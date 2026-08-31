@@ -49,6 +49,13 @@ add_subdirectory("${CMAKE_SOURCE_DIR}/external/ogg"
 add_subdirectory("${CMAKE_SOURCE_DIR}/external/vorbis"
                  "${CMAKE_BINARY_DIR}/external/vorbis" EXCLUDE_FROM_ALL)
 
+# The version each of these reports, pinned here beside the gitlink that decides
+# it. cmake/OpusPackageVersion.cmake and cmake/OpusFilePackageVersion.cmake read
+# these instead of running , which upstream does and which fails in
+# any checkout without tags. Update them when the submodule moves.
+set(MEDIAPERCH_OPUS_VERSION "1.6.1")      # external/opus at v1.6.1
+set(MEDIAPERCH_OPUSFILE_VERSION "0.12")   # external/opusfile at v0.12-41-g3ecc22a
+
 set(OPUS_BUILD_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
 set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)

@@ -33,6 +33,36 @@ git submodule update --init
 | `external/opus` | libopus, behind `decode_ogg` |
 | `external/opusfile` | opusfile: Ogg demuxing, seeking and header gain for Opus |
 
+### Four small CMake overrides, and why they are in `cmake/`
+
+The Xiph libraries are built in-tree, which their own CMake does not quite expect. Four
+files in `cmake/` fix that, all by the same mechanism: every one of those projects reaches
+its own modules with `list(APPEND CMAKE_MODULE_PATH ...)`, and this project's `cmake/` is
+already on that path from the top-level `CMakeLists.txt`, so ours is found first.
+
+| File | What it replaces |
+|---|---|
+| `FindOgg.cmake` | libvorbis and opusfile calling `find_package(Ogg REQUIRED)` for an *installed* libogg. Ours answers with the in-tree `Ogg::ogg` target |
+| `FindOpus.cmake` | the same, for opusfile's `find_package(Opus REQUIRED)` |
+| `OpusPackageVersion.cmake` | opus asking `git describe --tags` for its version number |
+| `OpusFilePackageVersion.cmake` | opusfile doing the same |
+
+The last two matter more than they look. Upstream has **no working fallback** when git cannot
+answer: `configure.ac` carries the literal placeholder `CURRENT_VERSION` that their release
+script fills in, and no `package_version` file is committed. In a checkout without tags --
+a CI runner fetching submodules at depth 1, a source archive, a `git clone --depth 1` --
+the describe fails, the version becomes `0`, and opusfile's
+
+```cmake
+list(GET PROJECT_VERSION_LIST 1 PROJECT_VERSION_MINOR)
+```
+
+fails the whole configure with `list index: 1 out of range`. That is exactly what CI hit,
+and it did not reproduce locally only because a full clone has the tags. The versions are
+now pinned beside the `add_subdirectory` calls in `modules/decode_ogg/CMakeLists.txt`, so
+the number and the gitlink move together, and `cmake -D CMAKE_DISABLE_FIND_PACKAGE_Git=ON`
+configures cleanly.
+
 `external/vorbis` and `external/opusfile` are pinned to upstream `master` rather than to a
 release tag, and both for the same kind of reason: opusfile has no `CMakeLists.txt` at all
 in v0.12, and vorbis v1.3.7 declares `cmake_minimum_required(VERSION 2.8.12)`, which CMake 4

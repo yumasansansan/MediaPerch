@@ -897,6 +897,13 @@ real time.
   The check compiled, linked, ran, and was never true. It is the same shape of bug as the
   one it was written to catch, found the same way: by printing what was actually there
   rather than reasoning about what should have been.
+- **A dependency that asks git for its own version number is a dependency that fails on
+  somebody else's machine.** opus and opusfile derive their version from `git describe`
+  and commit no fallback, so a CI runner fetching submodules at depth 1 gets version `0`
+  and opusfile turns that into a hard configure error. It passed locally for the least
+  interesting reason available: a full clone has tags. **A build that reads the repository
+  is a build whose result depends on how the repository was obtained**, and the fix was to
+  stop asking -- the versions are pinned beside the gitlinks now.
 - **Seeking had never been tested, in any decoder.** There was no way to ask for it from
   the command line, so there was no way to check it, so nobody had. `--seek` makes it
   falsifiable in one line: the hash of a decode seeking to frame N must equal the hash of
