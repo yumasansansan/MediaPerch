@@ -282,6 +282,13 @@ const MpSinkVtbl* ModuleRegistry::sink(std::string_view id) const
 ModuleRegistry::DecoderChoice ModuleRegistry::decoder_for(const std::string& path,
                                                           std::string_view prefer) const
 {
+    const auto ranked = decoders_for(path, prefer);
+    return ranked.empty() ? DecoderChoice{} : ranked.front();
+}
+
+std::vector<ModuleRegistry::DecoderChoice> ModuleRegistry::decoders_for(
+    const std::string& path, std::string_view prefer) const
+{
     // The first few kilobytes, which is all a probe is allowed to look at. A
     // probe that opens the file has already done the expensive thing twice.
     std::array<std::uint8_t, 4096> head{};
@@ -297,8 +304,7 @@ ModuleRegistry::DecoderChoice ModuleRegistry::decoder_for(const std::string& pat
         }
     }
 
-    DecoderChoice best;
-    std::uint32_t best_priority = 0;
+    std::vector<DecoderChoice> ranked;
 
     for (const auto& module : modules_) {
         const MpModuleDesc& desc = module->desc();
@@ -311,8 +317,11 @@ ModuleRegistry::DecoderChoice ModuleRegistry::decoder_for(const std::string& pat
         }
 
         if (!prefer.empty()) {
+            // An explicit choice is a choice, not a preference: it does not get
+            // a fallback, because "use that one" answered with a different one
+            // is not an answer.
             if (prefer == desc.id) {
-                return DecoderChoice{vtbl, &desc, 0};
+                return {DecoderChoice{vtbl, &desc, 0}};
             }
             continue;
         }
@@ -324,12 +333,21 @@ ModuleRegistry::DecoderChoice ModuleRegistry::decoder_for(const std::string& pat
         if (score == 0) {
             continue;
         }
-        if (score > best.score || (score == best.score && desc.priority > best_priority)) {
-            best = DecoderChoice{vtbl, &desc, score};
-            best_priority = desc.priority;
-        }
+        ranked.push_back(DecoderChoice{vtbl, &desc, score});
     }
-    return best;
+
+    // Score first, priority to break ties -- the same rule as before, now
+    // applied to the whole list rather than just its maximum. stable_sort so
+    // that two modules agreeing on both keep the order the registry loaded them
+    // in, which is at least deterministic.
+    std::stable_sort(ranked.begin(), ranked.end(),
+                     [](const DecoderChoice& a, const DecoderChoice& b) {
+                         if (a.score != b.score) {
+                             return a.score > b.score;
+                         }
+                         return a.desc->priority > b.desc->priority;
+                     });
+    return ranked;
 }
 
 std::filesystem::path module_directory()

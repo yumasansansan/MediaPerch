@@ -448,6 +448,30 @@ int play(const MpSinkVtbl& vtbl, const Options& options)
 }
 
 
+/// The best-ranked decoder that can actually open the file.
+///
+/// Probing is cheap and reads four kilobytes; opening is the real test, and
+/// mp::Decoder makes it a real test by requiring one frame of audio to come out.
+/// A decoder can score highest and still refuse -- decode_mf declines
+/// multichannel ALAC, decode_native cannot read a 32-bit FLAC -- and the right
+/// answer to that is the next candidate.
+///
+/// Falls back to the first entry when nothing opens, so the error the user sees
+/// comes from the decoder that claimed the file most confidently rather than
+/// from whichever one happened to be last.
+mp::win::ModuleRegistry::DecoderChoice first_that_opens(
+    const std::vector<mp::win::ModuleRegistry::DecoderChoice>& ranked,
+    const std::string& path)
+{
+    for (const auto& candidate : ranked) {
+        mp::Decoder probe;
+        if (probe.open(*candidate.vtbl, path.c_str()) == MP_OK) {
+            return candidate;
+        }
+    }
+    return ranked.empty() ? mp::win::ModuleRegistry::DecoderChoice{} : ranked.front();
+}
+
 int decode(const MpDecoderVtbl& vtbl, const Options& options)
 {
     if (options.file.empty()) {
@@ -1013,7 +1037,8 @@ int main(int argc, char** argv)
             std::fprintf(stderr, "%s needs --file\n", options.command.c_str());
             return 1;
         }
-        const auto choice = registry.decoder_for(options.file, options.decoder_id);
+        const auto ranked = registry.decoders_for(options.file, options.decoder_id);
+        const auto choice = first_that_opens(ranked, options.file);
         if (choice.vtbl == nullptr) {
             if (options.decoder_id.empty()) {
                 std::fprintf(stderr, "no decoder recognised %s\n", options.file.c_str());

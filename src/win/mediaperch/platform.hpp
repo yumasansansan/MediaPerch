@@ -171,6 +171,18 @@ public:
     [[nodiscard]] DecoderChoice decoder_for(const std::string& path,
                                             std::string_view prefer) const;
 
+    /// Every decoder that claims the file, best first.
+    ///
+    /// A probe sees four kilobytes; opening sees the whole header and, through
+    /// mp::Decoder, one frame of real audio. A decoder can therefore score
+    /// highest and still refuse -- decode_mf declines multichannel ALAC because
+    /// Media Foundation returns it in the wrong channel order, decode_native
+    /// decodes a 32-bit FLAC to nothing -- and when that happens the answer is
+    /// the next candidate, not failure. Ranking without a fallback turns every
+    /// such refusal into an unplayable file.
+    [[nodiscard]] std::vector<DecoderChoice> decoders_for(const std::string& path,
+                                                          std::string_view prefer) const;
+
 private:
     std::vector<std::unique_ptr<LoadedModule>> modules_;
 };

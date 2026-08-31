@@ -316,11 +316,19 @@ MpResult MP_CALL decoder_probe(const char* path, const std::uint8_t* head, std::
     // The formats nothing else in this tree reads. Scored at 100 because for
     // these it is the only answer; everything else gets 30, so it stays the
     // fallback rather than taking work from a decoder that does it better.
+    //
+    // "OggS" is the one entry that is no longer strictly true: decode_ogg reads
+    // Vorbis and Opus now. It stays at 100 because it is still the only answer
+    // for the *rest* of Ogg -- OggFLAC, Speex -- and because the tie against
+    // decode_ogg's 100 is broken by priority, 110 to 30, in decode_ogg's favour.
+    // Scoring by codec instead would mean parsing the identification header
+    // here to reach the same outcome.
     static const struct {
         const char* bytes;
         std::size_t at;
     } only_here[] = {
-        {"OggS", 0},                     // Vorbis, Opus, Speex
+        {"OggS", 0},                     // OggFLAC and Speex; decode_ogg outranks
+                                         // this for Vorbis and Opus
         {"MAC ", 0},                     // Monkey's Audio
         {"wvpk", 0},                     // WavPack
         {"\x1A\x45\xDF\xA3", 0},         // Matroska, WebM

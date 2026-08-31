@@ -152,6 +152,26 @@ MpResult MP_CALL decoder_probe(const char* path, const std::uint8_t* head, std::
     return MP_OK;
 }
 
+/// Whether a media subtype is ALAC.
+///
+/// Two spellings, and the SDK constant is the one that never turns up. mfapi.h
+/// builds MFAudioFormat_ALAC out of the two-byte WAVE tag 0x6C61 over the
+/// standard media-subtype base, giving {00006C61-0000-0010-8000-00AA00389B71}.
+/// What IMFSourceReader actually reports for an ALAC track is
+/// {616C6163-767A-494D-B478-F29D25DC9037}: the four-character code 'alac' over
+/// the base Media Foundation uses for the codecs it gained in Windows 8.
+///
+/// Comparing against the constant alone matches nothing, silently -- which is
+/// how this check failed the first time it was written, and is the same shape of
+/// bug as the one it exists to catch. Both are accepted; the literal is the one
+/// that fires.
+bool is_alac(const GUID& subtype) noexcept
+{
+    static const GUID mf_runtime_alac = {
+        0x616C6163, 0x767A, 0x494D, {0xB4, 0x78, 0xF2, 0x9D, 0x25, 0xDC, 0x90, 0x37}};
+    return subtype == mf_runtime_alac || subtype == MFAudioFormat_ALAC;
+}
+
 MpResult MP_CALL decoder_open(const char* path, MpDecoder** out) noexcept
 try {
     if (path == nullptr || out == nullptr) {
@@ -192,6 +212,34 @@ try {
     if (channels == 0 || rate == 0) {
         return MP_ERR_UNSUPPORTED;
     }
+    // Media Foundation's ALAC decoder returns Apple's own channel order and
+    // then labels it with a WAVE channel mask, so the mask and the samples
+    // disagree. ALAC's eight-channel order is C, Lc, Rc, L, R, Ls, Rs, LFE;
+    // WAVE's for the same mask is FL, FR, FC, LFE, BL, BR, FLC, FRC. Measured
+    // on a 384 kHz 7.1 file: every sample was present and **not one of the
+    // eight channels came back in its own slot**, which is worse than a refusal
+    // because nothing about it looks wrong.
+    //
+    // Stereo and mono cannot have a layout bug, so only multichannel is
+    // declined -- and declining hands the file to decode_ffmpeg, which was
+    // measured putting all eight channels back exactly where they started.
+    GUID native_subtype{};
+    const bool have_subtype = SUCCEEDED(native->GetGUID(MF_MT_SUBTYPE, &native_subtype));
+    if (have_subtype) {
+        // Data1 of an MFAudioFormat_* GUID is the WAVE format tag, which is the
+        // only readable part of it.
+        log_fmt(MP_LOG_DEBUG, "%s: native subtype tag 0x%04lX, %u ch, %u Hz", path,
+                static_cast<unsigned long>(native_subtype.Data1), channels, rate);
+    }
+    if (channels > 2 && have_subtype && is_alac(native_subtype)) {
+        log_fmt(MP_LOG_WARN,
+                "%s is %u-channel ALAC: Media Foundation returns those channels in "
+                "Apple's order while labelling them with a WAVE mask, so this module "
+                "declines it rather than put every channel in the wrong speaker",
+                path, channels);
+        return MP_ERR_UNSUPPORTED;
+    }
+
     // A compressed stream reports no bit depth of its own; 16 is what the
     // decoder will produce unless it says otherwise, and the read-back below is
     // what decides in either case.

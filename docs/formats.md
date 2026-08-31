@@ -22,7 +22,16 @@ ffmpeg -i X.flac -f s16le out.raw     # then hash out.raw
 | Behind it | libFLAC | libvorbis, libopus | `dr_wav`, `dr_flac` | Media Foundation | `ffmpeg`, `ffprobe` |
 | Covers | FLAC, every depth and rate | Vorbis and Opus in Ogg | WAV, FLAC to 24 bits | MP4/M4A, MP3, WMA, WAV, FLAC | the long tail |
 | Priority | 120 | 110 | 100 | 50 | 30 |
+| Probe score for FLAC | 100 | — | **60** | 40 | 30 |
 | Comes from | `external/flac` | four Xiph submodules | `external/dr_libs` | already on the machine | **found at run time, never shipped** |
+
+Score is the registry's primary key and priority only breaks ties, so the score
+is where a statement about *one format* belongs. `decode_native` scores FLAC at
+60, below every other FLAC reader here, because `dr_flac` is a reimplementation
+that cannot read 32-bit FLAC at all — and above `decode_mf` and `decode_ffmpeg`,
+so an install with no submodules and no FFmpeg still plays FLAC. Its WAV score
+stays at 100: there is no reference implementation to defer to, and `dr_wav` is
+measured bit-exact to 32 bits and 768 kHz.
 
 Three modules read FLAC on purpose. `decode_flac` outranks the others whenever it
 is installed, because for a lossless codec the reference implementation *is* the
@@ -51,7 +60,8 @@ through 8. §7 of [the plan](plan.md) has the full argument.
 | Opus in Ogg | `decode_ogg` | `48000 Hz / 1 ch / F32` | libopus through opusfile. Opus decodes at 48 kHz whatever the source rate was; that is the codec, not a resample |
 | OggFLAC | `decode_ffmpeg` | `44100 Hz / 1 ch / S16` | `decode_ogg` scores it **0**, not something low: it is an Ogg stream this module cannot read at all, and saying so lets the fallback have it |
 | WavPack | `decode_ffmpeg` | `44100 Hz / 2 ch / S32` | hash identical to the 32-bit WAV of the same signal |
-| ALAC in M4A | `decode_mf` | `44100 Hz / 2 ch / S24_PACKED` | hash identical to the 24-bit FLAC of the same signal: ALAC round-tripped losslessly. There is no `decode_alac`, and [the plan](plan.md) §7 explains why |
+| ALAC in M4A, stereo | `decode_mf` | `44100 Hz / 2 ch / S24_PACKED` | hash identical to the 24-bit FLAC of the same signal: ALAC round-tripped losslessly. There is no `decode_alac`, and [the plan](plan.md) §7 explains why |
+| ALAC, 384 kHz, 7.1 | `decode_ffmpeg` | `384000 Hz / 8 ch / S24_PACKED` | `decode_mf` **declines** this one. See below — it is the most interesting measurement on this page |
 | MP3 | `decode_mf` | `44100 Hz / 2 ch / S16` | Media Foundation outranks FFmpeg here, 100 to 30 |
 
 ## Vorbis and Opus: float, and what that costs
@@ -105,6 +115,109 @@ that channel is checked against FFmpeg only.
 
 The mask reported for 5.1 is `0x3f`: `FL|FR|FC|LFE|BL|BR`, the WAVE layout, which
 is what the sink can pass to `dwChannelMask` unchanged.
+
+### Reference or FFmpeg: which is more faithful?
+
+Neither, measurably. Six seconds of pink noise plus a tone, encoded and then
+decoded both ways and compared against the file that went *into* the encoder:
+
+| | Opus, 128 kb/s | Vorbis, q5 |
+|---|---|---|
+| SNR vs source, libopus/libvorbis | 9.78 dB | 12.61 dB |
+| SNR vs source, FFmpeg's own decoder | 9.78 dB | 12.61 dB |
+| difference between the two decoders | 134.8 dB down | 132.6 dB down |
+
+The two decoders are the same distance from the source to four decimal places,
+and the codec's own loss sits **120–125 dB above** the gap between them. Pink
+noise is a deliberately harsh case — a perceptual codec throws away a great deal
+of it and sounds fine doing so — which is exactly why it makes the point: the
+choice of decoder is not where the fidelity went.
+
+So the question is settled by the specification rather than by measurement, and
+the two codecs settle it differently:
+
+- **Opus** is defined *by* its reference implementation. RFC 6716 ships the
+  conformance procedure as a shell script, which is in the submodule at
+  `external/opus/tests/run_vectors.sh`, marked "extracted from RFC6716" — and
+  that procedure is not a bit comparison. It runs `opus_compare`, which measures
+  a psychoacoustically weighted error across 21 bands and reports a quality
+  percentage; the script accepts either of two reference outputs, because float
+  implementations legitimately differ. libopus is the yardstick, and FFmpeg's
+  decoder is a thing measured against it.
+- **Vorbis** has a prose specification, in this tree at
+  `external/vorbis/doc/`, with libvorbis as its reference implementation.
+
+Preferring the reference is therefore a decision about *provenance* rather than
+about output quality: a bug in libvorbis is a bug in the definition and gets
+fixed there, while a divergence in a reimplementation has to be found first.
+`decode_ffmpeg` remains one command away for anyone who disagrees, which is the
+point of the module boundary.
+
+## ALAC at the top of the format, and what Media Foundation does with it
+
+ALAC's ceiling is 32 bits, 384 kHz, 7.1. Two of those three were tested; the
+third could not be.
+
+**384 kHz and 7.1 are fine, and lossless — through one decoder.** A 24-bit
+384 kHz 7.1 ALAC file was decoded and compared channel by channel against the
+WAV it was encoded from:
+
+| | Slots matching the source |
+|---|---|
+| `decode_ffmpeg` | **8 of 8** |
+| `decode_mf` | **0 of 8** |
+
+`decode_mf` did not lose a single sample — every one of the eight channels came
+back somewhere, exactly. It came back in the *wrong slot*. Media Foundation
+returns ALAC in Apple's own channel order — `C, Lc, Rc, L, R, Ls, Rs, LFE` for
+eight channels — while labelling it with a WAVE channel mask, which says
+`FL, FR, FC, LFE, BL, BR, FLC, FRC`. The mask and the samples disagree, and
+nothing in the output looks wrong.
+
+That is worse than an error, so `decode_mf` now declines multichannel ALAC:
+
+```
+$ mediaperch-probe decode --file 384k-7.1.m4a
+[warn ] ... is 8-channel ALAC: Media Foundation returns those channels in Apple's
+        order while labelling them with a WAVE mask, so this module declines it
+        rather than put every channel in the wrong speaker
+decoder    decode_ffmpeg (FFmpeg (found at run time, not shipped))
+format     384000 Hz / 8 ch / S24_PACKED
+```
+
+Stereo and mono ALAC are untouched — a two-channel file cannot have a layout
+bug — and still go to `decode_mf` with the hash they always had. The same test
+run on 8-channel WAV and 8-channel FLAC gives one hash across all four decoders,
+Media Foundation included, so this is ALAC-specific rather than a general
+multichannel problem. Media Foundation refuses 8-channel AAC outright, which is
+the honest failure and the one this makes ALAC match.
+
+**32-bit ALAC is untested, and this is a gap, not a result.** No encoder on this
+machine can produce one: FFmpeg's ALAC encoder says so out loud —
+`[alac] encoding as 24 bits-per-sample` — whatever `-sample_fmt` it is given.
+Writing a 32-bit ALAC file needs Apple's own encoder. Until one exists to test
+with, nothing here claims anything about 32-bit ALAC.
+
+## When the best decoder says no
+
+Probing reads four kilobytes. Opening reads the whole header and, because
+`mp::Decoder` requires one frame of real audio before it calls an open a
+success, a frame of audio too. So a decoder can score highest and still refuse,
+and there are now two that do it for good reasons — `decode_mf` on multichannel
+ALAC, `decode_native` on 32-bit FLAC.
+
+The registry therefore ranks every decoder that claims the file and the host
+walks the list, so a refusal costs the next candidate rather than the file:
+
+| File | Ranked | Opens | Used |
+|---|---|---|---|
+| 32-bit FLAC | flac, native, mf, ffmpeg | flac | `decode_flac` |
+| 7.1 ALAC | mf, ffmpeg | ffmpeg | `decode_ffmpeg` |
+| Vorbis | ogg, ffmpeg | ogg | `decode_ogg` |
+
+`--decoder` does not get a fallback. Being told "use that one" and answering
+with a different one is not an answer; a forced decoder that refuses reports the
+refusal.
 
 ### What only libFLAC can do
 

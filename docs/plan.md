@@ -852,6 +852,23 @@ real time.
   the GCC rejection in `cmake/CompilerOptions.cmake` catches the same thing without a
   preset. Both exist because they catch different mistakes: `ninja-msvc` picking Clang is
   wrong even though Clang is supported.
+- **An OS decoder can be lossless and wrong at the same time.** Media Foundation
+  returns multichannel ALAC in Apple's channel order and labels it with a WAVE channel
+  mask. Every sample survives; not one of eight channels lands in its own speaker. Nothing
+  in the output looks wrong, and the only reason it was caught is that the test put a
+  different tone in every channel instead of the same signal everywhere. **A multichannel
+  test whose channels are indistinguishable tests one channel eight times.**
+- **Matching a GUID against the SDK constant matched nothing, silently.** `mfapi.h` builds
+  `MFAudioFormat_ALAC` from the WAVE tag 0x6C61 over the standard media-subtype base;
+  `IMFSourceReader` reports `{616C6163-767A-494D-B478-F29D25DC9037}` -- the four-character
+  code 'alac' over the base Media Foundation uses for the codecs it gained in Windows 8.
+  The check compiled, linked, ran, and was never true. It is the same shape of bug as the
+  one it was written to catch, found the same way: by printing what was actually there
+  rather than reasoning about what should have been.
+- **Ranking without a fallback makes every refusal fatal.** Probing sees four kilobytes;
+  opening sees the file. Once two decoders had good reasons to refuse a file they had
+  scored highest on, "pick the best" had to become "pick the best that opens" -- otherwise
+  correcting `decode_mf` turned a wrongly-decoded file into an unplayable one.
 - **A whole-image flag applied to part of the image fails twice, and the second time was
   avoidable.** `/guard:ehcont` was restricted to C++ on the reasoning that C has no
   exceptions. MSVC emits compound EH metadata for C objects too, so `/CETCOMPAT` rejected

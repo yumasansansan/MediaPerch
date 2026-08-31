@@ -174,8 +174,22 @@ MpResult MP_CALL decoder_probe(const char* path, const std::uint8_t* head, std::
 
     if (head != nullptr) {
         if (has_prefix(head, bytes, "fLaC", 0)) {
-            *out_score = 100;
+            // Deliberately below every other FLAC reader here. `dr_flac` is a
+            // reimplementation that cannot read 32-bit FLAC at all -- it decodes
+            // one to nothing, silently, which is why Decoder::can_actually_decode
+            // exists -- so it is the answer only when nothing better is
+            // installed. 60 keeps it ahead of decode_mf's 40 and decode_ffmpeg's
+            // 30, so an install with no submodules and no FFmpeg still plays
+            // FLAC, and behind decode_flac's 100 always.
+            //
+            // The score rather than the priority, because this is a statement
+            // about one format: score is the registry's primary key and priority
+            // only breaks ties, and dr_wav has no such caveat.
+            *out_score = 60;
         } else if (has_prefix(head, bytes, "RIFF", 0) && has_prefix(head, bytes, "WAVE", 8)) {
+            // WAV keeps 100. There is no reference implementation to defer to,
+            // dr_wav is measured bit-exact to 32-bit and 768 kHz, and it reaches
+            // the samples without a pipeline that could insert a converter.
             *out_score = 100;
         }
     }
