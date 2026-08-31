@@ -292,6 +292,66 @@ that is the bug that costs a week.
 The ring is single-producer/single-consumer, power-of-two, acquire/release indices, no CAS.
 It lives in `src/core` and is one of the two things `tests/` cares most about.
 
+### Volume, and why Path A has none
+
+A software volume control is a multiply. A multiply on integer samples either rounds or goes
+through float, and both are conversions — so **a volume slider is a Path B feature, and
+putting one in Path A would quietly make Path A into Path B for everybody who touched it.**
+
+The only volume that costs nothing is one applied below us, and `IAudioEndpointVolume` is
+how you reach it. But its capability query says less than its name suggests:
+`QueryHardwareSupport` returning `ENDPOINT_HARDWARE_SUPPORT_VOLUME` means the control is not
+implemented by the Windows audio engine. It does **not** say whether the driver applies it by
+scaling samples — which costs bits like any other gain — or whether the hardware applies it
+after the converter, which costs none. Measured on this machine: all four endpoints claim it,
+including a virtual cable that has no hardware at all.
+
+So the design is:
+
+| Device | What the UI offers |
+|---|---|
+| claims `ENDPOINT_HARDWARE_SUPPORT_VOLUME` | the endpoint's own volume, labelled as the device's, with the caveat that whether it is free is between the user and their DAC |
+| does not | **no volume control at all**, and a sentence saying why |
+| either, with Path B chosen | a normal software volume, and the UI says the stream is being processed |
+
+Showing no control is the honest option and the one to default to. A player that grows a
+slider which silently reroutes the stream has given up the only property it was built for,
+and the person using it will not be told.
+
+Test tones have the same trap in miniature: `mediaperch-probe play --amplitude` scales the
+*generator*, not a decoded stream, so nothing is rounded twice — but a quiet tone exercises
+proportionally fewer bits of the container, and the tool now says how many. Eleven of
+sixteen, at the amplitude that is comfortable in headphones. The bit-exactness proof is the
+capture test, never the tone.
+
+### Is there anything below WASAPI exclusive?
+
+No, and it is worth writing down because the question keeps coming back.
+
+An exclusive-mode stream has no mixer, no APO, no resampler and no volume in front of it —
+Microsoft documents that the session volume interfaces have no effect on one. And for a
+WaveRT driver, `IAudioRenderClient::GetBuffer` hands the application the hardware buffer
+itself: "no system intervention is required to transfer data between an exclusive-mode
+application and the audio hardware." There is no lower place for user-mode code to stand.
+
+| | What it would buy |
+|---|---|
+| **Kernel Streaming** | nothing. Same driver, same buffer. It existed to bypass KMixer, which was a pre-Vista problem |
+| **ASIO** | not a lower layer — a different one, with its own driver. No PCM accuracy to gain, because exclusive mode is already exact. What it buys is **native DSD**, without DoP's PCM wrapper |
+| **A kernel driver of our own** | a driver to sign, a driver to support, and the same bytes |
+
+The DSD case is the only real one, and it is now bounded: DoP carries DSD256 in 705.6 kHz
+PCM, which §14 records as working on a FiiO KA5. DSD512 needs 1411.2 kHz, which is past what
+that device accepts as PCM — so native DSD over ASIO is what a DSD512 library would need, and
+nothing else is.
+
+That became practical while this was being planned: **Steinberg relicensed the ASIO SDK under
+GPLv3 in October 2025**, alongside VST3. Before that it could not be redistributed, which is
+why Audacity shipped without it for two decades and foobar2000 keeps it in a separate
+component. For a `GPL-3.0-or-later` project it is now simply a module — `sink_asio`, someday,
+behind the same vtable as `sink_wasapi`, chosen by the user and absent from the default
+install.
+
 ---
 
 ## 6. Format negotiation
@@ -667,6 +727,12 @@ real time.
   the GCC rejection in `cmake/CompilerOptions.cmake` catches the same thing without a
   preset. Both exist because they catch different mistakes: `ninja-msvc` picking Clang is
   wrong even though Clang is supported.
+- **`ENDPOINT_HARDWARE_SUPPORT_VOLUME` is a weaker claim than its name.** It means the
+  volume control is not the Windows engine's. It says nothing about whether the driver
+  applies it by scaling samples or the hardware applies it after the converter — and every
+  endpoint on this machine claims it, including a VB-Audio virtual cable, which has no
+  hardware to apply anything with. Report it as "the endpoint has a volume control", never as
+  "this volume is free".
 - **Two devices, opposite channel-mask requirements.** The virtual cable refuses the plain
   `WAVEFORMATEX` at every width and takes only the extensible form; the FiiO KA5 takes the
   plain form at every width and never needs a mask. There is no order of trying them that is

@@ -57,6 +57,10 @@ Options
   --hz F            tone frequency, default 1000
   --amplitude A     fraction of full scale, default 0.5 (-6 dBFS).
                     Turn this down for headphones: 0.02 is about -34 dBFS.
+                    This is a property of the generator, not a gain stage: the
+                    tone is computed and quantised once, and nothing scales a
+                    sample afterwards. It does decide how much of the container
+                    the tone exercises, which `play` reports.
   --seconds N       play duration, default 10
   --shared          shared mode instead of exclusive
   --verbose
@@ -192,8 +196,11 @@ int list_devices(const MpSinkVtbl& sink)
             std::fprintf(stderr, "enumerate failed: %s\n", result_name(r));
             return 1;
         }
-        std::printf("%2u %s%s\n     %s\n", index,
-                    (info.flags & MP_DEVICE_IS_DEFAULT) != 0 ? "* " : "  ", info.name, info.id);
+        std::printf("%2u %s%s%s\n     %s\n", index,
+                    (info.flags & MP_DEVICE_IS_DEFAULT) != 0 ? "* " : "  ", info.name,
+                    (info.flags & MP_DEVICE_ENDPOINT_VOLUME) != 0 ? "   [endpoint volume]"
+                                                                  : "",
+                    info.id);
     }
 }
 
@@ -327,6 +334,16 @@ int play(const MpSinkVtbl& vtbl, const Options& options)
                 options.hz, options.amplitude,
                 options.amplitude > 0.0 ? 20.0 * std::log10(options.amplitude) : -144.0,
                 options.seconds);
+
+    // How much of the container this tone actually uses. A quiet tone is safe
+    // for headphones and proves correspondingly less about a 32-bit path, and
+    // saying so is cheaper than someone assuming otherwise. The bit-exactness
+    // proof is the capture test, not this.
+    const std::uint32_t container_bits =
+        8 * mp::container_bytes(negotiated.accepted.sample_type);
+    const double peak = options.amplitude * (std::pow(2.0, container_bits - 1) - 1.0);
+    const auto used = peak >= 1.0 ? static_cast<int>(std::floor(std::log2(peak))) + 2 : 0;
+    std::printf("exercises  %d of %u bits\n\n", used, container_bits);
 
     mp::SineSource source{source_format, options.hz, options.amplitude};
     mp::win::RenderThreadHooks hooks;

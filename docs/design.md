@@ -68,6 +68,9 @@ modules/             everything that can be loaded and unloaded at runtime.
                      a file someone else wrote — so it is the first candidate for
                      out-of-process hosting.
   sink_wasapi/       exclusive and shared, event-driven, both.
+  sink_asio/         someday. Not for accuracy -- exclusive mode is already exact --
+                     but for native DSD above what DoP can carry. Practical since
+                     Steinberg relicensed the ASIO SDK under GPLv3 in October 2025.
   dsp_*/             gain, resample, convolve, crossfeed. Never present in passthrough.
   video_d3d11/       presentation, and the three tone-map providers.
 shell/windows/       the WinUI 3 window. C#, Native AOT, **optional**: the engine runs

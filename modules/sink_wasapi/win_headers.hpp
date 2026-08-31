@@ -14,6 +14,7 @@
 #include <windows.h>
 
 #include <audioclient.h>
+#include <endpointvolume.h>
 #include <mmdeviceapi.h>
 #include <mmreg.h>
 

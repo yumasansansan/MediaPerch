@@ -181,6 +181,20 @@ try {
     ::CoTaskMemFree(id);
     copy_into(out->id, id_utf8);
 
+    // Does this endpoint have a volume control below Windows? Activating the
+    // interface does not take the device, so this is safe to ask during
+    // enumeration. See MP_DEVICE_ENDPOINT_VOLUME for what the answer does and
+    // does not mean -- it is a weaker claim than the API's constant name.
+    ComPtr<IAudioEndpointVolume> endpoint_volume;
+    if (SUCCEEDED(device->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr,
+                                   reinterpret_cast<void**>(endpoint_volume.GetAddressOf())))) {
+        DWORD hardware = 0;
+        if (SUCCEEDED(endpoint_volume->QueryHardwareSupport(&hardware)) &&
+            (hardware & ENDPOINT_HARDWARE_SUPPORT_VOLUME) != 0) {
+            out->flags |= MP_DEVICE_ENDPOINT_VOLUME;
+        }
+    }
+
     ComPtr<IPropertyStore> store;
     if (SUCCEEDED(device->OpenPropertyStore(STGM_READ, &store))) {
         PROPVARIANT name;

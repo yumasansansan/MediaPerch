@@ -61,6 +61,18 @@ So this one wants `S24_IN_32` where the other two want `S24_PACKED`.
 Not yet negotiated: it is the machine's speakers, and taking it in exclusive mode
 interrupts everything.
 
+## Volume
+
+All four endpoints on this machine report `ENDPOINT_HARDWARE_SUPPORT_VOLUME`, including both
+halves of a virtual cable. That flag means the control is not implemented by the Windows
+audio engine; it does not mean the volume is applied after the converter, and a virtual cable
+demonstrates the difference by claiming it while having no converter. `mediaperch-probe
+devices` therefore labels it `[endpoint volume]` and not `[hardware volume]`.
+
+Establishing whether a given device's volume is actually free would take a loopback capture
+at two settings and a comparison — which this machine can do, because the virtual cable is a
+loopback. Not done yet.
+
 ## Still unmeasured
 
 - **`AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED` has not been seen on any device.** The realign path

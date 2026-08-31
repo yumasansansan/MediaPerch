@@ -194,7 +194,30 @@ enum { MP_SHARE_EXCLUSIVE = 0u, MP_SHARE_SHARED = 1u };
 
 enum {
     MP_DEVICE_IS_DEFAULT = 1u << 0,
-    MP_DEVICE_EXCLUSIVE_ALLOWED = 1u << 1 /* the per-device user setting */
+
+    /* The endpoint has a volume control that the Windows audio engine does not
+     * implement -- IAudioEndpointVolume::QueryHardwareSupport reports
+     * ENDPOINT_HARDWARE_SUPPORT_VOLUME.
+     *
+     * Read that carefully, because it is weaker than it sounds and the flag is
+     * named for what the API actually says. It means the control lives below
+     * Windows. It does *not* say whether the driver applies it by scaling
+     * samples -- which costs bits like any other gain -- or whether the hardware
+     * applies it after the converter, which costs none. Windows will not tell
+     * you which, and on this machine a virtual cable claims it as readily as a
+     * USB DAC does.
+     *
+     * So this is a signal that a bit-exact volume control might be possible, not
+     * that one is. Path A has no gain stage of its own and never will; the honest
+     * behaviour for a device without this flag is to show no volume control at
+     * all, rather than to move the stream quietly onto Path B. */
+    MP_DEVICE_ENDPOINT_VOLUME = 1u << 1,
+
+    /* Whether exclusive mode is permitted is a per-device user setting with no
+     * documented way to read it. The only way to find out is to negotiate and
+     * see whether MP_ERR_DENIED comes back, so this is set once that has
+     * happened and is absent, not false, before then. */
+    MP_DEVICE_EXCLUSIVE_PROVEN = 1u << 2
 };
 
 typedef struct MpDeviceInfo {
