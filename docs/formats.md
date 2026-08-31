@@ -345,6 +345,112 @@ a few hundred kilobytes; the alternative costs the ability to reason about it.
 with a different one is not an answer; a forced decoder that refuses reports the
 refusal.
 
+## WAV, across every axis it has
+
+WAV is the only format here with no compression to argue about, so agreement
+means identical SHA-256s and nothing weaker. Every cell below is one:
+
+**Channel counts**, 24-bit at 48 kHz — `decode_native`, `decode_mf` and
+`decode_ffmpeg` produce the same hash for **1, 2, 3, 4, 6, 7, 8, 12, 16 and 24
+channels**. The reported masks follow the file: `0x3f` at six, `0x63f` at eight,
+`0x2d63f` at twelve, and **no mask at sixteen and twenty-four**, which is honest
+— WAVE runs out of named speaker positions before it runs out of channels, and a
+decoder here does not invent one.
+
+**Sample rates**, 24-bit stereo — the same three agree at **8 kHz, 44.1, 96,
+384, 768 kHz and 1.536 MHz**.
+
+**Bit depths**, stereo at 48 kHz:
+
+| Depth | `decode_native` | `decode_mf` | `decode_ffmpeg` |
+|---|---|---|---|
+| 8-bit unsigned | refused | refused | refused |
+| 16 | `S16` = | = | = |
+| 24 | `S24_PACKED` = | = | = |
+| 32 | `S32` = | = | = |
+| **32-bit float** | `F32` = | **`S32`, clipped** | `F32` = |
+| **64-bit float** | refused | refused | `F32`, with a warning |
+
+Two rows are not agreement, and both are worth reading.
+
+### Float WAV: Media Foundation clips it
+
+A float WAV can hold values above ±1.0 — that is what float WAV is *for*, and
+mixing engines produce them routinely. Given a file peaking at **2.5**:
+
+| | Reported | Peak returned |
+|---|---|---|
+| `decode_native` | `F32` | **2.5000** |
+| `decode_ffmpeg` | `F32` | **2.5000** (identical hash) |
+| `decode_mf` | `S32` | **1.0000** |
+
+Media Foundation converts float WAV to 32-bit integer and pins everything above
+unity. In that file **73.8% of the samples were above 1.0, and Media Foundation
+returned every one of them at exactly full scale** — its output matches a clipped
+copy of the source to 138.5 dB and matches a scaled copy to 7.5 dB, so it is
+clipping and not gain. This is a lossless format being altered, which is why
+`decode_native` scores 100 on WAV and `decode_mf` scores 40.
+
+64-bit float has no type in this ABI. `decode_native` and Media Foundation refuse
+it; `decode_ffmpeg` narrows it to `F32` and now says so:
+
+```
+[warn ] ... holds 64-bit floats and is being narrowed to 32; the output is not
+        the file's own samples
+```
+
+8-bit unsigned WAV is refused by everything, and by `decode_native` for the same
+reason: `MpFormat` has no one-byte sample type. That is a gap in the ABI rather
+than in `dr_wav`, and a real one — old files exist.
+
+## MP3 and AAC, and the thing Media Foundation does not do
+
+Neither is lossless, so the comparison is length, start alignment and content
+rather than hashes. The source in each row is two seconds — 96,000 frames — and
+the alignment was measured against pink noise, because a steady tone gives a
+correlation peak every period and cannot answer the question:
+
+| File | source | `decode_ffmpeg` | `decode_mf` |
+|---|---|---|---|
+| MP3, 48 kHz 320 kbps | 96000 | **96000**, starts at +0 | 98544, **starts 1729 frames late (36.0 ms)** |
+| MP3, 8 kHz mono 8 kbps (MPEG-2.5) | 16000 | **16000** | 17328 |
+| MP3, 44.1 kHz VBR V0 | 88200 | **88200** | 89328 |
+| MP3, 44.1 kHz dual channel | 88200 | **88200** | 90480 |
+| AAC, 48 kHz 320 kbps | 96000 | **96000**, starts at +0 | 97280, **starts 1024 frames late (21.3 ms)** |
+| AAC, 96 kHz stereo | 192000 | **192000** | 193536 |
+| AAC, 5.1 at 48 kHz | 96000 | **96000** | 97280 |
+| AAC, 8 kHz stereo | 16000 | **16000** | **refused** |
+| AAC, 7.1 at 48 kHz | 96000 | **95232** | **refused** |
+| AAC, raw ADTS 44.1 kHz | 88200 | 90112 | 90112 |
+
+The last row is the control that makes the rest a finding. Raw ADTS carries no
+gapless metadata, so there is nothing to trim and **both decoders agree at
+90112** — the difference in every other row is not decoding, it is that
+`decode_ffmpeg` reads the gapless information and Media Foundation does not:
+the LAME/Xing tag for MP3, the MP4 edit list for AAC, and — from
+[the Vorbis and Opus measurements](#why-not-just-hand-these-to-windows) —
+`CodecDelay` for Opus.
+
+That is one behaviour across four codecs. Every track decoded by Media
+Foundation begins with tens of milliseconds of the encoder's warm-up presented
+as audio, and ends with padding the file said to discard:
+
+| Codec | Delay Media Foundation leaves in |
+|---|---|
+| MP3 | 36.0 ms |
+| AAC | 21.3 ms |
+| Opus | 13.5 ms |
+
+Audible at a track boundary, and enough to make gapless playback impossible.
+Nothing in this milestone plays back-to-back tracks yet, so nothing is broken
+today — but the decoder resolution table will have to account for it when
+something does.
+
+Two smaller results from the same run. Media Foundation **refuses 8 kHz AAC and
+7.1 AAC** outright, which is the honest failure. And its 5.1 AAC channel order is
+correct, matching both the source and FFmpeg — so the channel scramble really is
+specific to ALAC and not a general multichannel problem.
+
 ### What only libFLAC can do
 
 A FLAC file carries an MD5 of its own unencoded audio, written by the encoder, and

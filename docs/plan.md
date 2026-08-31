@@ -928,6 +928,22 @@ real time.
   The check compiled, linked, ran, and was never true. It is the same shape of bug as the
   one it was written to catch, found the same way: by printing what was actually there
   rather than reasoning about what should have been.
+- **Media Foundation does not implement gapless metadata, in any codec.** Measured against
+  FFmpeg reading the same files: MP3 starts 36.0 ms late, AAC 21.3 ms, Opus 13.5 ms, and
+  each ends with padding the container said to discard. The control that turns this from
+  four observations into one finding is raw ADTS, which carries no gapless information --
+  there both decoders agree exactly. §11 will have to account for this before anything
+  plays two tracks in a row.
+- **A steady tone cannot measure a delay.** The first attempt at the MP3 alignment gave
+  +3458 samples interleaved and -1151 per channel, from the same files: a sine correlates
+  with itself once per period, so every peak is a plausible answer. Pink noise gave +1729
+  frames unambiguously. **A test signal that cannot distinguish the answers is not a
+  measurement**, and it looked exactly like one.
+- **Media Foundation clips float WAV**, converting it to 32-bit integer and pinning
+  everything above unity -- 73.8% of the samples in the test file. A *lossless* format,
+  altered, by the decoder that scores lowest on it for reasons written down before this was
+  measured. The scoring turns out to have been right for a better reason than the one
+  given.
 - **"It is lossy, so anything will do" is a conclusion, not a premise.** Vorbis and Opus
   have no bit-exactness to protect, which is a good reason to ask whether four submodules
   are worth it -- and a bad reason to assume the answer. Measuring found that Media

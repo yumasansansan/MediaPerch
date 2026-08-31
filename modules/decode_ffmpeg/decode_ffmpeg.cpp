@@ -411,6 +411,18 @@ try {
         // Vorbis, Opus and AAC decode to float natively. Saying so is honest;
         // pretending they are integers would be a conversion nobody asked for,
         // and the graph will route it to Path B or refuse, which is correct.
+        //
+        // Doubles are the exception, and they get said out loud. A 64-bit float
+        // WAV really does hold more than MP_SAMPLE_F32 can carry, and this ABI
+        // has no wider type -- so narrowing is the only way to play the file at
+        // all, and the rule against converting inside a decoder means the
+        // narrowing has to be visible rather than assumed.
+        if (sample_fmt == "dbl" || sample_fmt == "dblp") {
+            log_fmt(MP_LOG_WARN,
+                    "%s holds 64-bit floats and is being narrowed to 32; the output is "
+                    "not the file's own samples",
+                    path);
+        }
         decoder->format.sample_type = MP_SAMPLE_F32;
         decoder->format.valid_bits = 0;
         decoder->frame_bytes = 4 * channels;
