@@ -65,6 +65,7 @@ if(MEDIAPERCH_BUILD_PLATFORM)
 endif()
 
 if(MEDIAPERCH_BUILD_PLATFORM AND WIN32)
+    add_subdirectory(modules/decode_ffmpeg)
     add_subdirectory(modules/decode_mf)
     add_subdirectory(modules/sink_wasapi)
     add_subdirectory(src/win)

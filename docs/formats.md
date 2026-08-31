@@ -15,15 +15,14 @@ mediaperch-probe decode --file X.flac --decoder native
 ffmpeg -i X.flac -f s16le out.raw     # then hash out.raw
 ```
 
-## The three decoders
+## The four decoders
 
-| | `decode_flac` | `decode_native` | `decode_mf` |
-|---|---|---|---|
-| Behind it | libFLAC, the Xiph reference | `dr_wav`, `dr_flac` | Media Foundation |
-| Covers | FLAC, every depth and rate | WAV, FLAC to 24 bits | MP4/M4A, MP3, WMA, WAV, FLAC |
-| Priority | 120 | 100 | 50 |
-| Probe score for FLAC | 100 | 100 | 40 |
-| Comes from | `external/flac` submodule | `external/dr_libs` submodule | already on the machine |
+| | `decode_flac` | `decode_native` | `decode_mf` | `decode_ffmpeg` |
+|---|---|---|---|---|
+| Behind it | libFLAC, the Xiph reference | `dr_wav`, `dr_flac` | Media Foundation | `ffmpeg`, `ffprobe` |
+| Covers | FLAC, every depth and rate | WAV, FLAC to 24 bits | MP4/M4A, MP3, WMA, WAV, FLAC | the long tail |
+| Priority | 120 | 100 | 50 | 30 |
+| Comes from | `external/flac` submodule | `external/dr_libs` submodule | already on the machine | **found at run time, never shipped** |
 
 Three modules read FLAC on purpose. `decode_flac` outranks the others whenever it
 is installed, because for a lossless codec the reference implementation *is* the
@@ -31,6 +30,28 @@ specification. `decode_native` stays because an install that wants no submodules
 at all should still play music. `decode_mf` scores itself lowest on FLAC and WAV
 not because it is worse — the hashes below say it is not — but because it reaches
 them through a pipeline that *could* insert a converter, and the others cannot.
+
+`decode_ffmpeg` sits last on purpose. It reads more than anything else here and
+knows each format less well than the module that specialises in it, so it takes
+what is left: Vorbis, Opus, WavPack, Monkey's Audio, Matroska, DSF and DFF. It
+also does not ship. It looks for `ffmpeg` and `ffprobe` beside itself and then on
+`PATH`, and declines every file when neither is there — which is exactly what an
+uninstalled module does.
+
+Going through the executables rather than linking libavcodec is deliberate:
+FFmpeg's public structs change layout between major versions, so binding the DLLs
+would tie this module to one of them. One build of it works against FFmpeg 4
+through 8. §7 of [the plan](plan.md) has the full argument.
+
+### The long tail, measured
+
+| File | Chosen decoder | Reported | Note |
+|---|---|---|---|
+| Opus in Ogg | `decode_ffmpeg` | `48000 Hz / 2 ch / F32` | Opus decodes to float natively, and saying so is honest — the graph will route it to Path B or refuse, which is correct |
+| Vorbis in Ogg | `decode_ffmpeg` | `44100 Hz / 2 ch / F32` | likewise |
+| WavPack | `decode_ffmpeg` | `44100 Hz / 2 ch / S32` | hash identical to the 32-bit WAV of the same signal |
+| ALAC in M4A | `decode_mf` | `44100 Hz / 2 ch / S24_PACKED` | hash identical to the 24-bit FLAC of the same signal: ALAC round-tripped losslessly |
+| MP3 | `decode_mf` | `44100 Hz / 2 ch / S16` | Media Foundation outranks FFmpeg here, 100 to 30 |
 
 ### What only libFLAC can do
 
@@ -49,7 +70,18 @@ checksum. No other decoder here can be told it is wrong by its input.
 
 ## Bit-exactness
 
-All four hashes per row are the same value: the file, both decoders, and FFmpeg.
+Every decoder that can read a file produces the same bytes as every other. Four
+independent implementations, agreeing to the byte, at both extremes:
+
+| File | `flac` | `native` | `mf` | `ffmpeg` |
+|---|---|---|---|---|
+| 16-bit FLAC | `6ad3ba58` | `6ad3ba58` | `6ad3ba58` | `6ad3ba58` |
+| 24-bit FLAC | `7bb1010b` | `7bb1010b` | `7bb1010b` | `7bb1010b` |
+| 16-bit WAV | — | `6ad3ba58` | `6ad3ba58` | `6ad3ba58` |
+| 32-bit WAV, 768 kHz | — | `29a25188` | `29a25188` | `29a25188` |
+| 32-bit FLAC, 1048575 Hz | `3eb96f05` | — | — | `3eb96f05` |
+
+A dash is a refusal, not a mismatch. The detail per format follows.
 
 | File | Reported format | `native` | `mf` | FFmpeg |
 |---|---|---|---|---|

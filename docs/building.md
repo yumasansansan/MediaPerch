@@ -34,6 +34,11 @@ itself, and the rest of the tree builds. Catch2 is fetched at configure time ins
 because it is test scaffolding rather than something that ships. Nothing else is
 downloaded.
 
+**FFmpeg is not a build dependency at all.** `decode_ffmpeg` looks for `ffmpeg` and
+`ffprobe` beside itself and then on `PATH`, at run time, and declines every file when
+neither is there. Installing one is optional and is the user's choice — including the
+choice between an LGPL and a GPL build.
+
 ## The presets
 
 ```bash

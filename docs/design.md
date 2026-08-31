@@ -67,9 +67,9 @@ modules/             everything that can be loaded and unloaded at runtime.
                      wherever it is installed, and checks the file\'s own MD5.
   decode_mf/         Media Foundation source reader. Hardware video decode comes with it,
                      and it is measurably bit-exact for WAV and FLAC as well.
-  decode_ffmpeg/     libav*. The long tail, and the only decoder that is ever wrong about
-                     a file someone else wrote — so it is the first candidate for
-                     out-of-process hosting.
+  decode_ffmpeg/     the long tail, through the ffmpeg and ffprobe *programs*, found at
+                     run time and never shipped. Nothing to build against, no ABI to
+                     track, and the LGPL-or-GPL question stays with whoever installs it.
   sink_wasapi/       exclusive and shared, event-driven, both.
   sink_asio/         someday. Not for accuracy -- exclusive mode is already exact --
                      but for native DSD above what DoP can carry. Practical since
