@@ -41,6 +41,8 @@ jobs:
     runs-on: windows-2025-vs2026
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: true
 
       - name: MSVC developer environment
         shell: cmd
@@ -68,6 +70,8 @@ jobs:
         configuration: [Debug, RelWithDebInfo]
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: true
 
       - name: MSVC developer environment
         shell: cmd
@@ -101,6 +105,8 @@ jobs:
     runs-on: windows-2025-vs2026
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: true
 
       - name: MSVC developer environment
         shell: cmd
@@ -137,6 +143,8 @@ jobs:
     runs-on: windows-2025-vs2026
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: true
 
       - name: MSVC developer environment
         shell: cmd

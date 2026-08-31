@@ -61,8 +61,10 @@ src/linux/           Linux head. Not started. The core is shaped so that it can 
 include/mediaperch/  the module ABI. Pure C, one header, versioned. The only file a
                      third-party module has to read.
 modules/             everything that can be loaded and unloaded at runtime.
-  decode_native/     FLAC, WAV, AIFF, DSF/DFF. No dependencies: an install with nothing
-                     else on disk still plays music.
+  decode_native/     FLAC and WAV from two single headers. No build system at all: an
+                     install with nothing else on disk still plays music.
+  decode_flac/       libFLAC, the Xiph reference, as a submodule. Outranks the above
+                     wherever it is installed, and checks the file\'s own MD5.
   decode_mf/         Media Foundation source reader. Hardware video decode comes with it,
                      and it is measurably bit-exact for WAV and FLAC as well.
   decode_ffmpeg/     libav*. The long tail, and the only decoder that is ever wrong about

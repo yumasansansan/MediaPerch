@@ -61,6 +61,7 @@ add_subdirectory(src/core)
 # Portable modules build wherever the core does.
 if(MEDIAPERCH_BUILD_PLATFORM)
     add_subdirectory(modules/decode_native)
+    add_subdirectory(modules/decode_flac)
 endif()
 
 if(MEDIAPERCH_BUILD_PLATFORM AND WIN32)

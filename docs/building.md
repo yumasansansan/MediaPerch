@@ -10,8 +10,29 @@
 | CMake | 3.28 or later |
 | Ninja | for every preset except `vs` |
 
-Catch2 is fetched at configure time, so the first configure needs a network connection.
-Nothing else is downloaded.
+## Checking out
+
+The tree uses submodules for everything it compiles that is not ours:
+
+```bash
+git clone --recurse-submodules https://github.com/yumasansansan/MediaPerch.git
+```
+
+or, in a clone that already exists:
+
+```bash
+git submodule update --init
+```
+
+| Submodule | What for |
+|---|---|
+| `external/dr_libs` | `dr_wav` and `dr_flac`, behind `decode_native` |
+| `external/flac` | libFLAC, behind `decode_flac` |
+
+A missing submodule is not a build failure: `decode_flac` prints a warning and skips
+itself, and the rest of the tree builds. Catch2 is fetched at configure time instead,
+because it is test scaffolding rather than something that ships. Nothing else is
+downloaded.
 
 ## The presets
 

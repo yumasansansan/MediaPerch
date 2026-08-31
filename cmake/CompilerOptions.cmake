@@ -72,9 +72,13 @@ if(MSVC)
     # half-applied.
     add_compile_options(
         /guard:cf  # both cl and clang-cl take this one
-        # C has no exceptions, and clang-cl emits no EH continuation metadata to
-        # instrument, so this is cl-and-C++ only.
-        "$<$<AND:$<CXX_COMPILER_ID:MSVC>,$<COMPILE_LANGUAGE:CXX>>:/guard:ehcont>"
+        # Not restricted to C++, though it was at first on the reasoning that C
+        # has no exceptions. MSVC emits compound EH metadata for C objects too,
+        # and /CETCOMPAT then rejects every one of them at link time -- which is
+        # how libFLAC, a pure C library, produced four LNK2047s. A whole-image
+        # property has to be applied to the whole image, and "has no exceptions"
+        # was reasoning where a build was available.
+        "$<$<CXX_COMPILER_ID:MSVC>:/guard:ehcont>"
     )
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     # Clang with the GNU driver: the Linux head, when there is one.

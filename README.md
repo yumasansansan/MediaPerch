@@ -29,9 +29,11 @@ mode. `ReleaseBuffer` is where the claim stops and the driver begins, and
 an ordinary machine can see past it — including why a virtual cable, the obvious instrument,
 turns out not to be one.
 
-Working: WAV and FLAC decoding (hash-identical to FFmpeg), format negotiation against real
-drivers, the passthrough graph on two threads, WASAPI exclusive down to a 2 ms period,
-768 kHz / 32-bit on a USB DAC. 57 tests on MSVC and clang-cl.
+Working: three decoders chosen by probe — libFLAC, two single headers, and Media Foundation
+— all hash-identical to the reference on everything they read, up to 32-bit at 1,048,575 Hz;
+format negotiation against real drivers; the passthrough graph on two threads; WASAPI
+exclusive down to a 2 ms period; 768 kHz / 32-bit on a USB DAC. 62 tests plus libFuzzer
+targets, on MSVC and clang-cl.
 
 ```
 mediaperch-probe devices     # opens nothing, disturbs nothing

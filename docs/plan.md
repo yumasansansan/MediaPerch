@@ -460,9 +460,16 @@ Three outcomes, and the user picks the default once in settings:
 
 | Module | Backend | Covers | Why it exists |
 |---|---|---|---|
-| `decode_native` | C++, `dr_flac` and `dr_wav` single headers | FLAC, WAV | zero build-system footprint and no submodule; the base install plays music with nothing else on disk. **Measured bit-exact**: its SHA-256 for 16- and 24-bit WAV and FLAC equals FFmpeg's |
+| `decode_native` | C++, `dr_flac` and `dr_wav` single headers | FLAC, WAV | the floor: no build system beyond two `#include`s, so an install with nothing else on disk still plays music. **Measured bit-exact** for 16- and 24-bit, and measurably *not* able to read 32-bit FLAC |
+| `decode_flac` | libFLAC, the Xiph reference decoder, as a submodule | FLAC, all depths and rates | for a lossless codec the reference implementation *is* the specification, which is worth a dependency in a way it would not be for a lossy one. Reads what `dr_flac` cannot, and checks its own output against the MD5 the encoder wrote into the file |
 | `decode_mf` | Media Foundation `IMFSourceReader` | MP4/M4A, AAC, MP3, WMA — and WAV and FLAC, **also bit-exact** | ships with Windows, hardware-accelerated, and it is what brings §9 for free. Scores itself below `decode_native` on WAV and FLAC because it reaches them through a pipeline that *could* insert a converter, not because it did |
 | `decode_ffmpeg` | libav* | everything else — and **32-bit FLAC**, which neither of the others can read | the long tail, and the first candidate for out-of-process hosting. Measured: FFmpeg decodes a 32-bit FLAC byte-identically to the reference decoder, which is the first concrete reason to build this rather than a general appeal to coverage |
+
+Three modules read FLAC, deliberately. `decode_flac` outranks `decode_native` on priority
+(120 against 100) so the reference wins whenever it is installed; `decode_native` remains
+the answer for an install that wants no submodules at all; `decode_mf` scores 40 because it
+reaches FLAC through a pipeline that could insert a converter. Which of those a person wants
+is not ours to decide, and the module boundary is what lets it be their decision.
 
 Resolution, in order, and it is written down because "it depends on the config" is not a
 design:
@@ -483,6 +490,28 @@ Media Foundation's 40), MP3 and M4A go to `decode_mf` (100 against nothing), and
 
 The choice is per-track and visible: the UI and the log both name the module that opened
 the file.
+
+### Where dependencies come from
+
+Two mechanisms, and which one a dependency gets is decided by whether **we** build it.
+
+| | Examples | Why |
+|---|---|---|
+| **Git submodule, built from source** | `external/dr_libs`, `external/flac` | Pinned to a commit by the gitlink, so a checkout is reproducible and an upgrade is a reviewable diff. Both have (or need) no build system of consequence: dr_libs is headers, libFLAC is CMake-native. The tree builds them; CI builds them; nothing is downloaded at configure time except Catch2 |
+| **Loaded at run time, never vendored** | FFmpeg, one day | Its configure is a shell script needing MSYS2 and nasm on Windows, its build is tens of minutes, its output is tens of megabytes, and **its licence is a choice the user should make** — LGPL-2.1+ by default, GPL with `--enable-gpl`, and non-free options past that. Vendoring one configuration decides all of that for them. A module that resolves `avcodec` at run time and reports itself unavailable when it is absent respects every one of those and costs the build nothing |
+
+The rule generalises: **vendor what you compile, resolve what you don't.** A module that
+cannot find its dependency simply does not load, which is the behaviour the whole
+architecture already has for a module that is not installed.
+
+On "should every decoder use the official library" — no, and the reason is not size. For a
+**lossless** codec the reference implementation is the specification, and a reimplementation
+can drift from it silently: §14 records `dr_flac` decoding a 32-bit FLAC to nothing at all.
+For a **lossy** codec "correct" is a tolerance rather than an identity, so the argument is
+much weaker, and for AAC the obvious candidate (FDK-AAC) carries a licence that is not
+GPL-compatible at all. WAV has no reference implementation to prefer, because it has no
+reference implementation. So: official libraries for lossless codecs, whatever decodes well
+for lossy ones, and the module boundary so the choice stays with whoever installs it.
 
 ---
 
@@ -736,6 +765,13 @@ real time.
   the GCC rejection in `cmake/CompilerOptions.cmake` catches the same thing without a
   preset. Both exist because they catch different mistakes: `ninja-msvc` picking Clang is
   wrong even though Clang is supported.
+- **A whole-image flag applied to part of the image fails twice, and the second time was
+  avoidable.** `/guard:ehcont` was restricted to C++ on the reasoning that C has no
+  exceptions. MSVC emits compound EH metadata for C objects too, so `/CETCOMPAT` rejected
+  every object of libFLAC -- a pure C library -- with `LNK2047`, exactly as it had rejected
+  every object of Catch2 when the flag was target-scoped instead of directory-scoped. The
+  first time cost a link; the second cost another, because the fix was reasoned about rather
+  than built. A build was available both times.
 - **A decoder can open a file, describe it correctly, and produce nothing.** `dr_flac`
   opens a 32-bit FLAC, reports 32 bits from STREAMINFO, and decodes zero frames: its
   frame-header table still marks the bit-depth code FLAC 1.4 assigned to 32 bits as

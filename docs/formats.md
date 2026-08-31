@@ -15,18 +15,37 @@ mediaperch-probe decode --file X.flac --decoder native
 ffmpeg -i X.flac -f s16le out.raw     # then hash out.raw
 ```
 
-## The two decoders
+## The three decoders
 
-| | `decode_native` | `decode_mf` |
-|---|---|---|
-| Behind it | `dr_wav` and `dr_flac`, vendored | Media Foundation's source reader |
-| Covers | WAV, FLAC | MP4/M4A, MP3, WMA — and WAV and FLAC |
-| Probe score for WAV/FLAC | 100 | 40 |
-| Ships as | 220 KB beside the executable | nothing; it is already on the machine |
+| | `decode_flac` | `decode_native` | `decode_mf` |
+|---|---|---|---|
+| Behind it | libFLAC, the Xiph reference | `dr_wav`, `dr_flac` | Media Foundation |
+| Covers | FLAC, every depth and rate | WAV, FLAC to 24 bits | MP4/M4A, MP3, WMA, WAV, FLAC |
+| Priority | 120 | 100 | 50 |
+| Probe score for FLAC | 100 | 100 | 40 |
+| Comes from | `external/flac` submodule | `external/dr_libs` submodule | already on the machine |
 
-`decode_mf` scores itself lower on WAV and FLAC not because it is worse at them —
-the hashes below say it is not — but because it reaches them through a pipeline
-that *could* insert a converter, and `decode_native` cannot.
+Three modules read FLAC on purpose. `decode_flac` outranks the others whenever it
+is installed, because for a lossless codec the reference implementation *is* the
+specification. `decode_native` stays because an install that wants no submodules
+at all should still play music. `decode_mf` scores itself lowest on FLAC and WAV
+not because it is worse — the hashes below say it is not — but because it reaches
+them through a pipeline that *could* insert a converter, and the others cannot.
+
+### What only libFLAC can do
+
+A FLAC file carries an MD5 of its own unencoded audio, written by the encoder, and
+every frame carries a CRC. `decode_flac` turns the check on, so the file itself
+can say the decode was wrong:
+
+```
+$ mediaperch-probe decode --file corrupt.flac --decoder flac
+[warn ] libFLAC: FLAC__STREAM_DECODER_ERROR_STATUS_FRAME_CRC_MISMATCH in corrupt.flac
+[warn ] libFLAC: FLAC__STREAM_DECODER_ERROR_STATUS_LOST_SYNC in corrupt.flac
+```
+
+That is one flipped byte in the middle of the audio, found by the file's own
+checksum. No other decoder here can be told it is wrong by its input.
 
 ## Bit-exactness
 
@@ -42,9 +61,13 @@ All four hashes per row are the same value: the file, both decoders, and FFmpeg.
 | **32-bit WAV, 1048575** | `S32` | `3eb96f05` | `3eb96f05` | `3eb96f05` |
 | 24-bit FLAC, 768000 | `S24_PACKED` | `4b2e98d0` | refused | `4b2e98d0` |
 | 24-bit FLAC, 1048575 | `S24_PACKED` | `14693cb7` | refused | `14693cb7` |
-| **32-bit FLAC**, any rate | `S32` | **refused** | **refused** | `faf4b06d` etc. |
+| **32-bit FLAC, 44100** | `S32` | `faf4b06d` (`flac`) | refused | `faf4b06d` |
+| **32-bit FLAC, 768000** | `S32` | `29a25188` (`flac`) | refused | `29a25188` |
+| **32-bit FLAC, 1048575** | `S32` | `3eb96f05` (`flac`) | refused | `3eb96f05` |
 
-The 32-bit FLAC row is the interesting one, and it is covered below.
+The last three rows are `decode_flac`; `decode_native` refuses them (see below).
+Note that the 32-bit FLAC hashes equal the 32-bit WAV hashes two rows up: the FLAC
+round trip is lossless all the way through, at the spec's ceiling rate.
 
 **Media Foundation is bit-exact for WAV and FLAC.** That was not safe to assume:
 a source reader will insert a converter to produce whatever media type it is asked
@@ -58,7 +81,7 @@ FLAC has no channel-mask field and the two disagree about supplying the
 conventional one. It changes which candidate is offered to a device first and
 nothing else.
 
-## 32-bit FLAC: nothing here can play it, and it used to say nothing
+## 32-bit FLAC: what `dr_flac` cannot do, and what closed the gap
 
 FLAC has allowed 32-bit samples since version 1.4. The reference encoder produces
 them; `flac 1.5.0` encoded all three test files, and its own decoder round-tripped
@@ -91,11 +114,11 @@ f32_44k.flac    cannot decode: the decoder opened the file and produced no audio
 That check costs one frame at open and guards every decoder, including ones not
 written yet.
 
-**FFmpeg decodes these files correctly** -- byte-identical to the reference
-decoder, despite its own encoder being unable to write one. So this gap has a
-known shape and a known fix: `decode_ffmpeg`, the third module §7 already plans
-for. That is the first concrete reason to build it rather than a general
-appeal to coverage.
+**The gap is closed by `decode_flac`**, which uses libFLAC itself: all three files
+decode to hashes identical to the reference decoder's, including at 1,048,575 Hz.
+FFmpeg also decodes them correctly, so `decode_ffmpeg` would have worked too —
+libFLAC is the smaller answer, builds with CMake, and brings the MD5 check with
+it.
 
 ## Limits found by testing the edges
 
