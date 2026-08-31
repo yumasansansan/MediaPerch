@@ -17,6 +17,7 @@ twice.
 |---|---|
 | Core language | C++23 (C++20 as the guaranteed floor for library features) |
 | Module language | **anything that can export a C symbol.** v1 is C and C++ only; the ABI has this shape so that a second language stays a cheap option rather than a rewrite — see §2 |
+| Toolchains | MSVC and clang-cl on Windows; Clang on Linux when there is a Linux head. **GCC is not supported anywhere** — a third warning dialect and a third set of quirks for a platform Clang already covers — and configuration refuses it rather than drifting into it |
 | Layer | as low as practical. Prefer the platform API over a wrapper when the wrapper adds no capability we need |
 | Audio | WASAPI **exclusive**, event-driven, MMCSS `Pro Audio`. Shared mode is a fallback, not the design centre |
 | Bit-exactness | a testable property, not a marketing word. §12 says how it is tested |
@@ -639,6 +640,24 @@ real time.
   `/std:c++latest` and `C_STANDARD 23` emits `/std:clatest`; there is no `/std:c++23` and no
   `/std:c23` to ask for. Setting the flags by hand only earns a D9025 for overriding what
   CMake put there first.
+- **The Ninja generator does not go looking for Visual Studio, and the failure is silent.**
+  The VS generator locates the toolset itself; Ninja takes whatever `cc` and `c++` are on
+  `PATH`. Outside a developer prompt that is MinGW GCC on a GitHub runner and Strawberry
+  Perl's `gcc` or LLVM's `clang++` on a developer machine — and then everything builds,
+  cleanly, and nothing in the log admits the compiler was not the one the preset is named
+  after. Cost one CI run to notice. `MEDIAPERCH_EXPECT_TOOLSET`, set per preset and checked
+  at the top of `CMakeLists.txt`, turns it into a configuration error that says what to do;
+  the GCC rejection in `cmake/CompilerOptions.cmake` catches the same thing without a
+  preset. Both exist because they catch different mistakes: `ninja-msvc` picking Clang is
+  wrong even though Clang is supported.
+- **`/CETCOMPAT` and `/guard:ehcont` are whole-image flags and must not be target-scoped.**
+  The linker requires that *every* object carrying C++ EH metadata was compiled with
+  `/guard:ehcont`, third-party code built in-tree included — and Catch2 never sees an
+  interface library it does not link. Target-scoped, they produce `LNK2047` on every Catch2
+  object, which reads like a Catch2 problem and is not one. They live in an
+  `add_compile_options` at directory scope, applied before any subdirectory is added, and
+  `/guard:ehcont` drags `/guard:cf` along with it. The MSBuild and Ninja generators do not
+  agree about when this is fatal, so a green Ninja build is not evidence.
 
 ---
 

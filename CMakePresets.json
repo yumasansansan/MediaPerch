@@ -1,6 +1,10 @@
 {
   "version": 6,
-  "cmakeMinimumRequired": { "major": 3, "minor": 28, "patch": 0 },
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 28,
+    "patch": 0
+  },
   "configurePresets": [
     {
       "name": "base",
@@ -16,14 +20,23 @@
       "displayName": "Visual Studio 2026 (multi-config)",
       "description": "Opens as a real .sln. Needs no developer prompt.",
       "generator": "Visual Studio 18 2026",
-      "architecture": { "value": "x64", "strategy": "set" }
+      "architecture": {
+        "value": "x64",
+        "strategy": "set"
+      },
+      "cacheVariables": {
+        "MEDIAPERCH_EXPECT_TOOLSET": "MSVC"
+      }
     },
     {
       "name": "ninja-msvc",
       "inherits": "base",
       "displayName": "Ninja + MSVC",
       "description": "Faster than the .sln, but run it from a developer prompt.",
-      "generator": "Ninja Multi-Config"
+      "generator": "Ninja Multi-Config",
+      "cacheVariables": {
+        "MEDIAPERCH_EXPECT_TOOLSET": "MSVC"
+      }
     },
     {
       "name": "ninja-clang",
@@ -33,7 +46,8 @@
       "generator": "Ninja Multi-Config",
       "cacheVariables": {
         "CMAKE_C_COMPILER": "clang-cl",
-        "CMAKE_CXX_COMPILER": "clang-cl"
+        "CMAKE_CXX_COMPILER": "clang-cl",
+        "MEDIAPERCH_EXPECT_TOOLSET": "Clang"
       }
     },
     {
@@ -56,41 +70,84 @@
     }
   ],
   "buildPresets": [
-    { "name": "vs-debug", "configurePreset": "vs", "configuration": "Debug" },
-    { "name": "vs-release", "configurePreset": "vs", "configuration": "RelWithDebInfo" },
-    { "name": "ninja-msvc", "configurePreset": "ninja-msvc" },
-    { "name": "ninja-msvc-debug", "configurePreset": "ninja-msvc", "configuration": "Debug" },
-    { "name": "ninja-msvc-release", "configurePreset": "ninja-msvc", "configuration": "RelWithDebInfo" },
-    { "name": "ninja-clang-debug", "configurePreset": "ninja-clang", "configuration": "Debug" },
-    { "name": "core-only", "configurePreset": "core-only", "configuration": "Debug" }
+    {
+      "name": "vs-debug",
+      "configurePreset": "vs",
+      "configuration": "Debug"
+    },
+    {
+      "name": "vs-release",
+      "configurePreset": "vs",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "ninja-msvc",
+      "configurePreset": "ninja-msvc"
+    },
+    {
+      "name": "ninja-msvc-debug",
+      "configurePreset": "ninja-msvc",
+      "configuration": "Debug"
+    },
+    {
+      "name": "ninja-msvc-release",
+      "configurePreset": "ninja-msvc",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "ninja-clang-debug",
+      "configurePreset": "ninja-clang",
+      "configuration": "Debug"
+    },
+    {
+      "name": "core-only",
+      "configurePreset": "core-only",
+      "configuration": "Debug"
+    }
   ],
   "testPresets": [
     {
       "name": "vs-debug",
       "configurePreset": "vs",
       "configuration": "Debug",
-      "output": { "outputOnFailure": true },
-      "execution": { "noTestsAction": "error" }
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
     },
     {
       "name": "ninja-msvc",
       "configurePreset": "ninja-msvc",
-      "output": { "outputOnFailure": true },
-      "execution": { "noTestsAction": "error" }
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
     },
     {
       "name": "ninja-clang-debug",
       "configurePreset": "ninja-clang",
       "configuration": "Debug",
-      "output": { "outputOnFailure": true },
-      "execution": { "noTestsAction": "error" }
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
     },
     {
       "name": "core-only",
       "configurePreset": "core-only",
       "configuration": "Debug",
-      "output": { "outputOnFailure": true },
-      "execution": { "noTestsAction": "error" }
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
     }
   ]
 }

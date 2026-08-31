@@ -13,7 +13,8 @@ decided it should.
 
 **Status: milestone 0.** The skeleton stands, the module ABI is written and is compiled as
 C as well as C++, and the portable half — formats, the negotiation candidate builder, the
-lock-free ring — builds alone and is under test on two compilers. No sound comes out yet;
+lock-free ring — builds alone and is under test on MSVC and clang-cl. GCC is not a target
+anywhere, and configuration says so rather than drifting into it. No sound comes out yet;
 that is milestone 1.
 
 - [docs/design.md](docs/design.md) — the shape of the program, and the two constraints that

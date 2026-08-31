@@ -6,7 +6,7 @@
 | | |
 |---|---|
 | Windows | 10 version 2004 or later. Windows 11 24H2 for the HDR paths, when they exist |
-| Compiler | Visual Studio 2026 (MSVC 19.51 or later). LLVM/clang-cl is the optional second opinion |
+| Compiler | Visual Studio 2026 (MSVC 19.51 or later), and LLVM/clang-cl as the second opinion. **GCC is not supported on any platform** — Linux will be Clang too — and configuration fails on purpose if it is used |
 | CMake | 3.28 or later |
 | Ninja | for every preset except `vs` |
 
@@ -26,6 +26,28 @@ cmake --preset vs && cmake --build --preset vs-debug && ctest --preset vs-debug
 | `ninja-clang` | Ninja Multi-Config, clang-cl | the second compiler. Catches what MSVC lets through |
 | `core-only` | Ninja Multi-Config | what CI builds to keep `src/core` portable |
 | `asan` | Ninja Multi-Config, clang-cl | the address and undefined-behaviour sanitizers |
+
+## If it configures with the wrong compiler
+
+It will not any more, and that is worth explaining because the failure it replaces
+was silent.
+
+**The Ninja generator does not go looking for Visual Studio.** The `vs` generator finds
+the toolset by itself; Ninja takes whatever `cc` and `c++` are on `PATH`. Outside a
+developer prompt that is MinGW GCC on a GitHub runner, Strawberry Perl's `gcc` or LLVM's
+`clang++` on a typical developer machine — and then the whole project builds, cleanly, with
+nothing in the log admitting the toolchain was not the one the preset is named after.
+
+Two guards, because they catch different mistakes:
+
+- **`MEDIAPERCH_EXPECT_TOOLSET`**, set by each preset that means a particular compiler.
+  `ninja-msvc` configuring with Clang fails here even though Clang is a supported compiler.
+- **The GCC rejection** in `cmake/CompilerOptions.cmake`, which fires however you got
+  there, preset or not.
+
+Either way the fix is the same: run `VC\Auxiliary\Build\vcvars64.bat` first, or use the
+`vs` preset, which needs no developer prompt at all. To build with some other compiler
+deliberately, configure with `-D MEDIAPERCH_EXPECT_TOOLSET=`.
 
 ## Standards, and the one thing to know about them
 
