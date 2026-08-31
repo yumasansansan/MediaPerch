@@ -15,6 +15,8 @@ enum class SampleType : std::uint32_t {
     s24_in_32 = MP_SAMPLE_S24_IN_32,
     s32 = MP_SAMPLE_S32,
     f32 = MP_SAMPLE_F32,
+    u8 = MP_SAMPLE_U8,
+    f64 = MP_SAMPLE_F64,
 };
 
 enum class Encoding : std::uint32_t {

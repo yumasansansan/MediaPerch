@@ -128,3 +128,23 @@ TEST_CASE("describe says enough to diagnose a refused negotiation", "[format]")
     CHECK(text.find("S16") != std::string::npos);
     CHECK(text.find("mask 0x3") != std::string::npos);
 }
+
+TEST_CASE("the two Path B-only sample types describe themselves correctly")
+{
+    // U8 and F64 exist so that a decoder can report what a file holds rather
+    // than narrowing it in silence. Neither can ever be a wire format -- no
+    // endpoint takes eight-bit or sixty-four-bit samples -- so the thing to
+    // check is that they are described honestly and that negotiation leaves
+    // them alone.
+    CHECK(mp::container_bytes(mp::SampleType::u8) == 1);
+    CHECK(mp::natural_valid_bits(mp::SampleType::u8) == 8);
+
+    CHECK(mp::container_bytes(mp::SampleType::f64) == 8);
+    CHECK(mp::natural_valid_bits(mp::SampleType::f64) == 64);
+
+    // canonical_for maps integer containers, and 1 and 8 are not among them:
+    // an unsigned byte and an IEEE double are not points on the signed,
+    // left-justified line the repacker works in.
+    CHECK(mp::canonical_for(1, 8) == mp::SampleType::none);
+    CHECK(mp::canonical_for(8, 64) == mp::SampleType::none);
+}

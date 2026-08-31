@@ -15,6 +15,8 @@ constexpr const char* sample_type_name(SampleType t) noexcept
     case SampleType::s24_in_32: return "S24_IN_32";
     case SampleType::s32: return "S32";
     case SampleType::f32: return "F32";
+    case SampleType::u8: return "U8";
+    case SampleType::f64: return "F64";
     }
     return "?";
 }
@@ -40,6 +42,8 @@ std::uint32_t container_bytes(SampleType type) noexcept
     case SampleType::s24_in_32: return 4;
     case SampleType::s32: return 4;
     case SampleType::f32: return 4;
+    case SampleType::u8: return 1;
+    case SampleType::f64: return 8;
     }
     return 0;
 }
@@ -53,6 +57,8 @@ std::uint32_t natural_valid_bits(SampleType type) noexcept
     case SampleType::s24_in_32: return 24;
     case SampleType::s32: return 32;
     case SampleType::f32: return 32;
+    case SampleType::u8: return 8;
+    case SampleType::f64: return 64;
     }
     return 0;
 }

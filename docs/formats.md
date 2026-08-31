@@ -364,12 +364,12 @@ decoder here does not invent one.
 
 | Depth | `decode_native` | `decode_mf` | `decode_ffmpeg` |
 |---|---|---|---|
-| 8-bit unsigned | refused | refused | refused |
+| **8-bit unsigned** | `U8` | refused | refused |
 | 16 | `S16` = | = | = |
 | 24 | `S24_PACKED` = | = | = |
 | 32 | `S32` = | = | = |
 | **32-bit float** | `F32` = | **`S32`, clipped** | `F32` = |
-| **64-bit float** | refused | refused | `F32`, with a warning |
+| **64-bit float** | `F64` | refused | `F32`, with a warning |
 
 Two rows are not agreement, and both are worth reading.
 
@@ -399,9 +399,43 @@ it; `decode_ffmpeg` narrows it to `F32` and now says so:
         the file's own samples
 ```
 
-8-bit unsigned WAV is refused by everything, and by `decode_native` for the same
-reason: `MpFormat` has no one-byte sample type. That is a gap in the ABI rather
-than in `dr_wav`, and a real one — old files exist.
+### Eight bits, sixty-four bits, and four containers
+
+Both of those rows used to read *refused*, and neither refusal was dr_wav's.
+`drwav_read_pcm_frames` hands back the file's own bytes unconverted, so it had
+been able to read 8-bit and 64-bit float all along; what was missing was a type
+in `MpFormat` to name them with. There are two now, and both are Path B only,
+because no endpoint accepts either width:
+
+- **`MP_SAMPLE_U8`** — 8 bits in one byte, and the only **unsigned** type here.
+  Silence is 128, not 0. That is WAV's convention and it is why this needs its
+  own type rather than a quiet bias into `S16`: the bias would be a conversion.
+- **`MP_SAMPLE_F64`** — IEEE double. No audio hardware in existence takes
+  64-bit samples, so this can never be a wire format. It exists so a decoder can
+  say what the file holds; the narrowing then happens in the graph, where
+  somebody chose it.
+
+Neither reaches negotiation: candidates are generated over the 2-, 3- and 4-byte
+integer containers, and `canonical_for` returns `none` for one and eight.
+
+The same run found something else free. dr_wav reads **RIFF, RIFX (big-endian),
+RF64 (past four gigabytes), W64 and AIFF**, and has for as long as this module
+has existed — but the probe only ever claimed `RIFF`+`WAVE`, so nothing else
+could be reached except by `--decoder native`. It claims all five now. One
+signal, four containers, one hash:
+
+| Container | SHA-256 |
+|---|---|
+| RIFF | `f2d0870d1c3e673d…` |
+| AIFF | `f2d0870d1c3e673d…` |
+| RF64 | `f2d0870d1c3e673d…` |
+| W64 | `f2d0870d1c3e673d…` |
+
+AIFF is big-endian, so that row is dr_wav byte-swapping an entire file into
+agreement with the little-endian one, sample for sample.
+
+A-law, µ-law and ADPCM stay refused. dr_wav decodes them, but only by expanding
+them to 16 bits, and that is a conversion.
 
 ## MP3 and AAC, and the thing Media Foundation does not do
 

@@ -95,7 +95,22 @@ enum {
     MP_SAMPLE_S24_PACKED = 2u, /* 24 bits in 3 bytes */
     MP_SAMPLE_S24_IN_32 = 3u,  /* 24 bits in 4 bytes, left-aligned */
     MP_SAMPLE_S32 = 4u,        /* 32 bits in 4 bytes */
-    MP_SAMPLE_F32 = 5u         /* IEEE 754 single. Path B only. */
+    MP_SAMPLE_F32 = 5u,        /* IEEE 754 single. Path B only. */
+
+    /* 8 bits in 1 byte, and the only UNSIGNED type here: silence is 128, not 0.
+     * That is WAV's convention and it is not negotiable -- an 8-bit WAV really
+     * does store unsigned samples -- so it gets its own type rather than being
+     * quietly biased into S16 by whoever reads it. Path B only: no endpoint
+     * takes 8-bit, and reaching one means a conversion. */
+    MP_SAMPLE_U8 = 6u,
+
+    /* IEEE 754 double. Path B only, and for the same reason as F32 with one
+     * more: no audio hardware in existence accepts 64-bit samples, so this can
+     * never be a wire format. It exists so that a decoder reading a 64-bit
+     * float WAV can say what the file contains instead of narrowing it in
+     * silence -- the narrowing then happens in the graph, where it is visible
+     * and where somebody chose it. */
+    MP_SAMPLE_F64 = 7u
 };
 
 typedef uint32_t MpEncoding;

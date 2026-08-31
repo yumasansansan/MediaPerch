@@ -172,7 +172,31 @@ MpResult MP_CALL decoder_probe(const char* path, const std::uint8_t* head, std::
     (void)path;
     *out_score = 0;
 
+    // Every container dr_wav reads, not only the one everybody remembers.
+    // RIFX is big-endian WAV, RF64 is the form that gets past four gigabytes,
+    // W64 is Sony's, and FORM/AIFF is Apple's. dr_wav has decoded all of them
+    // for as long as this module has existed; nothing here ever said so, so
+    // nothing could reach them except by `--decoder native`.
+    static const char* const wav_like[] = {"RIFF", "RIFX", "RF64", "riff", "FORM"};
+
     if (head != nullptr) {
+        for (const char* magic : wav_like) {
+            if (!has_prefix(head, bytes, magic, 0)) {
+                continue;
+            }
+            // RIFF and RIFX carry "WAVE" at 8; AIFF carries "AIFF" or "AIFC";
+            // RF64 and W64 are unambiguous from the first four bytes alone.
+            const bool riff_like = (magic[1] == 'I');
+            if (riff_like && !has_prefix(head, bytes, "WAVE", 8)) {
+                continue;
+            }
+            if (magic[0] == 'F' && !has_prefix(head, bytes, "AIFF", 8) &&
+                !has_prefix(head, bytes, "AIFC", 8)) {
+                continue;
+            }
+            *out_score = 100;
+            return MP_OK;
+        }
         if (has_prefix(head, bytes, "fLaC", 0)) {
             // Deliberately below every other FLAC reader here. `dr_flac` is a
             // reimplementation that cannot read 32-bit FLAC at all -- it decodes
@@ -186,11 +210,6 @@ MpResult MP_CALL decoder_probe(const char* path, const std::uint8_t* head, std::
             // about one format: score is the registry's primary key and priority
             // only breaks ties, and dr_wav has no such caveat.
             *out_score = 60;
-        } else if (has_prefix(head, bytes, "RIFF", 0) && has_prefix(head, bytes, "WAVE", 8)) {
-            // WAV keeps 100. There is no reference implementation to defer to,
-            // dr_wav is measured bit-exact to 32-bit and 768 kHz, and it reaches
-            // the samples without a pipeline that could insert a converter.
-            *out_score = 100;
         }
     }
     return MP_OK;
@@ -240,21 +259,30 @@ try {
     }
 
     if (is_float) {
-        if (bits != 32) {
+        // dr_wav's `drwav_read_pcm_frames` hands back the file's own bytes
+        // unconverted, so 64-bit float costs nothing to carry -- the only thing
+        // that ever stopped it was this module having no type to name it with.
+        if (bits == 64) {
+            decoder->container = 8;
+            decoder->format.sample_type = MP_SAMPLE_F64;
+        } else if (bits == 32) {
+            decoder->container = 4;
+            decoder->format.sample_type = MP_SAMPLE_F32;
+        } else {
+            log_fmt(MP_LOG_WARN, "%u-bit float is not a format IEEE defines", bits);
             delete decoder;
             return MP_ERR_UNSUPPORTED;
         }
-        decoder->container = 4;
-        decoder->format.sample_type = MP_SAMPLE_F32;
         decoder->format.valid_bits = 0;
+    } else if (bits == 8) {
+        // Eight-bit WAV is unsigned -- silence is 128 -- which is a different
+        // number line from everything else here. That is exactly why it gets its
+        // own type instead of being biased into S16 on the way out: the bias
+        // would be a conversion, and this module does not do those.
+        decoder->container = 1;
+        decoder->format.sample_type = MP_SAMPLE_U8;
+        decoder->format.valid_bits = 8;
     } else {
-        // Eight-bit WAV is unsigned, which is a different number line and would
-        // need a conversion to reach any of our types. Refusing is honest.
-        if (bits < 12) {
-            log(MP_LOG_WARN, "8-bit PCM is unsigned and would need converting");
-            delete decoder;
-            return MP_ERR_UNSUPPORTED;
-        }
         decoder->container = container_for(bits);
         decoder->format.sample_type = sample_type_for(decoder->container, valid);
         if (decoder->container == 0 || decoder->format.sample_type == MP_SAMPLE_NONE) {
