@@ -463,6 +463,7 @@ Three outcomes, and the user picks the default once in settings:
 | `decode_native` | C++, `dr_flac` and `dr_wav` single headers | FLAC, WAV | the floor: no build system beyond two `#include`s, so an install with nothing else on disk still plays music. **Measured bit-exact** for 16- and 24-bit, and measurably *not* able to read 32-bit FLAC |
 | `decode_flac` | libFLAC, the Xiph reference decoder, as a submodule | FLAC, all depths and rates | for a lossless codec the reference implementation *is* the specification, which is worth a dependency in a way it would not be for a lossy one. Reads what `dr_flac` cannot, and checks its own output against the MD5 the encoder wrote into the file |
 | `decode_ogg` | libvorbis and libopus, the Xiph reference decoders, as submodules | Vorbis and Opus in Ogg | the same argument as `decode_flac`, arriving at a different place: these are the reference decoders, so they define what the codec means -- but the codecs are *lossy*, so what they define is a signal, not a byte pattern. This module reports MP_SAMPLE_F32 because that is what they produce, which puts every file it reads on Path B. See *Lossy codecs and Path A* below |
+| `decode_mp3` | `dr_mp3`, from the submodule `decode_native` already uses | MP3, every MPEG version and rate | not a better decoder -- it agrees with FFmpeg to 124 dB, which is float rounding for a codec whose conformance is defined as an RMS bound. It exists because Media Foundation does not implement gapless metadata and starts every MP3 36 ms late, and because dr_mp3 does and costs no new dependency |
 | `decode_mf` | Media Foundation `IMFSourceReader` | MP4/M4A, AAC, MP3, WMA — and WAV and FLAC, **also bit-exact** | ships with Windows, hardware-accelerated, and it is what brings §9 for free. Scores itself below `decode_native` on WAV and FLAC because it reaches them through a pipeline that *could* insert a converter, not because it did |
 | `decode_alac` | nothing at all: the codec and the MP4 parsing are both in this tree | ALAC in M4A, every depth to 32 bits and every layout to 7.1 | the reference is the specification *and* is unmaintained, so it was read rather than linked. See *ALAC, which is here and is written rather than vendored* below |
 | `decode_ffmpeg` | `ffmpeg` and `ffprobe`, **found at run time, never shipped** | WavPack, Monkey's Audio, Matroska, DSF/DFF, OggFLAC, and whatever else is installed | the fallback, at priority 30: every other module knows its own formats better. Not vendored, for the reasons in *Where dependencies come from* below |
@@ -928,6 +929,11 @@ real time.
   The check compiled, linked, ran, and was never true. It is the same shape of bug as the
   one it was written to catch, found the same way: by printing what was actually there
   rather than reasoning about what should have been.
+- **The second compiler earned its keep again, on a two-line change.** Adding `u8` and
+  `f64` to `SampleType` left two switches in `sine.cpp` non-exhaustive. MSVC said nothing;
+  clang-cl produced `-Wswitch` for both. The enum values are now listed rather than
+  defaulted, so the next type added to the ABI fails there until somebody decides what it
+  means.
 - **Media Foundation does not implement gapless metadata, in any codec.** Measured against
   FFmpeg reading the same files: MP3 starts 36.0 ms late, AAC 21.3 ms, Opus 13.5 ms, and
   each ends with padding the container said to discard. The control that turns this from

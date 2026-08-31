@@ -65,6 +65,11 @@ modules/             everything that can be loaded and unloaded at runtime.
                      install with nothing else on disk still plays music.
   decode_flac/       libFLAC, the Xiph reference, as a submodule. Outranks the above
                      wherever it is installed, and checks the file\'s own MD5.
+  decode_mp3/        MP3 through dr_mp3, which is already in external/dr_libs. It
+                     exists because Media Foundation does not implement gapless
+                     metadata and starts every MP3 36 ms late; dr_mp3 reads the
+                     LAME tag and costs no new dependency.
+
   decode_alac/       ALAC, written here: the codec and the slice of MP4 that finds
                      its packets. No submodule, no runtime library, no OS codec --
                      the reference implementation is the specification and has

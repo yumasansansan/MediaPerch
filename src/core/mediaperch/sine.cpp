@@ -20,6 +20,12 @@ double full_scale(SampleType type) noexcept
     case SampleType::s24_in_32: return 8388607.0;
     case SampleType::s32: return 2147483647.0;
     case SampleType::f32: return 1.0;
+    // Neither of these is a wire format -- no endpoint takes eight-bit or
+    // sixty-four-bit samples -- so the tone generator has nothing to generate
+    // into. They are listed rather than defaulted so that adding a type to the
+    // ABI keeps failing here until somebody has decided what it means.
+    case SampleType::u8:
+    case SampleType::f64:
     case SampleType::none: return 0.0;
     }
     return 0.0;
@@ -97,6 +103,11 @@ void SineSource::write_frame(std::uint8_t* dst, std::int32_t value) const noexce
             std::memcpy(p, &f, sizeof(f));
             break;
         }
+        // Path B-only types: full_scale() already refuses them, so a SineSource
+        // can never be constructed with one. Named anyway, for the same reason
+        // as there.
+        case SampleType::u8:
+        case SampleType::f64:
         case SampleType::none:
             break;
         }

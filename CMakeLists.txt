@@ -64,6 +64,7 @@ if(MEDIAPERCH_BUILD_PLATFORM)
     add_subdirectory(modules/decode_flac)
     add_subdirectory(modules/decode_ogg)
     add_subdirectory(modules/decode_alac)
+    add_subdirectory(modules/decode_mp3)
 endif()
 
 if(MEDIAPERCH_BUILD_PLATFORM AND WIN32)

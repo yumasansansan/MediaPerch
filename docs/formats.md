@@ -15,15 +15,15 @@ mediaperch-probe decode --file X.flac --decoder native
 ffmpeg -i X.flac -f s16le out.raw     # then hash out.raw
 ```
 
-## The six decoders
+## The seven decoders
 
-| | `decode_flac` | `decode_alac` | `decode_ogg` | `decode_native` | `decode_mf` | `decode_ffmpeg` |
-|---|---|---|---|---|---|---|
-| Behind it | libFLAC | **nothing** | libvorbis, libopus | `dr_wav`, `dr_flac` | Media Foundation | `ffmpeg`, `ffprobe` |
-| Covers | FLAC, every depth and rate | ALAC in M4A | Vorbis and Opus in Ogg | WAV, FLAC to 24 bits | MP4/M4A, MP3, WMA, WAV, FLAC | the long tail |
-| Priority | 120 | 115 | 110 | 100 | 50 | 30 |
-| Probe score for FLAC | 100 | — | — | **60** | 40 | 30 |
-| Comes from | `external/flac` | **this tree** | four Xiph submodules | `external/dr_libs` | already on the machine | **found at run time, never shipped** |
+| | `decode_flac` | `decode_alac` | `decode_ogg` | `decode_mp3` | `decode_native` | `decode_mf` | `decode_ffmpeg` |
+|---|---|---|---|---|---|---|---|
+| Behind it | libFLAC | **nothing** | libvorbis, libopus | `dr_mp3` | `dr_wav`, `dr_flac` | Media Foundation | `ffmpeg`, `ffprobe` |
+| Covers | FLAC, every depth and rate | ALAC in M4A | Vorbis and Opus in Ogg | MP3, every MPEG version | WAV and its four containers, FLAC to 24 bits | AAC, WMA, and what is left | the long tail |
+| Priority | 120 | 115 | 110 | 105 | 100 | 50 | 30 |
+| Probe score for FLAC | 100 | — | — | — | **60** | 40 | 30 |
+| Comes from | `external/flac` | **this tree** | four Xiph submodules | `external/dr_libs` | `external/dr_libs` | already on the machine | **found at run time, never shipped** |
 
 Score is the registry's primary key and priority only breaks ties, so the score
 is where a statement about *one format* belongs. `decode_native` scores FLAC at
@@ -345,6 +345,61 @@ a few hundred kilobytes; the alternative costs the ability to reason about it.
 with a different one is not an answer; a forced decoder that refuses reports the
 refusal.
 
+## MP3, and the 36 milliseconds
+
+`decode_mp3` exists because of one measurement, not because MP3 needed a better
+decoder. Media Foundation does not implement gapless metadata: it returns 2544
+frames more than the file holds and starts the audio **1729 frames — 36.0 ms —
+late**, presenting the encoder's warm-up as audio. `dr_mp3` reads the LAME/Xing
+tag, skips the delay, stops at the padding boundary, and subtracts the delay
+from its frame count.
+
+It also cost nothing. `dr_mp3` lives in `external/dr_libs`, the submodule
+`decode_native` already uses, so the module is one source file and an
+implementation unit.
+
+### Lengths, against the file that was encoded
+
+| File | source | `decode_mp3` | `decode_ffmpeg` | `decode_mf` |
+|---|---|---|---|---|
+| 48 kHz stereo, 320 kbps | 96000 | **96000** | 96000 | 98544 |
+| 8 kHz mono, 8 kbps (MPEG-2.5) | 16000 | **16000** | 16000 | 17328 |
+| 44.1 kHz VBR V0 | 88200 | **88200** | 88200 | 89328 |
+| 44.1 kHz dual channel | 88200 | **88200** | 88200 | 90480 |
+| pink noise, 320 kbps | 96000 | **96000** | 96000 | 98544 |
+
+Measured against pink noise, `decode_mp3` and `decode_ffmpeg` both start at
+**+0 frames** from the source. And on a file with no gapless tag at all, the two
+agree at 97920 frames — there is nothing to trim there, and neither invents any.
+
+### Content, against FFmpeg's own decoder
+
+| File | Identical samples | SNR | max abs difference |
+|---|---|---|---|
+| 48 kHz, 320 kbps | 6.7% | **124.24 dB** | 4.4 × 10⁻⁷ |
+| 8 kHz mono, 8 kbps | 5.7% | **125.25 dB** | 2.2 × 10⁻⁷ |
+| 44.1 kHz VBR V0 | 6.1% | **124.47 dB** | 3.9 × 10⁻⁷ |
+
+MP3 has no normative bit-exact decoder — ISO 11172-4 defines conformance as an
+RMS error bound — so two implementations are not expected to agree at all. These
+agree to float rounding.
+
+Every MPEG version and rate was checked: MPEG-1 at 44.1 and 48 kHz, MPEG-2 at
+16, 22.05 and 24 kHz, MPEG-2.5 at 11.025 and 12 kHz, CBR, VBR and dual channel.
+Lengths match FFmpeg exactly in all of them. Seeking matches the tail of a
+straight decode at 1152, 10000 and 50000 frames — and FFmpeg's seeks match
+FFmpeg's own tails, so both are self-consistent and differ only by the 124 dB
+that separates the decoders anyway.
+
+The output is `F32`, and the build defines `DR_MP3_FLOAT_OUTPUT` to make that
+true rather than nominal: without it dr_mp3 decodes to int16 and converts up on
+the way out, which would be a quantisation performed inside a decoder.
+
+`fuzz/mp3_fuzzer.cpp` drives it: 1.5 million executions under ASan, nothing
+found. MP3 earns a fuzzer more than the others here, because its frame parser
+resynchronises after garbage and will keep decoding through a file that is
+mostly not MP3.
+
 ## WAV, across every axis it has
 
 WAV is the only format here with no compression to argue about, so agreement
@@ -469,11 +524,11 @@ That is one behaviour across four codecs. Every track decoded by Media
 Foundation begins with tens of milliseconds of the encoder's warm-up presented
 as audio, and ends with padding the file said to discard:
 
-| Codec | Delay Media Foundation leaves in |
-|---|---|
-| MP3 | 36.0 ms |
-| AAC | 21.3 ms |
-| Opus | 13.5 ms |
+| Codec | Delay Media Foundation leaves in | Who reads it now |
+|---|---|---|
+| MP3 | 36.0 ms | `decode_mp3` |
+| AAC | 21.3 ms | `decode_mf` still — see [the plan](plan.md) §7 |
+| Opus | 13.5 ms | `decode_ogg` |
 
 Audible at a track boundary, and enough to make gapless playback impossible.
 Nothing in this milestone plays back-to-back tracks yet, so nothing is broken

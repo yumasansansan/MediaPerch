@@ -87,6 +87,7 @@ endfunction()
 
 mediaperch_add_fuzzer(wav_fuzzer wav_fuzzer.cpp wav)
 mediaperch_add_fuzzer(flac_fuzzer flac_fuzzer.cpp flac)
+mediaperch_add_fuzzer(mp3_fuzzer mp3_fuzzer.cpp mp3)
 mediaperch_add_fuzzer(alac_fuzzer alac_fuzzer.cpp alac
                       "${CMAKE_SOURCE_DIR}/modules/decode_alac/alac.cpp"
                       "${CMAKE_SOURCE_DIR}/modules/decode_alac/mp4.cpp")

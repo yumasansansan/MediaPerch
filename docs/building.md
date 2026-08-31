@@ -26,7 +26,7 @@ git submodule update --init
 
 | Submodule | What for |
 |---|---|
-| `external/dr_libs` | `dr_wav` and `dr_flac`, behind `decode_native` |
+| `external/dr_libs` | `dr_wav` and `dr_flac` behind `decode_native`, `dr_mp3` behind `decode_mp3` |
 | `external/flac` | libFLAC, behind `decode_flac` |
 | `external/ogg` | libogg, the container under the two below |
 | `external/vorbis` | libvorbis and vorbisfile, behind `decode_ogg` |
