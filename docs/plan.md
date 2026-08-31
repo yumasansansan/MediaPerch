@@ -1,0 +1,611 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+# MediaPerch — implementation plan
+
+A media player that goes straight to WASAPI exclusive when nothing needs to be done to the
+samples, and delegates HDR to the operating system instead of reinventing it.
+
+This document is the plan of record. It carries the decisions that are expensive to revisit
+— the language split, the module ABI, and the two audio code paths — and the API-level
+findings that would otherwise have to be rediscovered by reading Microsoft's documentation
+twice.
+
+---
+
+## 1. Goals and constraints
+
+| | |
+|---|---|
+| Core language | C++23 (C++20 as the guaranteed floor for library features) |
+| Module language | **anything that can export a C symbol.** v1 is C and C++ only; the ABI has this shape so that a second language stays a cheap option rather than a rewrite — see §2 |
+| Layer | as low as practical. Prefer the platform API over a wrapper when the wrapper adds no capability we need |
+| Audio | WASAPI **exclusive**, event-driven, MMCSS `Pro Audio`. Shared mode is a fallback, not the design centre |
+| Bit-exactness | a testable property, not a marketing word. §12 says how it is tested |
+| Video | Direct3D 11 + DirectComposition. HDR delegated to **the OS tone mappers** by default — with a correct one selectable, because the OS one is known to be wrong (§9.2) |
+| Modularity | decoders, sinks, DSP and the video presenter are runtime-loaded shared libraries behind one C ABI |
+| Shell | separate process, optional, replaceable. The engine is complete without it |
+| Windows floor | Windows 10 2004 for audio; Windows 11 22H2 for Advanced Color; Windows 11 24H2 for the desktop HDR-state APIs, degrading gracefully below each |
+| IDE | Visual Studio 2026, opened as a real `.sln`, as with DragonPerch |
+| Licence | `GPL-3.0-or-later`. Compatible with FFmpeg in either its LGPL or GPL configuration |
+
+Non-goals for v1: macOS, a scripting language, network streaming clients, a library
+database with a query language, DLNA, and any form of DRM.
+
+---
+
+## 2. Which language, and where the boundary is
+
+The question is **not** "C++ or Rust". It is *what the boundary between modules is made of*
+— and once that answer is "a C ABI across a `.dll` on disk", the language question stops
+being architectural and becomes a reversible, per-module choice that can be made later at no
+extra cost. That reframing is what decides it below.
+
+### Where C++ wins, and it is not close
+
+Everything MediaPerch touches on Windows is **COM**: `IMMDeviceEnumerator`, `IAudioClient`,
+`IAudioRenderClient`, `IAudioClock2`, `IMFSourceReader`, `IMFTransform`,
+`ID3D11VideoContext`, `IDXGISwapChain4`, `IDCompositionDevice`, `ID2D1Effect`. In C++ those
+are the *native* form of the API — `ComPtr`, `HRESULT`, `__uuidof` — and so is every
+sample, every PIX and Media Foundation trace article, and twenty years of answers.
+
+In Rust via [`windows-rs`](https://github.com/microsoft/windows-rs) the same interfaces
+exist and are generated automatically — Direct3D 12 has official samples in the repository
+— but calling them is `unsafe` end to end. That is the sharp point: **in the layer that is
+most Windows-specific, Rust's guarantees are suspended**, and what remains is better enums
+and worse documentation. Media Foundation's video plumbing in particular is a place where
+you want the search results to be in your language.
+
+Two more reasons specific to this project:
+
+- **The video path is D3D.** `ID3D11VideoContext::VideoProcessorSetOutputColorSpace`,
+  `ID3D11VideoContext2::VideoProcessorSetStreamHDRMetaData` and the Direct2D HDR tone map
+  effect are C++ APIs with C++ samples, and §9 makes them load-bearing.
+- **DragonPerch is C++23** with CMake presets, clang-tidy, Catch2 and libFuzzer. For one
+  maintainer with two native Windows/Linux projects, sharing the build system, the CI shape
+  and the muscle memory is worth more than it sounds.
+
+### Where Rust would win
+
+- **Parsers.** MediaPerch reads more hostile input than DragonPerch does: ID3v2, APE tags,
+  Vorbis comments, embedded cover art, cue sheets, playlists, FLAC frame headers.
+  Historically this is where players get CVEs, and Rust removes the class outright.
+  [`symphonia`](https://github.com/pdeljanov/symphonia) also ships FLAC/WAV/MP3/AAC/Vorbis
+  decoding, so it is not purely a safety argument — it is code not written.
+- **Threads.** `Send`/`Sync` checked at compile time is a real guarantee about a lock-free
+  ring shared between an MMCSS `Pro Audio` thread and an I/O thread. C++ offers discipline
+  and a comment.
+
+### Why v1 is C and C++ only anyway
+
+The Rust case above is real, and it still loses here, for one reason that is easy to miss:
+
+> **The largest parsing attack surface in this program is FFmpeg, and FFmpeg is C no matter
+> what language MediaPerch is written in.**
+
+Rust would protect the small surface we write ourselves and none of the large surface we
+link. The mitigation that actually covers the risk is **process isolation** — hosting
+`decode_ffmpeg` out of process behind the same ABI (§4) — and that mitigation is
+language-agnostic, covers our own parsers as well, and is one mechanism instead of two.
+Spend the complexity budget there.
+
+The rest follows:
+
+- `decode_native` in C++ is not more work than `decode_native` in Rust. `dr_flac.h`,
+  `dr_wav.h` and `dr_mp3.h` are single public-domain headers with no build-system footprint
+  at all, and DSF/DFF is a header plus raw blocks. Cargo's convenience argument mostly
+  evaporates against three `#include`s.
+- The safety gap is closed the way DragonPerch already closes it: libFuzzer on every parser,
+  ASan/UBSan in CI, `/GS` and `/guard:cf` in release. That machinery exists and the
+  maintainer already runs it.
+- For one maintainer, the cost that does not appear in a CI log — switching between two
+  languages, two dependency ecosystems, two fuzzing setups — is the one that actually bites.
+
+### The decision
+
+> **C++23 for `src/core`, the platform heads and every module. A plain C module ABI, kept
+> exactly as specified in §4 — not because Rust is coming, but because the ABI is the
+> expensive thing to change later and making it C costs nothing now.**
+
+**This is deliberately not a rejection of Rust; it is a deferral that costs nothing to
+reverse.** The module boundary is a `.dll` on disk, not a link step: no Corrosion, no
+mixed-language linking, no CRT mixing, no change to the C++ build. Adding a Rust module in
+two years is exactly the same amount of work as adding one today, so there is no reason to
+pay for it today.
+
+### Validating the ABI without adopting a second language
+
+The claim "an ABI that has never been crossed from a second language is an ABI that does not
+work yet" stays true, so it gets tested rather than assumed — cheaply:
+
+1. **A plain C probe module, in M2.** Roughly a hundred lines, built by hand, not in CI,
+   deleted afterwards. It catches most of what goes wrong: name mangling, an exception
+   escaping, a non-POD type in a struct, a default argument, `bool` width, a header that
+   only compiles as C++.
+2. **A Rust probe, once, on the same day.** Also throwaway. It catches the rest: calling
+   convention, `repr(C)` layout, and whether a panic can actually be contained at the
+   boundary. Half a day, and then the question is settled either way.
+
+### When to revisit
+
+Named, so that it is a decision rather than a someday:
+
+- a fuzzer finds a memory bug in a parser we wrote that is **not** a one-line fix; or
+- the parsing surface grows past tags, cue sheets, playlists and INI — a container demuxer
+  of our own, say; or
+- the Rust probe in M2 shows the boundary is *pleasant* rather than merely possible.
+
+Any of those, and `decode_native` becomes the first Rust module. Until then the ABI is ready
+and the toolchain is one.
+
+### What the shell is written in is a separate question
+
+The shell is a separate process behind an IPC boundary, so its language constrains nothing.
+WinUI 3's supported markup languages are C# and C++/WinRT; Rust can drive the Windows App
+SDK through `windows-rs` but has no XAML markup compiler, so a Rust shell means building
+the UI tree in code. DragonPerch's shell is C# with Native AOT and that pattern transfers
+directly: **C#, WinUI 3, Native AOT, and it stays optional.**
+
+---
+
+## 3. Layering
+
+Four rings, and dependencies only ever point inwards.
+
+```
+   ┌─ shell (any process, any language, optional) ────────────────┐
+   │  ┌─ platform head (src/win, src/linux) ───────────────────┐  │
+   │  │  ┌─ modules (C ABI, LoadLibrary/dlopen) ───────────┐   │  │
+   │  │  │  ┌─ core (portable, no OS headers) ─────────┐   │   │  │
+   │  │  │  │  graph · negotiation · ring · clock      │   │   │  │
+   │  │  │  │  playlist · registry · config schema     │   │   │  │
+   │  │  │  └──────────────────────────────────────────┘   │   │  │
+   │  │  └─────────────────────────────────────────────────┘   │  │
+   │  └────────────────────────────────────────────────────────┘  │
+   └──────────────────────────────────────────────────────────────┘
+```
+
+- **core** knows nothing about `HWND`, `IMMDevice`, files or sockets. It is handed
+  interfaces and drives them. CI builds it as a standalone target with the platform
+  directories removed from the include path, exactly as DragonPerch does, so the rule is
+  enforced rather than intended.
+- **the head** owns the message pump, the COM apartment (MTA for the engine, one
+  `MFStartup`), the device notification client, the module loader, the config file and the
+  IPC server. It is the only code allowed to include `<windows.h>`.
+- **modules** never call the head directly. They receive a host vtable at init.
+- **the shell** never sees a module. It sees playback state and a settings tree.
+
+---
+
+## 4. The module ABI
+
+One exported symbol per shared library:
+
+```c
+/* include/mediaperch/module.h — pure C, no dependencies */
+#define MP_ABI_VERSION 1u
+
+const MpModuleDesc *mp_module_entry(uint32_t host_abi_version);
+```
+
+Every rule below exists because of the render-thread constraint in
+[design.md](design.md).
+
+1. **Pure C, `extern "C"`, no C++ or Rust types, no allocation across the boundary.** The
+   caller supplies buffers and the callee fills them. A single host allocator vtable is
+   passed at init for the cases that genuinely need one, and it is never called from an RT
+   entry point.
+2. **Every interface struct begins with `size_t size`.** New fields append; a host reading
+   an older module clamps at `size`. This is the only versioning scheme that survives a
+   third-party module compiled a year ago.
+3. **Nothing unwinds.** C++ entry points are `noexcept` shims; Rust entry points wrap their
+   bodies in `catch_unwind` and return an error code. A module that unwinds anyway is
+   terminated with a diagnostic, not "handled".
+4. **Every entry point carries its thread class** in the header, and the tag is part of the
+   contract:
+
+   | Tag | May block | May allocate | Called from |
+   |---|---|---|---|
+   | `MP_RT` | no | no | the MMCSS render thread |
+   | `MP_IO` | yes | yes | the decode/IO thread |
+   | `MP_ANY` | yes | yes | control, at graph rebuild |
+
+5. **Unload requires quiescence.** `mp_module_unload` is legal only when the refcount is
+   zero *and* the engine has passed a barrier proving no RT thread can be inside module
+   code — in practice, at graph rebuild points only. A module that starts its own threads or
+   registers COM classes sets `MP_MODULE_NO_UNLOAD` and is honestly leaked for the process
+   lifetime instead of being dishonestly `FreeLibrary`-ed.
+6. **Capability declaration is data, not code.** The descriptor lists what the module claims
+   — kinds, container and codec IDs, sample formats, a priority — so the registry can build
+   the resolution table in §7 without loading and initialising every module at every start.
+
+Interfaces in v1:
+
+| Kind | Interface | Notes |
+|---|---|---|
+| `MP_KIND_DECODER` | `probe`, `open`, `read_packet` (`MP_IO`), `seek`, `close` | reports the source format; never converts |
+| `MP_KIND_SINK` | `enumerate`, `negotiate` (`MP_ANY`), `start`, `render` (`MP_RT`), `stop` | `negotiate` is the whole of §6 |
+| `MP_KIND_DSP` | `negotiate`, `process` (`MP_RT`), `reset` | f32 deinterleaved in and out; latency declared, not measured |
+| `MP_KIND_VIDEO` | `create_surface`, `present`, `set_colour_target` | §9 |
+| `MP_KIND_META` | `read_tags`, `read_art` (`MP_IO`) | the most hostile input in the program; fuzzed hardest |
+
+**Out-of-process modules use the same ABI.** A future `mp_host_ffmpeg.exe` implements the
+identical vtable over shared memory and a pipe, so a decoder that dies on a malformed file
+takes a helper process down and not the audio. The ABI is shaped now so that this needs no
+redesign later; it is not built in v1.
+
+---
+
+## 5. The audio engine
+
+Two graphs, chosen once when a track starts, never branched between at run time.
+
+### Path A — passthrough (the default)
+
+```
+  decoder ──packets already in the device's format──▶ SPSC ring (bytes) ──▶ GetBuffer / memcpy / ReleaseBuffer
+```
+
+No float. No gain. No mixing. No sample-rate conversion. No dither. The ring holds device
+bytes and the render callback performs one `memcpy`. Volume, if the user wants any, is
+`IAudioEndpointVolume`: the session interfaces (`ISimpleAudioVolume`, `IAudioStreamVolume`)
+have **no effect at all** on an exclusive-mode stream, which is a fact worth a comment
+beside the volume control.
+
+Three variants live here, and all three are `memcpy`:
+
+- **PCM.** Sample rate, bit depth and channel count all survived §6 unchanged.
+- **DoP.** DSD wrapped in 24-bit PCM frames with the alternating `0x05`/`0xFA` marker,
+  offered to the device as 176.4 or 352.8 kHz 24-bit. The device never learns it is DSD.
+- **IEC 61937 bitstream.** Dolby Digital / DTS / E-AC-3 handed through as a
+  `WAVEFORMATEXTENSIBLE` with a `KSDATAFORMAT_SUBTYPE_IEC61937_*` subformat, for a receiver
+  to decode.
+
+### Path B — processed
+
+```
+  decoder ─▶ f32 deinterleaved bus ─▶ DSP chain ─▶ requantise + dither ─▶ ring ─▶ sink
+```
+
+Entered when the user asks for DSP, when a resample is unavoidable, or when negotiation
+failed and the user chose to convert rather than not play. The canonical bus is f32
+deinterleaved because every DSP anyone will write wants it that way, and one conversion at
+each end is cheaper than N conversions inside.
+
+### Switching between them
+
+At a **graph rebuild point** only: track change, device change, format change, or an
+explicit user toggle. A rebuild stops the client, tears the graph down, renegotiates and
+starts again — an audible gap of a few tens of milliseconds. That gap is the correct trade.
+A hot swap means the render callback contains a branch on state another thread writes, and
+that is the bug that costs a week.
+
+### Threads
+
+| Thread | Priority | Does |
+|---|---|---|
+| render | MMCSS `Pro Audio` | wait on the event, `GetBuffer`, fill, `ReleaseBuffer`. Nothing else, ever |
+| decode | normal | read ahead into the ring, stay some hundreds of ms in front |
+| control | normal | IPC, module load/unload, graph rebuild, device notifications |
+
+The ring is single-producer/single-consumer, power-of-two, acquire/release indices, no CAS.
+It lives in `src/core` and is one of the two things `tests/` cares most about.
+
+---
+
+## 6. Format negotiation
+
+This is the step the architecture exists for, so it is specified rather than left to the
+sink module's judgement.
+
+```
+  source format (from the decoder)
+        │
+        ▼
+  candidate list, in preference order
+        │
+        ▼
+  for each candidate:  IsFormatSupported  →  Initialize   ← the real test
+        │                                        │
+        │                                        ├─ AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED
+        │                                        │     → GetBufferSize, recompute the
+        │                                        │       duration from the returned frame
+        │                                        │       count, Initialize again  (§14)
+        │                                        │
+        │                                        └─ AUDCLNT_E_UNSUPPORTED_FORMAT → next
+        ▼
+  first candidate that initialises wins
+        │
+        ├─ it is the source format, unchanged   → Path A
+        └─ nothing matched                      → ask, per §6.3
+```
+
+### 6.1 Candidate order
+
+1. The source format exactly — same rate, same bit depth, same channel count.
+2. The same rate and channels at a *wider* container (16-bit source into a 24-bit
+   endpoint is a lossless left-shift, and is still bit-exact in any sense that matters).
+3. The same rate, `WAVEFORMATEXTENSIBLE` with an explicit channel mask, because some drivers
+   accept only the extensible form even for stereo.
+4. — stop. Anything past here is a conversion, and a conversion is Path B and a user
+   decision.
+
+`IsFormatSupported` is called first only as a cheap filter. **`Initialize` is the answer**:
+in exclusive mode the driver, not the audio engine, decides, and some drivers say yes to
+formats they then refuse.
+
+### 6.2 What "bit-exact" means here
+
+Every sample that leaves the decoder reaches `ReleaseBuffer` with the same numeric value,
+in the same order, with no gain applied and no rate conversion. Container widening and
+channel-mask tagging are permitted. Nothing else is.
+
+### 6.3 When negotiation fails
+
+Three outcomes, and the user picks the default once in settings:
+
+| Choice | Behaviour |
+|---|---|
+| **Convert** | fall to Path B with the best available resampler. Loud in the UI about what it did |
+| **Shared** | fall to shared mode, ideally with `AUDCLNT_STREAMOPTIONS_RAW` via `IAudioClient2::SetClientProperties` to bypass system effects, and `IAudioClient3::InitializeSharedAudioStream` at `GetSharedModeEnginePeriod` for latency |
+| **Refuse** | do not play, and say exactly which format the device declined |
+
+"Refuse" must exist. It is the option that makes the other two honest.
+
+---
+
+## 7. Decoders, and how one is chosen
+
+| Module | Backend | Covers | Why it exists |
+|---|---|---|---|
+| `decode_native` | C++, `dr_flac`/`dr_wav`/`dr_mp3` single headers + a small DSD reader | FLAC, WAV, AIFF, DSF, DFF, MP3 | zero build-system footprint and no submodule; the base install plays music with nothing else on disk |
+| `decode_mf` | Media Foundation `IMFSourceReader` | MP4/MOV, AAC, HEVC, H.264, AV1, WMA | ships with Windows, hardware-accelerated, and it is what brings §9 for free |
+| `decode_ffmpeg` | libav* | everything else | the long tail, and the first candidate for out-of-process hosting |
+
+Resolution, in order, and it is written down because "it depends on the config" is not a
+design:
+
+1. an explicit per-extension override in the config file;
+2. the container's declared preference (`audio.decoder.preference = native, mf, ffmpeg`);
+3. `probe` on each candidate in priority order, highest first;
+4. first that opens successfully wins; a decoder that fails mid-file does **not** trigger a
+   silent retry with another backend, because a half-decoded track that switches backend is
+   worse than a clean error.
+
+The choice is per-track and visible: the UI and the log both name the module that opened
+the file.
+
+---
+
+## 8. Clock and A/V sync
+
+**The audio device is the master clock.** `IAudioClock2::GetDevicePosition` plus
+`IAudioClock::GetFrequency`, correlated with `QueryPerformanceCounter`, gives the
+presentation time everything else follows.
+
+The consequence has to be stated, because it is the opposite of the usual answer: **in
+exclusive passthrough there is no resampler, so audio cannot be rate-matched to video.**
+Video therefore drops or duplicates frames against the audio clock, always. Never adjust
+audio to keep video smooth — that is a conversion, and this player does not do conversions
+it did not announce.
+
+For audio-only playback the clock is used for gapless boundaries and for the position
+readout, and nothing else reads it.
+
+---
+
+## 9. Video and HDR
+
+The differentiating feature, and the one that needs the most care because the platform
+documentation contradicts a widely-held assumption.
+
+### 9.1 Two different stages, and only one of them tone-maps
+
+Windows tone-maps HDR video for SDR displays in *one* place, and it is not the place most
+people assume. Getting these two stages the right way round is the whole of this section.
+
+| Stage | What it does with out-of-range HDR | How you reach it |
+|---|---|---|
+| **Video processing**, before composition | **tone-maps.** This is what the *Stream HDR video* setting turns on, and why HDR content looks acceptable on an SDR panel in Movies & TV, Netflix or Edge | the GPU video processor, or the Media Foundation playback pipeline. **Not automatic** — you have to route the frame through it |
+| **DWM composition**, after | **clips.** An Advanced Color swap chain targeting a display without those capabilities is numerically clipped; everything outside `[0, 1]` in an FP16 scRGB buffer is simply lost | unavoidable — this is what presentation does |
+
+The consequence for a player: **decode with FFmpeg, upload your own texture, present it, and
+nothing tone-maps it** — the system setting does not help, because the frame never went
+through the stage that honours it. The `driver` provider below is exactly how a custom
+renderer opts back into that stage.
+
+### 9.2 The OS tone mapper is good, free, and measurably wrong
+
+Worth knowing before treating it as a reference: the *Stream HDR video* conversion has a
+long-standing, vendor-acknowledged defect. It maps the PQ EOTF to a **2.4 gamma** rather
+than to the sRGB piecewise curve or BT.1886 that Windows uses for SDR everywhere else. On an
+sRGB-calibrated display that means washed-out midtones with crushed blacks, at the same
+time. Intel published a support note titled "HDR to SDR Conversion for Windows' *Stream HDR*
+Function Is Incorrect"; there is no fix on an internal panel short of a 3D LUT through the
+DWM, and external monitors only work around it by having their own gamma control.
+
+So "it looks fine" and "it is correct" are both true statements about different things, and
+the design follows from that: **default to the OS mapper because it is free, hardware
+accelerated and matches every other Windows app, and keep a correct one selectable.** Ours
+targets sRGB with a BT.2390 EETF — which is, precisely, what those bug reports have been
+asking Microsoft to do.
+
+### 9.3 The providers
+
+"The OS tone mapper" is real; it just has to be called:
+
+| Provider | API | Runs on |
+|---|---|---|
+| `driver` | `ID3D11VideoContext::VideoProcessorSetOutputColorSpace` + `VideoProcessorSetStreamColorSpace1`, with `ID3D11VideoContext2::VideoProcessorSetStreamHDRMetaData` | the GPU's fixed-function video processor. The driver tone-maps using the stream's HDR metadata |
+| `d2d` | the Direct2D HDR tone map effect | Direct2D. The same tone mapper Windows ships for its own HDR video pipeline |
+| `shader` | our own BT.2390 EETF | our pixel shader. The fallback, and the escape hatch when a driver's is bad |
+| `none` | — | the display is already HDR; pass PQ through |
+
+`driver` is the default — it is the cheapest, it is what the OS's own player path uses, and
+it is the answer to "why does this look like Windows and MPC-BE does not".
+
+### 9.4 Detecting what the display actually is
+
+| Windows | Call | Gives |
+|---|---|---|
+| 11 24H2+ | `DisplayConfigGetDeviceInfo` with `DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO_2` | the **active colour mode** — SDR / WCG / HDR — for a desktop app, and `DISPLAYCONFIG_DEVICE_INFO_SET_HDR_STATE` to toggle HDR with the user's consent |
+| 10 2004+ | `IDXGIOutput6::GetDesc1` | HDR yes/no, plus the ST.2086 colour volume. **Cannot distinguish an auto-colour-managed SDR display from a plain one** — both report `DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709` |
+| any | `QueryDisplayConfig` + `DISPLAYCONFIG_SDR_WHITE_LEVEL` | the user's SDR reference white in nits, needed for §9.6 |
+
+`Windows.Graphics.Display.AdvancedColorInfo` is the nicest of these and is **UWP only** — a
+desktop app without a `CoreWindow` cannot use it. Do not plan around it.
+
+Capabilities change while running: the user toggles HDR, or drags the window to another
+monitor. Poll `IDXGIFactory1::IsCurrent` each frame, handle `WM_SIZE`, and on a change pick
+the output with the greatest intersection with the window rather than calling
+`IDXGISwapChain::GetContainingOutput`, which returns a stale output and whose obvious fix —
+recreating the swap chain — flashes black.
+
+### 9.5 Presentation
+
+Flip model, always (`DXGI_SWAP_EFFECT_FLIP_DISCARD`), because that is what makes a swap
+chain eligible for Advanced Color processing at all.
+
+- **General path:** `DXGI_FORMAT_R16G16B16A16_FLOAT`, scRGB
+  (`DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709`). Works on every display kind, blends with the
+  OSD, costs 64 bits per pixel.
+- **Fullscreen HDR10 optimisation:** `DXGI_FORMAT_R10G10B10A2_UNORM` with
+  `IDXGISwapChain3::SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)`. Half the
+  bandwidth, but no alpha blending — so only when nothing is composited over the video.
+
+### 9.6 The one that will look wrong first
+
+On an **HDR** display, scRGB `1.0` means 80 nits — *scene-referred*. On an Advanced Color
+**SDR** display, `1.0` means the display's reference white — *display-referred*. Subtitles
+and the OSD drawn at `1.0` on an HDR display therefore appear at 80 nits, which is dim and
+grey next to the video, and this is the single most common HDR bug in players.
+
+Fix: read the SDR white level (§9.4), and multiply SDR content by
+`sdr_white_level_nits / 80` in linear space before compositing. Alternatively, render the
+OSD to its own surface and let the OS composite it — Windows then applies the boost itself.
+The second is less code and is what the plan does; the first is kept for the fullscreen
+HDR10 path where there is no second surface.
+
+### 9.7 Order of work
+
+Present the OS path first (`driver` tone mapping, `decode_mf` hardware decode, flip-model
+scRGB) and get it correct. Only then add `shader`, and only as an option — a hand-written
+tone mapper that ships before the platform one has been made to work is how a project ends
+up maintaining a colour pipeline it never meant to own.
+
+---
+
+## 10. Shell and IPC
+
+The engine is a headless process with no toolkit linked in. Shells attach.
+
+- **Transport:** a named pipe on Windows with a message framing that is a versioned struct
+  stream, not a text protocol. One Unix-domain-socket implementation later for Linux.
+- **Surface:** playback state (transport, position, current track, current graph, current
+  device, the resolved format), the playlist, the settings tree, and a log tail. That is
+  all. The shell cannot reach into the graph.
+- **Fallback:** the engine keeps a minimal Win32 tray menu of its own, exactly as
+  DragonPerch's daemon does, so an install with no shell is usable rather than headless.
+  Greying out "Settings" when no shell is installed is the honest behaviour.
+- **The shell is killable at any moment** and playback does not notice. That is the whole
+  reason for the split, and it should be an actual test: kill the shell mid-track, assert
+  zero glitches.
+
+Because the surface is small and versioned, a third-party shell — a web UI, a hardware
+remote, a Linux Qt shell — is a normal thing to write rather than a fork.
+
+---
+
+## 11. Configuration
+
+One INI-shaped file, read by the head, validated against a schema that lives in the core, so
+that the same file is meaningful on a platform that does not exist yet. Reuse DragonPerch's
+INI parser and its fuzz corpus rather than writing a second one.
+
+Settings that matter enough to name here: the exclusive/shared default, the negotiation
+failure policy (§6.3), the decoder preference order (§7), the module search path and
+allow-list, the tone-map provider (§9.3), and whether the engine may toggle the display's
+HDR state.
+
+---
+
+## 12. Testing
+
+| Layer | How |
+|---|---|
+| core | Catch2, with a null sink and a synthetic decoder. Negotiation, graph selection, ring behaviour, gapless boundaries — no device, no COM |
+| bit-exactness | a `sink_capture` module that records exactly what `render` was given, byte for byte, and compares it with the decoded file. **This is the test the project is for**; write it in M2, not at the end |
+| ring | a soak test with a producer and a consumer under TSan, plus an assertion that the render side never allocates (an allocator hook that aborts while the RT flag is set) |
+| parsers | libFuzzer on every one — tags, cue sheets, playlists, INI — with corpora in `fuzz/corpus`, as DragonPerch already does |
+| devices | a manual matrix, because it cannot be automated: onboard Realtek, a USB DAC, HDMI to a receiver, Bluetooth. Record for each: the formats that negotiated, whether `AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED` appeared, and the minimum period that ran glitch-free for an hour |
+| glitch counting | the engine counts underruns, `AUDCLNT_E_DEVICE_INVALIDATED`, and late render callbacks, and shows them. A player that cannot tell you it glitched cannot be trusted when it says it did not |
+
+---
+
+## 13. Milestones
+
+| # | Deliverable | Done when |
+|---|---|---|
+| M0 | Repository skeleton, CMake presets, CI | `core` builds alone with the platform directories off the include path, and CI fails if that stops being true |
+| M1 | WASAPI exclusive, event-driven, sine from memory | a 1 kHz tone plays for an hour at the minimum device period with zero underruns; the realign path in §14 is exercised deliberately |
+| M2 | Module ABI v1 + `decode_native` + `sink_capture` + the two throwaway ABI probes (§2) | a FLAC plays through a loaded DLL, the capture test proves the bytes are identical, and the C and Rust probes both load and play |
+| M3 | `mediaperch-cli` and the IPC | the engine is genuinely usable with no GUI on disk |
+| M4 | Path B: f32 bus, DSP chain, resampler, dither. Gapless, seek | switching paths at a rebuild point is glitch-free and the passthrough path still contains no float |
+| M5 | `decode_mf` and `decode_ffmpeg`, and the resolution table | the format coverage matrix in the README is real and generated by a test |
+| M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse |
+| M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled |
+| M8 | WinUI 3 shell | killing it mid-track changes nothing audible |
+| M9 | Linux head | ALSA or PipeWire in an exclusive-equivalent mode, proving the core was actually portable |
+
+M1 and M2 are the ones that de-risk the project. If exclusive-mode negotiation and the
+module ABI both work, everything after them is ordinary work.
+
+---
+
+## 14. Findings to carry forward
+
+Established from Microsoft's documentation during planning; each has cost other projects
+real time.
+
+- **`AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED` is normal, not an error.** On that return, call
+  `GetBufferSize`, recompute the requested duration as
+  `REFTIMES_PER_SEC / nSamplesPerSec * nFrames + 0.5`, and `Initialize` a second time on a
+  *fresh* `IAudioClient` — the first one is spent. Any exclusive-mode implementation without
+  this path is broken on some hardware and fine on the developer's.
+- **Exclusive mode is a per-device user setting**, both "allow applications to take
+  exclusive control" and "give exclusive mode applications priority". Either can be off.
+  Handle the failure as a normal outcome with a clear message, never as a crash.
+- **Session volume does nothing in exclusive mode.** Use `IAudioEndpointVolume`.
+- **Exclusive mode silences every other application**, including system sounds. Microsoft's
+  own guidance is to release the device when not in the foreground or not streaming, and
+  MediaPerch will do that by default with an opt-out for people who want to keep the DAC.
+- **`AUDCLNT_STREAMFLAGS_EVENTCALLBACK` is required for the low-latency path**, and
+  `Initialize` then allocates two buffers used ping-pong. Prefill the first before `Start`.
+- **MMCSS: `AvSetMmThreadCharacteristics(L"Pro Audio")`**, reverted on stop. WASAPI itself
+  applies `Pro Audio` to its transport threads below a 10 ms device period and `Audio` above
+  it, so the numbers line up.
+- **`IAudioClient3::GetSharedModeEnginePeriod`** gives shared-mode latency comparable to
+  exclusive while keeping the mixer. It is the right fallback for people who want low
+  latency but not silence from everything else — and worth offering before exclusive to
+  users who only wanted the latency.
+- **Tone mapping happens before composition, never during it** (§9.1). The *Stream HDR video*
+  setting acts on frames that went through the video-processing stage; the DWM only clips. A
+  renderer that decodes and presents its own texture gets tone mapping from neither, and
+  that is the finding most likely to force a rewrite if it is discovered late.
+- **The OS tone mapper maps PQ to gamma 2.4, not sRGB or BT.1886** (§9.2) — washed-out and
+  black-crushed at the same time on a calibrated display. Good enough to default to, not
+  good enough to call reference, and the reason `shader` exists as a provider at all.
+- **`IDXGIOutput6` cannot see auto colour management** (§9.4). Reporting "SDR display" for
+  both a plain panel and an ACM one is a correct read of a limited API, not a bug to hunt.
+- **scRGB `1.0` means 80 nits on HDR and reference white on ACM-SDR** (§9.6). The same code
+  is right on one and wrong on the other.
+
+---
+
+## 15. Risks
+
+| Risk | Mitigation |
+|---|---|
+| Driver-specific exclusive-mode behaviour that no amount of reading predicts | the device matrix in §12, and treat every negotiation failure as a first-class outcome rather than an assertion |
+| The module ABI ossifies too early and every change becomes a break | `size`-prefixed structs (§4.2) and a v1 that is deliberately small. Do not add an interface until the second implementation of it exists |
+| Memory-safety bugs in parsers, now that Rust is not doing that job | libFuzzer on every parser from M2, ASan/UBSan in CI, `/GS` and `/guard:cf` in release, and `decode_ffmpeg` out of process — which is the only mitigation that covers FFmpeg's own surface, and Rust never would have |
+| The video half quietly becomes the whole project | audio is complete and shippable at M5. Video is M6 onward and is allowed to be late |
+| FFmpeg's licence and binary size make it awkward to ship | it is a module, so ship it separately; `decode_native` and `decode_mf` mean the base install still plays music and video |
