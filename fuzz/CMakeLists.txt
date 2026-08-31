@@ -46,7 +46,8 @@ function(mediaperch_add_fuzzer name source corpus)
     add_executable(${name} ${source} ${ARGN})
     target_include_directories(${name} PRIVATE
         "${CMAKE_SOURCE_DIR}/external/dr_libs"
-        "${CMAKE_SOURCE_DIR}/modules/decode_alac")
+        "${CMAKE_SOURCE_DIR}/modules/decode_alac"
+        "${CMAKE_SOURCE_DIR}/modules/mp4")
 
     # MSVC's STL annotates container bounds for ASan, and the annotations only
     # agree when every translation unit that touches a container was built the
@@ -90,4 +91,4 @@ mediaperch_add_fuzzer(flac_fuzzer flac_fuzzer.cpp flac)
 mediaperch_add_fuzzer(mp3_fuzzer mp3_fuzzer.cpp mp3)
 mediaperch_add_fuzzer(alac_fuzzer alac_fuzzer.cpp alac
                       "${CMAKE_SOURCE_DIR}/modules/decode_alac/alac.cpp"
-                      "${CMAKE_SOURCE_DIR}/modules/decode_alac/mp4.cpp")
+                      "${CMAKE_SOURCE_DIR}/modules/mp4/mp4.cpp")

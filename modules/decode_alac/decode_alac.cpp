@@ -321,7 +321,8 @@ MpResult MP_CALL decoder_open(const char* path, MpDecoder** out) noexcept
     }
 
     const char* why = "";
-    if (!mp::mp4::parse_moov(moov.data(), moov.size(), d->track, &why)) {
+    if (!mp::mp4::parse_moov(moov.data(), moov.size(), d->track, &why) ||
+        d->track.codec != mp::mp4::k_codec_alac) {
         // Not an error worth a warning: most MP4 files are not ALAC, and saying
         // so at debug level is what lets the host move on quietly.
         log_fmt(MP_LOG_DEBUG, "%s: %s", path, why);
@@ -331,7 +332,7 @@ MpResult MP_CALL decoder_open(const char* path, MpDecoder** out) noexcept
     }
 
     mp::alac::Config cfg;
-    if (!mp::alac::parse_config(d->track.cookie.data(), d->track.cookie.size(), cfg)) {
+    if (!mp::alac::parse_config(d->track.config.data(), d->track.config.size(), cfg)) {
         log_fmt(MP_LOG_WARN, "%s: the ALAC magic cookie is not one this decoder accepts", path);
         std::fclose(d->fp);
         delete d;

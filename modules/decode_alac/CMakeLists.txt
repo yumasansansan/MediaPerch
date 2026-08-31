@@ -7,9 +7,9 @@
 # alac.cpp and mp4.cpp are also compiled into a small static library so that the
 # fuzzers can drive the parsers without loading a module.
 
-add_library(mediaperch_alac STATIC alac.cpp mp4.cpp)
+add_library(mediaperch_alac STATIC alac.cpp)
 target_include_directories(mediaperch_alac PUBLIC "${CMAKE_CURRENT_LIST_DIR}")
-target_link_libraries(mediaperch_alac PRIVATE mediaperch_flags)
+target_link_libraries(mediaperch_alac PUBLIC mediaperch_mp4 PRIVATE mediaperch_flags)
 set_target_properties(mediaperch_alac PROPERTIES FOLDER "modules")
 
 add_library(mp_decode_alac MODULE decode_alac.cpp)

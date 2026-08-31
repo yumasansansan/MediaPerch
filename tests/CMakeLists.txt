@@ -32,7 +32,7 @@ add_executable(mediaperch_tests
 # lives, only whether it is ours.
 if(TARGET mediaperch_alac)
     target_sources(mediaperch_tests PRIVATE alac_test.cpp)
-    target_link_libraries(mediaperch_tests PRIVATE mediaperch_alac)
+    target_link_libraries(mediaperch_tests PRIVATE mediaperch_alac mediaperch_mp4)
 endif()
 
 target_link_libraries(mediaperch_tests

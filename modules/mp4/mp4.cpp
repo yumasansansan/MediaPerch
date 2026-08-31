@@ -89,17 +89,139 @@ private:
 };
 
 struct SampleTable {
+    std::uint32_t codec = 0;
     std::vector<std::uint8_t> cookie;
+    std::uint64_t skip_frames = 0;
+    std::uint64_t play_frames = 0;
+    std::uint32_t media_timescale = 0;
+    std::uint32_t movie_timescale = 0;
     std::vector<std::uint32_t> sizes;
     std::vector<std::uint64_t> chunk_offsets;
     // first_chunk (1-based), samples_per_chunk
     std::vector<std::pair<std::uint32_t, std::uint32_t>> stsc;
     std::uint64_t total_frames = 0;
-    bool have_alac = false;
 };
 
-/// The ALAC magic cookie lives in a child `alac` box of the `alac` sample entry.
-bool read_alac_entry(Span entry, SampleTable& t) noexcept
+/// A descriptor length, MPEG-4's seven-bits-at-a-time encoding.
+std::uint32_t descriptor_length(Span& s) noexcept
+{
+    std::uint32_t len = 0;
+    for (int i = 0; i < 4; ++i) {
+        const std::uint8_t b = s.u8();
+        len = (len << 7) | static_cast<std::uint32_t>(b & 0x7Fu);
+        if ((b & 0x80u) == 0) {
+            break;
+        }
+    }
+    return len;
+}
+
+/// Walks the `esds` descriptor chain to the DecoderSpecificInfo, which for AAC
+/// is the AudioSpecificConfig -- two bytes usually, five with SBR signalling.
+///
+/// The chain is ES_Descriptor > DecoderConfigDescriptor > DecoderSpecificInfo,
+/// each a tag byte, a variable-length length, and a payload. Every one of those
+/// lengths is from the file, so each is used only to bound a read, never to
+/// advance past one.
+bool read_esds(Span esds, SampleTable& t) noexcept
+{
+    if (esds.u8() != 0x03u) { // ES_Descriptor
+        return false;
+    }
+    descriptor_length(esds);
+    esds.skip(2); // ES_ID
+    const std::uint8_t flags = esds.u8();
+    if ((flags & 0x80u) != 0) {
+        esds.skip(2); // dependsOn_ES_ID
+    }
+    if ((flags & 0x40u) != 0) {
+        esds.skip(esds.u8()); // URL
+    }
+    if ((flags & 0x20u) != 0) {
+        esds.skip(2); // OCR_ES_Id
+    }
+
+    if (esds.u8() != 0x04u) { // DecoderConfigDescriptor
+        return false;
+    }
+    descriptor_length(esds);
+    esds.skip(1 + 1 + 3 + 4 + 4); // object type, stream type, buffer, bitrates
+
+    if (esds.u8() != 0x05u) { // DecoderSpecificInfo
+        return false;
+    }
+    const std::uint32_t len = descriptor_length(esds);
+    if (len == 0 || len > 64 || !esds.has(len)) {
+        return false;
+    }
+    t.cookie.assign(esds.here(), esds.here() + len);
+    return true;
+}
+
+void read_mdhd(Span box, SampleTable& t) noexcept
+{
+    const std::uint8_t version = box.u8();
+    box.skip(3); // flags
+    if (version == 1) {
+        box.skip(16); // creation + modification
+        t.media_timescale = box.u32();
+    } else {
+        box.skip(8);
+        t.media_timescale = box.u32();
+    }
+}
+
+void read_mvhd(Span box, SampleTable& t) noexcept
+{
+    const std::uint8_t version = box.u8();
+    box.skip(3);
+    if (version == 1) {
+        box.skip(16);
+        t.movie_timescale = box.u32();
+    } else {
+        box.skip(8);
+        t.movie_timescale = box.u32();
+    }
+}
+
+/// The gapless edit. One entry with a positive `media_time` is the shape every
+/// AAC encoder writes: skip that many frames of encoder warm-up, then play
+/// `segment_duration` of them.
+///
+/// A `media_time` of -1 marks an empty edit -- a gap of silence before the
+/// media starts -- which is not a delay and is ignored here rather than
+/// mistaken for one.
+void read_elst(Span box, SampleTable& t) noexcept
+{
+    const std::uint8_t version = box.u8();
+    box.skip(3);
+    const std::uint32_t count = box.u32();
+    if (count == 0 || count > 64) {
+        return;
+    }
+    for (std::uint32_t i = 0; i < count; ++i) {
+        std::uint64_t duration = 0;
+        std::int64_t media_time = 0;
+        if (version == 1) {
+            duration = box.u64();
+            media_time = static_cast<std::int64_t>(box.u64());
+        } else {
+            duration = box.u32();
+            media_time = static_cast<std::int32_t>(box.u32());
+        }
+        box.skip(4); // media_rate
+        if (media_time < 0) {
+            continue; // an empty edit: silence, not a delay
+        }
+        t.skip_frames = static_cast<std::uint64_t>(media_time);
+        t.play_frames = duration;
+        return; // the first real edit is the one that describes the audio
+    }
+}
+
+/// The codec configuration, which lives in a child box whose name depends on
+/// the codec: `alac` for ALAC, `esds` for everything MPEG-4 puts in `mp4a`.
+bool read_sample_entry(Span entry, std::uint32_t codec, SampleTable& t) noexcept
 {
     // AudioSampleEntry: 6 reserved + 2 data_reference_index, then the QuickTime
     // sound description whose version decides how much more there is.
@@ -117,16 +239,23 @@ bool read_alac_entry(Span entry, SampleTable& t) noexcept
     std::uint32_t type = 0;
     Span child{nullptr, 0};
     while (entry.next_box(type, child)) {
-        if (type != fourcc('a', 'l', 'a', 'c')) {
-            continue;
+        if (codec == k_codec_alac && type == fourcc('a', 'l', 'a', 'c')) {
+            child.skip(4); // version and flags
+            if (!child.has(24)) {
+                return false;
+            }
+            t.cookie.assign(child.here(), child.here() + 24);
+            t.codec = codec;
+            return true;
         }
-        child.skip(4); // version and flags
-        if (!child.has(24)) {
+        if (codec == k_codec_mp4a && type == fourcc('e', 's', 'd', 's')) {
+            child.skip(4); // version and flags
+            if (read_esds(child, t)) {
+                t.codec = codec;
+                return true;
+            }
             return false;
         }
-        t.cookie.assign(child.here(), child.here() + 24);
-        t.have_alac = true;
-        return true;
     }
     return false;
 }
@@ -142,7 +271,8 @@ void read_stbl(Span stbl, SampleTable& t) noexcept
             std::uint32_t etype = 0;
             Span entry{nullptr, 0};
             for (std::uint32_t i = 0; i < entries && box.next_box(etype, entry); ++i) {
-                if (etype == fourcc('a', 'l', 'a', 'c') && read_alac_entry(entry, t)) {
+                if ((etype == fourcc('a', 'l', 'a', 'c') || etype == fourcc('m', 'p', '4', 'a')) &&
+                    read_sample_entry(entry, etype, t)) {
                     break;
                 }
             }
@@ -226,13 +356,19 @@ void find_stbl(Span parent, SampleTable& t, int depth) noexcept
     while (parent.next_box(type, box)) {
         if (type == fourcc('s', 't', 'b', 'l')) {
             read_stbl(box, t);
-            if (t.have_alac) {
+            if (t.codec != 0) {
                 return;
             }
+        } else if (type == fourcc('m', 'd', 'h', 'd')) {
+            read_mdhd(box, t);
+        } else if (type == fourcc('e', 'l', 's', 't')) {
+            read_elst(box, t);
+        } else if (type == fourcc('m', 'v', 'h', 'd')) {
+            read_mvhd(box, t);
         } else if (type == fourcc('t', 'r', 'a', 'k') || type == fourcc('m', 'd', 'i', 'a') ||
-                   type == fourcc('m', 'i', 'n', 'f')) {
+                   type == fourcc('m', 'i', 'n', 'f') || type == fourcc('e', 'd', 't', 's')) {
             find_stbl(box, t, depth + 1);
-            if (t.have_alac) {
+            if (t.codec != 0 && t.media_timescale != 0) {
                 return;
             }
         }
@@ -307,13 +443,28 @@ bool parse_moov(const std::uint8_t* data, std::size_t bytes, AudioTrack& out,
     SampleTable t;
     find_stbl(Span{data, bytes}, t, 0);
 
-    if (!t.have_alac) {
-        *why = "no ALAC track in this file";
+    if (t.codec == 0) {
+        *why = "no audio track this parser recognises";
         return false;
     }
 
-    out.cookie = t.cookie;
+    out.codec = t.codec;
+    out.config = t.cookie;
     out.total_frames = t.total_frames;
+    out.media_timescale = t.media_timescale;
+    out.movie_timescale = t.movie_timescale;
+    out.skip_frames = t.skip_frames;
+
+    // `elst` durations are in the movie timescale and `media_time` is in the
+    // media one. They are usually equal for an audio-only file and there is no
+    // reason to rely on that.
+    if (t.play_frames != 0 && t.movie_timescale != 0 && t.media_timescale != 0 &&
+        t.movie_timescale != t.media_timescale) {
+        out.play_frames = t.play_frames * t.media_timescale / t.movie_timescale;
+    } else {
+        out.play_frames = t.play_frames;
+    }
+
     return flatten(t, out, why);
 }
 
