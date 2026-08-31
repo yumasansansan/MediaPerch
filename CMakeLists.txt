@@ -57,8 +57,8 @@ target_include_directories(mediaperch_abi INTERFACE "${CMAKE_CURRENT_LIST_DIR}/i
 
 add_subdirectory(src/core)
 
-if(MEDIAPERCH_BUILD_PLATFORM AND WIN32
-   AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/src/win/CMakeLists.txt")
+if(MEDIAPERCH_BUILD_PLATFORM AND WIN32)
+    add_subdirectory(modules/sink_wasapi)
     add_subdirectory(src/win)
 endif()
 

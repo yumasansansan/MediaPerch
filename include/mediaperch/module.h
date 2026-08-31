@@ -80,7 +80,8 @@ enum {
     MP_ERR_BUSY = 7u,         /* another process holds the device exclusively */
     MP_ERR_DENIED = 8u,       /* exclusive mode disabled for this device */
     MP_ERR_NO_MEMORY = 9u,
-    MP_ERR_INTERNAL = 10u
+    MP_ERR_INTERNAL = 10u,
+    MP_TIMEOUT = 11u          /* a wait expired. Also not an error by itself. */
 };
 
 /* ------------------------------------------------------------------ */

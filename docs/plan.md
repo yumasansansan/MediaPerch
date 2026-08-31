@@ -650,6 +650,27 @@ real time.
   the GCC rejection in `cmake/CompilerOptions.cmake` catches the same thing without a
   preset. Both exist because they catch different mistakes: `ninja-msvc` picking Clang is
   wrong even though Clang is supported.
+- **A real device refused the plain `WAVEFORMATEX` and took only the extensible form.**
+  Measured on a VB-Audio virtual cable at 44100/16/2: candidate 1, the plain form, came
+  back `AUDCLNT_E_UNSUPPORTED_FORMAT`; candidate 2, the same format as
+  `WAVEFORMATEXTENSIBLE` with `dwChannelMask = 0x3`, was accepted, at the minimum period of
+  88 frames (2.00 ms). This is the case §6.1 was reordered for. Had the mask variant been
+  appended after every widening -- which is how the rule reads written out as prose -- this
+  device would have been offered 24-in-32 and 32-bit first, and the stream would have been
+  needlessly widened while still reporting itself bit-exact. The reordering was a guess when
+  it was made and is a measurement now.
+- **Reporting a thread's state from the thread that started it is a race, and it lies
+  convincingly.** `PassthroughGraph::start` launches the render thread and returns; the
+  caller then read `hooks.realtime()` and printed "MMCSS REFUSED", which sent an afternoon
+  after a service that was running the whole time and a `Pro Audio` profile that was
+  registered the whole time. `AvSetMmThreadCharacteristicsW` had simply not been called yet.
+  Anything a worker thread discovers is published through an atomic with a `pending` state,
+  and `pending` is displayed as "has not answered yet" rather than folded into "no".
+- **The second compiler earns its place immediately.** clang-cl rejected a default argument
+  of a nested type whose default member initializers were needed while the enclosing class
+  was still incomplete; MSVC compiled it without a word. Clang is right, and the fix was to
+  move the type to namespace scope. One instance is not a policy, but it is the first thing
+  the `clang` CI job found, on the first tree it was pointed at.
 - **`/CETCOMPAT` and `/guard:ehcont` are whole-image flags and must not be target-scoped.**
   The linker requires that *every* object carrying C++ EH metadata was compiled with
   `/guard:ehcont`, third-party code built in-tree included — and Catch2 never sees an

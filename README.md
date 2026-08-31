@@ -11,11 +11,22 @@ mappers Windows already ships, so content looks the way it does in the system's 
 — including on an SDR display — rather than the way one more hand-written colour pipeline
 decided it should.
 
-**Status: milestone 0.** The skeleton stands, the module ABI is written and is compiled as
-C as well as C++, and the portable half — formats, the negotiation candidate builder, the
-lock-free ring — builds alone and is under test on MSVC and clang-cl. GCC is not a target
-anywhere, and configuration says so rather than drifting into it. No sound comes out yet;
-that is milestone 1.
+**Status: milestone 1, built and not yet heard.** The WASAPI sink is a loadable module
+behind the C ABI, the passthrough graph runs on two threads with a lock-free ring between
+them, and the negotiation of §6 — including the buffer-alignment retry on a fresh client —
+is implemented. 51 tests pass on MSVC and on clang-cl, among them an end-to-end
+bit-exactness check against a fake device: every byte the source produced, compared with
+every byte that reached `commit`, with no hardware involved.
+
+What has not happened yet is a tone coming out of a real endpoint. Exclusive mode silences
+every other application on the device it takes, so that is a deliberate step rather than a
+side effect of running the test suite.
+
+```
+mediaperch-probe devices     # opens nothing, disturbs nothing
+mediaperch-probe negotiate   # offers every candidate to a real device
+mediaperch-probe play        # takes the endpoint for the duration
+```
 
 - [docs/design.md](docs/design.md) — the shape of the program, and the two constraints that
   decided it.

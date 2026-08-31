@@ -18,8 +18,11 @@ add_executable(mediaperch_tests
     # been tested for that.
     abi_header_c.c
     format_test.cpp
+    graph_test.cpp
     negotiation_test.cpp
+    promote_test.cpp
     ring_test.cpp
+    sine_test.cpp
 )
 
 target_link_libraries(mediaperch_tests

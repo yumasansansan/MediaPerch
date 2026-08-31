@@ -12,11 +12,23 @@ add_library(mediaperch_core STATIC
     mediaperch/format.hpp
     mediaperch/negotiation.cpp
     mediaperch/negotiation.hpp
+    mediaperch/passthrough.cpp
+    mediaperch/passthrough.hpp
+    mediaperch/promote.cpp
+    mediaperch/promote.hpp
     mediaperch/ring.hpp
+    mediaperch/sine.cpp
+    mediaperch/sine.hpp
+    mediaperch/sink.cpp
+    mediaperch/sink.hpp
+    mediaperch/source.hpp
 )
 add_library(MediaPerch::core ALIAS mediaperch_core)
 
 target_include_directories(mediaperch_core PUBLIC "${CMAKE_CURRENT_LIST_DIR}")
 target_link_libraries(mediaperch_core PUBLIC MediaPerch::abi PRIVATE mediaperch_flags)
+
+find_package(Threads REQUIRED)
+target_link_libraries(mediaperch_core PUBLIC Threads::Threads)
 
 set_target_properties(mediaperch_core PROPERTIES FOLDER "core")
