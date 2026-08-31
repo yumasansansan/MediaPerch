@@ -65,6 +65,7 @@ if(MEDIAPERCH_BUILD_PLATFORM)
     add_subdirectory(modules/decode_ogg)
     add_subdirectory(modules/mp4)
     add_subdirectory(modules/decode_alac)
+    add_subdirectory(modules/decode_aac)
     add_subdirectory(modules/decode_mp3)
 endif()
 

@@ -31,8 +31,8 @@ add_executable(mediaperch_tests
 # portable-by-policy code -- but the test suite does not care where a thing
 # lives, only whether it is ours.
 if(TARGET mediaperch_alac)
-    target_sources(mediaperch_tests PRIVATE alac_test.cpp)
-    target_link_libraries(mediaperch_tests PRIVATE mediaperch_alac mediaperch_mp4)
+    target_sources(mediaperch_tests PRIVATE alac_test.cpp aac_test.cpp)
+    target_link_libraries(mediaperch_tests PRIVATE mediaperch_alac mediaperch_mp4 mediaperch_aac)
 endif()
 
 target_link_libraries(mediaperch_tests
