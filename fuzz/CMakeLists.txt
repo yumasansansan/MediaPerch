@@ -10,6 +10,15 @@
 #   cmake --build --preset fuzz
 #   build/fuzz/bin/wav_fuzzer corpus/wav -runs=100000
 
+# libFuzzer's own runtime, clang_rt.fuzzer-x86_64.lib, is built against the
+# static CRT. Objects here default to the dynamic one, and the two disagree
+# through a /failifmismatch record that MSVC's STL headers emit -- so the
+# mismatch only appears once a fuzz target includes <vector>, which is why it
+# waited until alac_fuzzer to show up rather than failing on the first one.
+# Matching libFuzzer is the fix; the alternative is fuzz targets that may not
+# use the standard library.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
+
 if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     message(FATAL_ERROR
         "MEDIAPERCH_BUILD_FUZZERS needs Clang: libFuzzer does not exist for MSVC. "
@@ -31,8 +40,22 @@ else()
 endif()
 
 function(mediaperch_add_fuzzer name source corpus)
-    add_executable(${name} ${source})
-    target_include_directories(${name} PRIVATE "${CMAKE_SOURCE_DIR}/external/dr_libs")
+    # Extra translation units after the corpus name: decode_alac's parsers are
+    # ours, so they are compiled into the fuzzer directly and get instrumented
+    # with it. The dr_libs ones need no extra sources -- they are headers.
+    add_executable(${name} ${source} ${ARGN})
+    target_include_directories(${name} PRIVATE
+        "${CMAKE_SOURCE_DIR}/external/dr_libs"
+        "${CMAKE_SOURCE_DIR}/modules/decode_alac")
+
+    # MSVC's STL annotates container bounds for ASan, and the annotations only
+    # agree when every translation unit that touches a container was built the
+    # same way. Ours are, but the runtime is not, and the mismatch shows up as a
+    # container-overflow report inside std::vector rather than anywhere real.
+    # Turning the annotations off costs a class of check the bounds checks in
+    # alac.cpp already cover.
+    target_compile_definitions(${name} PRIVATE
+        _DISABLE_VECTOR_ANNOTATION _DISABLE_STRING_ANNOTATION)
 
     # Not mediaperch_flags: this is somebody else's parser compiled into our
     # binary, and holding it to our warning set would drown the signal.
@@ -64,3 +87,6 @@ endfunction()
 
 mediaperch_add_fuzzer(wav_fuzzer wav_fuzzer.cpp wav)
 mediaperch_add_fuzzer(flac_fuzzer flac_fuzzer.cpp flac)
+mediaperch_add_fuzzer(alac_fuzzer alac_fuzzer.cpp alac
+                      "${CMAKE_SOURCE_DIR}/modules/decode_alac/alac.cpp"
+                      "${CMAKE_SOURCE_DIR}/modules/decode_alac/mp4.cpp")

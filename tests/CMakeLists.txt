@@ -26,6 +26,15 @@ add_executable(mediaperch_tests
     sine_test.cpp
 )
 
+# decode_alac's parsers are ours, so they get unit tests like the rest of the
+# tree. They live in a module rather than in the core because they are not
+# portable-by-policy code -- but the test suite does not care where a thing
+# lives, only whether it is ours.
+if(TARGET mediaperch_alac)
+    target_sources(mediaperch_tests PRIVATE alac_test.cpp)
+    target_link_libraries(mediaperch_tests PRIVATE mediaperch_alac)
+endif()
+
 target_link_libraries(mediaperch_tests
     PRIVATE MediaPerch::core Catch2::Catch2WithMain mediaperch_flags)
 

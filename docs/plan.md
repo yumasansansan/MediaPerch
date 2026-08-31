@@ -464,7 +464,8 @@ Three outcomes, and the user picks the default once in settings:
 | `decode_flac` | libFLAC, the Xiph reference decoder, as a submodule | FLAC, all depths and rates | for a lossless codec the reference implementation *is* the specification, which is worth a dependency in a way it would not be for a lossy one. Reads what `dr_flac` cannot, and checks its own output against the MD5 the encoder wrote into the file |
 | `decode_ogg` | libvorbis and libopus, the Xiph reference decoders, as submodules | Vorbis and Opus in Ogg | the same argument as `decode_flac`, arriving at a different place: these are the reference decoders, so they define what the codec means -- but the codecs are *lossy*, so what they define is a signal, not a byte pattern. This module reports MP_SAMPLE_F32 because that is what they produce, which puts every file it reads on Path B. See *Lossy codecs and Path A* below |
 | `decode_mf` | Media Foundation `IMFSourceReader` | MP4/M4A, AAC, MP3, WMA — and WAV and FLAC, **also bit-exact** | ships with Windows, hardware-accelerated, and it is what brings §9 for free. Scores itself below `decode_native` on WAV and FLAC because it reaches them through a pipeline that *could* insert a converter, not because it did |
-| `decode_ffmpeg` | `ffmpeg` and `ffprobe`, **found at run time, never shipped** | ALAC, WavPack, Monkey's Audio, Matroska, DSF/DFF, OggFLAC, and whatever else is installed | the fallback, at priority 30: every other module knows its own formats better. Not vendored, for the reasons in *Where dependencies come from* below |
+| `decode_alac` | nothing at all: the codec and the MP4 parsing are both in this tree | ALAC in M4A, every depth to 32 bits and every layout to 7.1 | the reference is the specification *and* is unmaintained, so it was read rather than linked. See *ALAC, which is here and is written rather than vendored* below |
+| `decode_ffmpeg` | `ffmpeg` and `ffprobe`, **found at run time, never shipped** | WavPack, Monkey's Audio, Matroska, DSF/DFF, OggFLAC, and whatever else is installed | the fallback, at priority 30: every other module knows its own formats better. Not vendored, for the reasons in *Where dependencies come from* below |
 
 Three modules read FLAC, deliberately. `decode_flac` outranks `decode_native` on priority
 (120 against 100) so the reference wins whenever it is installed; `decode_native` remains
@@ -555,35 +556,57 @@ looking for these bugs and that somebody is expected to fix them. Checked direct
 | `vorbis` | yes |
 | `opus` | yes |
 | `opusfile` | yes |
-| `alac` | **no** |
+| `alac` | **no** -- and this is the one that is not linked |
 
-Every dependency this tree compiles is on the right side of that line, and the one that is
-not is the one that is not here.
+Every dependency this tree compiles is on the right side of that line. The one that is not
+is the one this tree does not link.
 
-#### ALAC, and why it is not here
+#### ALAC, which is here and is written rather than vendored
 
-ALAC is a lossless codec with a reference implementation that Apple open-sourced in 2011
-under Apache-2.0, which by the first two tests makes it exactly the kind of library this
-section argues for. It is absent anyway.
+ALAC is a lossless codec whose reference implementation Apple open-sourced in 2011 under
+Apache-2.0. By the first two tests that makes it exactly the kind of library this section
+argues for. It is not linked here anyway, and the third test is why.
 
 Apple has not touched the decoder since 2011. In 2022 Check Point Research published
 **ALHACK**: Qualcomm and MediaTek had both ported that code into their audio DSPs, and the
 decoder bugs came with it. `CVE-2021-0674` and `CVE-2021-0675` (MediaTek) and
 `CVE-2021-30351` (Qualcomm, rated critical) gave remote code execution from a malicious
 audio file across roughly two thirds of the smartphones sold in 2021. The chipset vendors
-patched their own forks. Upstream never was.
+patched their own forks. Upstream never was, and `alac` is the one dependency in this
+document that is absent from OSS-Fuzz.
 
-The community fork most people reach for, `mikebrady/alac`, now says in its own README that
-it is deprecated "due to myriad security issues" and is no longer maintained upstream; its
-issue #9 records that a submitted patch was "limited and incomplete" and that fuzzing kept
-finding deeper problems in how decoding is handled. Vendoring it would be repeating the
-exact mistake that produced ALHACK, in a program whose entire job is to open files it did
-not create.
+The community fork most people reach for, `mikebrady/alac`, says in its own README that it
+is deprecated "due to myriad security issues". `nu774/qaac` vendors the same code and has
+touched `ALACDecoder.cpp` four times in fifteen years, most recently in 2022 -- an actively
+maintained project around an unmaintained codec, which is the distinction this test is
+about. Linking any of them would repeat the mistake that produced ALHACK, in a program
+whose whole job is to open files it did not create.
 
-So ALAC is read by `decode_mf` and `decode_ffmpeg`, both of which are maintained by
-organisations that ship security updates, and both of which were measured decoding it
-bit-exactly. **The rule this adds: a reference implementation is preferable only while it is
-maintained.** After that it is just old code with an authoritative name on it.
+**Nor does running it in a child process fix it.** A subprocess without a sandbox holds the
+same user token: code execution there is code execution here. That would relocate the
+parser, not contain it. Containment needs a job object, a low-integrity token and no
+network -- the out-of-process hosting §12 lists, which does not exist yet.
+
+So `decode_alac` is written here, from the reference read as a specification. That is the
+option the three tests actually point at: ALAC is a small codec -- Rice coding and adaptive
+LPC, no code books -- it is **lossless, so correctness is self-verifying** (a decode either
+reproduces the encoder's input exactly or it does not), and this tree already has a
+libFuzzer and ASan harness to point at it. New code has new bugs. The difference is that
+they are ours, our fuzzer finds them, and nobody has to be waited for.
+
+What that bought, measured: 13 files from 16 to 32 bits, 1 to 8 channels and 44.1 kHz to
+384 kHz, each decoded to a SHA-256 identical to the WAV that was encoded, including the
+format's ceiling of 32-bit/384 kHz/7.1. Seeking checked against the tail of a straight
+decode. Identical output from MSVC and clang-cl. `fuzz/alac_fuzzer.cpp` drives both the
+container parser and the codec.
+
+It is also the only decoder here with **no dependency of any kind** -- no submodule, no
+runtime library, no OS codec. `decode_native` is close, but `dr_libs` is still somebody
+else's. That is a statement about responsibility rather than about quality.
+
+**The rule this adds: a reference implementation is preferable only while it is
+maintained.** After that it is old code with an authoritative name on it, and the choice is
+between an independent implementation and writing one.
 
 #### Lossy codecs and Path A
 
@@ -852,6 +875,15 @@ real time.
   the GCC rejection in `cmake/CompilerOptions.cmake` catches the same thing without a
   preset. Both exist because they catch different mistakes: `ninja-msvc` picking Clang is
   wrong even though Clang is supported.
+- **The reference implementation was worth reading and not worth linking.** Writing an
+  ALAC decoder from Apple's source produced a working, bit-exact decoder in one sitting and
+  found five things the reference does not check on the way: `1 << (denshift - 1)` with a
+  denshift the stream sets to zero, `x >> (32 - k)` with an unbounded k, a warm-up loop
+  that writes `numactive` samples into a frame that may be shorter, a shift buffer ORed
+  into the output without having been filled, and a four-byte read that runs past the
+  packet on the last sample of every frame. Each of those is reachable from a file. That is
+  what an unmaintained parser looks like from the inside, and it is a better argument
+  against linking one than the CVE numbers are.
 - **An OS decoder can be lossless and wrong at the same time.** Media Foundation
   returns multichannel ALAC in Apple's channel order and labels it with a WAVE channel
   mask. Every sample survives; not one of eight channels lands in its own speaker. Nothing
@@ -865,6 +897,11 @@ real time.
   The check compiled, linked, ran, and was never true. It is the same shape of bug as the
   one it was written to catch, found the same way: by printing what was actually there
   rather than reasoning about what should have been.
+- **Seeking had never been tested, in any decoder.** There was no way to ask for it from
+  the command line, so there was no way to check it, so nobody had. `--seek` makes it
+  falsifiable in one line: the hash of a decode seeking to frame N must equal the hash of
+  the last (length - N) frames of a straight decode. A capability with no way to observe it
+  is a capability nobody knows the state of.
 - **Ranking without a fallback makes every refusal fatal.** Probing sees four kilobytes;
   opening sees the file. Once two decoders had good reasons to refuse a file they had
   scored highest on, "pick the best" had to become "pick the best that opens" -- otherwise

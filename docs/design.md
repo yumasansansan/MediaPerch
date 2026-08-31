@@ -65,6 +65,11 @@ modules/             everything that can be loaded and unloaded at runtime.
                      install with nothing else on disk still plays music.
   decode_flac/       libFLAC, the Xiph reference, as a submodule. Outranks the above
                      wherever it is installed, and checks the file\'s own MD5.
+  decode_alac/       ALAC, written here: the codec and the slice of MP4 that finds
+                     its packets. No submodule, no runtime library, no OS codec --
+                     the reference implementation is the specification and has
+                     been unmaintained since 2011, so it was read, not linked.
+
   decode_ogg/        libvorbis and libopus, the Xiph reference decoders, as submodules.
                      Reports F32 because that is what they produce, which puts
                      every file it reads on Path B. Permutes Ogg channel order

@@ -44,6 +44,7 @@ struct Options {
     double hz = 1000.0;
     double amplitude = 0.5;
     unsigned seconds = 10;
+    std::uint64_t seek = 0;
     bool shared = false;
     bool loopback = false;
     bool verbose = false;
@@ -86,6 +87,10 @@ Options
                     sample afterwards. It does decide how much of the container
                     the tone exercises, which `play` reports.
   --seconds N       play duration, default 10
+  --seek FRAMES     `decode` seeks here first, then hashes the rest. The hash of
+                    a seek to N must equal the hash of the last (length - N)
+                    frames of a straight decode, which is what makes seeking
+                    testable at all
   --shared          shared mode instead of exclusive
   --loopback        `verify` also records from a capture endpoint and reports
                     whether the loopback returned the bytes unchanged. Read
@@ -152,6 +157,12 @@ bool parse(int argc, char** argv, Options& out)
             if (i + 1 < argc) {
                 out.amplitude = std::strtod(argv[++i], nullptr);
             }
+        } else if (arg == "--seek") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "--seek needs a frame number\n");
+                return false;
+            }
+            out.seek = std::strtoull(argv[++i], nullptr, 10);
         } else if (arg == "--seconds") {
             std::uint32_t s = 0;
             value(s);
@@ -485,6 +496,17 @@ int decode(const MpDecoderVtbl& vtbl, const Options& options)
         std::fprintf(stderr, "cannot decode %s: %s\n", options.file.c_str(),
                      decoder.why().empty() ? result_name(opened) : decoder.why().c_str());
         return 1;
+    }
+
+    if (options.seek != 0) {
+        const MpResult sought = decoder.seek(options.seek);
+        if (sought != MP_OK) {
+            std::fprintf(stderr, "cannot seek %s to frame %llu: %s\n", options.file.c_str(),
+                         static_cast<unsigned long long>(options.seek), result_name(sought));
+            return 1;
+        }
+        std::printf("seek       to frame %llu\n",
+                    static_cast<unsigned long long>(options.seek));
     }
 
     const mp::Format format = decoder.format();
