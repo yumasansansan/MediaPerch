@@ -240,10 +240,16 @@ try {
         return MP_ERR_UNSUPPORTED;
     }
 
-    // A compressed stream reports no bit depth of its own; 16 is what the
-    // decoder will produce unless it says otherwise, and the read-back below is
-    // what decides in either case.
-    const UINT32 asked_bits = native_bits != 0 ? native_bits : 16;
+    // A compressed stream reports no bit depth of its own, so there is nothing
+    // to match and the question becomes what to ask for. Ask for 32.
+    //
+    // The obvious default is 16, and it is wrong: every lossy codec here decodes
+    // to float internally, so 16 bits is a quantisation performed inside the
+    // decoder, silently, on a signal that had more in it. Measured on an Opus
+    // track in MP4, asking 16 gets 16 and asking 32 gets 32 -- the resolution
+    // was there for the asking. The fall-back below still runs when a decoder
+    // will not produce it.
+    const UINT32 asked_bits = native_bits != 0 ? native_bits : 32;
 
     ComPtr<IMFMediaType> want;
     hr = ::MFCreateMediaType(&want);

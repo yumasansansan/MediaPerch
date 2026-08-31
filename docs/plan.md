@@ -608,6 +608,37 @@ else's. That is a statement about responsibility rather than about quality.
 maintained.** After that it is old code with an authoritative name on it, and the choice is
 between an independent implementation and writing one.
 
+#### Why the lossy codecs still get their reference libraries
+
+The argument for the reference implementation was made about *lossless* codecs, where
+correctness is an identity. It does not apply to Vorbis and Opus, so the question of whether
+four submodules are worth it -- rather than handing the files to Media Foundation, which
+already ships with Windows -- is a real one. It was measured rather than assumed.
+
+**Media Foundation cannot open Ogg.** It has the Vorbis and Opus decoders and no Ogg
+demuxer, so every `.ogg` and `.opus` file is refused by the source reader. Reaching those
+decoders would mean writing an Ogg demuxer and driving `IMFTransform` by hand: more of our
+code than libvorbis costs, and libvorbis still there. That alone settles it.
+
+The rest is worse. Given the same stream in Matroska, MF ignores the Opus pre-skip that the
+specification requires it to discard, so the first 648 samples of a track are wrong and 648
+more are appended -- 13.5 ms of wrong audio at every track start, and gapless playback
+impossible. It pads Vorbis lengths by 128 to 832 samples. It refuses multichannel Opus.
+FFmpeg, reading the identical file, is exact in every one of those cases. `docs/formats.md`
+has the numbers.
+
+So the distinction is not lossless-versus-lossy after all. It is this: **use the reference
+when it is maintained and the codec is too large to own; write it yourself when the codec is
+small enough that you can; and use the OS decoder when it is measurably right.** ALAC met
+the second test -- Rice coding and adaptive LPC, and an abandoned upstream. Vorbis and Opus
+meet the first: libvorbis and libopus are maintained, both are in OSS-Fuzz, and neither is a
+codec anybody should reimplement for fun. Media Foundation meets the third for WAV, FLAC,
+MP3 and AAC, and fails it for Ogg and for ALAC past stereo.
+
+`decode_ogg` is also portable, which `decode_mf` is not, and it is a module: an install that
+wants neither the submodules nor the four hundred kilobytes simply does not build it and
+gets Vorbis and Opus from `decode_ffmpeg` instead.
+
 #### Lossy codecs and Path A
 
 `decode_ogg` reports MP_SAMPLE_F32 and there is no version of it that does otherwise.
@@ -897,6 +928,17 @@ real time.
   The check compiled, linked, ran, and was never true. It is the same shape of bug as the
   one it was written to catch, found the same way: by printing what was actually there
   rather than reasoning about what should have been.
+- **"It is lossy, so anything will do" is a conclusion, not a premise.** Vorbis and Opus
+  have no bit-exactness to protect, which is a good reason to ask whether four submodules
+  are worth it -- and a bad reason to assume the answer. Measuring found that Media
+  Foundation cannot open Ogg at all, and that where it can decode these codecs it emits
+  13.5 ms of wrong audio at the start of every Opus track. The premise was right and the
+  conclusion would have been wrong.
+- **A default of 16 bits is a decision, and it was the wrong one.** `decode_mf` asked for
+  16-bit output whenever a stream declared no depth of its own -- which every compressed
+  stream does. Every lossy codec here decodes to float, so that was a quantisation
+  performed inside our own decoder, invisibly, on a signal that had more in it. Asking for
+  32 gets 32 wherever the decoder can produce it.
 - **A dependency that asks git for its own version number is a dependency that fails on
   somebody else's machine.** opus and opusfile derive their version from `git describe`
   and commit no fallback, so a CI runner fetching submodules at depth 1 gets version `0`

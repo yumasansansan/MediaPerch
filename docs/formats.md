@@ -115,6 +115,71 @@ that channel is checked against FFmpeg only.
 The mask reported for 5.1 is `0x3f`: `FL|FR|FC|LFE|BL|BR`, the WAVE layout, which
 is what the sink can pass to `dwChannelMask` unchanged.
 
+### Why not just hand these to Windows?
+
+It is a fair question and the right one to ask, because these codecs are lossy:
+there is no bit-exactness to protect, so the usual argument for the reference
+implementation does not apply. Four submodules is a real cost. The answer is
+that Media Foundation cannot do the job, and it fails in ways that were only
+visible once measured.
+
+**It cannot open Ogg at all.** Not the codec — the container. Every `.ogg` and
+`.opus` file in the test set is refused outright by `MFCreateSourceReaderFromURL`.
+Windows has the Vorbis and Opus *decoders*; it has no Ogg demuxer. Put the same
+streams in Matroska or WebM and MF decodes them happily. Since virtually every
+Vorbis and Opus file in the world is in Ogg, using MF would mean writing an Ogg
+demuxer and feeding it packets through `IMFTransform` — more of our code, not
+less, and libvorbis still not replaced.
+
+For the files it *can* open, the differences are these. Each row is Matroska,
+and the FFmpeg column is FFmpeg reading the **same file** MF was given, which is
+what makes the length rows a statement about MF rather than about the container:
+
+| | ours | FFmpeg | Media Foundation |
+|---|---|---|---|
+| Vorbis, content | reference | 132 dB | **131 dB** — as good as anyone's |
+| Vorbis, 7.1 channel order | correct | correct | **correct** |
+| Vorbis, length (three files) | 384000 / 96000 / 16000 | same | **384576 / 96832 / 16128** |
+| Opus, content after the head | reference | 134 dB | **134 dB** |
+| Opus, first 648 samples | correct | correct | **wrong**: peak error 0.48 on a 0.60 signal |
+| Opus, length | 288000 | 288000 | **288648** |
+| Opus, 7.1 | decoded | decoded | **refused** |
+| Output | F32, the codec's own | F32 | S32 or S16 |
+
+Read the Opus row carefully, because it is the one that matters most. From
+sample 648 onward MF agrees with the reference to 1.5 × 10⁻⁷ — its decoder is
+fine. What it does not do is honour the pre-skip that the stream carries and the
+specification requires it to discard. The result is **13.5 ms of wrong audio at
+the start of every Opus track** and an untrimmed tail, which is audible at a
+track boundary and makes gapless playback impossible. FFmpeg, given the same
+Matroska file with the same `CodecDelay`, produces exactly the right length.
+
+The Vorbis length rows are the same failure in a milder form: 128 to 832 extra
+samples depending on the file, where FFmpeg reading that file is exact.
+
+One thing this measurement did improve. `decode_mf` used to ask for 16 bits when
+a stream declares no depth of its own, which every compressed stream does. Every
+lossy codec here decodes to float, so that was a quantisation performed inside
+our own decoder, silently. It asks for 32 now: Opus in MP4 went from `S16` to
+`S32`, and AAC still comes back `S16` because Media Foundation's AAC decoder
+will not produce more, which is the fall-back working rather than a regression.
+
+### The edges of each format
+
+| File | ours | FFmpeg | MF |
+|---|---|---|---|
+| Vorbis, 192 kHz stereo | `192000 Hz / 2 ch / F32` | same | padded |
+| Vorbis, 8 kHz stereo | `8000 Hz / 2 ch / F32` | same | padded |
+| Vorbis, 7.1 at 48 kHz | `mask 0x63f` | no mask | correct order, padded |
+| Opus, 7.1, mapping family 1 | `mask 0x63f` | decoded | **refused** |
+| Opus, 12 and 16 channels, mapping family 255 | **refused** | decoded | refused |
+
+Opus allows up to 255 channels through mapping family 255. `decode_ogg` stops at
+eight, because eight is where WAVE channel masks stop and a decoder here does not
+report a layout it cannot name. Refusing hands the file to `decode_ffmpeg`, which
+decodes it — the fallback chain doing exactly what it is for, and the reason
+refusing is an acceptable answer rather than a dead end.
+
 ### Reference or FFmpeg: which is more faithful?
 
 Neither, measurably. Six seconds of pink noise plus a tone, encoded and then
