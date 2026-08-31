@@ -103,6 +103,19 @@ bool is_valid(const Format& f) noexcept
     return true;
 }
 
+SampleType canonical_for(std::uint32_t container_bytes, std::uint32_t valid_bits) noexcept
+{
+    if (valid_bits == 0 || valid_bits > container_bytes * 8) {
+        return SampleType::none;
+    }
+    switch (container_bytes) {
+    case 2: return SampleType::s16;
+    case 3: return SampleType::s24_packed;
+    case 4: return valid_bits <= 24 ? SampleType::s24_in_32 : SampleType::s32;
+    default: return SampleType::none;
+    }
+}
+
 std::uint32_t conventional_channel_mask(std::uint32_t channels) noexcept
 {
     switch (channels) {

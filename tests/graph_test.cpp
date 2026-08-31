@@ -2,7 +2,7 @@
 #include "fake_sink.hpp"
 
 #include "mediaperch/passthrough.hpp"
-#include "mediaperch/promote.hpp"
+#include "mediaperch/repack.hpp"
 #include "mediaperch/sink.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -117,7 +117,7 @@ TEST_CASE("a device that only takes the extensible form does not cause a widenin
     CHECK(result.tried == 2);
 }
 
-TEST_CASE("a 24-bit-only device gets a widened stream, not a converted one", "[negotiate]")
+TEST_CASE("a 24-bit-only device gets a repacked stream, not a converted one", "[negotiate]")
 {
     mp::test::FakeSinkRules rules;
     rules.accepts = [](const mp::Format& f) {
@@ -129,7 +129,7 @@ TEST_CASE("a 24-bit-only device gets a widened stream, not a converted one", "[n
     const auto result = mp::negotiate_best(sink, cd_audio());
 
     REQUIRE(result.ok);
-    CHECK(result.fidelity == mp::Fidelity::widened);
+    CHECK(result.fidelity == mp::Fidelity::repacked);
     CHECK(mp::is_bit_exact(result.fidelity));
     CHECK(mp::effective_valid_bits(result.accepted) == 16);
 }
@@ -207,7 +207,7 @@ TEST_CASE("every byte the source produced reaches the device unchanged", "[passt
     CHECK(graph.stats().underruns == 0);
 }
 
-TEST_CASE("a widened stream reaches the device as the shift and nothing else",
+TEST_CASE("a repacked stream reaches the device as the move and nothing else",
           "[passthrough]")
 {
     constexpr std::uint32_t period = 64;
@@ -231,7 +231,7 @@ TEST_CASE("a widened stream reaches the device as the shift and nothing else",
 
     const auto negotiated = mp::negotiate_best(sink, source_format);
     REQUIRE(negotiated.ok);
-    REQUIRE(negotiated.fidelity == mp::Fidelity::widened);
+    REQUIRE(negotiated.fidelity == mp::Fidelity::repacked);
 
     mp::PassthroughGraph graph{source, sink, negotiated.accepted, period,
                                negotiated.fidelity};
@@ -242,8 +242,8 @@ TEST_CASE("a widened stream reaches the device as the shift and nothing else",
     // Compute the expectation independently rather than reusing the graph's path.
     const std::size_t samples = bytes.size() / 2;
     std::vector<std::uint8_t> expected(samples * 4);
-    REQUIRE(mp::promote(bytes.data(), mp::SampleType::s16, expected.data(),
-                        mp::SampleType::s24_in_32, samples));
+    REQUIRE(mp::repack(bytes.data(), mp::SampleType::s16, expected.data(),
+                       mp::SampleType::s24_in_32, 16, samples));
 
     const auto captured = device.captured();
     REQUIRE(captured.size() >= expected.size());

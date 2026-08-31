@@ -15,6 +15,7 @@
 #include "mediaperch/sink.hpp"
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -31,6 +32,7 @@ struct Options {
     std::uint32_t bits = 16;
     std::uint32_t channels = 2;
     double hz = 1000.0;
+    double amplitude = 0.5;
     unsigned seconds = 10;
     bool shared = false;
     bool verbose = false;
@@ -53,6 +55,8 @@ Options
   --bits 16|24|32   24 means 24 valid bits in a 32-bit container; default 16
   --channels N      default 2
   --hz F            tone frequency, default 1000
+  --amplitude A     fraction of full scale, default 0.5 (-6 dBFS).
+                    Turn this down for headphones: 0.02 is about -34 dBFS.
   --seconds N       play duration, default 10
   --shared          shared mode instead of exclusive
   --verbose
@@ -90,6 +94,10 @@ bool parse(int argc, char** argv, Options& out)
         } else if (arg == "--hz") {
             if (i + 1 < argc) {
                 out.hz = std::strtod(argv[++i], nullptr);
+            }
+        } else if (arg == "--amplitude") {
+            if (i + 1 < argc) {
+                out.amplitude = std::strtod(argv[++i], nullptr);
             }
         } else if (arg == "--seconds") {
             std::uint32_t s = 0;
@@ -244,7 +252,7 @@ int negotiate(const MpSinkVtbl& vtbl, const Options& options)
     for (const auto& candidate : candidates) {
         mp::Format accepted{};
         const MpResult r = sink.negotiate(candidate.format, accepted);
-        const char* label = candidate.fidelity == mp::Fidelity::exact ? "exact" : "widened";
+        const char* label = candidate.fidelity == mp::Fidelity::exact ? "exact" : "repack";
 
         std::printf("%zu %-7s %-5s  %-44s ", ++index, label,
                     candidate.channel_mask_added ? "+mask" : "",
@@ -309,14 +317,18 @@ int play(const MpSinkVtbl& vtbl, const Options& options)
     std::printf("mode       %s\n", options.shared ? "shared" : "exclusive");
     std::printf("format     %s\n", mp::describe(negotiated.accepted).c_str());
     std::printf("path       %s%s\n",
-                negotiated.fidelity == mp::Fidelity::exact ? "passthrough, memcpy"
-                                                           : "passthrough, integer shift",
+                negotiated.fidelity == mp::Fidelity::exact
+                    ? "passthrough, memcpy"
+                    : "passthrough, container repack",
                 negotiated.channel_mask_added ? " (extensible form)" : "");
     std::printf("buffer     %u frames (%.2f ms)\n", period,
                 1000.0 * period / negotiated.accepted.sample_rate);
-    std::printf("tone       %.1f Hz for %u s\n\n", options.hz, options.seconds);
+    std::printf("tone       %.1f Hz at %.3f of full scale (%.1f dBFS) for %u s\n\n",
+                options.hz, options.amplitude,
+                options.amplitude > 0.0 ? 20.0 * std::log10(options.amplitude) : -144.0,
+                options.seconds);
 
-    mp::SineSource source{source_format, options.hz};
+    mp::SineSource source{source_format, options.hz, options.amplitude};
     mp::win::RenderThreadHooks hooks;
     mp::PassthroughGraph graph{source, sink, negotiated.accepted, period, negotiated.fidelity,
                                &hooks};

@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "mediaperch/negotiation.hpp"
 
+#include <array>
+
 namespace mp {
 namespace {
 
-/// Integer PCM only: float is a Path B bus format, and promoting into it is a
+/// Integer PCM only: float is a Path B bus format, and moving into it is a
 /// conversion however lossless it looks.
 constexpr bool is_integer_pcm(SampleType t) noexcept
 {
@@ -12,35 +14,12 @@ constexpr bool is_integer_pcm(SampleType t) noexcept
            t == SampleType::s24_in_32 || t == SampleType::s32;
 }
 
-/// The containers a source type may be promoted into, widest last, each of them
-/// holding the original bits unchanged.
-void append_widenings(SampleType from, std::vector<SampleType>& out)
-{
-    switch (from) {
-    case SampleType::s16:
-        out.push_back(SampleType::s24_in_32);
-        out.push_back(SampleType::s32);
-        break;
-    case SampleType::s24_packed:
-        out.push_back(SampleType::s24_in_32);
-        out.push_back(SampleType::s32);
-        break;
-    case SampleType::s24_in_32:
-        out.push_back(SampleType::s32);
-        break;
-    case SampleType::s32:
-    case SampleType::f32:
-    case SampleType::none:
-        break;
-    }
-}
-
 void emit(std::vector<Candidate>& out, const Format& base, Fidelity fidelity)
 {
     out.push_back(Candidate{base, fidelity, false});
 
-    // The extensible form, paired with its own base rather than appended after
-    // every widening -- see the header for why the order matters.
+    // The extensible form, paired with its own container rather than appended
+    // after every other one -- see the header for why the order matters.
     if (base.channel_mask == 0) {
         const std::uint32_t mask = conventional_channel_mask(base.channels);
         if (mask != 0) {
@@ -63,20 +42,30 @@ std::vector<Candidate> build_candidates(const Format& source)
     emit(out, source, Fidelity::exact);
 
     // A DoP frame carries its markers in the top byte and a bitstream is not
-    // samples at all. Neither survives being moved into a wider container.
-    if (source.encoding != Encoding::pcm) {
+    // samples at all. Neither survives being moved between containers. Float is
+    // not repacked either: it has no left-justified integer representation.
+    if (source.encoding != Encoding::pcm || !is_integer_pcm(source.sample_type)) {
         return out;
     }
 
-    std::vector<SampleType> wider;
-    append_widenings(source.sample_type, wider);
-
     const std::uint32_t valid = effective_valid_bits(source);
-    for (const SampleType type : wider) {
+    const std::uint32_t own = container_bytes(source.sample_type);
+
+    // Small to large, so a device that takes several gets the cheapest wire
+    // format rather than the widest.
+    for (const std::uint32_t bytes : std::array<std::uint32_t, 3>{2, 3, 4}) {
+        if (bytes == own) {
+            continue; // already offered, exactly, above
+        }
+        const SampleType type = canonical_for(bytes, valid);
+        if (type == SampleType::none) {
+            continue; // this container cannot hold the signal
+        }
+
         Format f = source;
         f.sample_type = type;
         f.valid_bits = valid; // the bits that carry signal do not change
-        emit(out, f, Fidelity::widened);
+        emit(out, f, Fidelity::repacked);
     }
     return out;
 }
@@ -96,16 +85,25 @@ Fidelity classify(const Format& source, const Format& accepted) noexcept
         return Fidelity::converted;
     }
 
-    if (source.sample_type == accepted.sample_type &&
-        effective_valid_bits(source) == effective_valid_bits(accepted)) {
-        return Fidelity::exact;
+    // Losing valid bits is the one thing a repack must never do.
+    if (effective_valid_bits(accepted) != effective_valid_bits(source)) {
+        return Fidelity::converted;
     }
 
-    if (source.encoding == Encoding::pcm && is_integer_pcm(source.sample_type) &&
-        is_integer_pcm(accepted.sample_type) &&
-        container_bytes(accepted.sample_type) > container_bytes(source.sample_type) &&
-        effective_valid_bits(accepted) >= effective_valid_bits(source)) {
-        return Fidelity::widened;
+    // Compare containers, not enum values: a four-byte container holding 24
+    // valid bits is the same wire format whether it is spelled `s24_in_32` or
+    // `s32` with `valid_bits = 24`.
+    if (container_bytes(source.sample_type) == container_bytes(accepted.sample_type)) {
+        return source.sample_type == SampleType::f32 ||
+                       accepted.sample_type == SampleType::f32
+                   ? (source.sample_type == accepted.sample_type ? Fidelity::exact
+                                                                 : Fidelity::converted)
+                   : Fidelity::exact;
+    }
+
+    if (is_integer_pcm(source.sample_type) && is_integer_pcm(accepted.sample_type) &&
+        source.encoding == Encoding::pcm) {
+        return Fidelity::repacked;
     }
 
     return Fidelity::converted;

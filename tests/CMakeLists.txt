@@ -20,7 +20,7 @@ add_executable(mediaperch_tests
     format_test.cpp
     graph_test.cpp
     negotiation_test.cpp
-    promote_test.cpp
+    repack_test.cpp
     ring_test.cpp
     sine_test.cpp
 )

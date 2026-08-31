@@ -85,7 +85,7 @@ void SineSource::write_frame(std::uint8_t* dst, std::int32_t value) const noexce
             write_le24(p, value);
             break;
         case SampleType::s24_in_32:
-            // Left-justified, matching promote() and WAVEFORMATEXTENSIBLE.
+            // Left-justified, matching repack() and WAVEFORMATEXTENSIBLE.
             write_le32(p, static_cast<std::int32_t>(static_cast<std::uint32_t>(value) << 8));
             break;
         case SampleType::s32:

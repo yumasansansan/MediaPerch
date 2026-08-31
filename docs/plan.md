@@ -323,24 +323,33 @@ sink module's judgement.
 
 ### 6.1 Candidate order
 
-For each container, starting with the source's own and widening outwards:
+Candidates are generated over **containers**, not over sample formats, and the source's own
+container comes first. For each container that can hold the source's valid bits:
 
 1. the plain form;
 2. the same thing as `WAVEFORMATEXTENSIBLE` with an explicit channel mask, because some
    drivers accept only the extensible form even for stereo.
 
-Then widen — 16-bit into a 24-in-32 endpoint is a lossless left-shift — and repeat. Stop
-after the widest container the source fits. Anything past that is a conversion, and a
-conversion is Path B and a user decision.
+Then the next container, from small to large, so a device that takes several gets the
+cheapest wire format rather than the widest. Stop there. A rate change, a channel change or
+losing valid bits is a conversion, and a conversion is Path B and a user decision.
 
-**The mask variant is paired with its own base rather than appended after every widening.**
-Written out as prose the rule reads "exact, then wider, then extensible", which would try a
-widened plain form before an exact extensible one — and so would widen the format needlessly
-on any driver whose only complaint was the missing channel mask. Cheap to get wrong, and
-invisible afterwards, because the result still plays.
+**Every container that fits is offered, including ones smaller than the source's.** "24-bit"
+names two different wire formats — three bytes packed, and 24 valid bits inside four — and
+devices want one or the other, with no way to tell which but to ask. Moving 24 valid bits out
+of a four-byte container into a three-byte one drops only the padding, so it loses nothing;
+calling it a "narrowing" and refusing it means refusing perfectly playable audio. §14 has the
+measurement that established this.
 
-Non-PCM encodings get no widening at all. Moving a DoP frame into a wider container shifts
-its `0x05`/`0xFA` markers into the sample bits and the DAC stops seeing DSD; a bitstream is
+**The mask variant is paired with its own container rather than appended after all of them.**
+Written out as prose the rule reads "exact, then other containers, then extensible", which
+would try a repacked plain form before an exact extensible one — and so would change the
+container needlessly on any driver whose only complaint was the missing channel mask. §14 has
+that measurement too. Cheap to get wrong, and invisible afterwards, because the result still
+plays.
+
+Non-PCM encodings get no repack at all. Moving a DoP frame between containers shifts its
+`0x05`/`0xFA` markers relative to the sample bits and the DAC stops seeing DSD; a bitstream is
 not samples in the first place.
 
 `IsFormatSupported` is called first only as a cheap filter. **`Initialize` is the answer**:
@@ -349,21 +358,29 @@ formats they then refuse.
 
 ### 6.2 What "bit-exact" means here
 
-Every sample that leaves the decoder reaches `ReleaseBuffer` carrying the same bits, in the
-same order, with no gain applied and no rate conversion. Container widening and channel-mask
-tagging are permitted. Nothing else is.
+Every sample that leaves the decoder reaches `ReleaseBuffer` carrying the same valid bits, in
+the same order, with no gain applied and no rate conversion. Moving those bits between
+containers, and naming a channel layout the source left unspecified, are permitted. Nothing
+else is.
 
 Which splits the passthrough path in two, and the distinction is worth naming because it is
 the difference between a `memcpy` and a loop:
 
 | | What the sink accepted | What Path A does |
 |---|---|---|
-| **exact** | the source format, byte for byte | `memcpy` |
-| **widened** | a larger container holding the same bits | a fixed integer left-shift per sample |
+| **exact** | the same container and the same valid bits | `memcpy` |
+| **repacked** | the same bits in a different container | keep the top `min(from, to)` bytes, zero-pad the bottom |
 
 Both are bit-exact — no signal lost, no gain, no rate change, no float anywhere. Only the
 first is literally a copy. Saying "Path A is one `memcpy`" is true of the common case and
 not true of all of it, and the graph has to know which of the two it is running.
+
+Because everything is left-justified — `WAVEFORMATEXTENSIBLE` puts the valid bits at the top
+of the container and zero-pads the bottom — a repack needs no arithmetic in either direction.
+It is a byte move, and it is lossless going to a *smaller* container exactly when the valid
+bits still fit, which is the only thing §6.1 has to check. This was originally a `promote`
+that could only widen; the first device that wanted a 24-bit format wanted the four-byte one,
+and the second wanted the three-byte one.
 
 ### 6.3 When negotiation fails
 
@@ -562,7 +579,7 @@ HDR state.
 | bit-exactness | a `sink_capture` module that records exactly what `render` was given, byte for byte, and compares it with the decoded file. **This is the test the project is for**; write it in M2, not at the end |
 | ring | a soak test with a producer and a consumer under TSan, plus an assertion that the render side never allocates (an allocator hook that aborts while the RT flag is set) |
 | parsers | libFuzzer on every one — tags, cue sheets, playlists, INI — with corpora in `fuzz/corpus`, as DragonPerch already does |
-| devices | a manual matrix, because it cannot be automated: onboard Realtek, a USB DAC, HDMI to a receiver, Bluetooth. Record for each: the formats that negotiated, whether `AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED` appeared, and the minimum period that ran glitch-free for an hour |
+| devices | a manual matrix, because it cannot be automated, kept in [devices.md](devices.md): onboard codec, a USB DAC, HDMI to a receiver, Bluetooth. For each, the formats that negotiated, whether `AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED` appeared, and the minimum period that ran glitch-free for an hour |
 | glitch counting | the engine counts underruns, `AUDCLNT_E_DEVICE_INVALIDATED`, and late render callbacks, and shows them. A player that cannot tell you it glitched cannot be trusted when it says it did not |
 
 ---
@@ -650,15 +667,37 @@ real time.
   the GCC rejection in `cmake/CompilerOptions.cmake` catches the same thing without a
   preset. Both exist because they catch different mistakes: `ninja-msvc` picking Clang is
   wrong even though Clang is supported.
+- **Two devices, opposite channel-mask requirements.** The virtual cable refuses the plain
+  `WAVEFORMATEX` at every width and takes only the extensible form; the FiiO KA5 takes the
+  plain form at every width and never needs a mask. There is no order of trying them that is
+  right for both, which is the whole argument for offering each container in both forms
+  before moving to the next container. See [devices.md](devices.md).
+- **The shared-mode dropdown is a setting, not a capability list.** The KA5's is 384000 Hz;
+  exclusive mode accepted 705600 and 768000. The virtual cable's is 192000/24; exclusive mode
+  accepted 44100/16. Reading it tells you what the engine is configured for and nothing about
+  what the driver will take -- except for one thing that turned out to matter more than the
+  rest of it, which is `nBlockAlign`, because that is what revealed that "24-bit" meant three
+  bytes.
+- **"24-bit" is two containers, and devices disagree about which one they mean.** Measured
+  on this machine: a VB-Audio virtual cable configured for 24-bit reported
+  `nBlockAlign = 6` for stereo — three bytes per sample, `S24_PACKED` — while the onboard
+  Realtek codec reported `nBlockAlign = 8` with `wValidBitsPerSample = 24`, which is 24 bits
+  inside four. A candidate list that offers only one of them refuses playable audio on half
+  the hardware, and the failure looks like a device limitation rather than a missing case:
+  before the fix, `negotiate --bits 24` on the cable reported all four candidates refused and
+  it was easy to believe the driver. After it, candidate 4 — `S24_PACKED` with a channel mask
+  — is accepted at 44100 and at 192000, at the minimum period of 2.00 ms. This is why
+  candidates are generated over containers and why the transform is called `repack` rather
+  than `promote`.
 - **A real device refused the plain `WAVEFORMATEX` and took only the extensible form.**
   Measured on a VB-Audio virtual cable at 44100/16/2: candidate 1, the plain form, came
   back `AUDCLNT_E_UNSUPPORTED_FORMAT`; candidate 2, the same format as
   `WAVEFORMATEXTENSIBLE` with `dwChannelMask = 0x3`, was accepted, at the minimum period of
   88 frames (2.00 ms). This is the case §6.1 was reordered for. Had the mask variant been
-  appended after every widening -- which is how the rule reads written out as prose -- this
-  device would have been offered 24-in-32 and 32-bit first, and the stream would have been
-  needlessly widened while still reporting itself bit-exact. The reordering was a guess when
-  it was made and is a measurement now.
+  appended after every other container -- which is how the rule reads written out as prose --
+  this device would have been offered the three- and four-byte containers first, and the
+  stream would have been repacked needlessly while still reporting itself bit-exact. The
+  reordering was a guess when it was made and is a measurement now.
 - **Reporting a thread's state from the thread that started it is a race, and it lies
   convincingly.** `PassthroughGraph::start` launches the render thread and returns; the
   caller then read `hooks.realtime()` and printed "MMCSS REFUSED", which sent an afternoon

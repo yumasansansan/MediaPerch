@@ -55,6 +55,19 @@ struct Format {
 /// channels, no sample type, or more valid bits than the container holds.
 [[nodiscard]] bool is_valid(const Format& f) noexcept;
 
+/// The sample type that canonically represents a container of `container_bytes`
+/// holding `valid_bits` of signal.
+///
+/// The enum has more states than the wire has formats: a four-byte container
+/// with 24 valid bits is `s24_in_32`, and `s32` with `valid_bits == 24` is the
+/// same `WAVEFORMATEXTENSIBLE` written a second way. Candidates are generated
+/// over containers and named through here, so the list never offers a device the
+/// same format twice under two names.
+///
+/// Returns `SampleType::none` for a container that cannot hold the valid bits.
+[[nodiscard]] SampleType canonical_for(std::uint32_t container_bytes,
+                                       std::uint32_t valid_bits) noexcept;
+
 /// The conventional speaker mask for a channel count, or 0 when there is no
 /// single obvious answer. Used to build the extensible-form candidate.
 [[nodiscard]] std::uint32_t conventional_channel_mask(std::uint32_t channels) noexcept;

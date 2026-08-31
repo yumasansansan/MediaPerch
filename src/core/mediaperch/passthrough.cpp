@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "mediaperch/passthrough.hpp"
 
-#include "mediaperch/promote.hpp"
+#include "mediaperch/repack.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -29,8 +29,8 @@ PassthroughGraph::PassthroughGraph(ISource& source, Sink& sink, const Format& wi
       ring_(round_up_ring(period_frames, frame_bytes(wire), config.ring_periods))
 {
     source_chunk_.resize(static_cast<std::size_t>(chunk_frames_) * source_frame_bytes_);
-    if (fidelity_ == Fidelity::widened) {
-        promoted_chunk_.resize(static_cast<std::size_t>(chunk_frames_) * wire_frame_bytes_);
+    if (fidelity_ == Fidelity::repacked) {
+        repacked_chunk_.resize(static_cast<std::size_t>(chunk_frames_) * wire_frame_bytes_);
     }
 }
 
@@ -61,15 +61,15 @@ bool PassthroughGraph::pump_once()
         return true;
     }
 
-    // Widened: a fixed integer shift into a larger container. Done here on the
+    // Repacked: the same bits moved into a different container. Done here on the
     // decode thread, never on the render thread.
     const std::size_t samples = frames * wire_.channels;
-    if (!promote(source_chunk_.data(), source_format_.sample_type, promoted_chunk_.data(),
-                 wire_.sample_type, samples)) {
+    if (!repack(source_chunk_.data(), source_format_.sample_type, repacked_chunk_.data(),
+                wire_.sample_type, effective_valid_bits(wire_), samples)) {
         fail(MP_ERR_FORMAT);
         return false;
     }
-    ring_.write(promoted_chunk_.data(), promoted_bytes(wire_.sample_type, samples));
+    ring_.write(repacked_chunk_.data(), repacked_bytes(wire_.sample_type, samples));
     return true;
 }
 

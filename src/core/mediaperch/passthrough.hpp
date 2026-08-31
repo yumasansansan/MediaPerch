@@ -93,8 +93,8 @@ private:
     void decode_loop();
     void render_loop() noexcept;
     void fail(MpResult r) noexcept;
-    /// Reads one chunk from the source into the ring, promoting if the sink took
-    /// a wider container. Returns false at the end of the stream.
+    /// Reads one chunk from the source into the ring, repacking if the sink took
+    /// a different container. Returns false at the end of the stream.
     bool pump_once();
 
     ISource* source_;
@@ -112,8 +112,8 @@ private:
 
     ByteRing ring_;
     std::vector<std::uint8_t> source_chunk_;
-    /// Only allocated when the sink widened the container.
-    std::vector<std::uint8_t> promoted_chunk_;
+    /// Only allocated when the sink took a different container.
+    std::vector<std::uint8_t> repacked_chunk_;
 
     std::thread decode_thread_;
     std::thread render_thread_;

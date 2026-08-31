@@ -33,6 +33,8 @@ mediaperch-probe play        # takes the endpoint for the duration
 - [docs/plan.md](docs/plan.md) — the plan of record: the language decision, the module ABI,
   the two audio paths, the HDR path, milestones, and the findings worth carrying forward.
 - [docs/building.md](docs/building.md) — how to build it.
+- [docs/devices.md](docs/devices.md) — what real hardware actually accepts, measured rather
+  than inferred.
 
 ## The shape of it, in one paragraph
 

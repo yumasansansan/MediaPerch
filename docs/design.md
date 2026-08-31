@@ -40,7 +40,7 @@ architecture than any taste question:
 | | Passthrough (default) | Processed |
 |---|---|---|
 | Bus format | the device's, verbatim | canonical f32, deinterleaved |
-| Sample touching | `memcpy`, or one integer shift if the container widened | gain, resample, convolution, dither |
+| Sample touching | `memcpy`, or one byte move if the container differs | gain, resample, convolution, dither |
 | Volume | `IAudioEndpointVolume`, or none | in the graph |
 | Chosen | when the file's format survives negotiation | when the user asks, or negotiation failed |
 | Code path | `src/core/passthrough.*` | `src/core/processed.*` |

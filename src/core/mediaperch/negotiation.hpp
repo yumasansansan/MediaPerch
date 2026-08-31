@@ -9,14 +9,14 @@ namespace mp {
 
 /// How faithfully a format the sink accepted carries the source.
 ///
-/// The distinction between `exact` and `widened` is not cosmetic: `exact` is one
-/// `memcpy`, `widened` is a fixed integer left-shift per sample. Both are
-/// bit-exact -- no signal is lost, no gain applied, no rate changed -- but only
-/// the first is literally a copy, and the passthrough graph has to know which it
-/// is doing.
+/// The distinction between `exact` and `repacked` is not cosmetic: `exact` is
+/// one `memcpy`, `repacked` moves every sample into a different container. Both
+/// are bit-exact -- no signal is lost, no gain applied, no rate changed -- but
+/// only the first is literally a copy, and the passthrough graph has to know
+/// which it is doing.
 enum class Fidelity : std::uint32_t {
-    exact,     ///< byte-identical. `memcpy`.
-    widened,   ///< a wider container holding the same bits. A shift, no float.
+    exact,     ///< the same container and the same valid bits. `memcpy`.
+    repacked,  ///< the same bits in a different container. No float, no rounding.
     converted, ///< anything else. Path B, and a user decision -- never produced here.
 };
 
@@ -33,23 +33,32 @@ struct Candidate {
 /// True for the fidelities the passthrough graph may serve.
 [[nodiscard]] constexpr bool is_bit_exact(Fidelity f) noexcept
 {
-    return f == Fidelity::exact || f == Fidelity::widened;
+    return f == Fidelity::exact || f == Fidelity::repacked;
 }
 
 /// The candidate list, in the order a sink should be asked -- and it stops
 /// deliberately early.
 ///
-/// Order is: for each container from the source's own outwards, the plain form
-/// first and the extensible form second. Trying every extensible variant only
-/// after every widening (which is how it reads if you list the rules as prose)
-/// would widen a format needlessly on any driver that simply wants a channel
-/// mask, so the mask variant is paired with its base rather than appended.
+/// Candidates are generated over **containers**, not over sample types. Every
+/// container that can hold the source's valid bits is offered: the source's own
+/// first, then the others from small to large. That includes containers
+/// *smaller* than the source's, because "24-bit" names two different wire
+/// formats -- three bytes packed, and 24 valid bits inside four -- and real
+/// devices want one or the other. A virtual cable configured for 24-bit wanted
+/// the three-byte form; the machine's onboard codec wanted the four-byte form.
+/// Offering only one of them means refusing perfectly playable audio.
 ///
-/// Nothing past a widening is offered. A rate change, a channel change or a
-/// narrowing is a conversion, and a conversion is Path B and the user's call.
+/// For each container the plain form comes first and the extensible form with a
+/// channel mask second. Trying every extensible variant only after every other
+/// container -- which is how it reads if the rules are listed as prose -- would
+/// change the sample container needlessly on any driver whose only complaint was
+/// the missing channel mask, and a real device does exactly that.
 ///
-/// Non-PCM encodings get no widening at all: shifting a DoP frame moves the
-/// marker bits, and a bitstream is not samples.
+/// Nothing beyond a repack is offered. A rate change, a channel change or losing
+/// valid bits is a conversion, and a conversion is Path B and the user's call.
+///
+/// Non-PCM encodings get no repack at all: moving a DoP frame between containers
+/// shifts its marker bits, and a bitstream is not samples.
 ///
 /// Returns empty for a format `is_valid` rejects.
 [[nodiscard]] std::vector<Candidate> build_candidates(const Format& source);
