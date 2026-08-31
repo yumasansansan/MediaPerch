@@ -65,6 +65,11 @@ modules/             everything that can be loaded and unloaded at runtime.
                      install with nothing else on disk still plays music.
   decode_flac/       libFLAC, the Xiph reference, as a submodule. Outranks the above
                      wherever it is installed, and checks the file\'s own MD5.
+  decode_ogg/        libvorbis and libopus, the Xiph reference decoders, as submodules.
+                     Reports F32 because that is what they produce, which puts
+                     every file it reads on Path B. Permutes Ogg channel order
+                     into WAVE order and changes nothing else.
+
   decode_mf/         Media Foundation source reader. Hardware video decode comes with it,
                      and it is measurably bit-exact for WAV and FLAC as well.
   decode_ffmpeg/     the long tail, through the ffmpeg and ffprobe *programs*, found at

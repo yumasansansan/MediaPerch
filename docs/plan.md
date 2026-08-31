@@ -462,8 +462,9 @@ Three outcomes, and the user picks the default once in settings:
 |---|---|---|---|
 | `decode_native` | C++, `dr_flac` and `dr_wav` single headers | FLAC, WAV | the floor: no build system beyond two `#include`s, so an install with nothing else on disk still plays music. **Measured bit-exact** for 16- and 24-bit, and measurably *not* able to read 32-bit FLAC |
 | `decode_flac` | libFLAC, the Xiph reference decoder, as a submodule | FLAC, all depths and rates | for a lossless codec the reference implementation *is* the specification, which is worth a dependency in a way it would not be for a lossy one. Reads what `dr_flac` cannot, and checks its own output against the MD5 the encoder wrote into the file |
+| `decode_ogg` | libvorbis and libopus, the Xiph reference decoders, as submodules | Vorbis and Opus in Ogg | the same argument as `decode_flac`, arriving at a different place: these are the reference decoders, so they define what the codec means -- but the codecs are *lossy*, so what they define is a signal, not a byte pattern. This module reports MP_SAMPLE_F32 because that is what they produce, which puts every file it reads on Path B. See *Lossy codecs and Path A* below |
 | `decode_mf` | Media Foundation `IMFSourceReader` | MP4/M4A, AAC, MP3, WMA — and WAV and FLAC, **also bit-exact** | ships with Windows, hardware-accelerated, and it is what brings §9 for free. Scores itself below `decode_native` on WAV and FLAC because it reaches them through a pipeline that *could* insert a converter, not because it did |
-| `decode_ffmpeg` | `ffmpeg` and `ffprobe`, **found at run time, never shipped** | Vorbis, Opus, WavPack, Monkey's Audio, Matroska, DSF/DFF, and whatever else is installed | the fallback, at priority 30: every other module knows its own formats better. Not vendored, for the reasons in *Where dependencies come from* below |
+| `decode_ffmpeg` | `ffmpeg` and `ffprobe`, **found at run time, never shipped** | ALAC, WavPack, Monkey's Audio, Matroska, DSF/DFF, OggFLAC, and whatever else is installed | the fallback, at priority 30: every other module knows its own formats better. Not vendored, for the reasons in *Where dependencies come from* below |
 
 Three modules read FLAC, deliberately. `decode_flac` outranks `decode_native` on priority
 (120 against 100) so the reference wins whenever it is installed; `decode_native` remains
@@ -497,7 +498,7 @@ Two mechanisms, and which one a dependency gets is decided by whether **we** bui
 
 | | Examples | Why |
 |---|---|---|
-| **Git submodule, built from source** | `external/dr_libs`, `external/flac` | Pinned to a commit by the gitlink, so a checkout is reproducible and an upgrade is a reviewable diff. Both have (or need) no build system of consequence: dr_libs is headers, libFLAC is CMake-native. The tree builds them; CI builds them; nothing is downloaded at configure time except Catch2 |
+| **Git submodule, built from source** | `external/dr_libs`, `external/flac`, `external/ogg`, `external/vorbis`, `external/opus`, `external/opusfile` | Pinned to a commit by the gitlink, so a checkout is reproducible and an upgrade is a reviewable diff. All of them have (or need) no build system of consequence: dr_libs is headers, the Xiph libraries are CMake-native. The tree builds them; CI builds them; nothing is downloaded at configure time except Catch2 |
 | **Found at run time, never vendored** | FFmpeg | Its configure is a shell script needing MSYS2 and nasm on Windows, its build is tens of minutes, its output is tens of megabytes, and **its licence is a choice the user should make** — LGPL-2.1+ by default, GPL with `--enable-gpl`, and non-free options past that. Vendoring one configuration decides all of that for them |
 
 The rule generalises: **vendor what you compile, resolve what you don't.** A module that
@@ -518,14 +519,86 @@ works against FFmpeg 4 through 8. `ffprobe` reports the stream's native sample f
 `ffmpeg` is asked for exactly that raw format so that nothing in the chain converts, and the
 result is hashed like everything else.
 
-On "should every decoder use the official library" — no, and the reason is not size. For a
-**lossless** codec the reference implementation is the specification, and a reimplementation
-can drift from it silently: §14 records `dr_flac` decoding a 32-bit FLAC to nothing at all.
-For a **lossy** codec "correct" is a tolerance rather than an identity, so the argument is
-much weaker, and for AAC the obvious candidate (FDK-AAC) carries a licence that is not
-GPL-compatible at all. WAV has no reference implementation to prefer, because it has no
-reference implementation. So: official libraries for lossless codecs, whatever decodes well
-for lossy ones, and the module boundary so the choice stays with whoever installs it.
+#### On "should every decoder use the official library"
+
+Not automatically, and the reason is not size. Three tests, and a reference implementation
+has to pass all three.
+
+**Is it the specification?** For a **lossless** codec the reference implementation *is* the
+specification, and a reimplementation can drift from it silently: §14 records `dr_flac`
+decoding a 32-bit FLAC to nothing at all. For a **lossy** codec "correct" is a tolerance
+rather than an identity, so the argument is weaker — though not absent, since the reference
+still defines the tolerance. WAV fails this test in the other direction: there is no
+reference implementation to prefer, because there is no reference implementation.
+
+**Is the licence compatible?** libogg, libvorbis, libopus and opusfile are all
+three-clause BSD, which is GPL-compatible, so they can be linked into a GPL-3.0 program and
+the combination stays distributable. Apple's ALAC reference is Apache-2.0, which is
+compatible with GPL-3.0 but *not* with GPL-2.0 — worth knowing before anyone relicenses.
+For AAC the obvious candidate, FDK-AAC, is not GPL-compatible at all.
+
+**Is it maintained?** This is the test ALAC fails, and it is the one that is easy to forget,
+because "reference implementation" sounds like a permanent property. It is not. A decoder
+parses a file somebody else wrote, so an unmaintained decoder is an unmaintained parser
+pointed at hostile input.
+
+"Maintained" needs a check that is not a vibe, and there is a good one: **is it in
+OSS-Fuzz?** Google runs continuous fuzzing against the projects listed there and reports
+what it finds to the maintainers, so presence in that list means both that somebody is
+looking for these bugs and that somebody is expected to fix them. Checked directly against
+`google/oss-fuzz/projects`:
+
+| Library | In OSS-Fuzz |
+|---|---|
+| `dr_libs` | yes |
+| `flac` | yes |
+| `vorbis` | yes |
+| `opus` | yes |
+| `opusfile` | yes |
+| `alac` | **no** |
+
+Every dependency this tree compiles is on the right side of that line, and the one that is
+not is the one that is not here.
+
+#### ALAC, and why it is not here
+
+ALAC is a lossless codec with a reference implementation that Apple open-sourced in 2011
+under Apache-2.0, which by the first two tests makes it exactly the kind of library this
+section argues for. It is absent anyway.
+
+Apple has not touched the decoder since 2011. In 2022 Check Point Research published
+**ALHACK**: Qualcomm and MediaTek had both ported that code into their audio DSPs, and the
+decoder bugs came with it. `CVE-2021-0674` and `CVE-2021-0675` (MediaTek) and
+`CVE-2021-30351` (Qualcomm, rated critical) gave remote code execution from a malicious
+audio file across roughly two thirds of the smartphones sold in 2021. The chipset vendors
+patched their own forks. Upstream never was.
+
+The community fork most people reach for, `mikebrady/alac`, now says in its own README that
+it is deprecated "due to myriad security issues" and is no longer maintained upstream; its
+issue #9 records that a submitted patch was "limited and incomplete" and that fuzzing kept
+finding deeper problems in how decoding is handled. Vendoring it would be repeating the
+exact mistake that produced ALHACK, in a program whose entire job is to open files it did
+not create.
+
+So ALAC is read by `decode_mf` and `decode_ffmpeg`, both of which are maintained by
+organisations that ship security updates, and both of which were measured decoding it
+bit-exactly. **The rule this adds: a reference implementation is preferable only while it is
+maintained.** After that it is just old code with an authoritative name on it.
+
+#### Lossy codecs and Path A
+
+`decode_ogg` reports MP_SAMPLE_F32 and there is no version of it that does otherwise.
+libvorbis and libopus are float codecs; `ov_read` and `op_read` reach int16 only by
+converting, and a decoder in this tree does not convert — that is the graph's job, on Path B,
+where it is visible and where the user chose it.
+
+The consequence is that no lossy file takes Path A, and that is not a limitation of this
+implementation. A lossy codec's output is *defined* as a floating-point signal with a
+tolerance; there is no byte pattern for it to be bit-exact to. Rounding to S32 inside the
+decoder would produce something that looked like Path A material and claim an exactness that
+exists nowhere in the chain. Measured against FFmpeg's own independent decoders, this module
+agrees to 130–140 dB SNR — float rounding, and about as close as two implementations of a
+tolerance-defined codec can get.
 
 ---
 

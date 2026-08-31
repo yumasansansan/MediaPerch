@@ -28,9 +28,20 @@ git submodule update --init
 |---|---|
 | `external/dr_libs` | `dr_wav` and `dr_flac`, behind `decode_native` |
 | `external/flac` | libFLAC, behind `decode_flac` |
+| `external/ogg` | libogg, the container under the two below |
+| `external/vorbis` | libvorbis and vorbisfile, behind `decode_ogg` |
+| `external/opus` | libopus, behind `decode_ogg` |
+| `external/opusfile` | opusfile: Ogg demuxing, seeking and header gain for Opus |
 
-A missing submodule is not a build failure: `decode_flac` prints a warning and skips
-itself, and the rest of the tree builds. Catch2 is fetched at configure time instead,
+`external/vorbis` and `external/opusfile` are pinned to upstream `master` rather than to a
+release tag, and both for the same kind of reason: opusfile has no `CMakeLists.txt` at all
+in v0.12, and vorbis v1.3.7 declares `cmake_minimum_required(VERSION 2.8.12)`, which CMake 4
+refuses outright. Upstream has fixed both on `master`. A submodule pins an exact commit
+either way, so the checkout is still reproducible; what is given up is a version number, not
+determinism.
+
+A missing submodule is not a build failure: `decode_flac` and `decode_ogg` print a warning
+and skip themselves, and the rest of the tree builds. Catch2 is fetched at configure time instead,
 because it is test scaffolding rather than something that ships. Nothing else is
 downloaded.
 

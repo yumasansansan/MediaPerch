@@ -4,3 +4,15 @@
 [submodule "external/flac"]
 	path = external/flac
 	url = https://github.com/xiph/flac.git
+[submodule "external/ogg"]
+	path = external/ogg
+	url = https://github.com/xiph/ogg.git
+[submodule "external/vorbis"]
+	path = external/vorbis
+	url = https://github.com/xiph/vorbis.git
+[submodule "external/opus"]
+	path = external/opus
+	url = https://github.com/xiph/opus.git
+[submodule "external/opusfile"]
+	path = external/opusfile
+	url = https://github.com/xiph/opusfile.git

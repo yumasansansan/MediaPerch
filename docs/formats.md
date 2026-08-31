@@ -15,14 +15,14 @@ mediaperch-probe decode --file X.flac --decoder native
 ffmpeg -i X.flac -f s16le out.raw     # then hash out.raw
 ```
 
-## The four decoders
+## The five decoders
 
-| | `decode_flac` | `decode_native` | `decode_mf` | `decode_ffmpeg` |
-|---|---|---|---|---|
-| Behind it | libFLAC, the Xiph reference | `dr_wav`, `dr_flac` | Media Foundation | `ffmpeg`, `ffprobe` |
-| Covers | FLAC, every depth and rate | WAV, FLAC to 24 bits | MP4/M4A, MP3, WMA, WAV, FLAC | the long tail |
-| Priority | 120 | 100 | 50 | 30 |
-| Comes from | `external/flac` submodule | `external/dr_libs` submodule | already on the machine | **found at run time, never shipped** |
+| | `decode_flac` | `decode_ogg` | `decode_native` | `decode_mf` | `decode_ffmpeg` |
+|---|---|---|---|---|---|
+| Behind it | libFLAC | libvorbis, libopus | `dr_wav`, `dr_flac` | Media Foundation | `ffmpeg`, `ffprobe` |
+| Covers | FLAC, every depth and rate | Vorbis and Opus in Ogg | WAV, FLAC to 24 bits | MP4/M4A, MP3, WMA, WAV, FLAC | the long tail |
+| Priority | 120 | 110 | 100 | 50 | 30 |
+| Comes from | `external/flac` | four Xiph submodules | `external/dr_libs` | already on the machine | **found at run time, never shipped** |
 
 Three modules read FLAC on purpose. `decode_flac` outranks the others whenever it
 is installed, because for a lossless codec the reference implementation *is* the
@@ -33,7 +33,7 @@ them through a pipeline that *could* insert a converter, and the others cannot.
 
 `decode_ffmpeg` sits last on purpose. It reads more than anything else here and
 knows each format less well than the module that specialises in it, so it takes
-what is left: Vorbis, Opus, WavPack, Monkey's Audio, Matroska, DSF and DFF. It
+what is left: ALAC, WavPack, Monkey's Audio, Matroska, OggFLAC, DSF and DFF. It
 also does not ship. It looks for `ffmpeg` and `ffprobe` beside itself and then on
 `PATH`, and declines every file when neither is there — which is exactly what an
 uninstalled module does.
@@ -47,11 +47,64 @@ through 8. §7 of [the plan](plan.md) has the full argument.
 
 | File | Chosen decoder | Reported | Note |
 |---|---|---|---|
-| Opus in Ogg | `decode_ffmpeg` | `48000 Hz / 2 ch / F32` | Opus decodes to float natively, and saying so is honest — the graph will route it to Path B or refuse, which is correct |
-| Vorbis in Ogg | `decode_ffmpeg` | `44100 Hz / 2 ch / F32` | likewise |
+| Vorbis in Ogg | `decode_ogg` | `44100 Hz / 1 ch / F32` | libvorbis itself |
+| Opus in Ogg | `decode_ogg` | `48000 Hz / 1 ch / F32` | libopus through opusfile. Opus decodes at 48 kHz whatever the source rate was; that is the codec, not a resample |
+| OggFLAC | `decode_ffmpeg` | `44100 Hz / 1 ch / S16` | `decode_ogg` scores it **0**, not something low: it is an Ogg stream this module cannot read at all, and saying so lets the fallback have it |
 | WavPack | `decode_ffmpeg` | `44100 Hz / 2 ch / S32` | hash identical to the 32-bit WAV of the same signal |
-| ALAC in M4A | `decode_mf` | `44100 Hz / 2 ch / S24_PACKED` | hash identical to the 24-bit FLAC of the same signal: ALAC round-tripped losslessly |
+| ALAC in M4A | `decode_mf` | `44100 Hz / 2 ch / S24_PACKED` | hash identical to the 24-bit FLAC of the same signal: ALAC round-tripped losslessly. There is no `decode_alac`, and [the plan](plan.md) §7 explains why |
 | MP3 | `decode_mf` | `44100 Hz / 2 ch / S16` | Media Foundation outranks FFmpeg here, 100 to 30 |
+
+## Vorbis and Opus: float, and what that costs
+
+`decode_ogg` reports `F32`, because libvorbis and libopus produce float and a
+decoder here never converts. So no Vorbis or Opus file takes Path A — and no
+implementation of these codecs could, because a lossy codec's output is defined
+as a signal within a tolerance, not as a byte pattern. There is nothing for it to
+be bit-exact *to*.
+
+What can be measured is whether two independent implementations agree. Against
+FFmpeg's own decoders, on the same file, sample for sample:
+
+| File | Frames | Byte lengths agree | max abs difference | SNR |
+|---|---|---|---|---|
+| Vorbis, 44.1 kHz mono | 264,600 | yes | 5.2 × 10⁻⁸ | 131.8 dB |
+| Opus, 48 kHz mono | 288,000 | yes | 1.9 × 10⁻⁸ | 140.4 dB |
+
+That is float rounding. The frame counts and byte lengths matching exactly is the
+other half of the result: it means the pre-skip, the header gain and the stream
+end are all handled the same way, which is where a decoder integration usually
+goes wrong silently.
+
+The same files decoded by the MSVC build and the clang-cl build give **identical
+SHA-256s** — all four test files, both codecs. Float arithmetic that came out the
+same under two compilers is float arithmetic nobody reordered.
+
+### The channel order, which is the part that can be wrong
+
+Ogg channel layouts are Vorbis's, and Opus mapping family 1 is defined to be the
+same. Windows wants WAVE order, and past stereo the two disagree — Vorbis 5.1 is
+L,C,R,BL,BR,LFE where WAVE 5.1 is L,R,C,LFE,BL,BR. `decode_ogg` permutes, which
+moves samples between slots and never changes a value.
+
+Tested with a 5.1 file carrying a different tone in every channel, checked twice:
+against the tones in the source WAV, and against FFmpeg's decode of the same file.
+
+| | Source | Decoded | max abs difference vs FFmpeg | SNR |
+|---|---|---|---|---|
+| FL | 400 Hz | 400 Hz | 9.7 × 10⁻⁸ | 131.5 dB |
+| FR | 800 Hz | 800 Hz | 8.9 × 10⁻⁸ | 131.7 dB |
+| FC | 200 Hz | 200 Hz | 7.5 × 10⁻⁸ | 133.7 dB |
+| LFE | 1600 Hz | — | 1.5 × 10⁻⁸ | 136.4 dB |
+| BL | 3200 Hz | 3200 Hz | 8.2 × 10⁻⁸ | 133.6 dB |
+| BR | 6400 Hz | 6400 Hz | 8.9 × 10⁻⁸ | 130.2 dB |
+
+(Vorbis at q8; Opus at 510 kb/s gives the same verdict at 131–140 dB.) The LFE row
+has no decoded frequency because both encoders band-limit LFE, so a 1600 Hz tone
+put there does not survive — which is the encoder behaving correctly, and is why
+that channel is checked against FFmpeg only.
+
+The mask reported for 5.1 is `0x3f`: `FL|FR|FC|LFE|BL|BR`, the WAVE layout, which
+is what the sink can pass to `dwChannelMask` unchanged.
 
 ### What only libFLAC can do
 
