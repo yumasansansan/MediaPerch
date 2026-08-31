@@ -89,6 +89,45 @@ jobs:
           ctest --preset ninja-msvc --build-config ${{ matrix.configuration }}
           --output-on-failure --no-tests=error
 
+  # Every parser that reads a file somebody else wrote, given bytes nobody wrote.
+  #
+  # §2 chose C++ over Rust for the parsers on the argument that libFuzzer and the
+  # sanitizers close the gap. That argument is worth nothing unless the fuzzer
+  # actually runs, so it runs here, on every push, rather than by hand once a
+  # year. Thirty seconds a target is not a campaign -- it is a smoke test that
+  # the campaign still builds, and a place for a regression corpus to live.
+  fuzz:
+    name: fuzz the parsers
+    runs-on: windows-2025-vs2026
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: MSVC developer environment
+        shell: cmd
+        run: ${{ env.VS_DEV_ENV }}
+
+      - name: Configure
+        run: cmake --preset fuzz
+
+      - name: Build
+        run: cmake --build --preset fuzz
+
+      - name: Fuzz
+        run: ctest --preset fuzz
+
+      # Whatever the run found that the corpus did not already cover. Worth
+      # keeping even when nothing crashed: it is the next run's starting point.
+      - name: Keep the crashes and the new corpus
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-findings
+          path: |
+            build/fuzz/bin/crash-*
+            build/fuzz/bin/leak-*
+            build/fuzz/bin/timeout-*
+          if-no-files-found: ignore
+
   # A second compiler catches what the first lets through -- and clang is the one
   # with complete C23, so it is also what proves the ABI header is not quietly
   # relying on an MSVC extension. clang-cl still needs the MSVC headers and

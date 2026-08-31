@@ -37,6 +37,8 @@
 
 #include <wrl/client.h>
 
+#include <cstdarg>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -62,7 +64,8 @@ void log(MpLogLevel level, const char* message) noexcept
     }
 }
 
-void logf(MpLogLevel level, const char* format, ...) noexcept
+// Deliberately not called logf: <cmath> has one and its float overload wins.
+void log_fmt(MpLogLevel level, const char* format, ...) noexcept
 {
     char buffer[512];
     va_list args;
@@ -241,13 +244,13 @@ try {
     }
 
     if (native_bits != 0 && got_bits != native_bits) {
-        logf(MP_LOG_WARN,
+        log_fmt(MP_LOG_WARN,
              "%s is %u-bit but Media Foundation will only give %u-bit; a converter is "
              "in the chain and the output is not the file's own samples",
              path, native_bits, got_bits);
     }
     if (got_rate != rate || got_channels != channels) {
-        logf(MP_LOG_WARN, "Media Foundation changed the stream from %u Hz/%u ch to %u Hz/%u ch",
+        log_fmt(MP_LOG_WARN, "Media Foundation changed the stream from %u Hz/%u ch to %u Hz/%u ch",
              rate, channels, got_rate, got_channels);
     }
 

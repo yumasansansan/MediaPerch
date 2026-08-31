@@ -5,6 +5,7 @@
 #include "mediaperch/source.hpp"
 
 #include <cstdint>
+#include <string>
 
 namespace mp {
 
@@ -39,11 +40,20 @@ public:
     /// Total frames, or 0 when the decoder does not know.
     [[nodiscard]] std::uint64_t length_frames() const noexcept { return length_; }
 
+    /// Why `open` refused, in words, or empty. Set only for the failures a
+    /// caller could not work out from the result code.
+    [[nodiscard]] const std::string& why() const noexcept { return why_; }
+
 private:
+    /// Decodes one frame and rewinds. Catches a decoder that opens a file,
+    /// describes it correctly and then produces nothing.
+    [[nodiscard]] bool can_actually_decode();
+
     const MpDecoderVtbl* vtbl_ = nullptr;
     MpDecoder* handle_ = nullptr;
     Format format_{};
     std::uint64_t length_ = 0;
+    std::string why_;
 };
 
 } // namespace mp

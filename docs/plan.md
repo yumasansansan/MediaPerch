@@ -462,7 +462,7 @@ Three outcomes, and the user picks the default once in settings:
 |---|---|---|---|
 | `decode_native` | C++, `dr_flac` and `dr_wav` single headers | FLAC, WAV | zero build-system footprint and no submodule; the base install plays music with nothing else on disk. **Measured bit-exact**: its SHA-256 for 16- and 24-bit WAV and FLAC equals FFmpeg's |
 | `decode_mf` | Media Foundation `IMFSourceReader` | MP4/M4A, AAC, MP3, WMA — and WAV and FLAC, **also bit-exact** | ships with Windows, hardware-accelerated, and it is what brings §9 for free. Scores itself below `decode_native` on WAV and FLAC because it reaches them through a pipeline that *could* insert a converter, not because it did |
-| `decode_ffmpeg` | libav* | everything else | the long tail, and the first candidate for out-of-process hosting |
+| `decode_ffmpeg` | libav* | everything else — and **32-bit FLAC**, which neither of the others can read | the long tail, and the first candidate for out-of-process hosting. Measured: FFmpeg decodes a 32-bit FLAC byte-identically to the reference decoder, which is the first concrete reason to build this rather than a general appeal to coverage |
 
 Resolution, in order, and it is written down because "it depends on the config" is not a
 design:
@@ -646,7 +646,8 @@ HDR state.
 | bit-exactness | two of them, because they prove different halves. In `tests/`, a fake sink implemented behind the real C vtable records every byte committed and compares it with the source — no hardware, runs in CI. On real hardware, `mediaperch-probe verify` plays a file through a **tee** that copies every buffer handed to `IAudioRenderClient::ReleaseBuffer`, and compares SHA-256 with what the decoder produced. **`ReleaseBuffer` is the boundary the claim is about**, and §14 records why nothing on this machine can see past it |
 | decoders | against a reference. `mediaperch-probe decode --file X` prints SHA-256 of the PCM; `ffmpeg -i X -f s16le out.raw` prints the same thing if the decoder is right. Measured: WAV and FLAC, 16-bit and 24-bit, all four hashes identical to FFmpeg's |
 | ring | a soak test with a producer and a consumer under TSan, plus an assertion that the render side never allocates (an allocator hook that aborts while the RT flag is set) |
-| parsers | libFuzzer on every one — tags, cue sheets, playlists, INI — with corpora in `fuzz/corpus`, as DragonPerch already does |
+| parsers | libFuzzer on every one, with corpora in `fuzz/corpus`, as DragonPerch already does. `dr_wav` and `dr_flac` have targets and **run in CI on every push** — thirty seconds each, which is a smoke test that the campaign still builds rather than a campaign, and somewhere for a regression corpus to live. §2 chose C++ for the parsers on the argument that fuzzing closes the gap; an unrun fuzzer would have made that argument worthless |
+| properties | randomised invariants over the whole format space, in `tests/`, with a fixed-seed generator so a failure prints a seed that reproduces it. About 15,000 cases per run, no hardware, no Clang: every candidate list is bit-exact and free of duplicate wire formats, non-PCM encodings are never repacked, and `repack` round-trips for every container pair that fits and refuses every pair that does not. This is the cheap half of fuzzing, and it runs on both compilers |
 | devices | a manual matrix, because it cannot be automated, kept in [devices.md](devices.md): onboard codec, a USB DAC, HDMI to a receiver, Bluetooth. For each, the formats that negotiated, whether `AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED` appeared, and the minimum period that ran glitch-free for an hour |
 | glitch counting | the engine counts underruns, `AUDCLNT_E_DEVICE_INVALIDATED`, and late render callbacks, and shows them. A player that cannot tell you it glitched cannot be trusted when it says it did not |
 
@@ -735,6 +736,26 @@ real time.
   the GCC rejection in `cmake/CompilerOptions.cmake` catches the same thing without a
   preset. Both exist because they catch different mistakes: `ninja-msvc` picking Clang is
   wrong even though Clang is supported.
+- **A decoder can open a file, describe it correctly, and produce nothing.** `dr_flac`
+  opens a 32-bit FLAC, reports 32 bits from STREAMINFO, and decodes zero frames: its
+  frame-header table still marks the bit-depth code FLAC 1.4 assigned to 32 bits as
+  reserved, and `DRFLAC_ASSERT(bitsPerSample <= 24)` runs through its decode paths. Nothing
+  returns an error. For this program that is the worst failure available -- `read` returns 0,
+  the graph reads that as the end of the stream, and the track is skipped in silence. So
+  `Decoder::open` decodes one frame and rewinds before declaring success. The check costs one
+  frame and guards every decoder, including the ones not written yet.
+- **A vendored library's sanity ceiling reads as our refusal.** `dr_wav` rejects any file
+  above `DRWAV_MAX_SAMPLE_RATE`, which defaults to 384000 — its own guard against garbage
+  headers, not a WAV limit, since the field is 32 bits wide. A 768 kHz file therefore came
+  back as "unsupported by this module", which points at the wrong culprit entirely. Two
+  things came out of it: the constant is now raised to 6,144,000, and the module logs *which
+  library declined* at debug level, because "we could not open it" and "dr_wav would not open
+  it" are different sentences and only one of them is actionable.
+- **Neither decoder reads everything.** Measured at the edges: `decode_mf` handles 32-bit WAV
+  at 1,048,575 Hz — the FLAC spec's ceiling — without complaint, and refuses FLAC above about
+  655 kHz. `decode_native` is the other way round. The two cover each other exactly, which is
+  the clearest argument the module architecture has produced so far. [formats.md](formats.md)
+  has the table.
 - **Media Foundation is bit-exact for WAV and FLAC.** This was not safe to assume. A source
   reader will insert a converter to produce whatever media type it is asked for, and the
   conversion is invisible — the samples simply come back different — so `decode_mf` reads the

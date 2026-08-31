@@ -459,7 +459,7 @@ int decode(const MpDecoderVtbl& vtbl, const Options& options)
     const MpResult opened = decoder.open(vtbl, options.file.c_str());
     if (opened != MP_OK) {
         std::fprintf(stderr, "cannot decode %s: %s\n", options.file.c_str(),
-                     result_name(opened));
+                     decoder.why().empty() ? result_name(opened) : decoder.why().c_str());
         return 1;
     }
 
@@ -711,7 +711,7 @@ int verify(const MpSinkVtbl& sink_vtbl, const MpDecoderVtbl& decoder_vtbl,
     const MpResult opened = decoder.open(decoder_vtbl, options.file.c_str());
     if (opened != MP_OK) {
         std::fprintf(stderr, "cannot decode %s: %s\n", options.file.c_str(),
-                     result_name(opened));
+                     decoder.why().empty() ? result_name(opened) : decoder.why().c_str());
         return 1;
     }
 

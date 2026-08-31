@@ -67,6 +67,22 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "MEDIAPERCH_SANITIZE": "ON"
       }
+    },
+    {
+      "name": "fuzz",
+      "displayName": "Fuzzers (clang-cl + libFuzzer)",
+      "description": "libFuzzer over every parser that reads somebody else's file. Uses the GNU-driver clang++ rather than clang-cl: CMake drives lld-link directly for clang-cl, so -fsanitize never reaches the link and the sanitizer runtimes come out undefined.",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "MEDIAPERCH_EXPECT_TOOLSET": "Clang",
+        "MEDIAPERCH_BUILD_FUZZERS": "ON",
+        "MEDIAPERCH_BUILD_TESTS": "OFF",
+        "MEDIAPERCH_BUILD_PLATFORM": "OFF"
+      },
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}"
     }
   ],
   "buildPresets": [
@@ -103,6 +119,10 @@
       "name": "core-only",
       "configurePreset": "core-only",
       "configuration": "Debug"
+    },
+    {
+      "name": "fuzz",
+      "configurePreset": "fuzz"
     }
   ],
   "testPresets": [
@@ -142,6 +162,16 @@
       "name": "core-only",
       "configurePreset": "core-only",
       "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "fuzz",
+      "configurePreset": "fuzz",
       "output": {
         "outputOnFailure": true
       },

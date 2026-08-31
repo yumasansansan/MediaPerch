@@ -22,6 +22,8 @@
 
 #include <mediaperch/module.h>
 
+#include <cstdarg>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -42,6 +44,18 @@ void log(MpLogLevel level, const char* message) noexcept
 }
 
 /// The smallest container that holds `bits`, in bytes, or 0 if none does.
+// Deliberately not called logf: <cmath> has one, dr_libs pulls <math.h> in, and
+// the overload that wins is the one that takes a float.
+void log_fmt(MpLogLevel level, const char* format, ...) noexcept
+{
+    char buffer[512];
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+    log(level, buffer);
+}
+
 std::uint32_t container_for(std::uint32_t bits) noexcept
 {
     if (bits == 0 || bits > 32) {
@@ -206,6 +220,7 @@ try {
             return MP_ERR_UNSUPPORTED;
         }
     } else {
+        log_fmt(MP_LOG_DEBUG, "neither dr_flac nor dr_wav would open %s", path);
         delete decoder;
         return MP_ERR_UNSUPPORTED;
     }
@@ -229,9 +244,13 @@ try {
         decoder->container = container_for(bits);
         decoder->format.sample_type = sample_type_for(decoder->container, valid);
         if (decoder->container == 0 || decoder->format.sample_type == MP_SAMPLE_NONE) {
+            log_fmt(MP_LOG_DEBUG, "no container for %u bits (%u valid)", bits, valid);
             delete decoder;
             return MP_ERR_UNSUPPORTED;
         }
+        log_fmt(MP_LOG_DEBUG, "%s: %u Hz, %u ch, %u bits (%u valid), container %u", path,
+             decoder->format.sample_rate, decoder->format.channels, bits, valid,
+             decoder->container);
         decoder->format.valid_bits = valid;
     }
 

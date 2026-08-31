@@ -48,6 +48,8 @@ mediaperch-probe verify      # a file, hashed at the device boundary
 - [docs/building.md](docs/building.md) — how to build it.
 - [docs/devices.md](docs/devices.md) — what real hardware actually accepts, measured rather
   than inferred.
+- [docs/formats.md](docs/formats.md) — what the decoders actually produce, hashed against
+  FFmpeg.
 
 ## The shape of it, in one paragraph
 

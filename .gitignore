@@ -19,3 +19,11 @@ compile_commands.json
 *.swp
 *~
 .DS_Store
+
+# What a local fuzz run generates. The seed corpus in fuzz/corpus/{wav,flac} is
+# tracked; anything the fuzzer discovers is not, until somebody decides it is a
+# regression worth keeping.
+/fuzz/corpus/*_found/
+crash-*
+leak-*
+timeout-*

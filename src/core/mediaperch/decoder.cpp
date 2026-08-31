@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "mediaperch/decoder.hpp"
 
+#include <vector>
+
 namespace mp {
 
 MpResult Decoder::open(const MpDecoderVtbl& vtbl, const char* path)
 {
     close();
+    why_.clear();
 
     if (vtbl.size < sizeof(MpDecoderVtbl) || vtbl.open == nullptr ||
         vtbl.get_format == nullptr || vtbl.read == nullptr) {
@@ -41,7 +44,43 @@ MpResult Decoder::open(const MpDecoderVtbl& vtbl, const char* path)
         close();
         return MP_ERR_FORMAT;
     }
+
+    // And a decoder that opens a file, describes it correctly, and then produces
+    // nothing at all is the worst failure of the three, because it is
+    // indistinguishable from an empty file: `read` returns 0, the graph calls
+    // that the end of the stream, and the track is skipped without a word.
+    //
+    // Measured, not imagined: `dr_flac` opens a 32-bit FLAC, reports 32 bits
+    // from STREAMINFO, and decodes zero frames -- its frame-header table still
+    // marks the bit-depth code that FLAC 1.4 assigned to 32 bits as reserved.
+    // The file plays as silence of length zero.
+    if (!can_actually_decode()) {
+        why_ = "the decoder opened the file and produced no audio at all";
+        close();
+        return MP_ERR_IO;
+    }
     return MP_OK;
+}
+
+bool Decoder::can_actually_decode()
+{
+    // A decoder that cannot seek would lose the frame this reads, so the check
+    // is skipped rather than made destructive. Every decoder here can seek.
+    if (length_ == 0 || vtbl_->seek == nullptr) {
+        return true;
+    }
+
+    std::vector<std::uint8_t> probe(frame_bytes(format_));
+    if (probe.empty()) {
+        return false;
+    }
+
+    std::size_t got = 0;
+    const MpResult r = vtbl_->read(handle_, probe.data(), probe.size(), &got);
+    const bool produced = (r == MP_OK || r == MP_END) && got > 0;
+
+    vtbl_->seek(handle_, 0);
+    return produced;
 }
 
 void Decoder::close() noexcept

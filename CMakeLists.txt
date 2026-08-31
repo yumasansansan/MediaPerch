@@ -31,6 +31,7 @@ if(MEDIAPERCH_EXPECT_TOOLSET AND NOT CMAKE_CXX_COMPILER_ID STREQUAL MEDIAPERCH_E
 endif()
 
 option(MEDIAPERCH_BUILD_TESTS "Build the test suite" ON)
+option(MEDIAPERCH_BUILD_FUZZERS "Build the libFuzzer targets (Clang only)" OFF)
 option(MEDIAPERCH_BUILD_PLATFORM "Build the platform head and the modules" ON)
 
 # There is no /std:c++23 in MSVC and no /std:c23 either; both are spelled
@@ -71,4 +72,9 @@ endif()
 if(MEDIAPERCH_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+if(MEDIAPERCH_BUILD_FUZZERS)
+    enable_testing()
+    add_subdirectory(fuzz)
 endif()
