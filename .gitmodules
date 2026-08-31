@@ -16,6 +16,3 @@
 [submodule "external/opusfile"]
 	path = external/opusfile
 	url = https://github.com/xiph/opusfile.git
-[submodule "external/faad2"]
-	path = external/faad2
-	url = https://github.com/knik0/faad2.git

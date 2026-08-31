@@ -93,6 +93,7 @@ struct SampleTable {
     std::vector<std::uint8_t> cookie;
     std::uint64_t skip_frames = 0;
     std::uint64_t play_frames = 0;
+    std::uint32_t frames_per_packet = 0;
     std::uint32_t media_timescale = 0;
     std::uint32_t movie_timescale = 0;
     std::vector<std::uint32_t> sizes;
@@ -338,6 +339,9 @@ void read_stbl(Span stbl, SampleTable& t) noexcept
                 const std::uint64_t n = box.u32();
                 const std::uint64_t delta = box.u32();
                 total += n * delta;
+                if (i == 0) {
+                    t.frames_per_packet = static_cast<std::uint32_t>(delta);
+                }
             }
             t.total_frames = total;
         }
@@ -452,6 +456,7 @@ bool parse_moov(const std::uint8_t* data, std::size_t bytes, AudioTrack& out,
     out.config = t.cookie;
     out.total_frames = t.total_frames;
     out.media_timescale = t.media_timescale;
+    out.frames_per_packet = t.frames_per_packet;
     out.movie_timescale = t.movie_timescale;
     out.skip_frames = t.skip_frames;
 

@@ -320,7 +320,7 @@ MpResult MP_CALL decoder_probe(const char* path, const std::uint8_t* head, std::
     // "OggS" is the one entry that is no longer strictly true: decode_ogg reads
     // Vorbis and Opus now. It stays at 100 because it is still the only answer
     // for the *rest* of Ogg -- OggFLAC, Speex -- and because the tie against
-    // decode_ogg's 100 is broken by priority, 110 to 30, in decode_ogg's favour.
+    // decode_ogg's 100 is broken by priority, 110 to 60, in decode_ogg's favour.
     // Scoring by codec instead would mean parsing the identification header
     // here to reach the same outcome.
     static const struct {
@@ -345,7 +345,22 @@ MpResult MP_CALL decoder_probe(const char* path, const std::uint8_t* head, std::
             return MP_OK;
         }
     }
-    if (magic(head, bytes, "ftyp", 4) || magic(head, bytes, "ID3") ||
+    // MP4 is the one place this module stops being a fallback.
+    //
+    // Measured: for AAC, FFmpeg returns exactly the length the file claims and
+    // starts at frame zero, while Media Foundation starts 1024 frames -- 21.3 ms
+    // -- late, leaves the encoder padding on the end, refuses 8 kHz outright and
+    // refuses 7.1 outright. That is a correctness difference rather than a
+    // preference, so MP4 audio goes to FFmpeg wherever FFmpeg is installed.
+    //
+    // decode_alac still wins an ALAC file: it scores the same 100 and outranks
+    // this module on priority, and it declines anything that is not ALAC in two
+    // seeks. Media Foundation is what is left when FFmpeg is absent.
+    if (magic(head, bytes, "ftyp", 4)) {
+        *out_score = 100;
+        return MP_OK;
+    }
+    if (magic(head, bytes, "ID3") ||
         magic(head, bytes, "fLaC") || magic(head, bytes, "RIFF") ||
         (bytes >= 2 && head[0] == 0xFF && (head[1] & 0xE0) == 0xE0)) {
         *out_score = 30;
@@ -576,7 +591,7 @@ const MpModuleDesc g_desc = {
     /* flags       */ 0,
     /* version     */ MP_MAKE_VERSION(0, 1, 0),
     /* kind        */ MP_KIND_DECODER,
-    /* priority    */ 30, // the fallback: everything else knows its formats better
+    /* priority    */ 60, // the fallback everywhere except MP4 -- see decoder_probe
     /* id          */ "decode_ffmpeg",
     /* name        */ "FFmpeg (found at run time, not shipped)",
     /* init        */ &module_init,

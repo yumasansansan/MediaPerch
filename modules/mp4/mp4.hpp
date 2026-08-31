@@ -55,6 +55,14 @@ struct AudioTrack {
     std::uint64_t skip_frames = 0;
     std::uint64_t play_frames = 0;
 
+    /// The duration of a whole packet, from the first `stts` entry.
+    ///
+    /// Not `total_frames / packets`: the last packet of a track is usually
+    /// short, so the average is a few frames under the real thing -- 1021
+    /// instead of 1024 on a two-second file, which is exactly wrong enough to
+    /// be hard to see.
+    std::uint32_t frames_per_packet = 0;
+
     std::uint32_t media_timescale = 0; ///< from `mdhd`; the sample rate, for audio
     std::uint32_t movie_timescale = 0; ///< from `mvhd`; what `elst` durations are in
 };
