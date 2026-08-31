@@ -460,19 +460,26 @@ Three outcomes, and the user picks the default once in settings:
 
 | Module | Backend | Covers | Why it exists |
 |---|---|---|---|
-| `decode_native` | C++, `dr_flac`/`dr_wav`/`dr_mp3` single headers + a small DSD reader | FLAC, WAV, AIFF, DSF, DFF, MP3 | zero build-system footprint and no submodule; the base install plays music with nothing else on disk |
-| `decode_mf` | Media Foundation `IMFSourceReader` | MP4/MOV, AAC, HEVC, H.264, AV1, WMA | ships with Windows, hardware-accelerated, and it is what brings §9 for free |
+| `decode_native` | C++, `dr_flac` and `dr_wav` single headers | FLAC, WAV | zero build-system footprint and no submodule; the base install plays music with nothing else on disk. **Measured bit-exact**: its SHA-256 for 16- and 24-bit WAV and FLAC equals FFmpeg's |
+| `decode_mf` | Media Foundation `IMFSourceReader` | MP4/M4A, AAC, MP3, WMA — and WAV and FLAC, **also bit-exact** | ships with Windows, hardware-accelerated, and it is what brings §9 for free. Scores itself below `decode_native` on WAV and FLAC because it reaches them through a pipeline that *could* insert a converter, not because it did |
 | `decode_ffmpeg` | libav* | everything else | the long tail, and the first candidate for out-of-process hosting |
 
 Resolution, in order, and it is written down because "it depends on the config" is not a
 design:
 
-1. an explicit per-extension override in the config file;
-2. the container's declared preference (`audio.decoder.preference = native, mf, ffmpeg`);
-3. `probe` on each candidate in priority order, highest first;
-4. first that opens successfully wins; a decoder that fails mid-file does **not** trigger a
+1. an explicit choice — `--decoder mf` on the command line, or a per-extension override in
+   the config file. An explicit choice wins outright, even over a decoder that would score
+   higher, because being able to say "use that one" is the point of having more than one;
+2. otherwise every loaded decoder is shown the file's first 4 KB and the best `probe` score
+   wins, ties broken by the module's declared priority;
+3. first that opens successfully wins; a decoder that fails mid-file does **not** trigger a
    silent retry with another backend, because a half-decoded track that switches backend is
    worse than a clean error.
+
+Implemented in `ModuleRegistry`, which loads every `mp_*.dll` beside the executable rather
+than naming the one it wants. Measured: FLAC and WAV go to `decode_native` (100 against
+Media Foundation's 40), MP3 and M4A go to `decode_mf` (100 against nothing), and forcing
+`--decoder native` on an MP3 produces a clean refusal rather than a guess.
 
 The choice is per-track and visible: the UI and the log both name the module that opened
 the file.
@@ -728,6 +735,19 @@ real time.
   the GCC rejection in `cmake/CompilerOptions.cmake` catches the same thing without a
   preset. Both exist because they catch different mistakes: `ninja-msvc` picking Clang is
   wrong even though Clang is supported.
+- **Media Foundation is bit-exact for WAV and FLAC.** This was not safe to assume. A source
+  reader will insert a converter to produce whatever media type it is asked for, and the
+  conversion is invisible — the samples simply come back different — so `decode_mf` reads the
+  *native* media type first, asks for PCM at exactly that depth, and then reads back what the
+  reader actually agreed to rather than reporting what it asked for. Measured across 16- and
+  24-bit WAV and FLAC: **every hash equals `decode_native`'s and FFmpeg's**. The OS decoder is
+  a real option, not a fallback to apologise for.
+
+  One difference worth knowing, and it is metadata rather than samples: for FLAC, Media
+  Foundation reports a channel mask (`0x3` for stereo) where `dr_flac` reports none, because
+  FLAC has no channel-mask field and the two libraries disagree about whether to supply the
+  conventional one. Both are defensible. It changes the first candidate offered to a device
+  and nothing else, because §6.1 offers the extensible form either way.
 - **A virtual cable is not a transparent loopback, and it fails silently.** The obvious way
   to prove bit-exactness past our own code is to play into a virtual cable's render endpoint
   and record from its capture endpoint. Measured with both endpoints taken in *exclusive*

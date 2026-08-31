@@ -34,6 +34,7 @@ struct Options {
     std::string command = "devices";
     std::string file;
     std::string raw;
+    std::string decoder_id; // empty = let the probe decide
     std::string capture; // capture endpoint id; empty = find one by name
     int capture_index = -1;
     int device_index = -1; // -1 = the system default
@@ -58,6 +59,7 @@ void usage()
               every other application on it.
   play        play a test tone.
               TAKES THE ENDPOINT for the whole duration.
+  modules     list what loaded, and what each one claims to be
   decode      decode a file and print SHA-256 of the PCM it produced. Touches no
               device. Compare it with a reference decoder to check this one.
   verify      play a file into a loopback and record the other end, then compare
@@ -69,6 +71,8 @@ Options
   --file PATH       the file to decode. WAV and FLAC
   --raw PATH        `decode` writes the decoded PCM here. `verify` writes what it
                     sent to PATH.sent and what it recorded to PATH.recorded
+  --decoder ID      force a decoder: native, mf, ... . Default is whichever
+                    probes highest, ties broken by the module's own priority
   --device N        index from `devices`; default is the system default endpoint
   --capture N       capture endpoint index; default is one named "CABLE Output"
   --rate R          default 44100
@@ -107,7 +111,7 @@ bool parse(int argc, char** argv, Options& out)
             usage();
             std::exit(0);
         } else if (arg == "devices" || arg == "negotiate" || arg == "play" ||
-                   arg == "verify" || arg == "decode") {
+                   arg == "verify" || arg == "decode" || arg == "modules") {
             out.command = arg;
         } else if (arg == "--file") {
             if (i + 1 < argc) {
@@ -116,6 +120,15 @@ bool parse(int argc, char** argv, Options& out)
         } else if (arg == "--raw") {
             if (i + 1 < argc) {
                 out.raw = argv[++i];
+            }
+        } else if (arg == "--decoder") {
+            if (i + 1 < argc) {
+                out.decoder_id = argv[++i];
+                // "native" and "mf" are what a person types; the modules call
+                // themselves decode_native and decode_mf.
+                if (out.decoder_id.rfind("decode_", 0) != 0) {
+                    out.decoder_id = "decode_" + out.decoder_id;
+                }
             }
         } else if (arg == "--capture") {
             if (i + 1 < argc) {
@@ -200,22 +213,6 @@ mp::Format requested_format(const Options& options)
         break;
     }
     return format;
-}
-
-/// Loads the WASAPI sink from beside the executable.
-std::unique_ptr<mp::win::LoadedModule> load_sink_module()
-{
-    const auto path = mp::win::module_directory() / "mp_sink_wasapi.dll";
-    auto module = mp::win::LoadedModule::load(path);
-    if (!module) {
-        std::fprintf(stderr, "could not load %s\n", path.string().c_str());
-        return nullptr;
-    }
-    if (module->sink_vtbl() == nullptr) {
-        std::fprintf(stderr, "%s is not a sink module\n", path.string().c_str());
-        return nullptr;
-    }
-    return module;
 }
 
 int list_devices(const MpSinkVtbl& sink)
@@ -982,11 +979,25 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    const auto module = load_sink_module();
-    if (!module) {
+    mp::win::ModuleRegistry registry;
+    registry.scan(mp::win::module_directory());
+
+    if (options.command == "modules") {
+        for (const MpModuleDesc* desc : registry.all()) {
+            std::printf("%-16s %-38s kind %u  priority %3u  v%u.%u.%u%s\n", desc->id,
+                        desc->name, desc->kind, desc->priority, desc->version >> 22,
+                        (desc->version >> 12) & 0x3FF, desc->version & 0xFFF,
+                        (desc->flags & MP_MODULE_NO_UNLOAD) != 0 ? "  [no-unload]" : "");
+        }
+        return 0;
+    }
+
+    const MpSinkVtbl* sink_vtbl = registry.sink();
+    if (sink_vtbl == nullptr) {
+        std::fprintf(stderr, "no sink module beside the executable\n");
         return 1;
     }
-    const MpSinkVtbl& sink = *module->sink_vtbl();
+    const MpSinkVtbl& sink = *sink_vtbl;
 
     if (options.command == "devices") {
         return list_devices(sink);
@@ -998,20 +1009,24 @@ int main(int argc, char** argv)
         return play(sink, options);
     }
     if (options.command == "decode" || options.command == "verify") {
-        const auto decoder_module =
-            mp::win::LoadedModule::load(mp::win::module_directory() / "mp_decode_native.dll");
-        if (!decoder_module || decoder_module->desc().kind != MP_KIND_DECODER) {
-            std::fprintf(stderr, "could not load mp_decode_native.dll\n");
+        if (options.file.empty()) {
+            std::fprintf(stderr, "%s needs --file\n", options.command.c_str());
             return 1;
         }
-        const auto* decoder_vtbl =
-            static_cast<const MpDecoderVtbl*>(decoder_module->desc().vtbl);
-        if (decoder_vtbl == nullptr || decoder_vtbl->size < sizeof(MpDecoderVtbl)) {
-            std::fprintf(stderr, "the decoder module returned a vtable this host cannot read\n");
+        const auto choice = registry.decoder_for(options.file, options.decoder_id);
+        if (choice.vtbl == nullptr) {
+            if (options.decoder_id.empty()) {
+                std::fprintf(stderr, "no decoder recognised %s\n", options.file.c_str());
+            } else {
+                std::fprintf(stderr, "no decoder called %s is loaded\n",
+                             options.decoder_id.c_str());
+            }
             return 1;
         }
-        return options.command == "decode" ? decode(*decoder_vtbl, options)
-                                          : verify(sink, *decoder_vtbl, options);
+        std::printf("decoder    %s (%s)%s\n", choice.desc->id, choice.desc->name,
+                    options.decoder_id.empty() ? "" : "  [forced]");
+        return options.command == "decode" ? decode(*choice.vtbl, options)
+                                           : verify(sink, *choice.vtbl, options);
     }
 
     usage();

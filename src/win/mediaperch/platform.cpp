@@ -3,10 +3,13 @@
 
 #include "mediaperch/win_headers.hpp"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 
 namespace mp::win {
 namespace {
@@ -216,6 +219,117 @@ const MpSinkVtbl* LoadedModule::sink_vtbl() const noexcept
         return nullptr;
     }
     return vtbl;
+}
+
+void ModuleRegistry::scan(const std::filesystem::path& directory)
+{
+    std::error_code error;
+    std::vector<std::filesystem::path> candidates;
+    for (const auto& entry : std::filesystem::directory_iterator{directory, error}) {
+        const auto& path = entry.path();
+        if (path.extension() != ".dll") {
+            continue;
+        }
+        const std::string name = path.filename().string();
+        if (name.rfind("mp_", 0) != 0) {
+            continue;
+        }
+        candidates.push_back(path);
+    }
+    // Deterministic order, so two runs on one machine agree about ties.
+    std::sort(candidates.begin(), candidates.end());
+
+    for (const auto& path : candidates) {
+        if (auto module = LoadedModule::load(path)) {
+            modules_.push_back(std::move(module));
+        }
+    }
+}
+
+std::vector<const MpModuleDesc*> ModuleRegistry::all() const
+{
+    std::vector<const MpModuleDesc*> out;
+    out.reserve(modules_.size());
+    for (const auto& module : modules_) {
+        out.push_back(&module->desc());
+    }
+    return out;
+}
+
+const MpSinkVtbl* ModuleRegistry::sink(std::string_view id) const
+{
+    const MpSinkVtbl* best = nullptr;
+    std::uint32_t best_priority = 0;
+    for (const auto& module : modules_) {
+        const MpSinkVtbl* vtbl = module->sink_vtbl();
+        if (vtbl == nullptr) {
+            continue;
+        }
+        if (!id.empty()) {
+            if (id == module->desc().id) {
+                return vtbl;
+            }
+            continue;
+        }
+        if (best == nullptr || module->desc().priority > best_priority) {
+            best = vtbl;
+            best_priority = module->desc().priority;
+        }
+    }
+    return id.empty() ? best : nullptr;
+}
+
+ModuleRegistry::DecoderChoice ModuleRegistry::decoder_for(const std::string& path,
+                                                          std::string_view prefer) const
+{
+    // The first few kilobytes, which is all a probe is allowed to look at. A
+    // probe that opens the file has already done the expensive thing twice.
+    std::array<std::uint8_t, 4096> head{};
+    std::size_t head_bytes = 0;
+    {
+        const std::filesystem::path where{
+            std::u8string{reinterpret_cast<const char8_t*>(path.c_str())}};
+        std::ifstream file{where, std::ios::binary};
+        if (file) {
+            file.read(reinterpret_cast<char*>(head.data()),
+                      static_cast<std::streamsize>(head.size()));
+            head_bytes = static_cast<std::size_t>(file.gcount());
+        }
+    }
+
+    DecoderChoice best;
+    std::uint32_t best_priority = 0;
+
+    for (const auto& module : modules_) {
+        const MpModuleDesc& desc = module->desc();
+        if (desc.kind != MP_KIND_DECODER) {
+            continue;
+        }
+        const auto* vtbl = static_cast<const MpDecoderVtbl*>(desc.vtbl);
+        if (vtbl == nullptr || vtbl->size < sizeof(MpDecoderVtbl)) {
+            continue;
+        }
+
+        if (!prefer.empty()) {
+            if (prefer == desc.id) {
+                return DecoderChoice{vtbl, &desc, 0};
+            }
+            continue;
+        }
+
+        std::uint32_t score = 0;
+        if (vtbl->probe != nullptr) {
+            vtbl->probe(path.c_str(), head.data(), head_bytes, &score);
+        }
+        if (score == 0) {
+            continue;
+        }
+        if (score > best.score || (score == best.score && desc.priority > best_priority)) {
+            best = DecoderChoice{vtbl, &desc, score};
+            best_priority = desc.priority;
+        }
+    }
+    return best;
 }
 
 std::filesystem::path module_directory()

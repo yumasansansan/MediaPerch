@@ -12,6 +12,8 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace mp::win {
 
@@ -132,5 +134,45 @@ private:
 
 /// Where modules live: beside the executable, as in DragonPerch.
 [[nodiscard]] std::filesystem::path module_directory();
+
+/// Everything that loaded, and the rules for choosing between them.
+///
+/// This is §7 of the plan made real. Until it existed the tool named the decoder
+/// DLL it wanted, which works for exactly as long as there is one.
+class ModuleRegistry {
+public:
+    ModuleRegistry() = default;
+    ~ModuleRegistry() = default;
+    ModuleRegistry(const ModuleRegistry&) = delete;
+    ModuleRegistry& operator=(const ModuleRegistry&) = delete;
+    ModuleRegistry(ModuleRegistry&&) = delete;
+    ModuleRegistry& operator=(ModuleRegistry&&) = delete;
+
+    /// Loads every `mp_*.dll` beside the executable that this host can read.
+    /// A module that refuses the ABI version, or returns a descriptor from the
+    /// future, is skipped with a line in the log rather than a failure.
+    void scan(const std::filesystem::path& directory);
+
+    [[nodiscard]] std::vector<const MpModuleDesc*> all() const;
+
+    /// `id` empty means "the highest-priority one".
+    [[nodiscard]] const MpSinkVtbl* sink(std::string_view id = {}) const;
+
+    struct DecoderChoice {
+        const MpDecoderVtbl* vtbl = nullptr;
+        const MpModuleDesc* desc = nullptr;
+        std::uint32_t score = 0;
+    };
+
+    /// An explicit `prefer` wins outright, even over a decoder that would score
+    /// higher -- being able to say "use that one" is the point of having more
+    /// than one. Otherwise every decoder is shown the file's first bytes and the
+    /// best score wins, ties broken by the module's declared priority.
+    [[nodiscard]] DecoderChoice decoder_for(const std::string& path,
+                                            std::string_view prefer) const;
+
+private:
+    std::vector<std::unique_ptr<LoadedModule>> modules_;
+};
 
 } // namespace mp::win

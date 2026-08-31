@@ -63,7 +63,8 @@ include/mediaperch/  the module ABI. Pure C, one header, versioned. The only fil
 modules/             everything that can be loaded and unloaded at runtime.
   decode_native/     FLAC, WAV, AIFF, DSF/DFF. No dependencies: an install with nothing
                      else on disk still plays music.
-  decode_mf/         Media Foundation source reader. Hardware video decode comes with it.
+  decode_mf/         Media Foundation source reader. Hardware video decode comes with it,
+                     and it is measurably bit-exact for WAV and FLAC as well.
   decode_ffmpeg/     libav*. The long tail, and the only decoder that is ever wrong about
                      a file someone else wrote — so it is the first candidate for
                      out-of-process hosting.

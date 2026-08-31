@@ -28,4 +28,4 @@ set_target_properties(mediaperch_probe PROPERTIES
     FOLDER "win")
 
 # The probe is useless without modules beside it.
-add_dependencies(mediaperch_probe mp_sink_wasapi mp_decode_native)
+add_dependencies(mediaperch_probe mp_sink_wasapi mp_decode_native mp_decode_mf)
