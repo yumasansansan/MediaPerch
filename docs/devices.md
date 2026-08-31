@@ -73,6 +73,40 @@ Establishing whether a given device's volume is actually free would take a loopb
 at two settings and a comparison — which this machine can do, because the virtual cable is a
 loopback. Not done yet.
 
+## The loopback is not an instrument
+
+VB-Cable's two endpoints look like a perfect way to prove bit-exactness: play into the
+render half, record from the capture half, compare. It does not work, and the way it fails
+is worth recording because it looks like a bug in the player.
+
+Both endpoints taken in exclusive mode, at the cable's own configured format
+(192000 Hz / 24-bit packed), both endpoint volumes reading exactly 1.0000, zero
+discontinuities reported by the capture:
+
+| | |
+|---|---|
+| correlation of the played block with the recording | 0.87 at 44100/16, 0.51 at 192000/24 |
+| samples identical at the best alignment | **0 of 32** |
+| longest prefix of the played stream found verbatim | **none, down to six bytes** |
+| what the recording looks like | samples repeated in runs, low bits cleared |
+
+Exclusive mode guarantees that *Windows* does not touch the samples. It cannot guarantee
+what a driver does, and a virtual cable's "hardware" is more software. So this measures the
+cable, not the player.
+
+`mediaperch-probe verify` therefore decides on the **tee**: every buffer handed to
+`IAudioRenderClient::ReleaseBuffer` is copied and hashed. Measured on this cable:
+
+| File | Wire format | Result |
+|---|---|---|
+| 16-bit FLAC, 44100 | `S16` + mask | bit-exact, 1,411,200 bytes |
+| 24-bit FLAC, 44100 | `S24_PACKED` + mask | bit-exact, 2,116,800 bytes |
+| 24-bit FLAC, 192000 | `S24_PACKED` + mask | bit-exact, 4,652,772 bytes |
+
+In each case the SHA-256 of the decoder's output, of FFmpeg's decode of the same file, and
+of the bytes handed to the device are the same value. Proving anything past `ReleaseBuffer`
+needs a second audio interface recording a digital output, not more software.
+
 ## Still unmeasured
 
 - **`AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED` has not been seen on any device.** The realign path

@@ -11,21 +11,34 @@ mappers Windows already ships, so content looks the way it does in the system's 
 — including on an SDR display — rather than the way one more hand-written colour pipeline
 decided it should.
 
-**Status: milestone 1, built and not yet heard.** The WASAPI sink is a loadable module
-behind the C ABI, the passthrough graph runs on two threads with a lock-free ring between
-them, and the negotiation of §6 — including the buffer-alignment retry on a fresh client —
-is implemented. 51 tests pass on MSVC and on clang-cl, among them an end-to-end
-bit-exactness check against a fake device: every byte the source produced, compared with
-every byte that reached `commit`, with no hardware involved.
+**Status: a FLAC reaches a real device with every byte intact, proved by hash.**
 
-What has not happened yet is a tone coming out of a real endpoint. Exclusive mode silences
-every other application on the device it takes, so that is a deliberate step rather than a
-side effect of running the test suite.
+```
+decoded    44100 Hz / 2 ch / S16, 352800 frames, 8.00 s
+           6ad3ba5878b1de9d97e7867553050a60bffb1ea52e38522eac6bd9f07812366a
+expected   6ad3ba5878b1de9d97e7867553050a60bffb1ea52e38522eac6bd9f07812366a
+committed  6ad3ba5878b1de9d97e7867553050a60bffb1ea52e38522eac6bd9f07812366a   <- handed to ReleaseBuffer
+
+BIT-EXACT to the device buffer: 1411200 bytes, not one byte altered.
+```
+
+That is one hash for the decoder's output, for FFmpeg's decode of the same file, and for the
+bytes handed to `IAudioRenderClient::ReleaseBuffer` on a real endpoint in WASAPI exclusive
+mode. `ReleaseBuffer` is where the claim stops and the driver begins, and
+[docs/devices.md](docs/devices.md) records the measurement that established why nothing on
+an ordinary machine can see past it — including why a virtual cable, the obvious instrument,
+turns out not to be one.
+
+Working: WAV and FLAC decoding (hash-identical to FFmpeg), format negotiation against real
+drivers, the passthrough graph on two threads, WASAPI exclusive down to a 2 ms period,
+768 kHz / 32-bit on a USB DAC. 57 tests on MSVC and clang-cl.
 
 ```
 mediaperch-probe devices     # opens nothing, disturbs nothing
-mediaperch-probe negotiate   # offers every candidate to a real device
-mediaperch-probe play        # takes the endpoint for the duration
+mediaperch-probe decode      # decode a file and hash it. No device involved
+mediaperch-probe negotiate   # offer every candidate format to a real device
+mediaperch-probe play        # a test tone. Takes the endpoint for the duration
+mediaperch-probe verify      # a file, hashed at the device boundary
 ```
 
 - [docs/design.md](docs/design.md) — the shape of the program, and the two constraints that

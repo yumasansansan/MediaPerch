@@ -57,6 +57,11 @@ target_include_directories(mediaperch_abi INTERFACE "${CMAKE_CURRENT_LIST_DIR}/i
 
 add_subdirectory(src/core)
 
+# Portable modules build wherever the core does.
+if(MEDIAPERCH_BUILD_PLATFORM)
+    add_subdirectory(modules/decode_native)
+endif()
+
 if(MEDIAPERCH_BUILD_PLATFORM AND WIN32)
     add_subdirectory(modules/sink_wasapi)
     add_subdirectory(src/win)

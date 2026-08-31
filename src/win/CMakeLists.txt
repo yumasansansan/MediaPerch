@@ -7,6 +7,8 @@
 add_library(mediaperch_win STATIC
     mediaperch/platform.cpp
     mediaperch/platform.hpp
+    mediaperch/verify.cpp
+    mediaperch/verify.hpp
     mediaperch/win_headers.hpp
 )
 add_library(MediaPerch::win ALIAS mediaperch_win)
@@ -14,7 +16,7 @@ add_library(MediaPerch::win ALIAS mediaperch_win)
 target_include_directories(mediaperch_win PUBLIC "${CMAKE_CURRENT_LIST_DIR}")
 target_link_libraries(mediaperch_win
     PUBLIC MediaPerch::core
-    PRIVATE mediaperch_flags avrt ole32)
+    PRIVATE mediaperch_flags mediaperch_waveformat avrt ole32 bcrypt)
 
 set_target_properties(mediaperch_win PROPERTIES FOLDER "win")
 
@@ -25,5 +27,5 @@ set_target_properties(mediaperch_probe PROPERTIES
     OUTPUT_NAME "mediaperch-probe"
     FOLDER "win")
 
-# The probe is useless without a sink beside it.
-add_dependencies(mediaperch_probe mp_sink_wasapi)
+# The probe is useless without modules beside it.
+add_dependencies(mediaperch_probe mp_sink_wasapi mp_decode_native)
