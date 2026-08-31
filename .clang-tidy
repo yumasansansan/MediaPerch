@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Tuned for a program with a real-time thread. The checks that are switched off
+# are switched off for a stated reason, not because they were noisy.
+
+Checks: >
+  bugprone-*,
+  cert-*,
+  concurrency-*,
+  cppcoreguidelines-*,
+  misc-*,
+  modernize-*,
+  performance-*,
+  portability-*,
+  readability-*,
+  -bugprone-easily-swappable-parameters,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -cppcoreguidelines-pro-bounds-constant-array-index,
+  -misc-non-private-member-variables-in-classes,
+  -modernize-use-trailing-return-type,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -readability-function-cognitive-complexity
+
+# -*-avoid-magic-numbers and -*-magic-numbers: a byte count, a marker value and a
+#   speaker-mask bit are all "magic numbers" that are clearer written out than
+#   given a name.
+# -pro-bounds-pointer-arithmetic and -pro-type-reinterpret-cast: the ring and the
+#   sink move raw device bytes. That is the job.
+# -use-trailing-return-type: a whole-codebase style change for no benefit.
+# -easily-swappable-parameters: fires on (ptr, size) pairs, which is the shape of
+#   every buffer API there is.
+
+WarningsAsErrors: >
+  bugprone-*,
+  concurrency-*,
+  cert-*,
+  performance-*
+
+HeaderFilterRegex: '.*/(src|include)/.*\.(h|hpp)$'
+
+CheckOptions:
+  readability-identifier-naming.ClassCase: CamelCase
+  readability-identifier-naming.StructCase: CamelCase
+  readability-identifier-naming.EnumCase: CamelCase
+  readability-identifier-naming.EnumConstantCase: lower_case
+  readability-identifier-naming.FunctionCase: lower_case
+  readability-identifier-naming.VariableCase: lower_case
+  readability-identifier-naming.ParameterCase: lower_case
+  readability-identifier-naming.PrivateMemberCase: lower_case
+  readability-identifier-naming.PrivateMemberSuffix: '_'
+  readability-identifier-naming.NamespaceCase: lower_case
+  readability-identifier-naming.ConstexprVariableCase: lower_case
+  readability-identifier-naming.MacroDefinitionCase: UPPER_CASE
+  readability-identifier-naming.MacroDefinitionIgnoredRegexp: '^MP_.*$'

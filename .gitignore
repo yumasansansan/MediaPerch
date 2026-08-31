@@ -1,0 +1,21 @@
+# Build trees
+/build/
+/out/
+/.vs/
+/.cache/
+CMakeUserPresets.json
+
+# Compiler and tooling droppings
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+compile_commands.json
+
+# Editors
+*.swp
+*~
+.DS_Store

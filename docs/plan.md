@@ -193,9 +193,11 @@ Every rule below exists because of the render-thread constraint in
    caller supplies buffers and the callee fills them. A single host allocator vtable is
    passed at init for the cases that genuinely need one, and it is never called from an RT
    entry point.
-2. **Every interface struct begins with `size_t size`.** New fields append; a host reading
-   an older module clamps at `size`. This is the only versioning scheme that survives a
-   third-party module compiled a year ago.
+2. **Every interface struct begins with `uint32_t size`.** New fields append; a host
+   reading an older module clamps at `size`. This is the only versioning scheme that
+   survives a third-party module compiled a year ago. `uint32_t` rather than `size_t`
+   because it keeps one arch-dependent field width out of every struct in the ABI, and no
+   descriptor is going to approach 4 GB.
 3. **Nothing unwinds.** C++ entry points are `noexcept` shims; Rust entry points wrap their
    bodies in `catch_unwind` and return an error code. A module that unwinds anyway is
    terminated with a diagnostic, not "handled".
@@ -320,13 +322,25 @@ sink module's judgement.
 
 ### 6.1 Candidate order
 
-1. The source format exactly — same rate, same bit depth, same channel count.
-2. The same rate and channels at a *wider* container (16-bit source into a 24-bit
-   endpoint is a lossless left-shift, and is still bit-exact in any sense that matters).
-3. The same rate, `WAVEFORMATEXTENSIBLE` with an explicit channel mask, because some drivers
-   accept only the extensible form even for stereo.
-4. — stop. Anything past here is a conversion, and a conversion is Path B and a user
-   decision.
+For each container, starting with the source's own and widening outwards:
+
+1. the plain form;
+2. the same thing as `WAVEFORMATEXTENSIBLE` with an explicit channel mask, because some
+   drivers accept only the extensible form even for stereo.
+
+Then widen — 16-bit into a 24-in-32 endpoint is a lossless left-shift — and repeat. Stop
+after the widest container the source fits. Anything past that is a conversion, and a
+conversion is Path B and a user decision.
+
+**The mask variant is paired with its own base rather than appended after every widening.**
+Written out as prose the rule reads "exact, then wider, then extensible", which would try a
+widened plain form before an exact extensible one — and so would widen the format needlessly
+on any driver whose only complaint was the missing channel mask. Cheap to get wrong, and
+invisible afterwards, because the result still plays.
+
+Non-PCM encodings get no widening at all. Moving a DoP frame into a wider container shifts
+its `0x05`/`0xFA` markers into the sample bits and the DAC stops seeing DSD; a bitstream is
+not samples in the first place.
 
 `IsFormatSupported` is called first only as a cheap filter. **`Initialize` is the answer**:
 in exclusive mode the driver, not the audio engine, decides, and some drivers say yes to
@@ -334,9 +348,21 @@ formats they then refuse.
 
 ### 6.2 What "bit-exact" means here
 
-Every sample that leaves the decoder reaches `ReleaseBuffer` with the same numeric value,
-in the same order, with no gain applied and no rate conversion. Container widening and
-channel-mask tagging are permitted. Nothing else is.
+Every sample that leaves the decoder reaches `ReleaseBuffer` carrying the same bits, in the
+same order, with no gain applied and no rate conversion. Container widening and channel-mask
+tagging are permitted. Nothing else is.
+
+Which splits the passthrough path in two, and the distinction is worth naming because it is
+the difference between a `memcpy` and a loop:
+
+| | What the sink accepted | What Path A does |
+|---|---|---|
+| **exact** | the source format, byte for byte | `memcpy` |
+| **widened** | a larger container holding the same bits | a fixed integer left-shift per sample |
+
+Both are bit-exact — no signal lost, no gain, no rate change, no float anywhere. Only the
+first is literally a copy. Saying "Path A is one `memcpy`" is true of the common case and
+not true of all of it, and the graph has to know which of the two it is running.
 
 ### 6.3 When negotiation fails
 
@@ -597,6 +623,22 @@ real time.
   both a plain panel and an ACM one is a correct read of a limited API, not a bug to hunt.
 - **scRGB `1.0` means 80 nits on HDR and reference white on ACM-SDR** (§9.6). The same code
   is right on one and wrong on the other.
+- **C23 is worth asking for and not worth relying on.** Measured on MSVC 19.51
+  (`/std:clatest`): `static_assert` as a keyword, `typeof`, `[[attributes]]`, binary
+  literals, digit separators and `()` meaning `(void)` all work. `bool`/`true`/`false` as
+  keywords, `nullptr`, and **enums with a fixed underlying type** do not — and the last of
+  those is the one an ABI header actually wants. clang has all of it. So: build C as C23,
+  and keep `include/mediaperch/module.h` in the C11 common subset, because that header's
+  whole job is to be read by a toolchain we do not control. `typedef uint32_t` plus untyped
+  enumerators gives the same guaranteed field width everywhere.
+- **What guarantees an ABI is `static_assert`, not the language version.** Every struct size
+  and every member offset is asserted in the header itself, so the check fires in whichever
+  language is compiling it — and `tests/abi_header_c.c` exists to make sure one of those
+  languages is actually C.
+- **CMake already knows MSVC spells both standards "latest".** `CXX_STANDARD 23` emits
+  `/std:c++latest` and `C_STANDARD 23` emits `/std:clatest`; there is no `/std:c++23` and no
+  `/std:c23` to ask for. Setting the flags by hand only earns a D9025 for overriding what
+  CMake put there first.
 
 ---
 

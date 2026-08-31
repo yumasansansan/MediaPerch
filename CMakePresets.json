@@ -1,0 +1,96 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 28, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "vs",
+      "inherits": "base",
+      "displayName": "Visual Studio 2026 (multi-config)",
+      "description": "Opens as a real .sln. Needs no developer prompt.",
+      "generator": "Visual Studio 18 2026",
+      "architecture": { "value": "x64", "strategy": "set" }
+    },
+    {
+      "name": "ninja-msvc",
+      "inherits": "base",
+      "displayName": "Ninja + MSVC",
+      "description": "Faster than the .sln, but run it from a developer prompt.",
+      "generator": "Ninja Multi-Config"
+    },
+    {
+      "name": "ninja-clang",
+      "inherits": "base",
+      "displayName": "Ninja + clang-cl",
+      "description": "The second compiler. Catches what MSVC lets through, and has full C23.",
+      "generator": "Ninja Multi-Config",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang-cl",
+        "CMAKE_CXX_COMPILER": "clang-cl"
+      }
+    },
+    {
+      "name": "core-only",
+      "inherits": "ninja-msvc",
+      "displayName": "Core alone",
+      "description": "What CI builds to keep src/core portable. No platform head, no modules. Ninja rather than the .sln so CI does not care which Visual Studio the runner has.",
+      "cacheVariables": {
+        "MEDIAPERCH_BUILD_PLATFORM": "OFF"
+      }
+    },
+    {
+      "name": "asan",
+      "inherits": "ninja-clang",
+      "displayName": "Ninja + clang-cl, sanitized",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "MEDIAPERCH_SANITIZE": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "vs-debug", "configurePreset": "vs", "configuration": "Debug" },
+    { "name": "vs-release", "configurePreset": "vs", "configuration": "RelWithDebInfo" },
+    { "name": "ninja-msvc", "configurePreset": "ninja-msvc" },
+    { "name": "ninja-msvc-debug", "configurePreset": "ninja-msvc", "configuration": "Debug" },
+    { "name": "ninja-msvc-release", "configurePreset": "ninja-msvc", "configuration": "RelWithDebInfo" },
+    { "name": "ninja-clang-debug", "configurePreset": "ninja-clang", "configuration": "Debug" },
+    { "name": "core-only", "configurePreset": "core-only", "configuration": "Debug" }
+  ],
+  "testPresets": [
+    {
+      "name": "vs-debug",
+      "configurePreset": "vs",
+      "configuration": "Debug",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    {
+      "name": "ninja-msvc",
+      "configurePreset": "ninja-msvc",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    {
+      "name": "ninja-clang-debug",
+      "configurePreset": "ninja-clang",
+      "configuration": "Debug",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    {
+      "name": "core-only",
+      "configurePreset": "core-only",
+      "configuration": "Debug",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    }
+  ]
+}

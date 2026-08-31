@@ -11,12 +11,16 @@ mappers Windows already ships, so content looks the way it does in the system's 
 — including on an SDR display — rather than the way one more hand-written colour pipeline
 decided it should.
 
-Not started yet. This repository currently holds the design.
+**Status: milestone 0.** The skeleton stands, the module ABI is written and is compiled as
+C as well as C++, and the portable half — formats, the negotiation candidate builder, the
+lock-free ring — builds alone and is under test on two compilers. No sound comes out yet;
+that is milestone 1.
 
 - [docs/design.md](docs/design.md) — the shape of the program, and the two constraints that
   decided it.
-- [docs/plan.md](docs/plan.md) — the plan of record: the language split, the module ABI, the
-  two audio paths, the HDR path, milestones, and the findings worth carrying forward.
+- [docs/plan.md](docs/plan.md) — the plan of record: the language decision, the module ABI,
+  the two audio paths, the HDR path, milestones, and the findings worth carrying forward.
+- [docs/building.md](docs/building.md) — how to build it.
 
 ## The shape of it, in one paragraph
 
