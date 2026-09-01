@@ -54,8 +54,17 @@ endif()
 
 # An equaliser's curve is computable, so the test computes it rather than
 # listening for it -- and then runs a tone through to check the two agree.
+# A convolution has a definition, so the test computes it the slow way and
+# subtracts.
+if(TARGET mediaperch_convolve)
+    target_sources(mediaperch_tests PRIVATE convolve_test.cpp)
+    target_link_libraries(mediaperch_tests PRIVATE mediaperch_convolve)
+endif()
+
 if(TARGET mediaperch_biquad)
-    target_sources(mediaperch_tests PRIVATE eq_test.cpp)
+    target_sources(mediaperch_tests PRIVATE eq_test.cpp autoeq_test.cpp
+                   ../modules/dsp_eq/autoeq.cpp)
+    target_include_directories(mediaperch_tests PRIVATE ../modules/dsp_eq)
     target_link_libraries(mediaperch_tests PRIVATE mediaperch_biquad)
 endif()
 

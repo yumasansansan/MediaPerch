@@ -504,6 +504,58 @@ apart. `tests/eq_test.cpp` checks every gain claim *twice*: once against that cu
 by running a sine through, because a coefficient set can be right while the difference
 equation using it is wrong, and the reverse.
 
+#### Three ways to realise the same curve
+
+`mode=iir` is the cascade itself: no latency, and the phase a biquad cascade has, which is
+minimum. `mode=linear` and `mode=minimum` build an FIR with the same magnitude and run it
+through [the convolver](#convolution). All three report the same `response`, because all
+three are realising the same `target_db` — one function, so the modes cannot disagree about
+what they are for.
+
+| | Latency | Cost at 8192 taps | Phase |
+|---|---|---|---|
+| `iir` | 0 | 25 mult/frame (5 sections) | minimum, and whatever the cascade's is |
+| `linear` | **4096 frames** | 564 mult/frame | linear: no phase shift, half the filter of pre-ringing |
+| `minimum` | **0** | 564 mult/frame | minimum: no pre-ringing, and no exact phase either |
+
+The FIR is the window method again — the target sampled on a grid, transformed back,
+truncated and Kaiser-windowed — and `mode=minimum` is that filter through the same cepstral
+factorisation the resampler uses. The delay a mode adds is reported rather than implied,
+because a player that shifts its own audio should say by how much.
+
+### Reading AutoEq
+
+[AutoEq](https://github.com/jaakkopasanen/AutoEq) (MIT) publishes a headphone correction for
+a few thousand models, in the two formats Equalizer APO reads, and `--dsp eq:preset=<path>`
+takes either.
+
+**`ParametricEQ.txt` is a cascade** — a preamp and a list of biquads — so it maps onto the
+bands one for one and works in every mode:
+
+```
+Preamp: -6.8 dB
+Filter 1: ON LSC Fc 105 Hz Gain 4.2 dB Q 0.70
+```
+```
+bands     lowshelf:105:+4.2:0.7;peak:1058:-1.4:1.51;…;-peak:8000:+1:1
+preamp    -6.80
+preset    parametric
+```
+
+A filter written `OFF` comes back as a disabled band rather than being dropped, because a
+profile that returns shorter than it went in is one somebody has to reconstruct.
+
+**`GraphicEQ.txt` is not a cascade.** It is a correction *target*, sampled at a hundred-odd
+frequencies, and there is no set of biquads it is equal to — fitting one is a real
+optimisation problem and pretending to have solved it would be worse than saying so. So a
+graphic profile selects `mode=minimum` and is realised as an FIR, which is exactly what the
+FIR modes are for. Between its points it is interpolated logarithmically in frequency and
+linearly in decibels, which is the axis it was sampled on; outside its range it holds,
+because a correction curve says nothing about what it did not measure.
+
+**The preamp is applied, not noted.** AutoEq computes it so the corrected signal does not
+clip, and a profile applied without it is a profile that clips.
+
 `headroom` is the one number to read before putting an equaliser in front of a quantiser:
 +4 dB of boost means a track that already peaked at −1 dBFS will now clip. Nothing is
 applied automatically about it, because a limiter that appears by itself is exactly what
@@ -516,6 +568,31 @@ setting to mute it and typing it again to hear it is how settings get lost. And 
 run in **transposed direct form II**, which is the form whose rounding behaves itself when a
 section's poles crowd the unit circle — which is every band under a hundred hertz at a
 hundred and ninety-two thousand samples a second.
+
+### Convolution
+
+Partitioned, in the frequency domain, because **direct convolution is not an implementation
+choice here — it is a non-starter**. A 65,536-tap impulse costs 65,536 multiply-accumulates
+per sample per channel; at 96 kHz stereo that is twelve billion a second, tens of times real
+time. The transform is the difference between a feature and an idea.
+
+Uniformly-partitioned overlap-save with a frequency-domain delay line: the impulse is cut
+into pieces and each is transformed once at configure, the input is transformed once per
+block and kept, and every output block is a sum of products of things already transformed.
+A few hundred flops per sample where the direct form wanted sixty-five thousand.
+
+**It adds no delay of its own.** Output frame *n* is the convolution at frame *n* — results
+arrive a partition at a time rather than one at a time, but nothing is shifted. Whatever
+delay a caller sees belongs to the impulse response.
+
+`tests/convolve_test.cpp` computes the convolution the slow way and subtracts: six impulse
+lengths against three partition sizes, agreeing to 10⁻¹², plus the impulse-is-a-wire
+identity, block-size invariance and channel isolation. There is nothing to interpret in a
+convolution — it has an answer, and either this produces it or it does not.
+
+A `dsp_convolve` module — an impulse response read from a file, for a room correction or a
+speaker measurement — is the same engine with the taps coming from somewhere else, and is
+not written yet.
 
 ### ReplayGain, measured rather than read
 
@@ -744,6 +821,10 @@ modules/             everything that can be loaded and unloaded at runtime.
                      stage that answers with a rate it was not given.
   dsp_mix/           the channel matrix. The third geometry, and the one whose
                      answer is a choice rather than an approximation.
+  transform/         the FFT, Bluestein, and the cepstral factorisation. Began
+                     in the resampler; moved when the equaliser wanted them too.
+  convolve/          partitioned overlap-save. What makes an FIR equaliser
+                     possible, and what a dsp_convolve would be built on.
   biquad/            second-order sections, shared: the equaliser is a cascade a
                      person chose and the loudness meter is one BS.1770 chose.
   dsp_eq/            the equaliser, anywhere on the axis.

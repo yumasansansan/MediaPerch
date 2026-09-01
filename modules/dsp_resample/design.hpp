@@ -52,6 +52,8 @@
 #ifndef MEDIAPERCH_RESAMPLE_DESIGN_HPP
 #define MEDIAPERCH_RESAMPLE_DESIGN_HPP
 
+#include <transform.hpp>
+
 #include <complex>
 #include <cstdint>
 #include <string>
@@ -227,13 +229,9 @@ struct Response {
                                     std::string& why);
 
 // --- the pieces, exposed because the tests measure them separately ----------
-
-/// In-place radix-2 FFT. `a.size()` must be a power of two.
-void fft(std::vector<std::complex<double>>& a, bool inverse);
-
-/// The DFT of any length, via Bluestein's chirp-z. Needed because a Dolph
-/// window is as long as the filter and filter lengths are not powers of two.
-void dft_any(std::vector<std::complex<double>>& a);
+//
+// The transforms themselves are in `modules/transform` now: the equaliser
+// wanted the same three, and neither owner should own them.
 
 /// A Kaiser window of `length` points for the given stopband attenuation.
 [[nodiscard]] std::vector<double> kaiser_window(std::size_t length, double attenuation_db);
@@ -245,16 +243,6 @@ void dft_any(std::vector<std::complex<double>>& a);
 /// Kaiser's shape parameter for a stopband, exposed because the DPSS window
 /// takes the same specification in different units.
 [[nodiscard]] double kaiser_beta_for(double attenuation_db) noexcept;
-
-/// Replaces `h` with the minimum-phase filter of the same magnitude response.
-///
-/// The real cepstrum, folded: a spectrum's magnitude decides its minimum-phase
-/// counterpart, and folding the cepstrum onto the causal half is how that
-/// counterpart is computed. `floor_db` is where the logarithm is clamped --
-/// a stopband null is a true zero, and the logarithm of zero has no folded
-/// version.
-void to_minimum_phase(std::vector<double>& h, double floor_db,
-                      std::uint32_t oversample);
 
 /// Parks-McClellan for a Type I (odd length, symmetric) lowpass.
 ///

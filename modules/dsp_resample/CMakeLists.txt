@@ -10,7 +10,8 @@
 
 add_library(mediaperch_resample STATIC resample.cpp design.cpp)
 target_include_directories(mediaperch_resample PUBLIC "${CMAKE_CURRENT_LIST_DIR}")
-target_link_libraries(mediaperch_resample PRIVATE mediaperch_flags)
+target_link_libraries(mediaperch_resample
+    PUBLIC mediaperch_transform PRIVATE mediaperch_flags)
 set_target_properties(mediaperch_resample PROPERTIES FOLDER "modules")
 
 add_library(mp_dsp_resample MODULE dsp_resample.cpp)

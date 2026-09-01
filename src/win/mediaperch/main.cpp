@@ -271,7 +271,11 @@ Options
                     `--dsp mix:channels=2` is the other geometry: every
                     coefficient of the matrix is a setting, the matrix that was
                     built is reported, and an upmix places what exists rather
-                    than inventing what does not
+                    than inventing what does not. `--dsp eq:preset=<path>`
+                    reads an AutoEq or Equalizer APO profile -- either the
+                    parametric one or the graphic curve, which needs
+                    mode=linear or mode=minimum because a curve is a target
+                    rather than a cascade
   --dither KIND     Path B only, and only where bits are actually being thrown
                     away. `triangular` (default) is the standard answer;
                     `highpass` is the same distribution with its noise tilted

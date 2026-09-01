@@ -472,7 +472,7 @@ TEST_CASE("the fast transform is the slow one", "[resample][design]")
     for (const std::size_t n : {2u, 8u, 64u, 256u}) {
         const auto x = ramp_signal(n);
         auto fast = x;
-        mp::resample::fft(fast, false);
+        mp::transform::fft(fast, false);
         const auto slow = naive_dft(x);
         for (std::size_t k = 0; k < n; ++k) {
             INFO("n " << n << " bin " << k);
@@ -480,7 +480,7 @@ TEST_CASE("the fast transform is the slow one", "[resample][design]")
             REQUIRE(fast[k].imag() == Catch::Approx(slow[k].imag()).margin(1e-9));
         }
         auto round_trip = fast;
-        mp::resample::fft(round_trip, true);
+        mp::transform::fft(round_trip, true);
         for (std::size_t i = 0; i < n; ++i) {
             REQUIRE(round_trip[i].real() == Catch::Approx(x[i].real()).margin(1e-12));
         }
@@ -494,7 +494,7 @@ TEST_CASE("a transform of a length that is not a power of two", "[resample][desi
     for (const std::size_t n : {3u, 7u, 100u, 147u, 161u}) {
         const auto x = ramp_signal(n);
         auto fast = x;
-        mp::resample::dft_any(fast);
+        mp::transform::dft_any(fast);
         const auto slow = naive_dft(x);
         for (std::size_t k = 0; k < n; ++k) {
             INFO("n " << n << " bin " << k);
@@ -523,7 +523,7 @@ TEST_CASE("a Dolph-Chebyshev window puts every sidelobe at the level asked for",
     for (std::size_t i = 0; i < n; ++i) {
         spectrum[i] = {w[i], 0.0};
     }
-    mp::resample::fft(spectrum, false);
+    mp::transform::fft(spectrum, false);
     const double peak = std::abs(spectrum[0]);
 
     // Past the mainlobe, every sidelobe sits at the same height. One bin of an

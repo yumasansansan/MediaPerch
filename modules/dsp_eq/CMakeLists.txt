@@ -3,9 +3,10 @@
 # The equaliser. The sections themselves live in modules/biquad, because the
 # loudness meter wants the same arithmetic for a cascade nobody chose.
 
-add_library(mp_dsp_eq MODULE dsp_eq.cpp)
+add_library(mp_dsp_eq MODULE dsp_eq.cpp autoeq.cpp)
 target_link_libraries(mp_dsp_eq
-    PRIVATE MediaPerch::abi mediaperch_flags mediaperch_biquad)
+    PRIVATE MediaPerch::abi mediaperch_flags mediaperch_biquad
+            mediaperch_convolve mediaperch_transform)
 
 set_target_properties(mp_dsp_eq PROPERTIES
     PREFIX ""
