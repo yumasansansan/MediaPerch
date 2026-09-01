@@ -2,30 +2,82 @@
 
 #include "mediaperch/dither.hpp"
 
+#include "mediaperch/shaper_tables.hpp"
+
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <numbers>
 
 namespace mp {
 namespace {
 
-/// h[k] = (-1)^(k+1) * C(N,k), for k = 1..N.
+/// c[k-1] = (-1)^k C(N,k), for k = 1..N.
 ///
-/// Which is the binomial expansion of (1 - z^-1)^N with the k = 0 term removed,
-/// because that term is the sample itself rather than a feedback tap. Derived
-/// here rather than tabulated: C(N,k) is exact in `double` for every N this
-/// allows, and a table would be a thing to get wrong.
-void binomial_taps(std::uint32_t order, std::array<double, NoiseShaping::k_max_order>& out)
+/// The binomial expansion of (1 - z^-1)^N without its k = 0 term, negated for
+/// the convention this file uses -- the history is added, so the taps carry the
+/// sign. With them, the noise transfer function 1 + C(z) is exactly (1 - z^-1)^N.
+///
+/// Derived rather than tabulated: C(N,k) is exact in `double` for every order
+/// this allows, and a table would be a thing to get wrong.
+std::vector<double> binomial_taps(std::uint32_t order)
 {
-    out.fill(0.0);
+    std::vector<double> out;
+    out.reserve(order);
     double c = 1.0; // C(N,0)
     for (std::uint32_t k = 1; k <= order; ++k) {
         c = c * static_cast<double>(order - k + 1) / static_cast<double>(k);
-        out[k - 1] = (k % 2 == 1) ? c : -c;
+        out.push_back((k % 2 == 0) ? c : -c);
     }
+    return out;
+}
+
+std::vector<double> shaper_taps(const NoiseShaping& shaping, std::uint32_t sample_rate)
+{
+    switch (shaping.kind) {
+    case NoiseShaping::Kind::none:
+        return {};
+    case NoiseShaping::Kind::binomial:
+        return binomial_taps(std::min(shaping.strength, NoiseShaping::k_max_order));
+    case NoiseShaping::Kind::shibata:
+        if (const ShaperCurve* curve = find_shaper(sample_rate, shaping.strength)) {
+            return std::vector<double>{curve->coefficients,
+                                       curve->coefficients + curve->length};
+        }
+        // No curve for this rate. Silently using one fitted for another rate
+        // would put the noise an octave from where it belongs, so this is
+        // nothing at all, and `taps()` says so.
+        return {};
+    }
+    return {};
 }
 
 } // namespace
+
+const ShaperCurve* find_shaper(std::uint32_t sample_rate, std::uint32_t intensity) noexcept
+{
+    for (const ShaperCurve& curve : shaper_curves()) {
+        if (curve.sample_rate == sample_rate && curve.intensity == intensity) {
+            return curve.length != 0 ? &curve : nullptr;
+        }
+    }
+    return nullptr;
+}
+
+std::uint32_t highest_intensity(std::uint32_t sample_rate) noexcept
+{
+    std::uint32_t best = 0;
+    for (const ShaperCurve& curve : shaper_curves()) {
+        // 90 and above are SSRC's special entries -- old curves, a plain
+        // first-order shaper, and none -- rather than a continuation of the
+        // scale, so they are not what "the strongest" means.
+        if (curve.sample_rate == sample_rate && curve.intensity < 90 &&
+            curve.intensity > best) {
+            best = curve.intensity;
+        }
+    }
+    return best;
+}
 
 const char* dither_kind_name(DitherKind kind) noexcept
 {
@@ -62,18 +114,64 @@ bool dither_kind_from_name(std::string_view name, DitherKind& out) noexcept
     return true;
 }
 
-Dither::Dither(DitherKind kind, NoiseShaping shaping, std::uint32_t seed) noexcept
-    : kind_(kind), order_(std::min(shaping.order, NoiseShaping::k_max_order)), seed_(seed),
-      rng_(seed)
+bool noise_shaping_from_name(std::string_view name, NoiseShaping& out) noexcept
 {
-    binomial_taps(order_, taps_);
+    auto number = [](std::string_view text, std::uint32_t& value) {
+        const char* first = text.data();
+        const char* last = first + text.size();
+        const auto result = std::from_chars(first, last, value);
+        return result.ec == std::errc{} && result.ptr == last;
+    };
+
+    if (name.starts_with("shibata")) {
+        out.kind = NoiseShaping::Kind::shibata;
+        out.strength = 0;
+        const std::string_view rest = name.substr(7);
+        if (rest.empty()) {
+            return true;
+        }
+        return rest.front() == ':' && number(rest.substr(1), out.strength);
+    }
+
+    std::uint32_t order = 0;
+    if (!number(name, order) || order > NoiseShaping::k_max_order) {
+        return false;
+    }
+    out.kind = order == 0 ? NoiseShaping::Kind::none : NoiseShaping::Kind::binomial;
+    out.strength = order;
+    return true;
+}
+
+std::string noise_shaping_describe(const NoiseShaping& shaping, std::uint32_t sample_rate)
+{
+    switch (shaping.kind) {
+    case NoiseShaping::Kind::none:
+        return "none";
+    case NoiseShaping::Kind::binomial:
+        return "binomial order " + std::to_string(shaping.strength);
+    case NoiseShaping::Kind::shibata:
+        if (const ShaperCurve* curve = find_shaper(sample_rate, shaping.strength)) {
+            return std::string{"shibata: "} + curve->name + " (" +
+                   std::to_string(curve->length) + " taps)";
+        }
+        return "shibata: no curve for " + std::to_string(sample_rate) +
+               " Hz at intensity " + std::to_string(shaping.strength) + ", so none";
+    }
+    return "none";
+}
+
+Dither::Dither(DitherKind kind, NoiseShaping shaping, std::uint32_t sample_rate,
+               std::uint32_t seed)
+    : kind_(kind), seed_(seed), rng_(seed), taps_(shaper_taps(shaping, sample_rate)),
+      history_(taps_.size(), 0.0)
+{
 }
 
 void Dither::reset() noexcept
 {
     rng_ = seed_;
     previous_ = 0.0;
-    history_.fill(0.0);
+    std::fill(history_.begin(), history_.end(), 0.0);
 }
 
 double Dither::uniform() noexcept
@@ -122,28 +220,28 @@ double Dither::next() noexcept
 
 double Dither::feedback() const noexcept
 {
-    // u[n] = x[n] - sum h[k] e[n-k], which makes the noise transfer function
-    // 1 - H(z) = (1 - z^-1)^N exactly.
     double sum = 0.0;
-    for (std::uint32_t k = 0; k < order_; ++k) {
+    for (std::size_t k = 0; k < taps_.size(); ++k) {
         sum += taps_[k] * history_[k];
     }
     return sum;
 }
 
-void Dither::accept(double error) noexcept
+void Dither::accept(double error, bool clipped) noexcept
 {
-    if (order_ == 0) {
+    if (taps_.empty()) {
         return;
     }
-    // A shaper is a feedback loop and a feedback loop can run away: a clipped
-    // sample produces an error far larger than an LSB, and a high-order filter
-    // multiplies it. Bounding what enters the history costs nothing when the
-    // signal is inside the rails and stops the loop ringing when it is not.
-    constexpr double k_bound = 4.0;
-    error = std::clamp(error, -k_bound, k_bound);
+    // A shaper is a feedback loop and an overloaded sample hands it an error
+    // far larger than an LSB. SSRC bounds the stored value to one LSB when the
+    // quantiser clipped, and does not bound it otherwise; the loop is stable
+    // for anything inside the rails and this is what keeps it from ringing
+    // when the signal is not.
+    if (clipped) {
+        error = std::clamp(error, -1.0, 1.0);
+    }
 
-    for (std::uint32_t k = order_; k > 1; --k) {
+    for (std::size_t k = history_.size(); k > 1; --k) {
         history_[k - 1] = history_[k - 2];
     }
     history_[0] = error;

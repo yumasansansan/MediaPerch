@@ -104,9 +104,9 @@ bool is_float(SampleType t) noexcept
 
 } // namespace
 
-std::uint32_t Converter::shaping_order() const noexcept
+std::uint32_t Converter::shaping_taps() const noexcept
 {
-    return dither_.empty() ? 0 : dither_.front().order();
+    return dither_.empty() ? 0 : dither_.front().taps();
 }
 
 Converter::Converter(const Format& from, const Format& to, ConvertConfig config) noexcept
@@ -175,7 +175,7 @@ Converter::Converter(const Format& from, const Format& to, ConvertConfig config)
     if (quantising_) {
         dither_.reserve(to.channels);
         for (std::uint32_t c = 0; c < to.channels; ++c) {
-            dither_.emplace_back(config.dither, config.shaping,
+            dither_.emplace_back(config.dither, config.shaping, to.sample_rate,
                                  config.seed + c * 0x9E3779B9u);
         }
     }
@@ -215,22 +215,30 @@ void Converter::run(const void* src, void* dst, std::size_t frames) noexcept
         const double lsb = v * scale_ / step_;
 
         double quantised = 0.0;
+        double clamped = 0.0;
+        bool clipped = false;
         if (quantising_) {
             Dither& noise = dither_[i % channels];
-            // Subtract what the shaper says this sample owes for the errors
-            // before it, then quantise, then hand back what this one cost.
-            const double shaped = lsb - noise.feedback();
+            // Add what the filter says this sample owes for the errors before
+            // it, quantise, and hand back what this one cost. Adding rather
+            // than subtracting is SSRC's convention and the one its curves are
+            // written for; the other way round the same numbers shape the noise
+            // *into* the midband.
+            const double shaped = lsb + noise.feedback();
             quantised = std::round(shaped + noise.next());
-            noise.accept(quantised - shaped);
+
+            // The clamp is not paranoia: a gain above unity, a float source
+            // that legitimately exceeds full scale -- which float WAV routinely
+            // does -- and a shaper handed a transient all land outside.
+            clamped = std::clamp(quantised * step_, floor_, ceiling_);
+            clipped = clamped != quantised * step_;
+            noise.accept(clamped / step_ - shaped, clipped);
         } else {
             quantised = std::round(lsb);
+            clamped = std::clamp(quantised * step_, floor_, ceiling_);
         }
 
-        // The clamp is not paranoia: a gain above unity, a float source that
-        // legitimately exceeds full scale -- which float WAV routinely does --
-        // and a shaper that has just been handed a transient all land outside.
-        write_sample(out + i * out_step, to_.sample_type,
-                     std::clamp(quantised * step_, floor_, ceiling_));
+        write_sample(out + i * out_step, to_.sample_type, clamped);
     }
 }
 

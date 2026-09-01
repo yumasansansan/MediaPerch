@@ -85,7 +85,9 @@ public:
     /// What is actually happening to the samples, in the words the settings
     /// use. For whoever has to tell the user, which §6.3 says somebody must.
     [[nodiscard]] DitherKind dither_kind() const noexcept { return config_.dither; }
-    [[nodiscard]] std::uint32_t shaping_order() const noexcept;
+    /// How many taps the shaper ended up with. Zero means it is not running,
+    /// which includes a curve that did not exist for this rate.
+    [[nodiscard]] std::uint32_t shaping_taps() const noexcept;
     /// True when the destination is narrow enough that dither and shaping are
     /// doing something. Widening cannot lose anything, so neither runs.
     [[nodiscard]] bool quantising() const noexcept { return quantising_; }

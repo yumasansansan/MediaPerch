@@ -93,7 +93,23 @@ can be stated:
 
 So nothing happens on the way *in*, and `tests/convert_test.cpp` proves it by taking every
 integer type out to `f64` and back and comparing bytes. The only rounding in the whole
-conversion is the one at the bottom of it, which is the one dither and shaping are about.
+conversion is the one at the bottom of it.
+
+**`double` is not narrowed on the way out either, except to the format that was asked for.**
+A 32-bit integer device is written from the `double` directly — there is no float32 anywhere
+in that path, and the cast to `float` exists on exactly one branch, the one whose
+destination *is* `f32`. An `f64` device, if one existed, would take the source unaltered
+through Path A: `f64` is a sample type in the ABI, `classify` calls an `f64` source on an
+`f64` device `exact`, and that is a `memcpy`.
+
+**And nothing useful can be done on the way in.** Widening is exact, so there is no
+information to recover and nothing to improve: what is sometimes done at this point —
+"bit-depth expansion", guessing at the dither that was removed — is speculative
+reconstruction rather than fidelity, and this program does not do it. The processing that
+is worth having lives at the *other* end, where bits are actually being discarded, which is
+what the rest of this section is about. The one genuine exception is **de-emphasis**, which
+is not a width question at all: it is a defined format property that a source either carries
+or does not.
 
 ### Dither
 
@@ -128,13 +144,28 @@ tilts the noise further out of the midband and each order also multiplies the to
 9th-order binomial shaper puts far more noise above 15 kHz than it removes below. Orders 1
 to 3 are useful. Past that, this is the mechanism rather than a recommendation.
 
-**The psychoacoustically weighted shapers are not here** — Lipshitz's minimally-audible
-curves, SoX's `shibata` family, and the `NS`/`LNS` sets other players ship. Those are not
-expressions to derive; they are tables of measured coefficients, and a table written from
-memory is a table that is wrong. They belong here, and they belong here the way
-`modules/decode_aac/aac_tables.cpp` got here: transcribed from a named source by a
-generator that refuses to emit a table failing its own check. `tools/gen_aac_tables.py` is
-the pattern.
+#### The measured curves
+
+`--shape shibata[:N]` selects one of **67 ATH-weighted curves over 8 sample rates**,
+transcribed by `tools/gen_shaper_tables.py` from
+[SSRC](https://github.com/shibatch/ssrc) — Naoki Shibata's, under the Boost Software
+Licence 1.0, which is GPL-3 compatible. They are *measured against the absolute threshold
+of hearing* rather than derived, which is also why they are indexed by sample rate: where
+the ear stops listening is a fixed frequency, and where that lands in the spectrum depends
+on how fast the samples go past. Intensity 0 is gentle and 16 is aggressive; 4 to 40 taps.
+
+**A curve is never substituted across rates.** A shaper fitted for 44.1 kHz applied to a
+96 kHz stream puts its noise an octave from where it belongs, so a rate with no curve gets
+no shaping and the report says so rather than sounding plausible.
+
+The transcription is checked rather than trusted, and it earned that: the first run of the
+generator matched 65 of the 67 entries — two carry a trailing comment between their closing
+braces — and wrote the file **without a word**. It now counts the entries in the source
+before it counts the ones it parsed, and refuses if they differ. `tests/convert_test.cpp`
+holds spot values read out of the source by eye.
+
+`ReSampler` (LGPL-2.1, also compatible) is the other implementation worth reading here and
+its curves are not transcribed yet.
 
 ### Choosing the path
 

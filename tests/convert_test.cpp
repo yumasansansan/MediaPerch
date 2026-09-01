@@ -9,11 +9,13 @@
 
 #include <mediaperch/convert.hpp>
 #include <mediaperch/dither.hpp>
+#include <mediaperch/shaper_tables.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <cmath>
 #include <cstring>
+#include <string>
 #include <vector>
 
 namespace {
@@ -353,7 +355,7 @@ TEST_CASE("highpass dither is tilted where plain triangular dither is not",
     // samples are *anti*-correlated -- which is what "tilted away from the
     // midband" means when it is written as a number rather than a picture.
     auto lag_one = [](mp::DitherKind kind) {
-        mp::Dither noise{kind, mp::NoiseShaping{}, 0x1f2e3d4cu};
+        mp::Dither noise{kind, mp::NoiseShaping{}, 48000, 0x1f2e3d4cu};
         std::vector<double> d(20000);
         for (auto& v : d) {
             v = noise.next();
@@ -390,7 +392,9 @@ TEST_CASE("noise shaping takes the error out of the band it was in",
     auto drift = [&](std::uint32_t order) {
         mp::ConvertConfig c;
         c.dither = mp::DitherKind::none; // so the shaper is the only thing acting
-        c.shaping.order = order;
+        c.shaping.kind = order == 0 ? mp::NoiseShaping::Kind::none
+                                    : mp::NoiseShaping::Kind::binomial;
+        c.shaping.strength = order;
         mp::Converter conv{make(mp::SampleType::f32), make(mp::SampleType::s16), c};
         std::vector<std::uint8_t> out(input.size() * 2);
         conv.run(bytes.data(), out.data(), frames);
@@ -414,16 +418,17 @@ TEST_CASE("order zero is off, and the order is what was asked for",
     mp::ConvertConfig c;
     c.dither = mp::DitherKind::none;
     CHECK(mp::Converter{make(mp::SampleType::f32), make(mp::SampleType::s16), c}
-              .shaping_order() == 0);
+              .shaping_taps() == 0);
 
-    c.shaping.order = 3;
+    c.shaping.kind = mp::NoiseShaping::Kind::binomial;
+    c.shaping.strength = 3;
     CHECK(mp::Converter{make(mp::SampleType::f32), make(mp::SampleType::s16), c}
-              .shaping_order() == 3);
+              .shaping_taps() == 3);
 
     // Past what the filter holds, clamped rather than read off the end.
-    c.shaping.order = 99;
+    c.shaping.strength = 99;
     CHECK(mp::Converter{make(mp::SampleType::f32), make(mp::SampleType::s16), c}
-              .shaping_order() == mp::NoiseShaping::k_max_order);
+              .shaping_taps() == mp::NoiseShaping::k_max_order);
 }
 
 TEST_CASE("the dither names a user types round-trip", "[convert][dither]")
@@ -447,4 +452,112 @@ TEST_CASE("the dither names a user types round-trip", "[convert][dither]")
 
     CHECK_FALSE(mp::dither_kind_from_name("shibata", out));
     CHECK_FALSE(mp::dither_kind_from_name("", out));
+}
+
+// --------------------------------------------------------------------------
+// The measured curves
+
+TEST_CASE("the transcribed curves are the ones in the source", "[convert][shaper]")
+{
+    // Spot values read out of SSRC's shapercoefs.h by eye. A generator that
+    // silently wrote most of a table is the failure this guards -- it happened
+    // once already, when two entries carrying a trailing comment did not match
+    // the pattern and 65 of 67 curves were emitted without a word.
+    const mp::ShaperCurve* curve = mp::find_shaper(44100, 0);
+    REQUIRE(curve != nullptr);
+    CHECK(curve->length == 12);
+    CHECK(curve->coefficients[0] == -0.59543782472610473633);
+    CHECK(curve->coefficients[11] == -0.031739629805088043213);
+
+    CHECK(mp::shaper_curves().size() == 67);
+
+    // Every rate a decoder in this tree can produce at CD and DVD rates.
+    CHECK(mp::find_shaper(48000, 0) != nullptr);
+    CHECK(mp::find_shaper(96000, 1) != nullptr);
+
+    // "No shaper" is a curve with no taps, and asking for it gets nothing
+    // rather than an empty filter to run.
+    CHECK(mp::find_shaper(44100, 99) == nullptr);
+
+    // A rate with no curves at all. Quietly using one fitted for another rate
+    // would put the noise an octave from where it belongs.
+    CHECK(mp::find_shaper(176400, 0) == nullptr);
+    CHECK(mp::highest_intensity(44100) == 16);
+    CHECK(mp::highest_intensity(176400) == 0);
+}
+
+TEST_CASE("a measured curve shapes, and an absent one does nothing",
+          "[convert][shaper]")
+{
+    constexpr std::size_t frames = 4000;
+    std::vector<float> input(frames * 2, 0.3F / 32768.0F);
+    const auto bytes = from_floats(input);
+
+    auto drift = [&](mp::NoiseShaping shaping) {
+        mp::ConvertConfig c;
+        c.dither = mp::DitherKind::none;
+        c.shaping = shaping;
+        mp::Converter conv{make(mp::SampleType::f32), make(mp::SampleType::s16), c};
+        std::vector<std::uint8_t> out(input.size() * 2);
+        conv.run(bytes.data(), out.data(), frames);
+        double sum = 0.0;
+        for (std::size_t i = 0; i < frames; ++i) {
+            sum += static_cast<double>(as_s16(out.data() + i * 2 * 2)) - 0.3;
+        }
+        return std::abs(sum);
+    };
+
+    mp::NoiseShaping off;
+    mp::NoiseShaping shibata{mp::NoiseShaping::Kind::shibata, 3};
+
+    // The ATH curves are not DC-nulling the way a binomial shaper is -- they
+    // are fitted to a hearing threshold, not to a corner at zero -- so the
+    // assertion is that they move the error a long way, not that they cancel
+    // it exactly.
+    CHECK(drift(off) > 1000.0);
+    CHECK(drift(shibata) < drift(off) / 10.0);
+
+    // 48 kHz has curves, this rate has none, and the difference is visible:
+    // nothing happens rather than something wrong happening.
+    mp::ConvertConfig c;
+    c.dither = mp::DitherKind::none;
+    c.shaping = shibata;
+    mp::Format odd = make(mp::SampleType::s16);
+    odd.sample_rate = 176400;
+    mp::Format odd_in = make(mp::SampleType::f32);
+    odd_in.sample_rate = 176400;
+    CHECK(mp::Converter{odd_in, odd, c}.shaping_taps() == 0);
+    CHECK(mp::Converter{make(mp::SampleType::f32), make(mp::SampleType::s16), c}
+              .shaping_taps() > 0);
+}
+
+TEST_CASE("the shaper names a user types are read the way they look",
+          "[convert][shaper]")
+{
+    mp::NoiseShaping out;
+
+    REQUIRE(mp::noise_shaping_from_name("0", out));
+    CHECK(out.kind == mp::NoiseShaping::Kind::none);
+
+    REQUIRE(mp::noise_shaping_from_name("3", out));
+    CHECK(out.kind == mp::NoiseShaping::Kind::binomial);
+    CHECK(out.strength == 3);
+
+    REQUIRE(mp::noise_shaping_from_name("shibata", out));
+    CHECK(out.kind == mp::NoiseShaping::Kind::shibata);
+    CHECK(out.strength == 0);
+
+    REQUIRE(mp::noise_shaping_from_name("shibata:6", out));
+    CHECK(out.strength == 6);
+
+    CHECK_FALSE(mp::noise_shaping_from_name("10", out));      // past the order
+    CHECK_FALSE(mp::noise_shaping_from_name("shibata6", out)); // missing colon
+    CHECK_FALSE(mp::noise_shaping_from_name("lipshitz", out)); // not transcribed
+    CHECK_FALSE(mp::noise_shaping_from_name("", out));
+
+    // And the report says what actually happened, not what was asked for.
+    CHECK(mp::noise_shaping_describe({mp::NoiseShaping::Kind::shibata, 0}, 44100)
+              .starts_with("shibata: ATH"));
+    CHECK(mp::noise_shaping_describe({mp::NoiseShaping::Kind::shibata, 0}, 176400)
+              .find("no curve") != std::string::npos);
 }

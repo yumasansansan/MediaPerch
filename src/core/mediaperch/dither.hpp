@@ -7,8 +7,8 @@
 // ear as distortion -- harmonics that were not in the music -- rather than as
 // noise. Dither decorrelates it by making the residue depend on a random value
 // instead, which costs about half a bit of noise floor and buys a quantiser
-// whose error is white and signal-independent. That trade is why every mastering
-// chain in the world takes it.
+// whose error is white and signal-independent. That trade is why every
+// mastering chain in the world takes it.
 //
 // Noise shaping is the second half. The quantiser's error is unavoidable, but
 // *where in the spectrum it lands* is not: feeding it back through a filter
@@ -21,9 +21,10 @@
 #ifndef MEDIAPERCH_DITHER_HPP
 #define MEDIAPERCH_DITHER_HPP
 
-#include <array>
 #include <cstdint>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace mp {
 
@@ -58,24 +59,34 @@ enum class DitherKind : std::uint32_t {
     gaussian,
 };
 
-/// The error-feedback filter that decides where the quantisation noise lands.
-///
-/// The coefficients are the binomial expansion of (1 - z^-1)^N, which is what
-/// makes the noise transfer function exactly an Nth-order highpass. They are
-/// *derived*, not transcribed: h[k] = (-1)^(k+1) C(N,k).
-///
-/// **Order is not quality.** Each order tilts the noise further out of the
-/// midband, and each order also multiplies the total noise power: a 9th-order
-/// binomial shaper puts 48 dB more noise above 15 kHz than it removes below it.
-/// Orders 1 to 3 are useful; past that this is the mechanism rather than a
-/// recommendation, and a psychoacoustically weighted shaper -- Lipshitz's, or
-/// SoX's shibata curves -- is a table of measured coefficients rather than
-/// anything a binomial expansion produces. Those belong here too and are not
-/// here yet, for the reason `tools/gen_aac_tables.py` exists: a table copied
-/// from memory is a table that is wrong.
+/// Where the quantisation noise is put.
 struct NoiseShaping {
-    /// 0 is off. Above `k_max_order` is clamped.
-    std::uint32_t order = 0;
+    enum class Kind : std::uint32_t {
+        /// Left where it fell: white, flat, and as loud in the midband as
+        /// anywhere else.
+        none,
+        /// A noise transfer function of exactly (1 - z^-1)^N. The coefficients
+        /// are the binomial expansion, *derived* -- there is nothing to mistype.
+        ///
+        /// **Order is not quality.** Each order tilts the noise further out of
+        /// the midband and each order also multiplies the total: a 9th-order
+        /// binomial shaper puts far more noise above 15 kHz than it takes from
+        /// below. Orders 1 to 3 are useful; past that this is the mechanism
+        /// rather than a recommendation, and the curves below are what somebody
+        /// listening should reach for instead.
+        binomial,
+        /// SSRC's ATH-weighted curves, transcribed by
+        /// `tools/gen_shaper_tables.py` from https://github.com/shibatch/ssrc.
+        /// Measured against the absolute threshold of hearing rather than
+        /// derived, and therefore indexed by sample rate as well as intensity.
+        shibata,
+    };
+
+    Kind kind = Kind::none;
+    /// `binomial`: the order, 1 to `k_max_order`.
+    /// `shibata`: SSRC's intensity. Low is gentle; 98 is a plain first-order
+    /// shaper and 99 is none.
+    std::uint32_t strength = 0;
 
     static constexpr std::uint32_t k_max_order = 9;
 };
@@ -83,44 +94,61 @@ struct NoiseShaping {
 [[nodiscard]] const char* dither_kind_name(DitherKind kind) noexcept;
 [[nodiscard]] bool dither_kind_from_name(std::string_view name, DitherKind& out) noexcept;
 
-/// One dither generator and one error-feedback filter, per stream.
+/// `0`..`9` for a binomial order, or `shibata:N` for one of SSRC's curves.
+[[nodiscard]] bool noise_shaping_from_name(std::string_view name, NoiseShaping& out) noexcept;
+/// What the shaper actually resolved to, for the report a user reads.
+[[nodiscard]] std::string noise_shaping_describe(const NoiseShaping& shaping,
+                                                 std::uint32_t sample_rate);
+
+/// One dither generator and one error-feedback filter, per channel.
 ///
-/// Holds the history the shaper needs, so it is per-channel: a shaper shared
-/// between channels feeds each channel's error into the others and correlates
-/// the noise across them, which is audible as a centre image on what should be
-/// two independent noise floors.
+/// Per channel because a shaper shared between them feeds each channel's error
+/// into the others, correlating what should be two independent noise floors
+/// into a centre image.
+///
+/// The feedback convention is SSRC's, since that is where the curves come from:
+/// the filtered history is *added* to the sample before quantising, and the
+/// error stored is `quantised - that sum`. Written the other way round the
+/// same coefficients shape the noise into the midband rather than out of it.
 class Dither {
 public:
-    Dither(DitherKind kind, NoiseShaping shaping, std::uint32_t seed) noexcept;
+    /// `sample_rate` chooses among the measured curves and is ignored by the
+    /// other kinds. A `shibata` shaper with no curve for that rate falls back
+    /// to no shaping rather than to a curve fitted for a different one.
+    Dither(DitherKind kind, NoiseShaping shaping, std::uint32_t sample_rate,
+           std::uint32_t seed);
 
     /// The value to add before rounding, in LSBs.
     [[nodiscard]] double next() noexcept;
 
-    /// What the feedback filter wants subtracted from this sample, in LSBs.
-    /// Zero when shaping is off.
+    /// What the filter says this sample owes for the errors before it, in LSBs.
     [[nodiscard]] double feedback() const noexcept;
 
-    /// The error this sample actually made, in LSBs, handed back so the filter
-    /// can shape the next one.
-    void accept(double error) noexcept;
+    /// The error this sample made, in LSBs. `clipped` bounds what is stored:
+    /// an overloaded sample produces an error far larger than an LSB and a
+    /// feedback loop handed one rings.
+    void accept(double error, bool clipped) noexcept;
 
     void reset() noexcept;
 
     [[nodiscard]] DitherKind kind() const noexcept { return kind_; }
-    [[nodiscard]] std::uint32_t order() const noexcept { return order_; }
+    /// How many taps the shaper actually has. 0 when it is off, which includes
+    /// a `shibata` setting for which no curve existed.
+    [[nodiscard]] std::uint32_t taps() const noexcept
+    {
+        return static_cast<std::uint32_t>(taps_.size());
+    }
 
 private:
     [[nodiscard]] double uniform() noexcept;
 
     DitherKind kind_;
-    std::uint32_t order_;
     std::uint32_t seed_;
     std::uint32_t rng_;
     /// The previous rectangular draw, for the highpass construction.
     double previous_ = 0.0;
-    /// h[k] for k = 1..order, and the errors they multiply.
-    std::array<double, NoiseShaping::k_max_order> taps_{};
-    std::array<double, NoiseShaping::k_max_order> history_{};
+    std::vector<double> taps_;
+    std::vector<double> history_;
 };
 
 } // namespace mp

@@ -48,7 +48,7 @@ struct Options {
     mp::PathPolicy path = mp::PathPolicy::bit_exact;
     double gain = 1.0;
     mp::DitherKind dither = mp::DitherKind::triangular;
-    std::uint32_t shaping = 0;
+    mp::NoiseShaping shaping{};
     bool float_source = false;
     std::string source;          // `compare`: the audio that was encoded
     std::string rival_id = "decode_ffmpeg"; // and a second decoder to sit beside
@@ -215,7 +215,12 @@ bool parse(int argc, char** argv, Options& out)
                 return false;
             }
         } else if (arg == "--shape") {
-            value(out.shaping);
+            if (i + 1 >= argc || !mp::noise_shaping_from_name(argv[++i], out.shaping)) {
+                std::fprintf(stderr,
+                             "--shape takes 0 to 9 for a binomial order, or "
+                             "shibata[:intensity]\n");
+                return false;
+            }
         } else if (arg == "--float") {
             out.float_source = true;
         } else if (arg == "--path") {
@@ -647,9 +652,10 @@ int play(const MpSinkVtbl& vtbl, const Options& options)
         std::printf("           source %s, gain %.4f, dither %s",
                     mp::describe(source_format).c_str(), options.gain,
                     mp::dither_kind_name(options.dither));
-        if (options.shaping != 0) {
-            std::printf(", noise shaping order %u", options.shaping);
-        }
+        std::printf(", shaping %s",
+                    mp::noise_shaping_describe(options.shaping,
+                                               negotiated.accepted.sample_rate)
+                        .c_str());
         std::printf("\n");
     }
     std::printf("buffer     %u frames (%.2f ms)\n", period,
@@ -675,7 +681,7 @@ int play(const MpSinkVtbl& vtbl, const Options& options)
         mp::ConvertConfig conversion;
         conversion.gain = options.gain;
         conversion.dither = options.dither;
-        conversion.shaping.order = options.shaping;
+        conversion.shaping = options.shaping;
         mp::ProcessedGraph graph{source, sink, negotiated.accepted, period, conversion, &hooks};
         return run_graph(graph, hooks, negotiated.accepted, options);
     }

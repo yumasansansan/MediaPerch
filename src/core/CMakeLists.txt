@@ -14,6 +14,8 @@ add_library(mediaperch_core STATIC
     mediaperch/convert.hpp
     mediaperch/dither.cpp
     mediaperch/dither.hpp
+    mediaperch/shaper_tables.cpp
+    mediaperch/shaper_tables.hpp
     mediaperch/decoder.cpp
     mediaperch/decoder.hpp
     mediaperch/format.cpp

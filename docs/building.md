@@ -222,6 +222,13 @@ without changing a line of what it does. `mp::win::open_utf8` exists because the
 narrow CRT calls go through the process code page and cannot open half the files
 on a machine that is not English — the wide call can, and costs nothing.
 
+`tools/gen_shaper_tables.py` is the other generator in the tree, alongside
+`tools/gen_aac_tables.py`. It transcribes noise-shaping coefficients from
+SSRC's `shapercoefs.h` and refuses to write a table whose entry count does not
+match the source's — which is not hypothetical, it caught itself dropping two
+of 67 on the first run. Neither generator runs during a build; both write files
+that are committed, so no build needs Python or the network.
+
 **`tools/mapsize.py` is how to find the next one.** Configure with
 `-D MEDIAPERCH_LINK_MAP=ON` — off by default, because it writes a `.map` beside
 every binary — and it charges every byte of a linked image to the object that
