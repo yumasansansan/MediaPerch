@@ -164,7 +164,7 @@ jobs:
       - name: FFmpeg, for the corpus and the second opinion
         run: |
           if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
-            winget install Gyan.FFmpeg -h
+            choco install ffmpeg -y --no-progress
           }
           # Logged on purpose: this job's thresholds are measurements, and the
           # encoder that produced the corpus is half of what was measured. The

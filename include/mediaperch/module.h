@@ -287,6 +287,101 @@ typedef struct MpSinkVtbl {
 } MpSinkVtbl;
 
 /* ------------------------------------------------------------------ */
+/* DSP                                                                 */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A stage in Path B's chain.
+ *
+ * Path A has no chain and never will: it exists so that a file can reach a
+ * device without anything touching it. This is the other path, where things are
+ * meant to touch it, and where a resampler, a ReplayGain, an equaliser or a
+ * convolver are all the same shape of thing.
+ *
+ * The bus is **deinterleaved double**, one contiguous array per channel. Two
+ * decisions worth stating:
+ *
+ *   - *Deinterleaved*, because that is what every filter anybody will write
+ *     wants: a per-channel history, a per-channel coefficient state, and an
+ *     inner loop that walks memory forwards.
+ *   - *double*, not float. The plan of record said f32 and it was written
+ *     before the converter was; that converter reads every sample exactly into
+ *     binary64 and quantises once at the very end, and putting an f32 bus in
+ *     the middle would add a rounding to a path whose whole argument is that it
+ *     has exactly one.
+ *
+ * A stage may produce a different number of frames than it consumed, and may
+ * report a different format from the one it was given -- that is what a
+ * resampler is. `configure` is where it says so, before anything runs.
+ *
+ * Every call here is MP_ANY: the chain runs on the decode thread, never on the
+ * render thread, exactly as the sample-type conversion does.
+ */
+typedef struct MpDsp MpDsp;
+
+typedef struct MpDspVtbl {
+    uint32_t size;
+    uint32_t reserved;
+
+    MpResult(MP_CALL *open)(MpDsp **out);
+    void(MP_CALL *close)(MpDsp *d);
+
+    /*
+     * What this stage would produce, given what it is being handed.
+     *
+     * `max_frames` is the largest block `process` will be asked for, so a stage
+     * can size its own buffers once here and allocate nothing afterwards.
+     * `out_format` may differ from `in_format` in sample rate and channel
+     * count; the host chains stages by feeding each one the previous one's
+     * answer. A stage that cannot work with `in_format` returns MP_ERR_FORMAT
+     * and is left out of the graph rather than run and hoped for.
+     */
+    MpResult(MP_CALL *configure)(MpDsp *d, const MpFormat *in_format, uint32_t max_frames,
+                                 MpFormat *out_format, uint32_t *out_max_frames);
+
+    /*
+     * `in_frames` frames from `in`, up to `out_capacity` frames into `out`,
+     * both deinterleaved: `in[c]` is channel c's samples. `out_frames` is how
+     * many were produced, which may be zero while a stage fills its own
+     * history and may exceed `in_frames` when a stage is upsampling.
+     *
+     * `in` may be NULL with `in_frames` zero, which is how a host asks a stage
+     * to keep producing from what it already holds.
+     */
+    MpResult(MP_CALL *process)(MpDsp *d, const double *const *in, uint32_t in_frames,
+                               double *const *out, uint32_t out_capacity,
+                               uint32_t *out_frames);
+
+    /*
+     * The end of the stream: produce whatever is still inside. Called until it
+     * reports zero frames. A stage with no memory can report zero immediately.
+     */
+    MpResult(MP_CALL *flush)(MpDsp *d, double *const *out, uint32_t out_capacity,
+                             uint32_t *out_frames);
+
+    /*
+     * One setting, as text.
+     *
+     * Text because the shell is a separate process behind a versioned wire
+     * format and must be able to drive a stage nobody had written when the
+     * shell was built. A stage returns MP_ERR_UNSUPPORTED for a key it does not
+     * have, so a host can offer what it finds rather than what it was compiled
+     * against. NULL `key` with `index` semantics is not provided: enumeration
+     * belongs in `describe`.
+     */
+    MpResult(MP_CALL *set)(MpDsp *d, const char *key, const char *value);
+
+    /*
+     * The settings this stage has, as one UTF-8 line per key:
+     *   "key\tcurrent\tdescription\n"
+     * Returns MP_END when `index` is past the last one. This is how `--dsp
+     * list` and a settings dialogue both find out what a stage can do without
+     * either of them knowing what the stage is.
+     */
+    MpResult(MP_CALL *describe)(MpDsp *d, uint32_t index, char *out, uint32_t out_bytes);
+} MpDspVtbl;
+
+/* ------------------------------------------------------------------ */
 /* The module itself                                                   */
 /* ------------------------------------------------------------------ */
 
@@ -294,7 +389,7 @@ typedef uint32_t MpKind;
 enum {
     MP_KIND_DECODER = 1u,
     MP_KIND_SINK = 2u,
-    MP_KIND_DSP = 3u,  /* reserved; no vtable until a second implementation exists */
+    MP_KIND_DSP = 3u,   /* MpDspVtbl */
     MP_KIND_VIDEO = 4u, /* reserved */
     MP_KIND_META = 5u   /* reserved */
 };
@@ -353,6 +448,8 @@ MP_STATIC_ASSERT(sizeof(MpResult) == 4, "MpResult is a u32 field");
 MP_STATIC_ASSERT(sizeof(MpSampleType) == 4, "MpSampleType is a u32 field");
 MP_STATIC_ASSERT(sizeof(MpEncoding) == 4, "MpEncoding is a u32 field");
 MP_STATIC_ASSERT(sizeof(MpKind) == 4, "MpKind is a u32 field");
+MP_STATIC_ASSERT(offsetof(MpDspVtbl, size) == 0, "MpDspVtbl::size leads");
+MP_STATIC_ASSERT(offsetof(MpDspVtbl, open) == 8, "MpDspVtbl::open follows the header");
 
 MP_STATIC_ASSERT(sizeof(MpFormat) == 32, "MpFormat layout is ABI");
 MP_STATIC_ASSERT(offsetof(MpFormat, sample_rate) == 0, "MpFormat layout is ABI");

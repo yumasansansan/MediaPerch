@@ -168,6 +168,13 @@ public:
     /// `id` empty means "the highest-priority one".
     [[nodiscard]] const MpSinkVtbl* sink(std::string_view id = {}) const;
 
+    /// A DSP stage by module id, or nullptr. Path B's chain is built from
+    /// these, and a stage nobody had written when this was compiled is found
+    /// the same way as one that ships with it.
+    [[nodiscard]] const MpDspVtbl* dsp(std::string_view id) const;
+    /// Every loaded DSP module, for `--dsp list` and for a settings dialogue.
+    [[nodiscard]] std::vector<const MpModuleDesc*> dsps() const;
+
     struct DecoderChoice {
         const MpDecoderVtbl* vtbl = nullptr;
         const MpModuleDesc* desc = nullptr;

@@ -39,7 +39,7 @@ architecture than any taste question:
 
 | | Passthrough (default) | Processed |
 |---|---|---|
-| Bus format | the device's, verbatim | canonical f32, deinterleaved |
+| Bus format | the device's, verbatim | deinterleaved binary64, one plane per channel |
 | Sample touching | `memcpy`, or one byte move if the container differs | gain, resample, convolution, dither |
 | Volume | `IAudioEndpointVolume`, or none | in the graph |
 | Chosen | when the file's format survives negotiation | when the user asks, or negotiation failed |
@@ -75,10 +75,13 @@ $ mediaperch-probe negotiate --rate 44100 --float --channels 2 --path auto
 3 CONVERT        44100 Hz / 2 ch / S32              -> ACCEPTED, buffer 132 frames
 ```
 
-**What Path B does is narrow on purpose.** Sample type, a gain, dither and noise shaping.
-It does **not** resample and does **not** change the channel count: both are real
-conversions needing real implementations, and a bad one here would be worse than the
-refusal it replaced, so negotiation still refuses a device that wants a different rate.
+**What the conversion does is narrow on purpose.** Sample type, a gain, dither and noise
+shaping. It does **not** resample and does **not** change the channel count: both are real
+conversions needing real implementations, and a bad one built into the converter would be
+worse than the refusal it replaced. Both are the *chain's* job, below -- a stage may answer
+`configure` with a different rate and negotiation will offer the device that rate instead.
+No stage that does so is written yet, so today negotiation still refuses a device that wants
+a rate the file does not have.
 
 ### The intermediate is binary64, and the read side is exact
 
@@ -123,6 +126,61 @@ is worth having lives at the *other* end, where bits are actually being discarde
 what the rest of this section is about. The one genuine exception is **de-emphasis**, which
 is not a width question at all: it is a defined format property that a source either carries
 or does not.
+
+### The DSP chain
+
+Path A exists so that a file can reach a device with nothing in between. The chain is the
+other side of that decision: the place where things are *meant* to touch the samples. A
+resampler, a ReplayGain, an equaliser and a convolver are all the same shape of thing, and
+the shape is `MpDspVtbl` -- the third module kind, beside decoders and sinks.
+
+| Call | What it is for |
+|---|---|
+| `configure` | the stage is handed its input format and the largest block it will be given, and answers with the format **it** produces and how much room that needs. This is the call that lets a resampler exist: the answer may carry a different sample rate or channel count |
+| `process` | deinterleaved `double` in, deinterleaved `double` out. It may produce fewer frames than it was given while it fills its history, or more when it is upsampling, which is why `configure` has to answer with a capacity |
+| `flush` | the end of the stream: whatever is still inside, called until it reports zero |
+| `set` / `describe` | one setting as text, and the list of them. Text because the shell is a separate process behind a versioned wire format and has to be able to drive a stage nobody had written when the shell was built |
+
+**The bus is deinterleaved `double`.** plan.md says f32, and this is a deliberate departure
+from it: the conversions at both ends of Path B already work in binary64, so an f32 bus
+would put a second rounding in the one path whose whole argument is that it has exactly one.
+The cost is memory bandwidth on a workload measured in tens of megabytes a second. The
+deinterleaving is what plan.md asked for and is kept, because it is what a filter wants.
+
+**There is still exactly one quantiser.** The shape is source → widen to the f64 bus →
+chain → the wire format, and only the last of those rounds. The widening is exact for every
+source type this program has (§ above), so the dither and the noise shaping stay in one
+place, at the bottom, where the bits are actually being discarded.
+
+**The chain decides what the device is asked for.** Negotiation runs against
+`DspChain::output_format()`, not the file's format, so a stage that resamples is offered to
+the device as the rate it produces. `ProcessedGraph` then builds its output converter from
+the chain's output rather than from the source, and refuses to start if it was handed a
+chain configured for some other stream -- a mismatch there would otherwise arrive as noise
+rather than as an error.
+
+**A chain is drained, not truncated.** At the end of a stream each stage is flushed until it
+reports zero, head first, with whatever comes out fed to the stages behind it. A delay line
+is the plain case: without the drain the last frames of every file are simply missing, and
+nothing else in the program would notice. `tests/dsp_test.cpp` plays a file through a
+delaying stage and requires every input frame to come out the far end.
+
+**Asking for a stage is asking for Path B.** `--dsp` implies `--path processed`, and says so
+in the report: a stage exists in order to change the samples, and a bit-exact claim over
+audio that has been through a filter would be a lie no format comparison could catch.
+
+```
+$ mediaperch-probe play --dsp gain:gain_db=-6 --verbose
+path       PROCESSED -- the samples are changed  [--path processed]
+           chain dsp_gain on an f64 bus, 44100 Hz / 2 ch / F64
+           --dsp implied --path processed
+dsp_gain   peak	0.250578	loudest sample seen (read only)
+```
+
+`--dsp list` prints every stage that is loaded with every setting it has, read out of the
+module through `describe` rather than out of a table in the host -- which is the point of
+the call: a shell can offer a stage it was never compiled against. `--shape list` does the
+same for the dither and shaping algorithms, of which there are rather a lot.
 
 ### Dither
 
@@ -282,7 +340,8 @@ modules/             everything that can be loaded and unloaded at runtime.
   sink_asio/         someday. Not for accuracy -- exclusive mode is already exact --
                      but for native DSD above what DoP can carry. Practical since
                      Steinberg relicensed the ASIO SDK under GPLv3 in October 2025.
-  dsp_*/             gain, resample, convolve, crossfeed. Never present in passthrough.
+  dsp_gain/          the first MpDspVtbl module: a gain, and the peak it saw.
+  dsp_*/             resample, convolve, crossfeed. Never present in passthrough.
   video_d3d11/       presentation, and the three tone-map providers.
 shell/windows/       the WinUI 3 window. C#, Native AOT, **optional**: the engine runs
                      with none of it on disk, the same way DragonPerch's daemon does.

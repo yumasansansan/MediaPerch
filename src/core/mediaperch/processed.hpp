@@ -24,6 +24,7 @@
 #define MEDIAPERCH_PROCESSED_HPP
 
 #include "mediaperch/convert.hpp"
+#include "mediaperch/dsp.hpp"
 #include "mediaperch/passthrough.hpp"
 #include "mediaperch/ring.hpp"
 #include "mediaperch/sink.hpp"
@@ -44,9 +45,17 @@ public:
     /// `wire` is what the sink accepted. Unlike Path A it may be anything the
     /// converter can reach, which is any PCM sample type at the same rate and
     /// channel count.
+    /// `chain` may be null, and usually is: a stream that only needs its
+    /// sample type changed goes straight through one converter. When it is
+    /// given, the shape becomes source -> f64 bus -> chain -> wire, with the
+    /// widening exact and the one quantiser still at the end. It must already
+    /// be configured, for `dsp_bus_format(source.format())` -- the graph reads
+    /// its output format to build the converter behind it, and checks in
+    /// `start` that it was configured for the stream it is about to be fed.
     ProcessedGraph(ISource& source, Sink& sink, const Format& wire,
                    std::uint32_t period_frames, ConvertConfig convert = {},
-                   IRenderThreadHooks* hooks = nullptr, PassthroughConfig config = {});
+                   IRenderThreadHooks* hooks = nullptr, PassthroughConfig config = {},
+                   DspChain* chain = nullptr);
 
     ProcessedGraph(const ProcessedGraph&) = delete;
     ProcessedGraph& operator=(const ProcessedGraph&) = delete;
@@ -79,12 +88,24 @@ private:
     void render_loop() noexcept;
     void fail(MpResult r) noexcept;
     bool pump_once();
+    /// Converts `frames` from `chain_out_` and puts them in the ring.
+    void emit(std::uint32_t frames);
+    /// Drains the chain once, at the end of the stream. A resampler holds a
+    /// filter's worth of the last audio and it is as much the file as the rest.
+    bool flush_chain();
 
     ISource* source_;
     Sink* sink_;
     Format wire_;
     Format source_format_;
+    /// Without a chain: source straight to the wire format.
+    /// With one: source to the bus, and the bus to the wire format.
     Converter converter_;
+    DspChain* chain_;
+    Format bus_{};
+    Converter to_bus_;
+    std::vector<std::uint8_t> bus_chunk_;
+    std::vector<double> chain_out_;
     IRenderThreadHooks* hooks_;
     PassthroughConfig config_;
 
@@ -92,6 +113,11 @@ private:
     std::uint32_t wire_frame_bytes_;
     std::uint32_t source_frame_bytes_;
     std::uint32_t chunk_frames_;
+    /// The most one `pump_once` can put in the ring. Without a chain that is
+    /// one chunk; with one it is whatever the chain said it could produce,
+    /// which for anything that upsamples is more. Both loops keep this much
+    /// room free, so a write never has to be split or dropped.
+    std::uint32_t pump_bytes_;
 
     ByteRing ring_;
     std::vector<std::uint8_t> source_chunk_;
@@ -101,6 +127,7 @@ private:
     std::thread render_thread_;
     std::atomic<bool> running_{false};
     std::atomic<bool> drained_{false};
+    bool flushed_ = false;
     std::atomic<MpResult> error_{MP_OK};
 
     std::atomic<std::uint64_t> frames_rendered_{0};

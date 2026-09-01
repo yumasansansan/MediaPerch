@@ -255,6 +255,30 @@ std::vector<const MpModuleDesc*> ModuleRegistry::all() const
     return out;
 }
 
+const MpDspVtbl* ModuleRegistry::dsp(std::string_view id) const
+{
+    for (const auto& module : modules_) {
+        const MpModuleDesc& desc = module->desc();
+        if (desc.kind != MP_KIND_DSP || id != desc.id) {
+            continue;
+        }
+        const auto* vtbl = static_cast<const MpDspVtbl*>(desc.vtbl);
+        return (vtbl != nullptr && vtbl->size >= sizeof(MpDspVtbl)) ? vtbl : nullptr;
+    }
+    return nullptr;
+}
+
+std::vector<const MpModuleDesc*> ModuleRegistry::dsps() const
+{
+    std::vector<const MpModuleDesc*> out;
+    for (const auto& module : modules_) {
+        if (module->desc().kind == MP_KIND_DSP) {
+            out.push_back(&module->desc());
+        }
+    }
+    return out;
+}
+
 const MpSinkVtbl* ModuleRegistry::sink(std::string_view id) const
 {
     const MpSinkVtbl* best = nullptr;

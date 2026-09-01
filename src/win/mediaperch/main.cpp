@@ -11,6 +11,7 @@
 
 #include "mediaperch/compare.hpp"
 #include "mediaperch/decoder.hpp"
+#include "mediaperch/dsp.hpp"
 #include "mediaperch/negotiation.hpp"
 #include "mediaperch/passthrough.hpp"
 #include "mediaperch/processed.hpp"
@@ -26,6 +27,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -50,6 +52,9 @@ struct Options {
     double gain = 1.0;
     mp::DitherKind dither = mp::DitherKind::triangular;
     mp::NoiseShaping shaping{};
+    /// `name` or `name:key=value,key=value`, in the order given, which is the
+    /// order they run in.
+    std::vector<std::string> dsp;
     bool float_source = false;
     std::string source;          // `compare`: the audio that was encoded
     std::string rival_id = "decode_ffmpeg"; // and a second decoder to sit beside
@@ -66,6 +71,90 @@ struct Options {
     bool loopback = false;
     bool verbose = false;
 };
+
+/// Every dither and every shaper, in the words the flags take.
+///
+/// A setting whose values can only be found by reading the source is a setting
+/// nobody will use. There are 79 measured curves in this program, from two
+/// projects, and this is the only place that says so.
+void list_algorithms()
+{
+    std::printf(R"(--dither KIND
+  none            no dither. The error is then a function of the signal, which
+                  is what makes truncation sound like distortion rather than
+                  like noise
+  rectangular     one uniform LSB. No distortion, but a noise floor that
+                  breathes with the signal
+  triangular      two summed uniforms, +/- one LSB. THE DEFAULT and the
+                  standard answer: no distortion and no modulation either
+  highpass        the same distribution, formed from two samples one apart, so
+                  it arrives tilted away from the midband
+  gaussian        +/- half an LSB of Gaussian noise. The right shape when
+                  something downstream will quantise again
+
+--shape WHICH
+  0               none. The error stays where it fell
+)");
+    std::printf("  1 .. %u          binomial: noise transfer function (1 - z^-1)^N exactly,\n",
+                mp::NoiseShaping::k_max_order);
+    std::printf(R"(                  derived rather than tabulated. **Order is not quality** --
+                  each order moves noise further out of the midband and
+                  multiplies the total, so 1 to 3 are useful and the rest are
+                  the mechanism rather than a recommendation
+
+  Measured curves, from ReSampler (jniemann66, LGPL-2.1). Fitted at 44.1 kHz
+  and usable at other rates, where the shape stretches with the rate and the
+  notches move off the frequencies they were placed at:
+
+)");
+    for (const auto& curve : mp::shaper_curves()) {
+        if (curve.sample_rate != 0) {
+            continue;
+        }
+        const std::string_view full{curve.name};
+        const std::size_t colon = full.find(':');
+        if (colon == std::string_view::npos) {
+            continue;
+        }
+        const std::string_view what = full.substr(colon + 2);
+        std::printf("  %-14.*s  %.*s (%u tap%s)\n", static_cast<int>(colon), full.data(),
+                    static_cast<int>(what.size()), what.data(), curve.length,
+                    curve.length == 1 ? "" : "s");
+    }
+
+    std::printf(R"(
+  shibata[:N]     ATH-weighted, from SSRC (shibatch, Boost 1.0). Weighted by the
+                  absolute threshold of hearing, so they are fitted per sample
+                  rate and are never substituted across one. N is SSRC's own
+                  numbering, and the default is the highest this rate has:
+
+                    0-6    ATH curve A, gentle to aggressive
+                    10-16  ATH curve B
+                    90-92  the older curves: low, mid, high
+                    98     a plain first-order shaper
+                    99     none at all
+
+                  What each rate actually has:
+
+)");
+    std::uint32_t rate = 0;
+    for (const auto& curve : mp::shaper_curves()) {
+        if (curve.sample_rate == 0) {
+            continue;
+        }
+        if (curve.sample_rate != rate) {
+            if (rate != 0) {
+                std::printf("\n");
+            }
+            rate = curve.sample_rate;
+            std::printf("    %6u Hz   ", rate);
+        }
+        std::printf("%u ", curve.intensity);
+    }
+    if (rate != 0) {
+        std::printf("\n");
+    }
+}
 
 void usage()
 {
@@ -143,6 +232,12 @@ Options
                       processed Path B whether or not Path A was available
   --gain G          Path B only: linear gain, 1.0 is unity. A volume control has
                     nowhere else to live on an exclusive-mode stream
+  --dsp STAGE       Path B only: add a stage to the chain, in the order given,
+                    as `name` or `name:key=value,key=value`. Repeatable.
+                    `--dsp list` prints every stage that is loaded, with every
+                    setting it has and what that setting is now. A stage exists
+                    to change the samples, so asking for one implies
+                    --path processed
   --dither KIND     Path B only, and only where bits are actually being thrown
                     away. `triangular` (default) is the standard answer;
                     `highpass` is the same distribution with its noise tilted
@@ -150,11 +245,9 @@ Options
                     something downstream will quantise again; `rectangular`
                     leaves a noise floor that breathes with the signal;
                     `none` is what a measurement wants
-  --shape N         Path B only: Nth-order noise shaping, 0 (off) to 9. The
-                    noise transfer function is (1 - z^-1)^N exactly. **Order is
-                    not quality** -- each order moves noise further out of the
-                    midband and multiplies the total, so 1 to 3 are useful and
-                    the rest are the mechanism rather than a recommendation
+  --shape WHICH     Path B only: a binomial order 0 to 9, `shibata[:N]` for a
+                    measured ATH-weighted curve, or a published one by name.
+                    `--shape list` (or `--dither list`) prints all of them
   --seek FRAMES     `decode` seeks here first, then hashes the rest. The hash of
                     a seek to N must equal the hash of the last (length - N)
                     frames of a straight decode, which is what makes seeking
@@ -208,6 +301,20 @@ bool parse(int argc, char** argv, Options& out)
             if (i + 1 < argc) {
                 out.gain = std::strtod(argv[++i], nullptr);
             }
+        } else if (arg == "--dsp") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "--dsp takes a stage name, or `list`\n");
+                return false;
+            }
+            out.dsp.emplace_back(argv[++i]);
+        } else if (arg == "--dither" && i + 1 < argc &&
+                   std::string_view{argv[i + 1]} == "list") {
+            list_algorithms();
+            std::exit(0);
+        } else if (arg == "--shape" && i + 1 < argc &&
+                   std::string_view{argv[i + 1]} == "list") {
+            list_algorithms();
+            std::exit(0);
         } else if (arg == "--dither") {
             if (i + 1 >= argc || !mp::dither_kind_from_name(argv[++i], out.dither)) {
                 std::fprintf(stderr,
@@ -219,7 +326,8 @@ bool parse(int argc, char** argv, Options& out)
             if (i + 1 >= argc || !mp::noise_shaping_from_name(argv[++i], out.shaping)) {
                 std::fprintf(stderr,
                              "--shape takes 0 to 9 for a binomial order, "
-                             "shibata[:intensity], or one of:\n  %s\n",
+                             "shibata[:intensity], or one of:\n  %s\n"
+                             "`--shape list` prints all of them with what they do.\n",
                              mp::named_shapers().c_str());
                 return false;
             }
@@ -602,7 +710,95 @@ int run_graph(Graph& graph, mp::win::RenderThreadHooks& hooks, const mp::Format&
     return stats.underruns == 0 ? 0 : 2;
 }
 
-int play(const MpSinkVtbl& vtbl, const Options& options)
+/// One `--dsp` argument: `name` or `name:key=value,key=value`.
+///
+/// The name may leave off the `dsp_` the module calls itself by, the same way
+/// `--decoder mp3` may, because nobody types a prefix twice.
+bool add_dsp_stage(const mp::win::ModuleRegistry& registry, const std::string& spec,
+                   mp::DspChain& chain, std::string& why)
+{
+    const std::size_t colon = spec.find(':');
+    std::string id = spec.substr(0, colon);
+    if (id.rfind("dsp_", 0) != 0) {
+        id = "dsp_" + id;
+    }
+    const MpDspVtbl* vtbl = registry.dsp(id);
+    if (vtbl == nullptr) {
+        why = "no DSP module called " + id + " is loaded; `--dsp list` says which are";
+        return false;
+    }
+    chain.add(*vtbl, id);
+    mp::DspStage& stage = chain.at(chain.size() - 1);
+    if (!stage.open()) {
+        why = id + " would not open";
+        return false;
+    }
+    if (colon == std::string::npos) {
+        return true;
+    }
+
+    for (std::size_t at = colon + 1; at <= spec.size();) {
+        const std::size_t comma = std::min(spec.find(',', at), spec.size());
+        const std::string setting = spec.substr(at, comma - at);
+        at = comma + 1;
+        if (setting.empty()) {
+            continue;
+        }
+        const std::size_t equals = setting.find('=');
+        if (equals == std::string::npos) {
+            why = id + ": `" + setting + "` is not key=value";
+            return false;
+        }
+        const std::string key = setting.substr(0, equals);
+        if (stage.set(key, setting.substr(equals + 1)) != MP_OK) {
+            why = id + " would not take `" + setting + "`; `--dsp list` says what it takes";
+            return false;
+        }
+    }
+    return true;
+}
+
+/// `--dsp list`: every stage that is loaded, and every knob it has.
+int list_dsp_modules(const mp::win::ModuleRegistry& registry)
+{
+    const auto found = registry.dsps();
+    if (found.empty()) {
+        std::printf("no DSP modules beside the executable\n");
+        return 1;
+    }
+    for (const MpModuleDesc* desc : found) {
+        std::printf("%-16s %s\n", desc->id, desc->name);
+        const MpDspVtbl* vtbl = registry.dsp(desc->id);
+        if (vtbl == nullptr) {
+            std::printf("    (this module does not offer a DSP this host can use)\n\n");
+            continue;
+        }
+        mp::DspStage stage{*vtbl, desc->id};
+        if (!stage.open()) {
+            std::printf("    (it would not open)\n\n");
+            continue;
+        }
+        for (const std::string& line : stage.describe()) {
+            // key \t current \t what it does, which is the module's own words.
+            const std::size_t first = line.find('\t');
+            const std::size_t second = line.find('\t', first + 1);
+            if (first == std::string::npos || second == std::string::npos) {
+                std::printf("    %s\n", line.c_str());
+                continue;
+            }
+            std::printf("    %-10s %-12s %s\n", line.substr(0, first).c_str(),
+                        line.substr(first + 1, second - first - 1).c_str(),
+                        line.substr(second + 1).c_str());
+        }
+        std::printf("\n");
+    }
+    std::printf("--dsp NAME, or --dsp NAME:key=value,key=value. Repeat it for a chain;\n"
+                "they run in the order given.\n");
+    return 0;
+}
+
+int play(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
+         const Options& options)
 {
     if (options.float_source) {
         std::fprintf(stderr,
@@ -616,6 +812,15 @@ int play(const MpSinkVtbl& vtbl, const Options& options)
         return 1;
     }
 
+    mp::DspChain chain;
+    std::string why;
+    for (const std::string& spec : options.dsp) {
+        if (!add_dsp_stage(registry, spec, chain, why)) {
+            std::fprintf(stderr, "%s\n", why.c_str());
+            return 1;
+        }
+    }
+
     std::string device_id;
     if (!device_id_for(vtbl, options.device_index, device_id)) {
         return 1;
@@ -625,7 +830,30 @@ int play(const MpSinkVtbl& vtbl, const Options& options)
         return 1;
     }
 
-    const auto negotiated = mp::negotiate_best(sink, source_format, options.path);
+    // What the device is asked for. A chain that resamples or remixes changes
+    // what has to reach the device, so the rate and the channels come from its
+    // output -- but the sample type stays the source's, because the f64 bus is
+    // this program's business and offering the device f64 first would say the
+    // file was something it was not.
+    mp::Format offered = source_format;
+    mp::PathPolicy policy = options.path;
+    if (!chain.empty()) {
+        // Sized provisionally: the device has not said how big a period is yet,
+        // and all that is wanted here is the format that comes out the far end.
+        if (!chain.configure(mp::dsp_bus_format(source_format), 4096, why)) {
+            std::fprintf(stderr, "%s\n", why.c_str());
+            return 1;
+        }
+        offered.sample_rate = chain.output_format().sample_rate;
+        offered.channels = chain.output_format().channels;
+        offered.channel_mask = chain.output_format().channel_mask;
+        // A stage exists in order to change the samples. There is nothing left
+        // for a policy to decide, and pretending otherwise would end in a
+        // bit-exact claim over audio that had been through a filter.
+        policy = mp::PathPolicy::processed;
+    }
+
+    const auto negotiated = mp::negotiate_best(sink, offered, policy);
     if (!negotiated.ok) {
         report_refusal(negotiated);
         return 1;
@@ -637,10 +865,16 @@ int play(const MpSinkVtbl& vtbl, const Options& options)
         return 1;
     }
 
+    if (!chain.empty() && !chain.configure(mp::dsp_bus_format(source_format), period, why)) {
+        // Same chain, now sized for the block the graph will actually feed it.
+        std::fprintf(stderr, "%s\n", why.c_str());
+        return 1;
+    }
+
     std::printf("device     %s\n", device_id.empty() ? "(default endpoint)" : device_id.c_str());
     std::printf("mode       %s\n", options.shared ? "shared" : "exclusive");
     std::printf("format     %s\n", mp::describe(negotiated.accepted).c_str());
-    const bool processing = mp::use_processed(options.path, negotiated.fidelity);
+    const bool processing = mp::use_processed(policy, negotiated.fidelity);
     std::printf("path       %s%s  [--path %s]\n",
                 processing                                    ? "PROCESSED -- the samples are changed"
                 : negotiated.fidelity == mp::Fidelity::exact  ? "passthrough, memcpy"
@@ -659,6 +893,17 @@ int play(const MpSinkVtbl& vtbl, const Options& options)
                                                negotiated.accepted.sample_rate)
                         .c_str());
         std::printf("\n");
+        if (!chain.empty()) {
+            std::printf("           chain ");
+            for (std::size_t i = 0; i < chain.size(); ++i) {
+                std::printf("%s%s", i == 0 ? "" : " -> ", chain.at(i).name().c_str());
+            }
+            std::printf(" on an f64 bus, %s\n",
+                        mp::describe(chain.output_format()).c_str());
+            if (options.path != mp::PathPolicy::processed) {
+                std::printf("           --dsp implied --path processed\n");
+            }
+        }
     }
     std::printf("buffer     %u frames (%.2f ms)\n", period,
                 1000.0 * period / negotiated.accepted.sample_rate);
@@ -679,13 +924,28 @@ int play(const MpSinkVtbl& vtbl, const Options& options)
 
     mp::SineSource source{source_format, options.hz, options.amplitude};
     mp::win::RenderThreadHooks hooks;
-    if (mp::use_processed(options.path, negotiated.fidelity)) {
+    if (processing) {
         mp::ConvertConfig conversion;
         conversion.gain = options.gain;
         conversion.dither = options.dither;
         conversion.shaping = options.shaping;
-        mp::ProcessedGraph graph{source, sink, negotiated.accepted, period, conversion, &hooks};
-        return run_graph(graph, hooks, negotiated.accepted, options);
+        mp::ProcessedGraph graph{source,           sink,
+                                 negotiated.accepted, period,
+                                 conversion,       &hooks,
+                                 mp::PassthroughConfig{},
+                                 chain.empty() ? nullptr : &chain};
+        const int rc = run_graph(graph, hooks, negotiated.accepted, options);
+        // What each stage made of it, in the stage's own words. `dsp_gain`
+        // reports the loudest sample it saw, which is the cheapest evidence
+        // that the chain was in the path at all.
+        if (options.verbose) {
+            for (std::size_t i = 0; i < chain.size(); ++i) {
+                for (const std::string& line : chain.at(i).describe()) {
+                    std::printf("%-10s %s\n", chain.at(i).name().c_str(), line.c_str());
+                }
+            }
+        }
+        return rc;
     }
 
     mp::PassthroughGraph graph{source, sink, negotiated.accepted, period, negotiated.fidelity,
@@ -1516,6 +1776,12 @@ int main(int argc, char** argv)
         return 0;
     }
 
+    for (const std::string& spec : options.dsp) {
+        if (spec == "list") {
+            return list_dsp_modules(registry);
+        }
+    }
+
     const MpSinkVtbl* sink_vtbl = registry.sink();
     if (sink_vtbl == nullptr) {
         std::fprintf(stderr, "no sink module beside the executable\n");
@@ -1530,7 +1796,7 @@ int main(int argc, char** argv)
         return negotiate(sink, options);
     }
     if (options.command == "play") {
-        return play(sink, options);
+        return play(sink, registry, options);
     }
     if (options.command == "decode" || options.command == "verify" ||
         options.command == "compare") {
