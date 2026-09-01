@@ -29,10 +29,12 @@
 #ifndef MEDIAPERCH_CONVERT_HPP
 #define MEDIAPERCH_CONVERT_HPP
 
+#include "mediaperch/dither.hpp"
 #include "mediaperch/format.hpp"
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace mp {
 
@@ -40,11 +42,14 @@ struct ConvertConfig {
     /// Linear, not decibels: 1.0 is unity and the graph does no arithmetic on it.
     double gain = 1.0;
 
-    /// TPDF dither, applied only when the destination is an integer that cannot
-    /// hold the source exactly. Off makes the output reproducible byte for byte,
-    /// which is what the tests want and what a measurement wants; on is what
-    /// listening wants.
-    bool dither = true;
+    /// Which distribution the dither is drawn from, applied only when the
+    /// destination is an integer that cannot hold the source exactly.
+    /// `DitherKind::none` is what a measurement wants; the rest are what
+    /// listening wants, and they differ from each other -- see dither.hpp.
+    DitherKind dither = DitherKind::triangular;
+
+    /// Where the quantisation noise is put. Order 0 leaves it where it fell.
+    NoiseShaping shaping{};
 
     /// The dither generator's seed. Fixed rather than from a clock, so two runs
     /// of the same file produce the same bytes and a difference means something.
@@ -77,9 +82,15 @@ public:
     [[nodiscard]] const Format& from() const noexcept { return from_; }
     [[nodiscard]] const Format& to() const noexcept { return to_; }
 
-private:
-    [[nodiscard]] double next_dither() noexcept;
+    /// What is actually happening to the samples, in the words the settings
+    /// use. For whoever has to tell the user, which §6.3 says somebody must.
+    [[nodiscard]] DitherKind dither_kind() const noexcept { return config_.dither; }
+    [[nodiscard]] std::uint32_t shaping_order() const noexcept;
+    /// True when the destination is narrow enough that dither and shaping are
+    /// doing something. Widening cannot lose anything, so neither runs.
+    [[nodiscard]] bool quantising() const noexcept { return quantising_; }
 
+private:
     Format from_;
     Format to_;
     ConvertConfig config_;
@@ -92,7 +103,12 @@ private:
     /// One least-significant bit of the destination, in destination units: 1 for
     /// a container whose valid bits fill it, 256 for 24 bits inside four bytes.
     double step_ = 1.0;
-    std::uint32_t rng_;
+    bool quantising_ = false;
+
+    /// One per channel. A shaper shared between channels feeds each channel's
+    /// error into the others, which correlates their noise floors and puts a
+    /// centre image on what should be two independent ones.
+    std::vector<Dither> dither_;
 };
 
 } // namespace mp

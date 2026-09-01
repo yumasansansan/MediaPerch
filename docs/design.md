@@ -75,12 +75,66 @@ $ mediaperch-probe negotiate --rate 44100 --float --channels 2 --path auto
 3 CONVERT        44100 Hz / 2 ch / S32              -> ACCEPTED, buffer 132 frames
 ```
 
-**What Path B does is narrow on purpose.** Sample type, through a normalised `double`, with
-TPDF dither when the destination cannot hold the signal; and a gain, because a volume
-control on an exclusive-mode stream has nowhere else to live — the session interfaces do
-not touch it. It does **not** resample and does **not** change the channel count. Both are
-real conversions needing real implementations, and a bad one here would be worse than the
+**What Path B does is narrow on purpose.** Sample type, a gain, dither and noise shaping.
+It does **not** resample and does **not** change the channel count: both are real
+conversions needing real implementations, and a bad one here would be worse than the
 refusal it replaced, so negotiation still refuses a device that wants a different rate.
+
+### The intermediate is binary64, and the read side is exact
+
+Every sample is read into a `double`, and that is not a precaution — it is a guarantee that
+can be stated:
+
+- **float32 → double** is a widening conversion and is always exact.
+- **any integer container here → double** is exact: binary64 has a 53-bit significand and
+  the widest container is 32 bits.
+- **the normalising divide by 2^(bits−1)** is exact, because it is a power of two: it
+  changes the exponent and leaves the significand alone.
+
+So nothing happens on the way *in*, and `tests/convert_test.cpp` proves it by taking every
+integer type out to `f64` and back and comparing bytes. The only rounding in the whole
+conversion is the one at the bottom of it, which is the one dither and shaping are about.
+
+### Dither
+
+Rounding alone is not a small error, it is a *correlated* one: the residue is a function of
+the signal, so it reaches the ear as harmonics that were not in the music. Dither makes the
+residue depend on a random value instead — half a bit of noise floor bought with the
+distortion removed.
+
+| `--dither` | What it is | When |
+|---|---|---|
+| `none` | rounding | a measurement, and the only setting where two runs give identical bytes |
+| `rectangular` | one uniform draw, ±½ LSB | decorrelates the error but leaves its *variance* following the signal, heard as a floor that breathes. Here because it is what everybody reaches for first |
+| `triangular` **(default)** | two independent draws | decorrelates the error and its variance both, at 4.77 dB more noise. The standard answer |
+| `highpass` | one draw differenced with the last | the same triangular distribution, with a first-order highpass spectrum instead of a white one. Same total power, moved off the midband |
+| `gaussian` | σ = ½ LSB, Box–Muller | the distribution a sum of independent sources tends to, and so the right shape when something downstream will quantise again |
+
+Every one of them is seeded rather than drawn from a clock: two decodes of one file have to
+produce the same bytes, or a difference between them means nothing.
+
+### Noise shaping
+
+The quantiser's error is unavoidable; *where in the spectrum it lands* is not. Feeding it
+back through a filter moves it out of the band the ear is sensitive to. Total noise power
+goes up and audible noise goes down.
+
+`--shape N` gives a noise transfer function of exactly **(1 − z⁻¹)ᴺ**. The coefficients are
+the binomial expansion, `h[k] = (−1)^(k+1) C(N,k)`, **derived rather than tabulated** — there
+is nothing here to mistype.
+
+**Order is not quality**, and this is the part to read before turning it up. Each order
+tilts the noise further out of the midband and each order also multiplies the total: a
+9th-order binomial shaper puts far more noise above 15 kHz than it removes below. Orders 1
+to 3 are useful. Past that, this is the mechanism rather than a recommendation.
+
+**The psychoacoustically weighted shapers are not here** — Lipshitz's minimally-audible
+curves, SoX's `shibata` family, and the `NS`/`LNS` sets other players ship. Those are not
+expressions to derive; they are tables of measured coefficients, and a table written from
+memory is a table that is wrong. They belong here, and they belong here the way
+`modules/decode_aac/aac_tables.cpp` got here: transcribed from a named source by a
+generator that refuses to emit a table failing its own check. `tools/gen_aac_tables.py` is
+the pattern.
 
 ### Choosing the path
 

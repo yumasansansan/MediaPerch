@@ -104,8 +104,13 @@ bool is_float(SampleType t) noexcept
 
 } // namespace
 
+std::uint32_t Converter::shaping_order() const noexcept
+{
+    return dither_.empty() ? 0 : dither_.front().order();
+}
+
 Converter::Converter(const Format& from, const Format& to, ConvertConfig config) noexcept
-    : from_(from), to_(to), config_(config), rng_(config.seed)
+    : from_(from), to_(to), config_(config)
 {
     possible_ = is_valid(from) && is_valid(to) && from.sample_rate == to.sample_rate &&
                 from.channels == to.channels && from.encoding == Encoding::pcm &&
@@ -118,7 +123,8 @@ Converter::Converter(const Format& from, const Format& to, ConvertConfig config)
     if (is_float(to.sample_type)) {
         // Float holds everything an integer container can, so nothing is lost
         // going this way -- unless a gain pushes it past what float represents,
-        // which it does not at any gain anybody sets.
+        // which it does not at any gain anybody sets. Nothing to dither and
+        // nothing to shape: there is no quantiser here.
         scale_ = 1.0;
         ceiling_ = std::numeric_limits<double>::max();
         floor_ = -ceiling_;
@@ -139,6 +145,17 @@ Converter::Converter(const Format& from, const Format& to, ConvertConfig config)
     lossy_ = is_float(from.sample_type) || config.gain != 1.0 ||
              effective_valid_bits(from) > bits;
 
+    // Dither and noise shaping earn their keep only where bits are being
+    // thrown away. Widening cannot lose anything, so adding noise to it would
+    // be vandalism.
+    //
+    // A gain counts, and leaving it out was a bug: 16 bits to 16 bits at 0.5
+    // is not a widening, it is a quantiser whose input is half an LSB off the
+    // grid on every other sample, and rounding that without dither is exactly
+    // the correlated error this file exists to avoid.
+    quantising_ = is_float(from.sample_type) || effective_valid_bits(from) > bits ||
+                  config.gain != 1.0;
+
     // s24_in_32 and s32 are written as a whole 32-bit word, so a 24-bit value
     // has to be left-justified into it the way the container expects.
     if (to.sample_type == SampleType::s24_in_32 || to.sample_type == SampleType::s32) {
@@ -152,19 +169,16 @@ Converter::Converter(const Format& from, const Format& to, ConvertConfig config)
         // nothing at all.
         step_ = shift;
     }
-}
 
-double Converter::next_dither() noexcept
-{
-    // TPDF: the sum of two independent uniform values, which is the standard
-    // choice because it decorrelates the error from the signal *and* keeps the
-    // noise floor stationary. One uniform value would do the first and not the
-    // second.
-    auto uniform = [this]() noexcept {
-        rng_ = rng_ * 1664525u + 1013904223u;
-        return static_cast<double>(rng_) / 4294967296.0 - 0.5;
-    };
-    return uniform() + uniform();
+    // One generator per channel, each with its own seed, so that two channels
+    // do not receive the same noise and turn it into a centre image.
+    if (quantising_) {
+        dither_.reserve(to.channels);
+        for (std::uint32_t c = 0; c < to.channels; ++c) {
+            dither_.emplace_back(config.dither, config.shaping,
+                                 config.seed + c * 0x9E3779B9u);
+        }
+    }
 }
 
 void Converter::run(const void* src, void* dst, std::size_t frames) noexcept
@@ -178,29 +192,45 @@ void Converter::run(const void* src, void* dst, std::size_t frames) noexcept
     const std::size_t in_step = container_bytes(from_.sample_type);
     const std::size_t out_step = container_bytes(to_.sample_type);
     const std::size_t samples = frames * from_.channels;
-    const bool to_float = is_float(to_.sample_type);
-    const bool dithering = config_.dither && !to_float &&
-                           (is_float(from_.sample_type) ||
-                            effective_valid_bits(from_) > effective_valid_bits(to_));
+    const unsigned channels = from_.channels;
+
+    // Reading is exact for every type this handles and needs no comment beyond
+    // saying so: binary64 has a 53-bit significand, every integer container
+    // here is at most 32 bits, and the normalising divisor is a power of two,
+    // which moves the exponent and leaves the significand alone. The only
+    // rounding in this function is the one at the bottom of it.
+    if (is_float(to_.sample_type)) {
+        for (std::size_t i = 0; i < samples; ++i) {
+            const double v = read_sample(in + i * in_step, from_.sample_type) * config_.gain;
+            write_sample(out + i * out_step, to_.sample_type, v);
+        }
+        return;
+    }
 
     for (std::size_t i = 0; i < samples; ++i) {
-        double v = read_sample(in + i * in_step, from_.sample_type) * config_.gain;
+        const double v = read_sample(in + i * in_step, from_.sample_type) * config_.gain;
 
-        if (to_float) {
-            write_sample(out + i * out_step, to_.sample_type, v);
-            continue;
+        // In LSBs of the destination from here down, which is the unit dither
+        // and noise shaping are both defined in.
+        const double lsb = v * scale_ / step_;
+
+        double quantised = 0.0;
+        if (quantising_) {
+            Dither& noise = dither_[i % channels];
+            // Subtract what the shaper says this sample owes for the errors
+            // before it, then quantise, then hand back what this one cost.
+            const double shaped = lsb - noise.feedback();
+            quantised = std::round(shaped + noise.next());
+            noise.accept(quantised - shaped);
+        } else {
+            quantised = std::round(lsb);
         }
 
-        v *= scale_;
-        if (dithering) {
-            v += next_dither() * step_;
-        }
-        // Round half away from zero, then clamp. The clamp is not paranoia: a
-        // gain above unity, or a float source that legitimately exceeds full
-        // scale -- which float WAV routinely does -- both land outside.
-        v = std::round(v / step_) * step_;
-        v = std::clamp(v, floor_, ceiling_);
-        write_sample(out + i * out_step, to_.sample_type, v);
+        // The clamp is not paranoia: a gain above unity, a float source that
+        // legitimately exceeds full scale -- which float WAV routinely does --
+        // and a shaper that has just been handed a transient all land outside.
+        write_sample(out + i * out_step, to_.sample_type,
+                     std::clamp(quantised * step_, floor_, ceiling_));
     }
 }
 

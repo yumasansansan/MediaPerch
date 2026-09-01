@@ -376,7 +376,7 @@ TEST_CASE("Path B plays a float source a device would not take", "[processed]")
     REQUIRE(mp::needs_processing(negotiated.fidelity));
 
     mp::ConvertConfig conversion;
-    conversion.dither = false;
+    conversion.dither = mp::DitherKind::none;
     mp::ProcessedGraph graph{source, sink, negotiated.accepted, period, conversion};
     REQUIRE(graph.start() == MP_OK);
     REQUIRE(wait_until_stopped(graph));

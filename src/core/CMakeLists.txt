@@ -12,6 +12,8 @@ add_library(mediaperch_core STATIC
     mediaperch/compare.hpp
     mediaperch/convert.cpp
     mediaperch/convert.hpp
+    mediaperch/dither.cpp
+    mediaperch/dither.hpp
     mediaperch/decoder.cpp
     mediaperch/decoder.hpp
     mediaperch/format.cpp

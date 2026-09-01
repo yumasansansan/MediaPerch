@@ -273,9 +273,12 @@ failed and the user chose to convert rather than not play. The canonical bus is 
 deinterleaved because every DSP anyone will write wants it that way, and one conversion at
 each end is cheaper than N conversions inside.
 
-**What is written so far** is `src/core/processed.*` and `src/core/convert.*`: the graph,
-the sample-type conversion through a normalised `double`, TPDF dither, and a gain. The DSP
-chain itself is the extension point and is empty. The bus is not yet f32 deinterleaved
+**What is written so far** is `src/core/processed.*`, `src/core/convert.*` and
+`src/core/dither.*`: the graph, the sample-type conversion through a normalised `double`,
+five dither distributions, Nth-order noise shaping and a gain. The DSP chain itself is the
+extension point and is empty, and so is the shelf of psychoacoustically weighted shaping
+curves -- those are transcription work, not derivation work, and design.md says why they
+are not guessed at. The bus is not yet f32 deinterleaved
 either -- with one stage there is nothing for a canonical bus to be canonical *for*, and
 converting straight from the source to the wire format avoids a round trip that would only
 be justified once there is a chain. It resamples nothing and remixes nothing, so

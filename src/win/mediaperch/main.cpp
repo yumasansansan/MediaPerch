@@ -47,7 +47,8 @@ struct Options {
     std::uint64_t seek = 0;
     mp::PathPolicy path = mp::PathPolicy::bit_exact;
     double gain = 1.0;
-    bool no_dither = false;
+    mp::DitherKind dither = mp::DitherKind::triangular;
+    std::uint32_t shaping = 0;
     bool float_source = false;
     std::string source;          // `compare`: the audio that was encoded
     std::string rival_id = "decode_ffmpeg"; // and a second decoder to sit beside
@@ -141,8 +142,18 @@ Options
                       processed Path B whether or not Path A was available
   --gain G          Path B only: linear gain, 1.0 is unity. A volume control has
                     nowhere else to live on an exclusive-mode stream
-  --no-dither       Path B only: quantise without dither. Reproducible byte for
-                    byte, which a measurement wants and an ear does not
+  --dither KIND     Path B only, and only where bits are actually being thrown
+                    away. `triangular` (default) is the standard answer;
+                    `highpass` is the same distribution with its noise tilted
+                    away from the midband; `gaussian` is the right shape when
+                    something downstream will quantise again; `rectangular`
+                    leaves a noise floor that breathes with the signal;
+                    `none` is what a measurement wants
+  --shape N         Path B only: Nth-order noise shaping, 0 (off) to 9. The
+                    noise transfer function is (1 - z^-1)^N exactly. **Order is
+                    not quality** -- each order moves noise further out of the
+                    midband and multiplies the total, so 1 to 3 are useful and
+                    the rest are the mechanism rather than a recommendation
   --seek FRAMES     `decode` seeks here first, then hashes the rest. The hash of
                     a seek to N must equal the hash of the last (length - N)
                     frames of a straight decode, which is what makes seeking
@@ -196,8 +207,15 @@ bool parse(int argc, char** argv, Options& out)
             if (i + 1 < argc) {
                 out.gain = std::strtod(argv[++i], nullptr);
             }
-        } else if (arg == "--no-dither") {
-            out.no_dither = true;
+        } else if (arg == "--dither") {
+            if (i + 1 >= argc || !mp::dither_kind_from_name(argv[++i], out.dither)) {
+                std::fprintf(stderr,
+                             "--dither takes none, rectangular, triangular, highpass "
+                             "or gaussian\n");
+                return false;
+            }
+        } else if (arg == "--shape") {
+            value(out.shaping);
         } else if (arg == "--float") {
             out.float_source = true;
         } else if (arg == "--path") {
@@ -626,9 +644,13 @@ int play(const MpSinkVtbl& vtbl, const Options& options)
         // Loud, because §6.3 says it has to be. A converted stream is not the
         // thing this program is for, and a person who did not mean to ask for
         // one should be able to see that they did.
-        std::printf("           source %s, gain %.4f, dither %s\n",
+        std::printf("           source %s, gain %.4f, dither %s",
                     mp::describe(source_format).c_str(), options.gain,
-                    options.no_dither ? "off" : "on");
+                    mp::dither_kind_name(options.dither));
+        if (options.shaping != 0) {
+            std::printf(", noise shaping order %u", options.shaping);
+        }
+        std::printf("\n");
     }
     std::printf("buffer     %u frames (%.2f ms)\n", period,
                 1000.0 * period / negotiated.accepted.sample_rate);
@@ -652,7 +674,8 @@ int play(const MpSinkVtbl& vtbl, const Options& options)
     if (mp::use_processed(options.path, negotiated.fidelity)) {
         mp::ConvertConfig conversion;
         conversion.gain = options.gain;
-        conversion.dither = !options.no_dither;
+        conversion.dither = options.dither;
+        conversion.shaping.order = options.shaping;
         mp::ProcessedGraph graph{source, sink, negotiated.accepted, period, conversion, &hooks};
         return run_graph(graph, hooks, negotiated.accepted, options);
     }

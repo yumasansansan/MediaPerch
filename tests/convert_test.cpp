@@ -8,6 +8,7 @@
 // weaker guarantee honestly made rather than a stronger one implied.
 
 #include <mediaperch/convert.hpp>
+#include <mediaperch/dither.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -51,7 +52,7 @@ std::int16_t as_s16(const std::uint8_t* p)
 mp::ConvertConfig exactly()
 {
     mp::ConvertConfig c;
-    c.dither = false; // so a value can be asserted rather than a range
+    c.dither = mp::DitherKind::none; // so a value can be asserted, not a range
     return c;
 }
 
@@ -238,4 +239,212 @@ TEST_CASE("dither is not applied where it would only add noise", "[convert]")
     // 0x1234 at 16 bits is 0x12340000 at 32, exactly.
     CHECK(as_s32(out.data() + 0) == 0x12340000);
     CHECK(as_s32(out.data() + 4) == 0x56780000);
+}
+
+// --------------------------------------------------------------------------
+// Dither and noise shaping
+//
+// The properties here are the defining ones rather than the audible ones: an
+// ear is not available to a test, and "sounds better" is not a thing to assert.
+// What can be asserted is what each construction is *for*.
+
+TEST_CASE("reading into a double is exact for every type", "[convert][dither]")
+{
+    // The claim the whole conversion rests on. binary64 has a 53-bit
+    // significand, every integer container here is at most 32 bits, and the
+    // normalising divisor is a power of two -- so it moves the exponent and
+    // leaves the significand alone. A round trip through f64 has to come back
+    // byte for byte, or nothing below this line means anything.
+    for (const auto type : {mp::SampleType::u8, mp::SampleType::s16,
+                            mp::SampleType::s24_packed, mp::SampleType::s32}) {
+        const std::size_t width = mp::container_bytes(type);
+        std::vector<std::uint8_t> original(width * 2 * 64);
+        std::uint32_t state = 12345;
+        for (auto& byte : original) {
+            state = state * 1664525u + 1013904223u;
+            byte = static_cast<std::uint8_t>(state >> 24);
+        }
+
+        std::vector<std::uint8_t> wide(8 * 2 * 64);
+        std::vector<std::uint8_t> back(original.size());
+        mp::Converter up{make(type), make(mp::SampleType::f64), exactly()};
+        mp::Converter down{make(mp::SampleType::f64), make(type), exactly()};
+        REQUIRE(up.possible());
+        REQUIRE(down.possible());
+        CHECK_FALSE(up.lossy());
+
+        up.run(original.data(), wide.data(), 64);
+        down.run(wide.data(), back.data(), 64);
+        INFO("container bytes " << width);
+        CHECK(std::memcmp(original.data(), back.data(), original.size()) == 0);
+    }
+}
+
+TEST_CASE("a gain at the same width still quantises, and still gets dither",
+          "[convert][dither]")
+{
+    // 16 bits to 16 bits is not a widening once there is a gain: half the
+    // samples land off the grid. Treating it as one skipped the dither
+    // entirely, which is the correlated error the whole file exists to avoid.
+    std::vector<std::uint8_t> input(2 * 2 * 512);
+    for (std::size_t i = 0; i < input.size(); i += 2) {
+        const auto v = static_cast<std::int16_t>(1000 + (i % 7));
+        std::memcpy(input.data() + i, &v, 2);
+    }
+
+    mp::ConvertConfig half;
+    half.gain = 0.5;
+    mp::Converter conv{make(mp::SampleType::s16), make(mp::SampleType::s16), half};
+    REQUIRE(conv.possible());
+    CHECK(conv.lossy());
+    CHECK(conv.quantising());
+
+    std::vector<std::uint8_t> a(input.size());
+    std::vector<std::uint8_t> b(input.size());
+    conv.run(input.data(), a.data(), 512);
+
+    mp::ConvertConfig plain = half;
+    plain.dither = mp::DitherKind::none;
+    mp::Converter without{make(mp::SampleType::s16), make(mp::SampleType::s16), plain};
+    without.run(input.data(), b.data(), 512);
+
+    // Dither is doing something, which it was not before.
+    CHECK(std::memcmp(a.data(), b.data(), a.size()) != 0);
+}
+
+TEST_CASE("every dither kind is reproducible, and none of them is another one",
+          "[convert][dither]")
+{
+    std::vector<float> input(1024, 0.5F / 32768.0F);
+    const auto bytes = from_floats(input);
+
+    auto render = [&](mp::DitherKind kind) {
+        mp::ConvertConfig c;
+        c.dither = kind;
+        mp::Converter conv{make(mp::SampleType::f32), make(mp::SampleType::s16), c};
+        std::vector<std::uint8_t> out(input.size() * 2);
+        conv.run(bytes.data(), out.data(), input.size() / 2);
+        return out;
+    };
+
+    const auto kinds = {mp::DitherKind::none, mp::DitherKind::rectangular,
+                        mp::DitherKind::triangular, mp::DitherKind::highpass_triangular,
+                        mp::DitherKind::gaussian};
+    std::vector<std::vector<std::uint8_t>> rendered;
+    for (const auto kind : kinds) {
+        INFO(mp::dither_kind_name(kind));
+        const auto once = render(kind);
+        CHECK(once == render(kind)); // seeded, so the same twice
+        rendered.push_back(once);
+    }
+    for (std::size_t i = 1; i < rendered.size(); ++i) {
+        for (std::size_t j = 0; j < i; ++j) {
+            CHECK(rendered[i] != rendered[j]);
+        }
+    }
+}
+
+TEST_CASE("highpass dither is tilted where plain triangular dither is not",
+          "[convert][dither]")
+{
+    // The difference between the two is the whole reason to have both. Plain
+    // TPDF draws independent values, so successive samples are uncorrelated;
+    // the highpass form differences one draw with the last, so successive
+    // samples are *anti*-correlated -- which is what "tilted away from the
+    // midband" means when it is written as a number rather than a picture.
+    auto lag_one = [](mp::DitherKind kind) {
+        mp::Dither noise{kind, mp::NoiseShaping{}, 0x1f2e3d4cu};
+        std::vector<double> d(20000);
+        for (auto& v : d) {
+            v = noise.next();
+        }
+        double product = 0.0;
+        double energy = 0.0;
+        for (std::size_t i = 1; i < d.size(); ++i) {
+            product += d[i] * d[i - 1];
+            energy += d[i] * d[i];
+        }
+        return product / energy;
+    };
+
+    CHECK(std::abs(lag_one(mp::DitherKind::triangular)) < 0.05);
+    CHECK(std::abs(lag_one(mp::DitherKind::gaussian)) < 0.05);
+    // -0.5 exactly, in the limit: the sequence is r[n] - r[n-1].
+    CHECK(lag_one(mp::DitherKind::highpass_triangular) < -0.4);
+}
+
+TEST_CASE("noise shaping takes the error out of the band it was in",
+          "[convert][dither]")
+{
+    // A constant input sitting between two codes. Without shaping every sample
+    // rounds the same way, so the error is a DC offset and its running sum
+    // grows without bound -- which is exactly the audible failure, a quiet
+    // passage acquiring a level shift. With a shaper the noise transfer
+    // function is (1 - z^-1)^N, whose gain at DC is zero, so the same sum
+    // stays bounded however long the block is.
+    constexpr std::size_t frames = 4000;
+    const float value = 0.3F / 32768.0F;
+    std::vector<float> input(frames * 2, value);
+    const auto bytes = from_floats(input);
+
+    auto drift = [&](std::uint32_t order) {
+        mp::ConvertConfig c;
+        c.dither = mp::DitherKind::none; // so the shaper is the only thing acting
+        c.shaping.order = order;
+        mp::Converter conv{make(mp::SampleType::f32), make(mp::SampleType::s16), c};
+        std::vector<std::uint8_t> out(input.size() * 2);
+        conv.run(bytes.data(), out.data(), frames);
+
+        double sum = 0.0;
+        for (std::size_t i = 0; i < frames; ++i) {
+            sum += static_cast<double>(as_s16(out.data() + i * 2 * 2)) - 0.3;
+        }
+        return std::abs(sum);
+    };
+
+    CHECK(drift(0) > 1000.0);  // every sample the same way: 0.3 x 4000
+    CHECK(drift(1) < 5.0);     // the first-order shaper cancels it
+    CHECK(drift(2) < 5.0);
+    CHECK(drift(3) < 5.0);
+}
+
+TEST_CASE("order zero is off, and the order is what was asked for",
+          "[convert][dither]")
+{
+    mp::ConvertConfig c;
+    c.dither = mp::DitherKind::none;
+    CHECK(mp::Converter{make(mp::SampleType::f32), make(mp::SampleType::s16), c}
+              .shaping_order() == 0);
+
+    c.shaping.order = 3;
+    CHECK(mp::Converter{make(mp::SampleType::f32), make(mp::SampleType::s16), c}
+              .shaping_order() == 3);
+
+    // Past what the filter holds, clamped rather than read off the end.
+    c.shaping.order = 99;
+    CHECK(mp::Converter{make(mp::SampleType::f32), make(mp::SampleType::s16), c}
+              .shaping_order() == mp::NoiseShaping::k_max_order);
+}
+
+TEST_CASE("the dither names a user types round-trip", "[convert][dither]")
+{
+    for (const auto kind : {mp::DitherKind::none, mp::DitherKind::rectangular,
+                            mp::DitherKind::triangular,
+                            mp::DitherKind::highpass_triangular,
+                            mp::DitherKind::gaussian}) {
+        mp::DitherKind back{};
+        INFO(mp::dither_kind_name(kind));
+        REQUIRE(mp::dither_kind_from_name(mp::dither_kind_name(kind), back));
+        CHECK(back == kind);
+    }
+
+    // The spellings somebody who has used other tools will reach for.
+    mp::DitherKind out{};
+    CHECK(mp::dither_kind_from_name("tpdf", out));
+    CHECK(out == mp::DitherKind::triangular);
+    CHECK(mp::dither_kind_from_name("rpdf", out));
+    CHECK(out == mp::DitherKind::rectangular);
+
+    CHECK_FALSE(mp::dither_kind_from_name("shibata", out));
+    CHECK_FALSE(mp::dither_kind_from_name("", out));
 }
