@@ -32,14 +32,48 @@ void emit(std::vector<Candidate>& out, const Format& base, Fidelity fidelity)
 
 } // namespace
 
-std::vector<Candidate> build_candidates(const Format& source)
+const char* path_policy_name(PathPolicy p) noexcept
+{
+    switch (p) {
+    case PathPolicy::automatic:
+        return "auto";
+    case PathPolicy::exact_only:
+        return "exact";
+    case PathPolicy::processed:
+        return "processed";
+    }
+    return "auto";
+}
+
+bool path_policy_from_name(std::string_view name, PathPolicy& out) noexcept
+{
+    if (name == "auto") {
+        out = PathPolicy::automatic;
+    } else if (name == "exact") {
+        out = PathPolicy::exact_only;
+    } else if (name == "processed") {
+        out = PathPolicy::processed;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+std::vector<Candidate> build_candidates(const Format& source, PathPolicy policy)
 {
     std::vector<Candidate> out;
-    if (!is_valid(source)) {
+    if (!is_valid(source) || policy == PathPolicy::processed) {
         return out;
     }
 
     emit(out, source, Fidelity::exact);
+
+    // Asked for a memcpy and nothing else: the source's own container, in both
+    // its plain and its extensible form, and no further. Every candidate past
+    // this point is a repack, and a repack is what was refused.
+    if (policy == PathPolicy::exact_only) {
+        return out;
+    }
 
     // A DoP frame carries its markers in the top byte and a bitstream is not
     // samples at all. Neither survives being moved between containers. Float is

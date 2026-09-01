@@ -90,15 +90,22 @@ MpResult Sink::position(std::uint64_t& frames, std::uint64_t& qpc) noexcept
     return vtbl_->get_position(handle_, &frames, &qpc);
 }
 
-Negotiated negotiate_best(Sink& sink, const Format& source)
+Negotiated negotiate_best(Sink& sink, const Format& source, PathPolicy policy)
 {
     Negotiated out;
+    out.policy = policy;
     if (!sink) {
         out.last_error = MP_ERR_INVALID;
         return out;
     }
+    if (policy == PathPolicy::processed) {
+        // Refusing is the honest answer while there is no processed graph. It
+        // is not MP_ERR_FORMAT: nothing is wrong with the format.
+        out.last_error = MP_ERR_UNSUPPORTED;
+        return out;
+    }
 
-    for (const Candidate& candidate : build_candidates(source)) {
+    for (const Candidate& candidate : build_candidates(source, policy)) {
         ++out.tried;
 
         Format accepted{};
@@ -112,7 +119,7 @@ Negotiated negotiate_best(Sink& sink, const Format& source)
         // hands back a different one has failed the request, and calling that
         // success is exactly how a player ends up quietly resampling.
         const Fidelity actual = classify(source, accepted);
-        if (!is_bit_exact(actual)) {
+        if (!allows(policy, actual)) {
             out.last_error = MP_ERR_FORMAT;
             continue;
         }

@@ -43,11 +43,45 @@ architecture than any taste question:
 | Sample touching | `memcpy`, or one byte move if the container differs | gain, resample, convolution, dither |
 | Volume | `IAudioEndpointVolume`, or none | in the graph |
 | Chosen | when the file's format survives negotiation | when the user asks, or negotiation failed |
-| Code path | `src/core/passthrough.*` | `src/core/processed.*` |
+| Code path | `src/core/passthrough.*` | **not written yet** |
 
 They share the ring buffer, the sink module and the clock. Nothing else. The passthrough
 graph contains no floating-point arithmetic on sample data at all, which is a property a
 test can assert and a review can see.
+
+**Only the left-hand column exists today, and that is worth saying plainly** because the
+table above reads like a description of two things that are both there. `Fidelity::converted`
+is defined, produced by nothing, and refused by `PassthroughGraph::start`. This build plays
+a file bit-exact or does not play it.
+
+The consequence is not theoretical. Every lossy decoder here reports `F32`, because that is
+what a lossy codec's output *is*; on the machine this was written on, the endpoint refuses
+`F32` in exclusive mode:
+
+```
+$ mediaperch-probe negotiate --rate 44100 --float --channels 2
+1 exact          44100 Hz / 2 ch / F32        -> format refused
+2 exact   +mask  44100 Hz / 2 ch / F32 / mask 0x3  -> format refused
+```
+
+So MP3, AAC, Vorbis and Opus can be decoded and hashed on that machine and cannot be
+*played* on it. Path B is what fixes that, and until it exists the honest thing is to
+refuse rather than to convert quietly.
+
+### Choosing the path
+
+Which graph a stream may take is a setting, not only an inference. `--path` on the probe
+today, a config key when there is a config:
+
+| `--path` | What it allows |
+|---|---|
+| `auto` (default) | bit-exact, either a `memcpy` or a container repack. What negotiation has always done |
+| `exact` | a `memcpy` and nothing else. A container repack is bit-exact and is still a byte move, and somebody may want to know that nothing at all touched the samples |
+| `processed` | the DSP graph. Refuses, with the reason, because there is not one |
+
+`exact` also shortens the candidate list, which matters more than it sounds: every
+candidate is a real `IAudioClient::Initialize`, and in exclusive mode each one takes the
+device away from whatever else is using it.
 
 ## Layout
 

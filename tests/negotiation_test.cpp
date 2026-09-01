@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "mediaperch/negotiation.hpp"
 
+#include "mediaperch/format.hpp"
+
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
@@ -317,4 +319,77 @@ TEST_CASE("is_bit_exact covers exactly the two the passthrough graph may serve",
     STATIC_REQUIRE(mp::is_bit_exact(mp::Fidelity::exact));
     STATIC_REQUIRE(mp::is_bit_exact(mp::Fidelity::repacked));
     STATIC_REQUIRE_FALSE(mp::is_bit_exact(mp::Fidelity::converted));
+}
+
+// --------------------------------------------------------------------------
+// Choosing the path by hand
+//
+// Until there was a policy the answer was always "every bit-exact container the
+// device might take". That is the right default and these check it is still
+// what `automatic` does -- and that the other two mean what they say, because a
+// setting that quietly does the same thing as the default is worse than no
+// setting.
+
+TEST_CASE("asking for a memcpy offers the source's container and nothing else",
+          "[negotiation][path]")
+{
+    const auto full = mp::build_candidates(cd_audio(), mp::PathPolicy::automatic);
+    const auto exact = mp::build_candidates(cd_audio(), mp::PathPolicy::exact_only);
+
+    REQUIRE_FALSE(exact.empty());
+    CHECK(exact.size() < full.size());
+    for (const auto& candidate : exact) {
+        INFO(mp::describe(candidate.format));
+        CHECK(candidate.fidelity == mp::Fidelity::exact);
+        CHECK(candidate.format.sample_type == cd_audio().sample_type);
+    }
+    // The extensible form is still offered: naming a layout the source left
+    // unspecified moves no bytes, so it is a memcpy too.
+    CHECK(exact.size() == 2);
+    CHECK(exact.front() == full.front());
+}
+
+TEST_CASE("asking for the processed graph offers nothing, because there is not one",
+          "[negotiation][path]")
+{
+    CHECK(mp::build_candidates(cd_audio(), mp::PathPolicy::processed).empty());
+}
+
+TEST_CASE("the default policy is the behaviour that was there before it existed",
+          "[negotiation][path]")
+{
+    CHECK(mp::build_candidates(cd_audio()) ==
+          mp::build_candidates(cd_audio(), mp::PathPolicy::automatic));
+}
+
+TEST_CASE("a policy allows exactly what its name says", "[negotiation][path]")
+{
+    CHECK(mp::allows(mp::PathPolicy::automatic, mp::Fidelity::exact));
+    CHECK(mp::allows(mp::PathPolicy::automatic, mp::Fidelity::repacked));
+    CHECK_FALSE(mp::allows(mp::PathPolicy::automatic, mp::Fidelity::converted));
+
+    CHECK(mp::allows(mp::PathPolicy::exact_only, mp::Fidelity::exact));
+    CHECK_FALSE(mp::allows(mp::PathPolicy::exact_only, mp::Fidelity::repacked));
+    CHECK_FALSE(mp::allows(mp::PathPolicy::exact_only, mp::Fidelity::converted));
+
+    // Nothing reaches the processed graph, because nothing implements it.
+    CHECK_FALSE(mp::allows(mp::PathPolicy::processed, mp::Fidelity::exact));
+    CHECK_FALSE(mp::allows(mp::PathPolicy::processed, mp::Fidelity::repacked));
+    CHECK_FALSE(mp::allows(mp::PathPolicy::processed, mp::Fidelity::converted));
+}
+
+TEST_CASE("the names a user types round-trip", "[negotiation][path]")
+{
+    for (const auto policy : {mp::PathPolicy::automatic, mp::PathPolicy::exact_only,
+                              mp::PathPolicy::processed}) {
+        mp::PathPolicy back{};
+        INFO(mp::path_policy_name(policy));
+        REQUIRE(mp::path_policy_from_name(mp::path_policy_name(policy), back));
+        CHECK(back == policy);
+    }
+
+    mp::PathPolicy ignored{};
+    CHECK_FALSE(mp::path_policy_from_name("", ignored));
+    CHECK_FALSE(mp::path_policy_from_name("bit-exact", ignored));
+    CHECK_FALSE(mp::path_policy_from_name("AUTO", ignored));
 }

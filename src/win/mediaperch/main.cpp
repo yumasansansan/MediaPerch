@@ -44,6 +44,8 @@ struct Options {
     double amplitude = 0.5;
     unsigned seconds = 10;
     std::uint64_t seek = 0;
+    mp::PathPolicy path = mp::PathPolicy::automatic;
+    bool float_source = false;
     std::string source;          // `compare`: the audio that was encoded
     std::string rival_id = "decode_ffmpeg"; // and a second decoder to sit beside
     double min_snr_db = 0.0;
@@ -92,6 +94,9 @@ Options
   --capture N       capture endpoint index; default is one named "CABLE Output"
   --rate R          default 44100
   --bits 16|24|32   24 means 24 valid bits in a 32-bit container; default 16
+  --float           the source is 32-bit float rather than integer. This is what
+                    every lossy decoder here produces, and asking a device for it
+                    is the question those files raise
   --channels N      default 2
   --hz F            tone frequency, default 1000
   --amplitude A     fraction of full scale, default 0.5 (-6 dBFS).
@@ -123,6 +128,10 @@ Options
                     Default 2048, two AAC frames
   --untrimmed       `compare`: the decode may be longer than the source, which
                     is correct for a format with no gapless metadata
+  --path WHICH      which graph a stream may take. `auto` (default) plays it
+                    bit-exact if the device will take it; `exact` refuses even a
+                    container repack, so it is a memcpy or nothing; `processed`
+                    asks for the DSP graph, which does not exist yet and says so
   --seek FRAMES     `decode` seeks here first, then hashes the rest. The hash of
                     a seek to N must equal the hash of the last (length - N)
                     frames of a straight decode, which is what makes seeking
@@ -171,6 +180,13 @@ bool parse(int argc, char** argv, Options& out)
                 if (out.decoder_id.rfind("decode_", 0) != 0) {
                     out.decoder_id = "decode_" + out.decoder_id;
                 }
+            }
+        } else if (arg == "--float") {
+            out.float_source = true;
+        } else if (arg == "--path") {
+            if (i + 1 >= argc || !mp::path_policy_from_name(argv[++i], out.path)) {
+                std::fprintf(stderr, "--path takes auto, exact or processed\n");
+                return false;
             }
         } else if (arg == "--source") {
             if (i + 1 < argc) {
@@ -291,6 +307,11 @@ mp::Format requested_format(const Options& options)
     format.channel_mask = 0;
     format.encoding = mp::Encoding::pcm;
 
+    if (options.float_source) {
+        format.sample_type = mp::SampleType::f32;
+        return format;
+    }
+
     switch (options.bits) {
     case 16:
         format.sample_type = mp::SampleType::s16;
@@ -363,6 +384,34 @@ mp::Sink open_sink(const MpSinkVtbl& vtbl, const std::string& device_id, bool sh
     return mp::Sink{&vtbl, handle};
 }
 
+/// Why nothing was accepted, said in terms of what was asked for.
+///
+/// "No candidate was accepted" is the same sentence whether the device refused
+/// everything or the user asked for a graph that does not exist, and those are
+/// very different things to be told.
+void report_refusal(const mp::Negotiated& negotiated)
+{
+    switch (negotiated.policy) {
+    case mp::PathPolicy::processed:
+        std::fprintf(stderr,
+                     "--path processed asks for the DSP graph, and there is not one yet.\n"
+                     "This build plays bit-exact or not at all.\n");
+        return;
+    case mp::PathPolicy::exact_only:
+        std::fprintf(stderr,
+                     "--path exact allows only a memcpy, and the device took none of the "
+                     "%zu format%s offered: %s\n"
+                     "Without --path, a container repack would also have been offered.\n",
+                     negotiated.tried, negotiated.tried == 1 ? "" : "s",
+                     result_name(negotiated.last_error));
+        return;
+    case mp::PathPolicy::automatic:
+        break;
+    }
+    std::fprintf(stderr, "no candidate was accepted (%zu offered): %s\n", negotiated.tried,
+                 result_name(negotiated.last_error));
+}
+
 int negotiate(const MpSinkVtbl& vtbl, const Options& options)
 {
     const mp::Format source = requested_format(options);
@@ -381,9 +430,16 @@ int negotiate(const MpSinkVtbl& vtbl, const Options& options)
     }
 
     std::printf("source     %s\n", mp::describe(source).c_str());
-    std::printf("mode       %s\n\n", options.shared ? "shared" : "exclusive");
+    std::printf("mode       %s\n", options.shared ? "shared" : "exclusive");
+    std::printf("path       %s\n\n", mp::path_policy_name(options.path));
 
-    const auto candidates = mp::build_candidates(source);
+    if (options.path == mp::PathPolicy::processed) {
+        std::printf("There is no processed graph yet, so there is nothing to offer a\n"
+                    "device: this build plays bit-exact or not at all.\n");
+        return 1;
+    }
+
+    const auto candidates = mp::build_candidates(source, options.path);
     std::size_t index = 0;
     for (const auto& candidate : candidates) {
         mp::Format accepted{};
@@ -400,10 +456,11 @@ int negotiate(const MpSinkVtbl& vtbl, const Options& options)
         }
 
         const mp::Fidelity actual = mp::classify(source, accepted);
-        if (!mp::is_bit_exact(actual)) {
-            // The device said yes and meant something else. Not a success.
-            std::printf("-> accepted %s -- NOT bit-exact, refusing\n",
-                        mp::describe(accepted).c_str());
+        if (!mp::allows(options.path, actual)) {
+            // Either the device said yes and meant something else, or it meant
+            // something this policy does not allow. Both are refusals here.
+            std::printf("-> accepted %s -- %s, refusing\n", mp::describe(accepted).c_str(),
+                        mp::is_bit_exact(actual) ? "not what --path allows" : "NOT bit-exact");
             continue;
         }
 
@@ -414,12 +471,22 @@ int negotiate(const MpSinkVtbl& vtbl, const Options& options)
         return 0;
     }
 
-    std::printf("\nnothing was accepted. %zu candidates offered.\n", candidates.size());
+    std::printf("\nnothing was accepted. %zu candidate%s offered.\n", candidates.size(),
+                candidates.size() == 1 ? "" : "s");
+    if (options.path == mp::PathPolicy::exact_only) {
+        std::printf("--path exact offers only the source's own container. Without it, a\n"
+                    "container repack would also have been tried.\n");
+    }
     return 1;
 }
 
 int play(const MpSinkVtbl& vtbl, const Options& options)
 {
+    if (options.float_source) {
+        std::fprintf(stderr,
+                     "--float is for `negotiate`: the tone generator writes integers.\n");
+        return 1;
+    }
     const mp::Format source_format = requested_format(options);
     if (!mp::is_valid(source_format)) {
         std::fprintf(stderr, "that is not a format: %s\n",
@@ -436,10 +503,9 @@ int play(const MpSinkVtbl& vtbl, const Options& options)
         return 1;
     }
 
-    const auto negotiated = mp::negotiate_best(sink, source_format);
+    const auto negotiated = mp::negotiate_best(sink, source_format, options.path);
     if (!negotiated.ok) {
-        std::fprintf(stderr, "no candidate was accepted (%zu offered): %s\n", negotiated.tried,
-                     result_name(negotiated.last_error));
+        report_refusal(negotiated);
         return 1;
     }
 
@@ -452,11 +518,12 @@ int play(const MpSinkVtbl& vtbl, const Options& options)
     std::printf("device     %s\n", device_id.empty() ? "(default endpoint)" : device_id.c_str());
     std::printf("mode       %s\n", options.shared ? "shared" : "exclusive");
     std::printf("format     %s\n", mp::describe(negotiated.accepted).c_str());
-    std::printf("path       %s%s\n",
+    std::printf("path       %s%s  [--path %s]\n",
                 negotiated.fidelity == mp::Fidelity::exact
                     ? "passthrough, memcpy"
                     : "passthrough, container repack",
-                negotiated.channel_mask_added ? " (extensible form)" : "");
+                negotiated.channel_mask_added ? " (extensible form)" : "",
+                mp::path_policy_name(negotiated.policy));
     std::printf("buffer     %u frames (%.2f ms)\n", period,
                 1000.0 * period / negotiated.accepted.sample_rate);
     std::printf("tone       %.1f Hz at %.3f of full scale (%.1f dBFS) for %u s\n\n",
@@ -1116,7 +1183,7 @@ int verify(const MpSinkVtbl& sink_vtbl, const MpDecoderVtbl& decoder_vtbl,
     TeeSink tee{sink_vtbl, raw_handle};
     mp::Sink sink = tee.sink(); // owns the device from here
 
-    const auto negotiated = mp::negotiate_best(sink, source_format);
+    const auto negotiated = mp::negotiate_best(sink, source_format, options.path);
     if (!negotiated.ok) {
         std::fprintf(stderr, "no candidate was accepted (%zu offered): %s\n",
                      negotiated.tried, result_name(negotiated.last_error));

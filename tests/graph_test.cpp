@@ -289,3 +289,47 @@ TEST_CASE("a device that stops signalling is reported, not waited on for ever",
     CHECK(graph.error() == MP_TIMEOUT);
     CHECK(graph.stats().wait_timeouts == 1);
 }
+
+TEST_CASE("a device is only ever asked for what the policy allows", "[negotiate][path]")
+{
+    // A device that will not take the source's own container but will take a
+    // repack. Under `automatic` that plays; under `exact_only` it must not,
+    // because a repack is not the memcpy that was asked for.
+    mp::Format source = cd_audio();
+    source.sample_type = mp::SampleType::s24_in_32;
+
+    mp::test::FakeSinkRules rules;
+    rules.accepts = [](const mp::Format& f) {
+        return f.sample_type == mp::SampleType::s24_packed;
+    };
+    mp::test::FakeSink accepts_packed{rules};
+    mp::Sink sink = accepts_packed.handle();
+    const auto automatic = mp::negotiate_best(sink, source, mp::PathPolicy::automatic);
+    REQUIRE(automatic.ok);
+    CHECK(automatic.fidelity == mp::Fidelity::repacked);
+
+    mp::test::FakeSink again{rules};
+    mp::Sink strict_sink = again.handle();
+    const auto strict = mp::negotiate_best(strict_sink, source, mp::PathPolicy::exact_only);
+    CHECK_FALSE(strict.ok);
+    CHECK(strict.policy == mp::PathPolicy::exact_only);
+    // And it was never even offered: two candidates, both the source's own
+    // container. Negotiating costs an Initialize and in exclusive mode that
+    // takes the device.
+    CHECK(strict.tried == 2);
+}
+
+TEST_CASE("asking for the processed graph is refused rather than answered", "[negotiate][path]")
+{
+    mp::test::FakeSink anything{mp::test::FakeSinkRules{}};
+    mp::Sink sink = anything.handle();
+    const auto negotiated =
+        mp::negotiate_best(sink, cd_audio(), mp::PathPolicy::processed);
+
+    CHECK_FALSE(negotiated.ok);
+    CHECK(negotiated.tried == 0);
+    // Not MP_ERR_FORMAT: there is nothing wrong with the format. The graph is
+    // what is missing, and saying so is the difference between "your file is
+    // unplayable" and "this build cannot do that yet".
+    CHECK(negotiated.last_error == MP_ERR_UNSUPPORTED);
+}

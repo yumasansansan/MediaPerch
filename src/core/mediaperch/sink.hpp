@@ -55,6 +55,9 @@ struct Negotiated {
     bool ok = false;
     Format accepted{};
     Fidelity fidelity = Fidelity::converted;
+    /// The policy that was asked for, carried back so a caller can report what
+    /// it was refused *under* rather than only that it was refused.
+    PathPolicy policy = PathPolicy::automatic;
     bool channel_mask_added = false;
     /// How many candidates were offered before one stuck. Worth logging: a
     /// device that takes the fourth is telling you something about its driver.
@@ -69,6 +72,12 @@ struct Negotiated {
 /// taken on trust. A sink that answers MP_OK while handing back something that
 /// is not bit-exact has failed, not succeeded, and treating that as success
 /// would quietly defeat the one property this program exists to have.
-[[nodiscard]] Negotiated negotiate_best(Sink& sink, const Format& source);
+///
+/// `policy` decides which answers count as acceptable; see `PathPolicy`. It
+/// filters the candidate list as well as the result, because each candidate
+/// costs a real `IAudioClient::Initialize` and in exclusive mode each one takes
+/// the device away from whatever else is using it.
+[[nodiscard]] Negotiated negotiate_best(Sink& sink, const Format& source,
+                                        PathPolicy policy = PathPolicy::automatic);
 
 } // namespace mp

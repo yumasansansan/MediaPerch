@@ -262,6 +262,12 @@ Three variants live here, and all three are `memcpy`:
   `WAVEFORMATEXTENSIBLE` with a `KSDATAFORMAT_SUBTYPE_IEC61937_*` subformat, for a receiver
   to decode.
 
+**Path A is what exists.** `src/core/passthrough.*` is written, tested and measured. Path B
+below is not written: `Fidelity::converted` is produced by nothing and `PassthroughGraph`
+refuses it. §6.3's three outcomes are therefore one outcome today, "Refuse", and the setting
+that will choose between them exists as `--path` with its third value refusing honestly
+rather than pretending.
+
 ### Path B — processed
 
 ```
@@ -448,7 +454,7 @@ Three outcomes, and the user picks the default once in settings:
 
 | Choice | Behaviour |
 |---|---|
-| **Convert** | fall to Path B with the best available resampler. Loud in the UI about what it did |
+| **Convert** | fall to Path B with the best available resampler. Loud in the UI about what it did. **Not implemented**: there is no Path B, so `--path processed` refuses and says why |
 | **Shared** | fall to shared mode, ideally with `AUDCLNT_STREAMOPTIONS_RAW` via `IAudioClient2::SetClientProperties` to bypass system effects, and `IAudioClient3::InitializeSharedAudioStream` at `GetSharedModeEnginePeriod` for latency |
 | **Refuse** | do not play, and say exactly which format the device declined |
 
@@ -718,7 +724,11 @@ converting, and a decoder in this tree does not convert — that is the graph's 
 where it is visible and where the user chose it.
 
 The consequence is that no lossy file takes Path A, and that is not a limitation of this
-implementation. A lossy codec's output is *defined* as a floating-point signal with a
+implementation -- but while Path B is unwritten it *is* a limitation of this build, and a
+measured one. The endpoint on the development machine refuses `F32` in exclusive mode, so
+every MP3, AAC, Vorbis and Opus file there can be decoded and hashed and cannot be played.
+`mediaperch-probe negotiate --float` is the one-line way to ask any device the same
+question. A lossy codec's output is *defined* as a floating-point signal with a
 tolerance; there is no byte pattern for it to be bit-exact to. Rounding to S32 inside the
 decoder would produce something that looked like Path A material and claim an exactness that
 exists nowhere in the chain. Measured against FFmpeg's own independent decoders, this module
