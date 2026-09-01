@@ -2,6 +2,7 @@
 #include "fake_sink.hpp"
 
 #include "mediaperch/passthrough.hpp"
+#include "mediaperch/processed.hpp"
 #include "mediaperch/repack.hpp"
 #include "mediaperch/sink.hpp"
 
@@ -64,7 +65,10 @@ std::vector<std::uint8_t> pattern(std::size_t bytes)
     return out;
 }
 
-bool wait_until_stopped(const mp::PassthroughGraph& graph)
+/// Templated because Path A and Path B are two classes: from out here the only
+/// thing that matters is that both of them stop.
+template <typename Graph>
+bool wait_until_stopped(const Graph& graph)
 {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
     while (graph.running()) {
@@ -319,17 +323,94 @@ TEST_CASE("a device is only ever asked for what the policy allows", "[negotiate]
     CHECK(strict.tried == 2);
 }
 
-TEST_CASE("asking for the processed graph is refused rather than answered", "[negotiate][path]")
+TEST_CASE("a float source that the device refuses reaches it through Path B",
+          "[negotiate][path]")
 {
-    mp::test::FakeSink anything{mp::test::FakeSinkRules{}};
-    mp::Sink sink = anything.handle();
-    const auto negotiated =
-        mp::negotiate_best(sink, cd_audio(), mp::PathPolicy::processed);
+    // The measured case. Every lossy decoder here reports F32; the endpoint this
+    // was written on will not take float in exclusive mode. Under the default
+    // that file does not play, which is honest and useless; under `auto` it
+    // plays converted, and the report says so.
+    mp::Format source = cd_audio();
+    source.sample_type = mp::SampleType::f32;
 
-    CHECK_FALSE(negotiated.ok);
-    CHECK(negotiated.tried == 0);
-    // Not MP_ERR_FORMAT: there is nothing wrong with the format. The graph is
-    // what is missing, and saying so is the difference between "your file is
-    // unplayable" and "this build cannot do that yet".
-    CHECK(negotiated.last_error == MP_ERR_UNSUPPORTED);
+    mp::test::FakeSinkRules rules;
+    rules.accepts = [](const mp::Format& f) { return f.sample_type == mp::SampleType::s32; };
+
+    mp::test::FakeSink refuses_float{rules};
+    mp::Sink strict = refuses_float.handle();
+    CHECK_FALSE(mp::negotiate_best(strict, source, mp::PathPolicy::bit_exact).ok);
+
+    mp::test::FakeSink again{rules};
+    mp::Sink sink = again.handle();
+    const auto negotiated = mp::negotiate_best(sink, source, mp::PathPolicy::automatic);
+    REQUIRE(negotiated.ok);
+    CHECK(negotiated.fidelity == mp::Fidelity::converted);
+    CHECK(mp::needs_processing(negotiated.fidelity));
+    CHECK(negotiated.accepted.sample_type == mp::SampleType::s32);
+}
+
+TEST_CASE("Path B plays a float source a device would not take", "[processed]")
+{
+    constexpr std::uint32_t period = 64;
+    mp::Format source_format = cd_audio();
+    source_format.sample_type = mp::SampleType::f32;
+
+    // A ramp, so the conversion can be checked rather than only its length.
+    const std::size_t frames = period * 4;
+    std::vector<std::uint8_t> bytes(frames * mp::frame_bytes(source_format));
+    for (std::size_t i = 0; i < frames * source_format.channels; ++i) {
+        const auto v = static_cast<float>(static_cast<double>(i % 200) / 400.0);
+        std::memcpy(bytes.data() + i * 4, &v, 4);
+    }
+
+    VectorSource source{source_format, bytes};
+    mp::test::FakeSinkRules rules;
+    rules.period_frames = period;
+    rules.accepts = [](const mp::Format& f) { return f.sample_type == mp::SampleType::s32; };
+    mp::test::FakeSink device{rules};
+    mp::Sink sink = device.handle();
+
+    const auto negotiated =
+        mp::negotiate_best(sink, source_format, mp::PathPolicy::automatic);
+    REQUIRE(negotiated.ok);
+    REQUIRE(mp::needs_processing(negotiated.fidelity));
+
+    mp::ConvertConfig conversion;
+    conversion.dither = false;
+    mp::ProcessedGraph graph{source, sink, negotiated.accepted, period, conversion};
+    REQUIRE(graph.start() == MP_OK);
+    REQUIRE(wait_until_stopped(graph));
+    graph.stop();
+
+    CHECK(graph.error() == MP_OK);
+    CHECK(graph.lossy());
+    CHECK(graph.stats().underruns == 0);
+
+    // Every frame arrived, and each sample is the float scaled to 32 bits.
+    const auto captured = device.captured();
+    REQUIRE(captured.size() >= frames * mp::frame_bytes(negotiated.accepted));
+    for (std::size_t i = 0; i < frames * source_format.channels; ++i) {
+        float in = 0.0F;
+        std::memcpy(&in, bytes.data() + i * 4, 4);
+        std::int32_t out = 0;
+        std::memcpy(&out, captured.data() + i * 4, 4);
+        INFO("sample " << i);
+        REQUIRE(out == static_cast<std::int32_t>(std::llround(static_cast<double>(in) *
+                                                              2147483648.0)));
+    }
+}
+
+TEST_CASE("Path B refuses what its converter cannot do", "[processed]")
+{
+    // No resampler and no remix: a graph asked for either says so at start
+    // rather than producing something.
+    mp::Format wire = cd_audio();
+    wire.sample_rate = 96000;
+
+    VectorSource source{cd_audio(), pattern(4096)};
+    mp::test::FakeSink device{mp::test::FakeSinkRules{}};
+    mp::Sink sink = device.handle();
+
+    mp::ProcessedGraph graph{source, sink, wire, 64};
+    CHECK(graph.start() == MP_ERR_INVALID);
 }

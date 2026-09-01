@@ -333,7 +333,7 @@ TEST_CASE("is_bit_exact covers exactly the two the passthrough graph may serve",
 TEST_CASE("asking for a memcpy offers the source's container and nothing else",
           "[negotiation][path]")
 {
-    const auto full = mp::build_candidates(cd_audio(), mp::PathPolicy::automatic);
+    const auto full = mp::build_candidates(cd_audio(), mp::PathPolicy::bit_exact);
     const auto exact = mp::build_candidates(cd_audio(), mp::PathPolicy::exact_only);
 
     REQUIRE_FALSE(exact.empty());
@@ -349,39 +349,95 @@ TEST_CASE("asking for a memcpy offers the source's container and nothing else",
     CHECK(exact.front() == full.front());
 }
 
-TEST_CASE("asking for the processed graph offers nothing, because there is not one",
+TEST_CASE("asking for the processed graph still offers the source's own format",
           "[negotiation][path]")
 {
-    CHECK(mp::build_candidates(cd_audio(), mp::PathPolicy::processed).empty());
+    // A gain does not need a different wire format. Forcing one would quantise
+    // a 16-bit file into some other container for no reason at all, so the
+    // source's own container is offered first here as everywhere else -- what
+    // changes is which graph runs, not which format is asked for.
+    const auto only_b = mp::build_candidates(cd_audio(), mp::PathPolicy::processed);
+    REQUIRE_FALSE(only_b.empty());
+    CHECK(contains(only_b, cd_audio()));
+    CHECK(only_b.front().format == cd_audio());
+
+    // And Path B is what runs, whatever the format relationship turns out to be.
+    CHECK(mp::use_processed(mp::PathPolicy::processed, mp::Fidelity::exact));
+    CHECK(mp::use_processed(mp::PathPolicy::processed, mp::Fidelity::converted));
+    CHECK_FALSE(mp::use_processed(mp::PathPolicy::bit_exact, mp::Fidelity::exact));
+    CHECK_FALSE(mp::use_processed(mp::PathPolicy::automatic, mp::Fidelity::repacked));
+    CHECK(mp::use_processed(mp::PathPolicy::automatic, mp::Fidelity::converted));
 }
 
-TEST_CASE("the default policy is the behaviour that was there before it existed",
+TEST_CASE("the default is bit-exact, which is the option that can refuse",
           "[negotiation][path]")
 {
     CHECK(mp::build_candidates(cd_audio()) ==
-          mp::build_candidates(cd_audio(), mp::PathPolicy::automatic));
+          mp::build_candidates(cd_audio(), mp::PathPolicy::bit_exact));
+    for (const auto& candidate : mp::build_candidates(cd_audio())) {
+        CHECK(candidate.fidelity != mp::Fidelity::converted);
+    }
+}
+
+TEST_CASE("auto tries every bit-exact answer before it converts one",
+          "[negotiation][path]")
+{
+    const auto list = mp::build_candidates(cd_audio(), mp::PathPolicy::automatic);
+    const auto exact = mp::build_candidates(cd_audio(), mp::PathPolicy::bit_exact);
+    REQUIRE(list.size() > exact.size());
+
+    // The bit-exact list, in its own order, is the front of this one.
+    CHECK(std::equal(exact.begin(), exact.end(), list.begin()));
+    for (std::size_t i = exact.size(); i < list.size(); ++i) {
+        INFO(mp::describe(list[i].format));
+        CHECK(list[i].fidelity == mp::Fidelity::converted);
+    }
+}
+
+TEST_CASE("a float source has no repack and every conversion", "[negotiation][path]")
+{
+    // The case Path B was written for: every lossy decoder here reports F32,
+    // and an endpoint that will not take float leaves the file unplayable.
+    mp::Format source = cd_audio();
+    source.sample_type = mp::SampleType::f32;
+
+    const auto strict = mp::build_candidates(source, mp::PathPolicy::bit_exact);
+    for (const auto& candidate : strict) {
+        CHECK(candidate.format.sample_type == mp::SampleType::f32);
+    }
+
+    const auto loose = mp::build_candidates(source, mp::PathPolicy::automatic);
+    CHECK(loose.size() > strict.size());
+    CHECK(std::ranges::any_of(loose, [](const mp::Candidate& c) {
+        return c.fidelity == mp::Fidelity::converted &&
+               c.format.sample_type == mp::SampleType::s32;
+    }));
 }
 
 TEST_CASE("a policy allows exactly what its name says", "[negotiation][path]")
 {
-    CHECK(mp::allows(mp::PathPolicy::automatic, mp::Fidelity::exact));
-    CHECK(mp::allows(mp::PathPolicy::automatic, mp::Fidelity::repacked));
-    CHECK_FALSE(mp::allows(mp::PathPolicy::automatic, mp::Fidelity::converted));
-
     CHECK(mp::allows(mp::PathPolicy::exact_only, mp::Fidelity::exact));
     CHECK_FALSE(mp::allows(mp::PathPolicy::exact_only, mp::Fidelity::repacked));
     CHECK_FALSE(mp::allows(mp::PathPolicy::exact_only, mp::Fidelity::converted));
 
-    // Nothing reaches the processed graph, because nothing implements it.
-    CHECK_FALSE(mp::allows(mp::PathPolicy::processed, mp::Fidelity::exact));
-    CHECK_FALSE(mp::allows(mp::PathPolicy::processed, mp::Fidelity::repacked));
-    CHECK_FALSE(mp::allows(mp::PathPolicy::processed, mp::Fidelity::converted));
+    CHECK(mp::allows(mp::PathPolicy::bit_exact, mp::Fidelity::exact));
+    CHECK(mp::allows(mp::PathPolicy::bit_exact, mp::Fidelity::repacked));
+    CHECK_FALSE(mp::allows(mp::PathPolicy::bit_exact, mp::Fidelity::converted));
+
+    CHECK(mp::allows(mp::PathPolicy::automatic, mp::Fidelity::exact));
+    CHECK(mp::allows(mp::PathPolicy::automatic, mp::Fidelity::repacked));
+    CHECK(mp::allows(mp::PathPolicy::automatic, mp::Fidelity::converted));
+
+    // Any format at all: what `processed` decides is the graph, not the wire.
+    CHECK(mp::allows(mp::PathPolicy::processed, mp::Fidelity::exact));
+    CHECK(mp::allows(mp::PathPolicy::processed, mp::Fidelity::repacked));
+    CHECK(mp::allows(mp::PathPolicy::processed, mp::Fidelity::converted));
 }
 
 TEST_CASE("the names a user types round-trip", "[negotiation][path]")
 {
-    for (const auto policy : {mp::PathPolicy::automatic, mp::PathPolicy::exact_only,
-                              mp::PathPolicy::processed}) {
+    for (const auto policy : {mp::PathPolicy::bit_exact, mp::PathPolicy::exact_only,
+                              mp::PathPolicy::automatic, mp::PathPolicy::processed}) {
         mp::PathPolicy back{};
         INFO(mp::path_policy_name(policy));
         REQUIRE(mp::path_policy_from_name(mp::path_policy_name(policy), back));
@@ -391,5 +447,6 @@ TEST_CASE("the names a user types round-trip", "[negotiation][path]")
     mp::PathPolicy ignored{};
     CHECK_FALSE(mp::path_policy_from_name("", ignored));
     CHECK_FALSE(mp::path_policy_from_name("bit-exact", ignored));
+    CHECK_FALSE(mp::path_policy_from_name("convert", ignored));
     CHECK_FALSE(mp::path_policy_from_name("AUTO", ignored));
 }

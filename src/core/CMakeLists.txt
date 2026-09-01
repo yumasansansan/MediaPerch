@@ -10,6 +10,8 @@
 add_library(mediaperch_core STATIC
     mediaperch/compare.cpp
     mediaperch/compare.hpp
+    mediaperch/convert.cpp
+    mediaperch/convert.hpp
     mediaperch/decoder.cpp
     mediaperch/decoder.hpp
     mediaperch/format.cpp
@@ -18,6 +20,8 @@ add_library(mediaperch_core STATIC
     mediaperch/negotiation.hpp
     mediaperch/passthrough.cpp
     mediaperch/passthrough.hpp
+    mediaperch/processed.cpp
+    mediaperch/processed.hpp
     mediaperch/repack.cpp
     mediaperch/repack.hpp
     mediaperch/ring.hpp

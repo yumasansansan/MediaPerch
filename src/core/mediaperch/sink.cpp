@@ -98,13 +98,6 @@ Negotiated negotiate_best(Sink& sink, const Format& source, PathPolicy policy)
         out.last_error = MP_ERR_INVALID;
         return out;
     }
-    if (policy == PathPolicy::processed) {
-        // Refusing is the honest answer while there is no processed graph. It
-        // is not MP_ERR_FORMAT: nothing is wrong with the format.
-        out.last_error = MP_ERR_UNSUPPORTED;
-        return out;
-    }
-
     for (const Candidate& candidate : build_candidates(source, policy)) {
         ++out.tried;
 
@@ -118,8 +111,21 @@ Negotiated negotiate_best(Sink& sink, const Format& source, PathPolicy policy)
         // Do not take the sink's word for it. A driver that accepts a format and
         // hands back a different one has failed the request, and calling that
         // success is exactly how a player ends up quietly resampling.
+        //
+        // `classify` still decides what happened; the policy decides whether
+        // that is allowed. The two are kept apart on purpose: a stream that
+        // ends up converted is converted whether or not anybody asked for it,
+        // and the report has to say so either way.
         const Fidelity actual = classify(source, accepted);
         if (!allows(policy, actual)) {
+            out.last_error = MP_ERR_FORMAT;
+            continue;
+        }
+        // Path B can only reach what the converter can reach, and it does not
+        // resample or remix. A device that answered with a different rate has
+        // not offered a conversion this program will make.
+        if (needs_processing(actual) && (accepted.sample_rate != source.sample_rate ||
+                                         accepted.channels != source.channels)) {
             out.last_error = MP_ERR_FORMAT;
             continue;
         }

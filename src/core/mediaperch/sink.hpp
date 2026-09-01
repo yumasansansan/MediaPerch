@@ -57,7 +57,7 @@ struct Negotiated {
     Fidelity fidelity = Fidelity::converted;
     /// The policy that was asked for, carried back so a caller can report what
     /// it was refused *under* rather than only that it was refused.
-    PathPolicy policy = PathPolicy::automatic;
+    PathPolicy policy = PathPolicy::bit_exact;
     bool channel_mask_added = false;
     /// How many candidates were offered before one stuck. Worth logging: a
     /// device that takes the fourth is telling you something about its driver.
@@ -78,6 +78,6 @@ struct Negotiated {
 /// costs a real `IAudioClient::Initialize` and in exclusive mode each one takes
 /// the device away from whatever else is using it.
 [[nodiscard]] Negotiated negotiate_best(Sink& sink, const Format& source,
-                                        PathPolicy policy = PathPolicy::automatic);
+                                        PathPolicy policy = PathPolicy::bit_exact);
 
 } // namespace mp

@@ -18,6 +18,7 @@ add_executable(mediaperch_tests
     # been tested for that.
     abi_header_c.c
     compare_test.cpp
+    convert_test.cpp
     format_test.cpp
     graph_test.cpp
     negotiation_test.cpp

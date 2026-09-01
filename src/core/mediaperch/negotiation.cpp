@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "mediaperch/negotiation.hpp"
 
+#include <algorithm>
+
 #include <array>
 
 namespace mp {
@@ -35,22 +37,26 @@ void emit(std::vector<Candidate>& out, const Format& base, Fidelity fidelity)
 const char* path_policy_name(PathPolicy p) noexcept
 {
     switch (p) {
-    case PathPolicy::automatic:
-        return "auto";
+    case PathPolicy::bit_exact:
+        return "bitexact";
     case PathPolicy::exact_only:
         return "exact";
+    case PathPolicy::automatic:
+        return "auto";
     case PathPolicy::processed:
         return "processed";
     }
-    return "auto";
+    return "bitexact";
 }
 
 bool path_policy_from_name(std::string_view name, PathPolicy& out) noexcept
 {
-    if (name == "auto") {
-        out = PathPolicy::automatic;
+    if (name == "bitexact") {
+        out = PathPolicy::bit_exact;
     } else if (name == "exact") {
         out = PathPolicy::exact_only;
+    } else if (name == "auto") {
+        out = PathPolicy::automatic;
     } else if (name == "processed") {
         out = PathPolicy::processed;
     } else {
@@ -59,10 +65,43 @@ bool path_policy_from_name(std::string_view name, PathPolicy& out) noexcept
     return true;
 }
 
+/// The containers Path B may convert into, widest first.
+///
+/// Widest first because the conversion quantises, and every bit the destination
+/// has is a bit the quantiser does not have to throw away. Float is not here:
+/// if the device took float, the source's own format already did, and if it did
+/// not then converting *to* float would not help.
+void emit_conversions(std::vector<Candidate>& out, const Format& source)
+{
+    for (const SampleType type : {SampleType::s32, SampleType::s24_in_32,
+                                  SampleType::s24_packed, SampleType::s16}) {
+        Format f = source;
+        f.sample_type = type;
+        f.valid_bits = 0; // the destination's own width; nothing is being preserved
+        const bool already = std::ranges::any_of(out, [&](const Candidate& c) {
+            return c.format.sample_type == type;
+        });
+        if (!already) {
+            emit(out, f, Fidelity::converted);
+        }
+    }
+}
+
 std::vector<Candidate> build_candidates(const Format& source, PathPolicy policy)
 {
     std::vector<Candidate> out;
-    if (!is_valid(source) || policy == PathPolicy::processed) {
+    if (!is_valid(source)) {
+        return out;
+    }
+
+    // Path B was asked for by name. The candidate list is still every container
+    // the device might take, the source's own included: a gain does not need a
+    // different wire format, and forcing one would quantise for no reason.
+    if (policy == PathPolicy::processed) {
+        if (source.encoding == Encoding::pcm) {
+            emit(out, source, Fidelity::exact);
+            emit_conversions(out, source);
+        }
         return out;
     }
 
@@ -76,30 +115,43 @@ std::vector<Candidate> build_candidates(const Format& source, PathPolicy policy)
     }
 
     // A DoP frame carries its markers in the top byte and a bitstream is not
-    // samples at all. Neither survives being moved between containers. Float is
-    // not repacked either: it has no left-justified integer representation.
-    if (source.encoding != Encoding::pcm || !is_integer_pcm(source.sample_type)) {
+    // samples at all. Neither survives being moved between containers, and
+    // neither survives being converted either -- so for those two the exact
+    // candidate is the whole list, whatever the policy says.
+    if (source.encoding != Encoding::pcm) {
         return out;
     }
 
-    const std::uint32_t valid = effective_valid_bits(source);
-    const std::uint32_t own = container_bytes(source.sample_type);
+    // Float is not *repacked*: it has no left-justified integer representation.
+    // It is very much converted, though, and skipping straight past this block
+    // to the conversions is the entire reason Path B exists -- every lossy
+    // decoder here reports F32.
+    if (is_integer_pcm(source.sample_type)) {
+        const std::uint32_t valid = effective_valid_bits(source);
+        const std::uint32_t own = container_bytes(source.sample_type);
 
-    // Small to large, so a device that takes several gets the cheapest wire
-    // format rather than the widest.
-    for (const std::uint32_t bytes : std::array<std::uint32_t, 3>{2, 3, 4}) {
-        if (bytes == own) {
-            continue; // already offered, exactly, above
-        }
-        const SampleType type = canonical_for(bytes, valid);
-        if (type == SampleType::none) {
-            continue; // this container cannot hold the signal
-        }
+        // Small to large, so a device that takes several gets the cheapest wire
+        // format rather than the widest.
+        for (const std::uint32_t bytes : std::array<std::uint32_t, 3>{2, 3, 4}) {
+            if (bytes == own) {
+                continue; // already offered, exactly, above
+            }
+            const SampleType type = canonical_for(bytes, valid);
+            if (type == SampleType::none) {
+                continue; // this container cannot hold the signal
+            }
 
-        Format f = source;
-        f.sample_type = type;
-        f.valid_bits = valid; // the bits that carry signal do not change
-        emit(out, f, Fidelity::repacked);
+            Format f = source;
+            f.sample_type = type;
+            f.valid_bits = valid; // the bits that carry signal do not change
+            emit(out, f, Fidelity::repacked);
+        }
+    }
+
+    // Last, and only when asked: everything above is bit-exact and is tried
+    // first, so a device that can take the signal unaltered always does.
+    if (policy == PathPolicy::automatic) {
+        emit_conversions(out, source);
     }
     return out;
 }

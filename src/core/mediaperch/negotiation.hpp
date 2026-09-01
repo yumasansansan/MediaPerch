@@ -46,13 +46,25 @@ struct Candidate {
 ///   * negotiating costs a real `IAudioClient::Initialize` per candidate, and
 ///     in exclusive mode each one takes the device. Asking for fewer candidates
 ///     is a thing a user may reasonably want.
-///   * `processed` is here so the setting has the shape it will need, and it
-///     refuses honestly instead of pretending. Nothing in this tree implements
-///     Path B yet.
+///   * `automatic` and `processed` reach Path B, which converts the sample type
+///     and applies a gain. The default does not, because converting quietly is
+///     the one thing this program exists not to do -- but refusing to convert
+///     *at all* leaves every lossy file unplayable on a device that will not
+///     take float, so the choice belongs to the person listening.
 enum class PathPolicy : std::uint32_t {
-    automatic,  ///< bit-exact if the device will take it. The default.
-    exact_only, ///< one memcpy or nothing: a container repack is refused too.
-    processed,  ///< always the processed graph. Not built yet, and says so.
+    /// A memcpy or a container repack, and nothing else. **The default**, and
+    /// the option §2 of the design calls the one that makes the others honest:
+    /// a player that cannot refuse is a player that converts quietly.
+    bit_exact,
+    /// One memcpy. A repack is bit-exact and is still a byte move, and somebody
+    /// may want to know that nothing at all touched the samples.
+    exact_only,
+    /// Bit-exact if the device will take it, and Path B if it will not. What a
+    /// person means by "just play it", and it says loudly when it converts.
+    automatic,
+    /// Path B whether or not Path A was available -- for a gain, and for the
+    /// DSP that will hang off it.
+    processed,
 };
 
 /// The name a user types, or nullptr for a word that is not one of them.
@@ -92,7 +104,7 @@ enum class PathPolicy : std::uint32_t {
 /// Returns empty for a format `is_valid` rejects, and for `PathPolicy::processed`,
 /// which has no candidates because it has no graph.
 [[nodiscard]] std::vector<Candidate> build_candidates(const Format& source,
-                                                      PathPolicy policy = PathPolicy::automatic);
+                                                      PathPolicy policy = PathPolicy::bit_exact);
 
 /// True when `policy` allows a stream that reached `fidelity` to play.
 [[nodiscard]] constexpr bool allows(PathPolicy policy, Fidelity fidelity) noexcept
@@ -100,12 +112,32 @@ enum class PathPolicy : std::uint32_t {
     switch (policy) {
     case PathPolicy::exact_only:
         return fidelity == Fidelity::exact;
-    case PathPolicy::automatic:
+    case PathPolicy::bit_exact:
         return fidelity == Fidelity::exact || fidelity == Fidelity::repacked;
+    case PathPolicy::automatic:
     case PathPolicy::processed:
-        return false; // there is no processed graph to reach
+        return true;
     }
     return false;
+}
+
+/// Which graph runs.
+///
+/// Not the same question as `classify`, and the difference is worth stating.
+/// `classify` describes the *format* relationship: whether the device's wire
+/// format holds the source's samples unaltered. Path B runs whenever the format
+/// says it must -- and also whenever the user asked for it, because a gain is a
+/// change the format cannot see. A 16-bit file, a 16-bit device and a volume of
+/// 0.5 is `Fidelity::exact` and is emphatically Path B.
+[[nodiscard]] constexpr bool use_processed(PathPolicy policy, Fidelity fidelity) noexcept
+{
+    return policy == PathPolicy::processed || fidelity == Fidelity::converted;
+}
+
+/// True when a stream at this fidelity cannot reach the device unaltered.
+[[nodiscard]] constexpr bool needs_processing(Fidelity f) noexcept
+{
+    return f == Fidelity::converted;
 }
 
 /// What the sink actually gave us, against what we asked for.

@@ -43,45 +43,70 @@ architecture than any taste question:
 | Sample touching | `memcpy`, or one byte move if the container differs | gain, resample, convolution, dither |
 | Volume | `IAudioEndpointVolume`, or none | in the graph |
 | Chosen | when the file's format survives negotiation | when the user asks, or negotiation failed |
-| Code path | `src/core/passthrough.*` | **not written yet** |
+| Code path | `src/core/passthrough.*` | `src/core/processed.*` |
 
 They share the ring buffer, the sink module and the clock. Nothing else. The passthrough
 graph contains no floating-point arithmetic on sample data at all, which is a property a
 test can assert and a review can see.
 
-**Only the left-hand column exists today, and that is worth saying plainly** because the
-table above reads like a description of two things that are both there. `Fidelity::converted`
-is defined, produced by nothing, and refused by `PassthroughGraph::start`. This build plays
-a file bit-exact or does not play it.
+**The render thread is the same code in both**, and that is the point of having two graphs
+rather than one with a branch. `ProcessedGraph::render_loop` and
+`PassthroughGraph::render_loop` both wait on the device, copy out of the ring and commit;
+neither has any idea whether a conversion happened. The conversion runs on the decode
+thread, in `Converter`, exactly where Path A's repack runs. The thread with the 3 ms
+deadline cannot take a wrong turn because it has no turn to take.
 
-The consequence is not theoretical. Every lossy decoder here reports `F32`, because that is
-what a lossy codec's output *is*; on the machine this was written on, the endpoint refuses
-`F32` in exclusive mode:
+### Why Path B had to exist
+
+Every lossy decoder here reports `F32`, because that is what a lossy codec's output *is*.
+The endpoint this was written on refuses `F32` in exclusive mode:
 
 ```
 $ mediaperch-probe negotiate --rate 44100 --float --channels 2
-1 exact          44100 Hz / 2 ch / F32        -> format refused
-2 exact   +mask  44100 Hz / 2 ch / F32 / mask 0x3  -> format refused
+1 exact          44100 Hz / 2 ch / F32              -> format refused
+2 exact   +mask  44100 Hz / 2 ch / F32 / mask 0x3   -> format refused
 ```
 
-So MP3, AAC, Vorbis and Opus can be decoded and hashed on that machine and cannot be
-*played* on it. Path B is what fixes that, and until it exists the honest thing is to
-refuse rather than to convert quietly.
+Without Path B, MP3, AAC, Vorbis and Opus decode and hash on that machine and cannot be
+played on it. With it, and only when asked:
+
+```
+$ mediaperch-probe negotiate --rate 44100 --float --channels 2 --path auto
+3 CONVERT        44100 Hz / 2 ch / S32              -> ACCEPTED, buffer 132 frames
+```
+
+**What Path B does is narrow on purpose.** Sample type, through a normalised `double`, with
+TPDF dither when the destination cannot hold the signal; and a gain, because a volume
+control on an exclusive-mode stream has nowhere else to live — the session interfaces do
+not touch it. It does **not** resample and does **not** change the channel count. Both are
+real conversions needing real implementations, and a bad one here would be worse than the
+refusal it replaced, so negotiation still refuses a device that wants a different rate.
 
 ### Choosing the path
 
 Which graph a stream may take is a setting, not only an inference. `--path` on the probe
 today, a config key when there is a config:
 
-| `--path` | What it allows |
-|---|---|
-| `auto` (default) | bit-exact, either a `memcpy` or a container repack. What negotiation has always done |
-| `exact` | a `memcpy` and nothing else. A container repack is bit-exact and is still a byte move, and somebody may want to know that nothing at all touched the samples |
-| `processed` | the DSP graph. Refuses, with the reason, because there is not one |
+| `--path` | Allows | Graph |
+|---|---|---|
+| `bitexact` **(default)** | a `memcpy` or a container repack | A |
+| `exact` | a `memcpy`, and not even a repack | A |
+| `auto` | bit-exact if the device takes it, converted if it does not | A, then B |
+| `processed` | any format the device takes, and Path B regardless | B |
 
-`exact` also shortens the candidate list, which matters more than it sounds: every
-candidate is a real `IAudioClient::Initialize`, and in exclusive mode each one takes the
-device away from whatever else is using it.
+The default is the one that can **refuse**, and §2 is why: a player that cannot fail here
+is a player that converts quietly. `auto` is how somebody says "just play it", and it
+prints `PROCESSED -- the samples are changed` with the gain and the dither setting when it
+takes that option.
+
+`processed` and `auto` are also not the same thing when both would work. A 16-bit file on a
+16-bit device at a gain of 0.5 is `Fidelity::exact` — the *format* relationship is
+untouched — and it is emphatically Path B, because a gain is a change no format comparison
+can see. `use_processed` is that distinction and `classify` is the other one.
+
+`exact` shortens the candidate list, which matters more than it sounds: every candidate is
+a real `IAudioClient::Initialize`, and in exclusive mode each one takes the device away
+from whatever else is using it.
 
 ## Layout
 

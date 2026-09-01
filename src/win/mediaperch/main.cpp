@@ -13,6 +13,7 @@
 #include "mediaperch/decoder.hpp"
 #include "mediaperch/negotiation.hpp"
 #include "mediaperch/passthrough.hpp"
+#include "mediaperch/processed.hpp"
 #include "mediaperch/repack.hpp"
 #include "mediaperch/sine.hpp"
 #include "mediaperch/sink.hpp"
@@ -44,7 +45,9 @@ struct Options {
     double amplitude = 0.5;
     unsigned seconds = 10;
     std::uint64_t seek = 0;
-    mp::PathPolicy path = mp::PathPolicy::automatic;
+    mp::PathPolicy path = mp::PathPolicy::bit_exact;
+    double gain = 1.0;
+    bool no_dither = false;
     bool float_source = false;
     std::string source;          // `compare`: the audio that was encoded
     std::string rival_id = "decode_ffmpeg"; // and a second decoder to sit beside
@@ -128,10 +131,18 @@ Options
                     Default 2048, two AAC frames
   --untrimmed       `compare`: the decode may be longer than the source, which
                     is correct for a format with no gapless metadata
-  --path WHICH      which graph a stream may take. `auto` (default) plays it
-                    bit-exact if the device will take it; `exact` refuses even a
-                    container repack, so it is a memcpy or nothing; `processed`
-                    asks for the DSP graph, which does not exist yet and says so
+  --path WHICH      which graph a stream may take:
+                      bitexact  a memcpy or a container repack, and nothing
+                                else. THE DEFAULT: it can refuse, which is what
+                                makes the others honest
+                      exact     a memcpy only. Not even a repack
+                      auto      bit-exact if the device will take it, and Path B
+                                if it will not. Says loudly when it converts
+                      processed Path B whether or not Path A was available
+  --gain G          Path B only: linear gain, 1.0 is unity. A volume control has
+                    nowhere else to live on an exclusive-mode stream
+  --no-dither       Path B only: quantise without dither. Reproducible byte for
+                    byte, which a measurement wants and an ear does not
   --seek FRAMES     `decode` seeks here first, then hashes the rest. The hash of
                     a seek to N must equal the hash of the last (length - N)
                     frames of a straight decode, which is what makes seeking
@@ -181,6 +192,12 @@ bool parse(int argc, char** argv, Options& out)
                     out.decoder_id = "decode_" + out.decoder_id;
                 }
             }
+        } else if (arg == "--gain") {
+            if (i + 1 < argc) {
+                out.gain = std::strtod(argv[++i], nullptr);
+            }
+        } else if (arg == "--no-dither") {
+            out.no_dither = true;
         } else if (arg == "--float") {
             out.float_source = true;
         } else if (arg == "--path") {
@@ -394,8 +411,17 @@ void report_refusal(const mp::Negotiated& negotiated)
     switch (negotiated.policy) {
     case mp::PathPolicy::processed:
         std::fprintf(stderr,
-                     "--path processed asks for the DSP graph, and there is not one yet.\n"
-                     "This build plays bit-exact or not at all.\n");
+                     "--path processed asks Path B for a format this device will take, and\n"
+                     "it took none of the %zu offered: %s\n"
+                     "Path B converts the sample type and applies a gain. It does not\n"
+                     "resample and does not change the channel count.\n",
+                     negotiated.tried, result_name(negotiated.last_error));
+        return;
+    case mp::PathPolicy::automatic:
+        std::fprintf(stderr,
+                     "the device took none of the %zu formats offered, bit-exact or "
+                     "converted: %s\n",
+                     negotiated.tried, result_name(negotiated.last_error));
         return;
     case mp::PathPolicy::exact_only:
         std::fprintf(stderr,
@@ -405,11 +431,13 @@ void report_refusal(const mp::Negotiated& negotiated)
                      negotiated.tried, negotiated.tried == 1 ? "" : "s",
                      result_name(negotiated.last_error));
         return;
-    case mp::PathPolicy::automatic:
+    case mp::PathPolicy::bit_exact:
         break;
     }
-    std::fprintf(stderr, "no candidate was accepted (%zu offered): %s\n", negotiated.tried,
-                 result_name(negotiated.last_error));
+    std::fprintf(stderr,
+                 "no bit-exact candidate was accepted (%zu offered): %s\n"
+                 "--path auto would also offer to convert, and say so when it did.\n",
+                 negotiated.tried, result_name(negotiated.last_error));
 }
 
 int negotiate(const MpSinkVtbl& vtbl, const Options& options)
@@ -433,18 +461,14 @@ int negotiate(const MpSinkVtbl& vtbl, const Options& options)
     std::printf("mode       %s\n", options.shared ? "shared" : "exclusive");
     std::printf("path       %s\n\n", mp::path_policy_name(options.path));
 
-    if (options.path == mp::PathPolicy::processed) {
-        std::printf("There is no processed graph yet, so there is nothing to offer a\n"
-                    "device: this build plays bit-exact or not at all.\n");
-        return 1;
-    }
-
     const auto candidates = mp::build_candidates(source, options.path);
     std::size_t index = 0;
     for (const auto& candidate : candidates) {
         mp::Format accepted{};
         const MpResult r = sink.negotiate(candidate.format, accepted);
-        const char* label = candidate.fidelity == mp::Fidelity::exact ? "exact" : "repack";
+        const char* label = candidate.fidelity == mp::Fidelity::exact      ? "exact"
+                            : candidate.fidelity == mp::Fidelity::repacked ? "repack"
+                                                                          : "CONVERT";
 
         std::printf("%zu %-7s %-5s  %-44s ", ++index, label,
                     candidate.channel_mask_added ? "+mask" : "",
@@ -480,71 +504,16 @@ int negotiate(const MpSinkVtbl& vtbl, const Options& options)
     return 1;
 }
 
-int play(const MpSinkVtbl& vtbl, const Options& options)
+/// Starts a graph, plays for as long as it was asked to, and reports.
+///
+/// A template because Path A and Path B are two classes rather than one class
+/// with a branch -- which is §2's rule and is about the render thread, not about
+/// this. From out here they are the same object: start it, watch it, stop it,
+/// ask it how it went.
+template <typename Graph>
+int run_graph(Graph& graph, mp::win::RenderThreadHooks& hooks, const mp::Format& wire,
+              const Options& options)
 {
-    if (options.float_source) {
-        std::fprintf(stderr,
-                     "--float is for `negotiate`: the tone generator writes integers.\n");
-        return 1;
-    }
-    const mp::Format source_format = requested_format(options);
-    if (!mp::is_valid(source_format)) {
-        std::fprintf(stderr, "that is not a format: %s\n",
-                     mp::describe(source_format).c_str());
-        return 1;
-    }
-
-    std::string device_id;
-    if (!device_id_for(vtbl, options.device_index, device_id)) {
-        return 1;
-    }
-    mp::Sink sink = open_sink(vtbl, device_id, options.shared);
-    if (!sink) {
-        return 1;
-    }
-
-    const auto negotiated = mp::negotiate_best(sink, source_format, options.path);
-    if (!negotiated.ok) {
-        report_refusal(negotiated);
-        return 1;
-    }
-
-    std::uint32_t period = 0;
-    if (sink.period_frames(period) != MP_OK || period == 0) {
-        std::fprintf(stderr, "the device did not report a buffer size\n");
-        return 1;
-    }
-
-    std::printf("device     %s\n", device_id.empty() ? "(default endpoint)" : device_id.c_str());
-    std::printf("mode       %s\n", options.shared ? "shared" : "exclusive");
-    std::printf("format     %s\n", mp::describe(negotiated.accepted).c_str());
-    std::printf("path       %s%s  [--path %s]\n",
-                negotiated.fidelity == mp::Fidelity::exact
-                    ? "passthrough, memcpy"
-                    : "passthrough, container repack",
-                negotiated.channel_mask_added ? " (extensible form)" : "",
-                mp::path_policy_name(negotiated.policy));
-    std::printf("buffer     %u frames (%.2f ms)\n", period,
-                1000.0 * period / negotiated.accepted.sample_rate);
-    std::printf("tone       %.1f Hz at %.3f of full scale (%.1f dBFS) for %u s\n\n",
-                options.hz, options.amplitude,
-                options.amplitude > 0.0 ? 20.0 * std::log10(options.amplitude) : -144.0,
-                options.seconds);
-
-    // How much of the container this tone actually uses. A quiet tone is safe
-    // for headphones and proves correspondingly less about a 32-bit path, and
-    // saying so is cheaper than someone assuming otherwise. The bit-exactness
-    // proof is the capture test, not this.
-    const std::uint32_t container_bits =
-        8 * mp::container_bytes(negotiated.accepted.sample_type);
-    const double peak = options.amplitude * (std::pow(2.0, container_bits - 1) - 1.0);
-    const auto used = peak >= 1.0 ? static_cast<int>(std::floor(std::log2(peak))) + 2 : 0;
-    std::printf("exercises  %d of %u bits\n\n", used, container_bits);
-
-    mp::SineSource source{source_format, options.hz, options.amplitude};
-    mp::win::RenderThreadHooks hooks;
-    mp::PassthroughGraph graph{source, sink, negotiated.accepted, period, negotiated.fidelity,
-                               &hooks};
 
     const MpResult started = graph.start();
     if (started != MP_OK) {
@@ -590,7 +559,7 @@ int play(const MpSinkVtbl& vtbl, const Options& options)
 
     const auto stats = graph.stats();
     const double seconds = static_cast<double>(stats.frames_rendered) /
-                           negotiated.accepted.sample_rate;
+                           wire.sample_rate;
     std::printf("\nplayed     %llu frames (%.2f s)\n",
                 static_cast<unsigned long long>(stats.frames_rendered), seconds);
     std::printf("underruns  %llu", static_cast<unsigned long long>(stats.underruns));
@@ -606,6 +575,91 @@ int play(const MpSinkVtbl& vtbl, const Options& options)
         return 1;
     }
     return stats.underruns == 0 ? 0 : 2;
+}
+
+int play(const MpSinkVtbl& vtbl, const Options& options)
+{
+    if (options.float_source) {
+        std::fprintf(stderr,
+                     "--float is for `negotiate`: the tone generator writes integers.\n");
+        return 1;
+    }
+    const mp::Format source_format = requested_format(options);
+    if (!mp::is_valid(source_format)) {
+        std::fprintf(stderr, "that is not a format: %s\n",
+                     mp::describe(source_format).c_str());
+        return 1;
+    }
+
+    std::string device_id;
+    if (!device_id_for(vtbl, options.device_index, device_id)) {
+        return 1;
+    }
+    mp::Sink sink = open_sink(vtbl, device_id, options.shared);
+    if (!sink) {
+        return 1;
+    }
+
+    const auto negotiated = mp::negotiate_best(sink, source_format, options.path);
+    if (!negotiated.ok) {
+        report_refusal(negotiated);
+        return 1;
+    }
+
+    std::uint32_t period = 0;
+    if (sink.period_frames(period) != MP_OK || period == 0) {
+        std::fprintf(stderr, "the device did not report a buffer size\n");
+        return 1;
+    }
+
+    std::printf("device     %s\n", device_id.empty() ? "(default endpoint)" : device_id.c_str());
+    std::printf("mode       %s\n", options.shared ? "shared" : "exclusive");
+    std::printf("format     %s\n", mp::describe(negotiated.accepted).c_str());
+    const bool processing = mp::use_processed(options.path, negotiated.fidelity);
+    std::printf("path       %s%s  [--path %s]\n",
+                processing                                    ? "PROCESSED -- the samples are changed"
+                : negotiated.fidelity == mp::Fidelity::exact  ? "passthrough, memcpy"
+                                                              : "passthrough, container repack",
+                negotiated.channel_mask_added ? " (extensible form)" : "",
+                mp::path_policy_name(negotiated.policy));
+    if (processing) {
+        // Loud, because §6.3 says it has to be. A converted stream is not the
+        // thing this program is for, and a person who did not mean to ask for
+        // one should be able to see that they did.
+        std::printf("           source %s, gain %.4f, dither %s\n",
+                    mp::describe(source_format).c_str(), options.gain,
+                    options.no_dither ? "off" : "on");
+    }
+    std::printf("buffer     %u frames (%.2f ms)\n", period,
+                1000.0 * period / negotiated.accepted.sample_rate);
+    std::printf("tone       %.1f Hz at %.3f of full scale (%.1f dBFS) for %u s\n\n",
+                options.hz, options.amplitude,
+                options.amplitude > 0.0 ? 20.0 * std::log10(options.amplitude) : -144.0,
+                options.seconds);
+
+    // How much of the container this tone actually uses. A quiet tone is safe
+    // for headphones and proves correspondingly less about a 32-bit path, and
+    // saying so is cheaper than someone assuming otherwise. The bit-exactness
+    // proof is the capture test, not this.
+    const std::uint32_t container_bits =
+        8 * mp::container_bytes(negotiated.accepted.sample_type);
+    const double peak = options.amplitude * (std::pow(2.0, container_bits - 1) - 1.0);
+    const auto used = peak >= 1.0 ? static_cast<int>(std::floor(std::log2(peak))) + 2 : 0;
+    std::printf("exercises  %d of %u bits\n\n", used, container_bits);
+
+    mp::SineSource source{source_format, options.hz, options.amplitude};
+    mp::win::RenderThreadHooks hooks;
+    if (mp::use_processed(options.path, negotiated.fidelity)) {
+        mp::ConvertConfig conversion;
+        conversion.gain = options.gain;
+        conversion.dither = !options.no_dither;
+        mp::ProcessedGraph graph{source, sink, negotiated.accepted, period, conversion, &hooks};
+        return run_graph(graph, hooks, negotiated.accepted, options);
+    }
+
+    mp::PassthroughGraph graph{source, sink, negotiated.accepted, period, negotiated.fidelity,
+                               &hooks};
+    return run_graph(graph, hooks, negotiated.accepted, options);
 }
 
 
