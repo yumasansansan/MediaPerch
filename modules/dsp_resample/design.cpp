@@ -383,7 +383,7 @@ std::vector<double> dpss_window(std::size_t length, double nw)
     return v;
 }
 
-void to_minimum_phase(std::vector<double>& h, double floor_db)
+void to_minimum_phase(std::vector<double>& h, double floor_db, std::uint32_t oversample)
 {
     const std::size_t length = h.size();
     if (length < 2) {
@@ -391,8 +391,9 @@ void to_minimum_phase(std::vector<double>& h, double floor_db)
     }
     // Room for the cepstrum to decay in. Too little and it wraps, which shows
     // up as a filter whose magnitude is not the one it was given.
+    const std::size_t factor = std::max<std::size_t>(oversample, 2);
     const std::size_t n =
-        std::min<std::size_t>(next_power_of_two(length * 16), std::size_t{1} << 22);
+        std::min<std::size_t>(next_power_of_two(length * factor), std::size_t{1} << 22);
 
     std::vector<std::complex<double>> spectrum(n, {0.0, 0.0});
     for (std::size_t i = 0; i < length; ++i) {
@@ -1074,7 +1075,10 @@ bool design_prototype(const Design& design, std::uint32_t up, std::uint32_t down
             // it. The floor is where the logarithm stops looking: twenty
             // decibels under the stopband is far enough to be a null and near
             // enough to still be a number.
-            to_minimum_phase(out, -(design.attenuation_db + 20.0));
+            const double floor_db = design.phase_floor_db < 0.0
+                                        ? design.phase_floor_db
+                                        : -(design.attenuation_db + 20.0);
+            to_minimum_phase(out, floor_db, design.cepstrum);
             const double sum = std::accumulate(out.begin(), out.end(), 0.0);
             if (sum != 0.0) {
                 const double scale = gain / sum;

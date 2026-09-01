@@ -268,6 +268,30 @@ latency  6.36  input frames left after alignment; minimum phase, so not exact
 Linear phase reports `0.00 … exact`. This is a trade between two audible things and not a
 better setting, which is exactly why it is a setting.
 
+**Where the factorisation is truncated is also a setting**, because it has to be: the
+cepstrum of a filter with a deep stopband is long, and computing it in a transform that is
+too short wraps its tail onto its head. What comes out then has the right shape and the
+wrong magnitude — a failure that looks like the method and is arithmetic. Measured on the
+same 158-tap filter, whose linear-phase original is −119.97 dB:
+
+| `cepstrum` | Stopband | Passband ripple |
+|---|---|---|
+| 2 | −116.90 dB | 1.1 × 10⁻² dB |
+| 4 | −117.89 dB | 1.1 × 10⁻⁵ dB |
+| 16 | −119.53 dB | 5.4 × 10⁻⁵ dB |
+| **32 (default)** | **−119.91 dB** | 1.2 × 10⁻⁵ dB |
+| 64 | −119.95 dB | 8.8 × 10⁻⁶ dB |
+
+Thirty-two is the default because that is where the loss stops mattering — 0.06 dB against
+the linear-phase filter it came from — and it costs 220 ms on a 25,281-tap prototype where
+16 costs 118.
+
+`phase_floor` is the other half: a stopband null is a true zero, the logarithm of zero has
+no folded version, and the clamp has to go somewhere. It goes 20 dB under the stopband by
+default. Setting it explicitly shows what it does about as plainly as anything in this
+program: **at `phase_floor=-60` the filter comes out at −59.92 dB**, because telling the
+factorisation the filter is 60 dB deep is telling it to build one that is.
+
 #### The methods, measured against each other
 
 Every number below is `Response`, read off the built filter by transforming it, not

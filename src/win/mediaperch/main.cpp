@@ -252,7 +252,7 @@ Options
                     also a setting -- design=window|remez|refine,
                     window=kaiser|dpss|dolph, phase=linear|minimum,
                     stages=1|auto, attenuation, bandwidth, passband_ripple,
-                    taps, verify. `--dsp list` prints them all with what each
+                    taps, cepstrum, phase_floor, verify. `--dsp list` prints them all with what each
                     one is now, and what the filter it built measured
   --dither KIND     Path B only, and only where bits are actually being thrown
                     away. `triangular` (default) is the standard answer;

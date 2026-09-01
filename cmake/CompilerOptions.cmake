@@ -140,7 +140,17 @@ if(MEDIAPERCH_TOOLCHAIN STREQUAL msvc)
 # ---------------------------------------------------------------------------
 #
 # The Linux head, when there is one, and the fuzzers today.
+#
+# **One driver, two object formats.** The same clang++ produces ELF on Linux and
+# COFF on Windows, and the linker options are not the same words. The compiler
+# options below are; only the link ones have to ask. `MEDIAPERCH_ELF` is that
+# question asked once, so nothing further down has to remember it.
 else()
+
+    set(MEDIAPERCH_ELF TRUE)
+    if(WIN32)
+        set(MEDIAPERCH_ELF FALSE)
+    endif()
 
     # -- warnings ------------------------------------------------------------
     target_compile_options(mediaperch_flags INTERFACE
@@ -155,7 +165,15 @@ else()
 
     # -- hardening, global ---------------------------------------------------
     add_compile_options(-fstack-protector-strong)
-    add_link_options(LINKER:-z,relro LINKER:-z,now LINKER:-z,noexecstack)
+    if(MEDIAPERCH_ELF)
+        add_link_options(LINKER:-z,relro LINKER:-z,now LINKER:-z,noexecstack)
+    else()
+        # lld-link does not know `-z`. It reads `-z relro` as an unknown flag
+        # followed by an object file called `relro`, and says exactly that --
+        # which is what broke the fuzz job. These are the COFF spellings of the
+        # same three ideas, and they are already the defaults for this linker.
+        add_link_options(LINKER:/DYNAMICBASE LINKER:/NXCOMPAT LINKER:/HIGHENTROPYVA)
+    endif()
 
     # -- optimisation, global, Release ---------------------------------------
     add_compile_options(
@@ -165,7 +183,12 @@ else()
         "$<$<CONFIG:Release>:-ffunction-sections>"
         "$<$<CONFIG:Release>:-fdata-sections>"
     )
-    add_link_options("$<$<CONFIG:Release>:LINKER:--gc-sections>")
+    if(MEDIAPERCH_ELF)
+        add_link_options("$<$<CONFIG:Release>:LINKER:--gc-sections>")
+    else()
+        add_link_options("$<$<CONFIG:Release>:LINKER:/OPT:REF>"
+                         "$<$<CONFIG:Release>:LINKER:/OPT:ICF>")
+    endif()
 
 endif()
 
@@ -231,8 +254,8 @@ target_compile_definitions(mediaperch_flags INTERFACE
 option(MEDIAPERCH_LINK_MAP "Ask the linker for a map file beside every binary" OFF)
 
 if(MEDIAPERCH_LINK_MAP)
-    if(MSVC)
-        add_link_options(/MAP)
+    if(MSVC OR NOT MEDIAPERCH_ELF)
+        add_link_options(LINKER:/MAP)
     else()
         add_link_options(LINKER:-Map=$<TARGET_FILE:$<TARGET_PROPERTY:NAME>>.map)
     endif()

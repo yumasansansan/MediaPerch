@@ -125,6 +125,27 @@ struct Design {
     std::uint32_t taps = 0;
     /// The prototype's ceiling, in coefficients.
     std::uint32_t max_taps = 1u << 22;
+    /// `phase=minimum` only: how much room the cepstrum is given, as a
+    /// multiple of the filter's length, rounded up to a power of two.
+    ///
+    /// **This is where the factorisation is truncated, and it is the setting
+    /// that decides whether it worked.** The cepstrum of a filter with a deep
+    /// stopband is long; computing it in a transform that is too short wraps
+    /// its tail onto its head, and what comes out has the right shape and the
+    /// wrong magnitude. Measured on a 158-tap filter whose linear-phase
+    /// original is -119.97 dB: 2 gives -116.90, 16 gives -119.53, 32 gives
+    /// -119.91, 64 gives -119.95. Thirty-two is the default because that is
+    /// where the loss stops mattering; on a 25,281-tap prototype it costs
+    /// 220 ms against 118 for 16.
+    std::uint32_t cepstrum = 32;
+    /// `phase=minimum` only: how far below the peak the logarithm stops
+    /// looking, in dB. Zero derives it from the attenuation.
+    ///
+    /// A stopband null is a true zero and the logarithm of zero has no folded
+    /// version, so it has to be clamped somewhere. Clamping high loses the
+    /// stopband's shape; clamping low makes the cepstrum longer and needs more
+    /// room above.
+    double phase_floor_db = 0.0;
     /// How many steps the conversion may take. 1 is one filter for the whole
     /// ratio; 0 searches for the cheapest split it can find.
     ///
@@ -210,7 +231,8 @@ void dft_any(std::vector<std::complex<double>>& a);
 /// counterpart is computed. `floor_db` is where the logarithm is clamped --
 /// a stopband null is a true zero, and the logarithm of zero has no folded
 /// version.
-void to_minimum_phase(std::vector<double>& h, double floor_db);
+void to_minimum_phase(std::vector<double>& h, double floor_db,
+                      std::uint32_t oversample);
 
 /// Parks-McClellan for a Type I (odd length, symmetric) lowpass.
 ///

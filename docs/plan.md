@@ -961,6 +961,13 @@ real time.
   MediaPerch will do that by default with an opt-out for people who want to keep the DAC.
 - **`AUDCLNT_STREAMFLAGS_EVENTCALLBACK` is required for the low-latency path**, and
   `Initialize` then allocates two buffers used ping-pong. Prefill the first before `Start`.
+- **One Clang driver, two object formats.** The same `clang++` produces ELF on Linux and
+  COFF on Windows, and the linker options are not the same words. `-Wl,-z,relro` is a
+  hardening flag on one and three missing object files on the other -- `lld-link` reads it
+  as an unknown argument followed by files called `relro`, `now` and `noexecstack`, and
+  says exactly that. The fuzz job builds with the GNU driver on Windows and broke on
+  precisely this. Hardening and `--gc-sections` are therefore asked once, in
+  `cmake/CompilerOptions.cmake`, against the object format rather than the compiler.
 - **`main`'s `argv` is in the process code page, and the ABI says UTF-8.** On a Japanese
   machine the two differ, and a file whose name is not ASCII reaches a decoder as bytes that
   name nothing — which surfaces as "no decoder recognised this file" and reads as a decoder

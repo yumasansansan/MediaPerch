@@ -215,6 +215,24 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
         d->design.max_taps = static_cast<std::uint32_t>(taps);
         return MP_OK;
     }
+    if (std::strcmp(key, "cepstrum") == 0) {
+        char* end = nullptr;
+        const unsigned long factor = std::strtoul(value, &end, 10);
+        if (end == value || factor < 2 || factor > 256) {
+            return MP_ERR_INVALID;
+        }
+        d->design.cepstrum = static_cast<std::uint32_t>(factor);
+        return MP_OK;
+    }
+    if (std::strcmp(key, "phase_floor") == 0) {
+        char* end = nullptr;
+        const double db = std::strtod(value, &end);
+        if (end == value || !std::isfinite(db) || db > 0.0 || db < -400.0) {
+            return MP_ERR_INVALID;
+        }
+        d->design.phase_floor_db = db;
+        return MP_OK;
+    }
     if (std::strcmp(key, "stages") == 0) {
         if (std::strcmp(value, "auto") == 0) {
             d->design.stages = 0;
@@ -284,6 +302,24 @@ MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
                           "stages\t%u\thow many steps the conversion may take; auto "
                           "searches for the cheapest",
                           d->design.stages);
+        }
+        return MP_OK;
+    case 17:
+        std::snprintf(out, out_bytes,
+                      "cepstrum\t%u\ttransform length as a multiple of the filter "
+                      "(phase=minimum only)",
+                      d->design.cepstrum);
+        return MP_OK;
+    case 18:
+        if (d->design.phase_floor_db < 0.0) {
+            std::snprintf(out, out_bytes,
+                          "phase_floor\t%.1f\tdB below the peak where the logarithm "
+                          "stops (phase=minimum only)",
+                          d->design.phase_floor_db);
+        } else {
+            std::snprintf(out, out_bytes,
+                          "phase_floor\tauto\tdB below the peak where the logarithm "
+                          "stops; auto is 20 under the stopband");
         }
         return MP_OK;
     case 16: {

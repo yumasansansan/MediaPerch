@@ -846,3 +846,37 @@ TEST_CASE("the block size does not change a cascade either", "[resample][cascade
         }
     }
 }
+
+TEST_CASE("the cepstrum's own truncation is a setting, and it shows",
+          "[resample][design]")
+{
+    // A minimum-phase filter is computed through a transform, and a transform
+    // has a length. Too short and the cepstrum's tail wraps onto its head: what
+    // comes out has the right shape and the wrong magnitude, which is the
+    // failure worth being able to see rather than to trust.
+    const auto stopband = [](std::uint32_t factor, double floor) {
+        mp::resample::Design d = quality("good");
+        d.taps = 158;
+        d.phase = mp::resample::Phase::minimum;
+        d.cepstrum = factor;
+        d.phase_floor_db = floor;
+        std::uint32_t taps = 0;
+        return designed(d, 2, 1, taps).stopband_db;
+    };
+
+    const double cramped = stopband(2, 0.0);
+    const double roomy = stopband(64, 0.0);
+    INFO("cepstrum=2 " << cramped << " dB, cepstrum=64 " << roomy << " dB");
+    CHECK(roomy < cramped - 2.0);
+    // And with room, the factorisation costs almost nothing: the linear-phase
+    // filter it came from measures about -119.97 dB.
+    CHECK(roomy < -119.5);
+
+    // The floor is the other half. Clamping the logarithm at 60 dB tells the
+    // factorisation the filter is 60 dB deep, and it builds one that is -- an
+    // unusually direct demonstration of what the setting does.
+    const double shallow = stopband(64, -60.0);
+    INFO("floor -60 dB gives " << shallow << " dB");
+    CHECK(shallow > -62.0);
+    CHECK(shallow < -58.0);
+}
