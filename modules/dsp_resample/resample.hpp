@@ -1,25 +1,25 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// A polyphase rational resampler, designed rather than transcribed.
+// A polyphase rational resampler.
 //
-// The coefficients are a Kaiser-windowed sinc, computed at `configure` from the
-// two numbers that actually decide a filter: how far down the stopband has to
-// be, and how much of the passband is kept. That is the same choice made for
-// the binomial noise shapers and for the opposite reason to the ATH curves --
-// there is a closed form here, it is short, and a table of numbers copied from
-// somewhere else would be a table of numbers nobody in this tree could check.
-//
-// **The ratio is rational and reduced.** 44100 -> 48000 is 160/147, and the
-// filter is built once for that pair. A rate pair that does not reduce to
+// **The ratio is rational and reduced.** 44100 -> 48000 is 160/147, and one
+// prototype is designed for that pair; each output sample then costs one phase
+// of it rather than the whole thing. A rate pair that does not reduce to
 // something small (44100 -> 44101 is 44101/44100) would need a prototype of
 // millions of taps, and `configure` refuses it by name rather than allocating
 // it: an arbitrary-ratio resampler interpolates between phases and is a
 // different thing, worth writing on purpose rather than by accident.
 //
+// How the coefficients are arrived at is [design.hpp](design.hpp), which is
+// where the interesting decisions are. Everything here is bookkeeping: where in
+// the stream we are, which phase that lands on, and what is still held.
+//
 // Everything is `double`, because the bus is.
 
 #ifndef MEDIAPERCH_RESAMPLE_HPP
 #define MEDIAPERCH_RESAMPLE_HPP
+
+#include "design.hpp"
 
 #include <cstdint>
 #include <string>
@@ -27,36 +27,23 @@
 
 namespace mp::resample {
 
-/// What the filter has to do, in the two numbers a Kaiser design takes.
-struct Design {
-    /// Stopband attenuation. Everything above the new Nyquist is at least this
-    /// far down, so it is also the aliasing floor.
-    double attenuation_db = 120.0;
-    /// Where the passband ends, as a fraction of the lower of the two Nyquist
-    /// frequencies. The transition band is what is left. 0.95 of 22.05 kHz
-    /// keeps everything to 20.9 kHz and spends the rest on the skirt.
-    double bandwidth = 0.95;
-    /// The prototype's ceiling, in coefficients. A ratio that does not reduce
-    /// asks for millions; this is what turns that into a refusal instead of a
-    /// hundred-megabyte allocation.
-    std::uint32_t max_taps = 1u << 22;
-};
-
 /// Named settings, because a person choosing a resampler is choosing a
 /// trade-off and not a number of taps.
 ///
-/// The attenuations are chosen against the destination, not against the ear:
-/// 120 dB is past 16-bit and past 20-bit, 144 dB is past 24-bit, and `fast`
-/// is the one that admits it is for a laptop rather than for a DAC.
+/// The attenuations are chosen against the destination rather than against the
+/// ear: 120 dB is past 16-bit and past 20-bit, 144 dB is past 24-bit, and
+/// `fast` is the one that admits it is for a laptop rather than for a DAC.
+/// `extreme` is past what any container can carry and is there because somebody
+/// will want to know what the arithmetic can do.
 [[nodiscard]] bool design_from_name(const std::string& name, Design& out);
 [[nodiscard]] std::string quality_names();
 
 /// The engine: one designed filter, and the state of one stream through it.
 class Resampler {
 public:
-    /// Designs the filter. Returns false and fills `why` when the ratio cannot
-    /// be done under `design`, which is a refusal the host must pass on rather
-    /// than paper over.
+    /// Designs the filter. Returns false and fills `why` when the ratio or the
+    /// specification cannot be done, which is a refusal the host must pass on
+    /// rather than paper over.
     [[nodiscard]] bool configure(std::uint32_t in_rate, std::uint32_t out_rate,
                                  std::uint32_t channels, const Design& design,
                                  std::string& why);
@@ -69,14 +56,16 @@ public:
 
     [[nodiscard]] std::uint32_t up() const noexcept { return up_; }
     [[nodiscard]] std::uint32_t down() const noexcept { return down_; }
-    /// Multiplies per output sample. The prototype is this times `up()`.
-    [[nodiscard]] std::uint32_t taps_per_phase() const noexcept { return taps_; }
+    /// Multiplies per output sample.
+    [[nodiscard]] std::uint32_t taps_per_phase() const noexcept { return phase_taps_; }
     /// The filter's own delay, in input frames. Already compensated: output
     /// frame k lines up with input frame k * down/up, not with k + this.
     [[nodiscard]] double latency_frames() const noexcept
     {
         return static_cast<double>(taps_) / 2.0;
     }
+    /// What the design actually achieved, measured rather than assumed.
+    [[nodiscard]] const Response& response() const noexcept { return response_; }
 
     /// Room a caller must have for `in_frames` of input.
     [[nodiscard]] std::uint32_t max_output(std::uint32_t in_frames) const noexcept;
@@ -101,7 +90,7 @@ public:
     /// Phase `p`, its taps in the order the inner loop reads them.
     [[nodiscard]] const double* phase(std::uint32_t p) const noexcept
     {
-        return coef_.data() + static_cast<std::size_t>(p) * taps_;
+        return coef_.data() + static_cast<std::size_t>(p) * phase_taps_;
     }
 
 private:
@@ -114,11 +103,27 @@ private:
     std::uint32_t up_ = 1;
     std::uint32_t down_ = 1;
     std::uint32_t channels_ = 0;
-    std::uint32_t taps_ = 1;
-    /// The prototype's centre, in prototype samples. An integer, which is what
-    /// makes the 1:1 case a unit impulse rather than an interpolation.
+    /// The design's own tap count: even, and what the group delay is half of.
+    std::uint32_t taps_ = 0;
+    /// What the inner loop runs over: `taps_ + 1`. The prototype is odd-length
+    /// so that its centre lands on a sample, which puts one extra coefficient in
+    /// phase 0; every other phase is padded with a zero so all phases are the
+    /// same length and the loop has no special case.
+    std::uint32_t phase_taps_ = 1;
+    /// The prototype's centre, in prototype samples.
     std::uint64_t centre_ = 0;
 
+    /// What the last design was for. Designing is expensive -- seconds, with
+    /// `design=refine` on a long prototype -- and a host configures a stage
+    /// twice: once to find out what format comes out, and once with the block
+    /// size the device settled on. The filter does not depend on the block
+    /// size, so the second one is free.
+    Design last_{};
+    std::uint32_t last_in_rate_ = 0;
+    std::uint32_t last_out_rate_ = 0;
+    bool designed_ = false;
+
+    Response response_{};
     std::vector<double> proto_; ///< as designed, for inspection
     std::vector<double> coef_;  ///< the same numbers, per phase, reversed
 

@@ -187,36 +187,122 @@ same for the dither and shaping algorithms, of which there are rather a lot.
 The stage `MpDspVtbl` was shaped for, and the first one whose answer to
 `configure` is a different sample rate. `--dsp resample:rate=48000`.
 
-It is a **polyphase FIR with a Kaiser-windowed sinc, designed at `configure`
-rather than transcribed**. That is the opposite choice from the noise-shaping
-curves and for the same reason: those are measurements of hearing and cannot be
-derived, this has a closed form four lines long, and a table of numbers copied
-out of another project is a table nobody in this tree could check.
+It is a **polyphase FIR, designed at `configure` rather than transcribed**. That is the
+opposite choice from the noise-shaping curves and for the same reason: those are
+measurements of hearing and cannot be derived, this has a closed form four lines long, and
+a table of numbers copied out of another project is a table nobody in this tree could
+check.
 
-The ratio is rational and reduced — 44100 → 48000 is 160/147 — and each output
-sample costs one phase of the filter, not the whole of it. Two numbers decide
-everything else:
+The ratio is rational and reduced — 44100 → 48000 is 160/147 — and each output sample
+costs one phase of the filter, not the whole of it. Two numbers decide the specification:
 
-| | Stopband | Passband | Taps at 160/147 |
+| | Stopband | Passband | Multiplies at 160/147 |
 |---|---|---|---|
-| `quality=fast` | 96 dB | 91% of Nyquist | 70 |
-| `quality=good` **(default)** | 120 dB | 95% | 158 |
-| `quality=best` | 144 dB | 98% | 474 |
+| `quality=fast` | 96 dB | 91% of Nyquist | 71 |
+| `quality=good` **(default)** | 120 dB | 95% | 159 |
+| `quality=best` | 144 dB | 98% | 475 |
+| `quality=extreme` | 180 dB | 99% | 1277 |
 
-`attenuation` and `bandwidth` are also settable directly, which is what the
-presets set.
+`attenuation`, `bandwidth`, `passband_ripple` and `taps` are settable directly, which is
+what the presets set. `extreme` measures −180.08 dB with 8.9 × 10⁻⁹ dB of passband ripple
+and still plays a 44.1 kHz file to a 48 kHz device with no underruns — it is past every
+container this program can write to, and it is there because "how far does this go" is a
+fair question and guessing at the answer is not.
 
-**A rate pair that does not reduce is refused, by name.** 44100 → 44101 reduces
-to 44101/44100: every phase is a separate filter and there are 44101 of them.
-`configure` says so and names the count rather than allocating seven million
-coefficients. An arbitrary-ratio resampler interpolates between phases and is a
-different program, worth writing deliberately rather than discovering by
-accident.
+#### How the coefficients are arrived at
 
-**It is never inserted automatically.** A resampler that appears whenever a
-device is fussy is how a bit-exact player stops being one quietly. `--path auto`
-still refuses a device that wants a rate the file does not have; asking for the
-stage is what changes that, and the report then says `PROCESSED`.
+Three methods, and the difference between them is not a preference.
+
+**`design=window`** (the default) multiplies the ideal lowpass — a sinc — by a window. It
+is closed-form, unconditionally stable, and works at any length. Its limit is structural:
+the passband and stopband ripples come from the same convolution with the window's own
+spectrum, so they are forced to be roughly equal. A resampler wants them wildly unequal —
+a thousandth of a decibel in the passband, a hundred and forty in the stopband — and this
+method has no way to say so.
+
+Two windows. `window=kaiser` is the default and is itself a closed-form approximation to
+the Slepian (DPSS) window, which is the optimum of the window family; the gap between them
+is a fraction of a decibel, which is why there is no `window=dpss` and why the effort went
+into changing method instead. `window=dolph` is Dolph–Chebyshev: every sidelobe at exactly
+the level asked for, and the narrowest mainlobe that allows. It is **measurably worse here**
+(below), because sidelobes that never decay leak more into a filter's stopband than
+sidelobes that do, and because the window has spikes at both ends. It is kept because that
+is a fact worth being able to reproduce rather than a claim.
+
+**`design=remez`** is Parks–McClellan. It minimises the *weighted* maximum error over the
+whole filter, and the alternation theorem says the answer is the best any filter of that
+length can do. It buys the two things the window method cannot offer: independent passband
+and stopband weights, and — measured below — six decibels at the length Kaiser's own
+formula picks, or forty at a length too short for the specification. Its limitation is
+real and is refused rather than hidden: the Lagrange interpolation at the heart of the
+exchange loses conditioning past about a thousand extremal points, so a 25,281-tap
+prototype is out of reach and 44100 → 48000 cannot use it. 96000 → 48000 can.
+
+**`design=refine`** is what is left when Parks–McClellan will not fit. A filter is two
+constraints — it is *n* taps long, and its response is inside a mask — and projecting onto
+each in turn converges towards the same equiripple answer, at two transforms a round
+instead of an interpolation over ten thousand nodes. It is the only method here that can
+improve on a window at the length 44100 → 48000 actually needs, and what it buys there is
+1.2 dB for about two seconds of work. That is the honest size of it.
+
+Three things were considered and are deliberately not here. **DPSS** is the window family's
+true optimum and Kaiser is within a fraction of a decibel of it. **Multistage decomposition**
+would cut 160/147 into cascaded stages and save most of the multiplies — an efficiency
+question rather than a fidelity one, and this filter already runs 45 seconds of 768 kHz
+without an underrun. **Minimum phase** would halve the taps for the same magnitude response
+and remove the pre-ringing, at the cost of the property the graph relies on — that output
+frame *k* lines up with input frame *k·M/L* — so it is a change to the alignment contract
+and not a flag.
+
+#### The methods, measured against each other
+
+Every number below is `Response`, read off the built filter by transforming it, not
+inferred from the formula that designed it.
+
+At 2/1, 158 taps per phase, which is the length Kaiser's own order formula picks for
+120 dB:
+
+| | Stopband | Passband ripple | Design time |
+|---|---|---|---|
+| `window,kaiser` | −119.97 dB | 8.8 × 10⁻⁶ dB | 0 ms |
+| `window,dolph` | −89.49 dB | 2.9 × 10⁻⁴ dB | 0 ms |
+| `refine` | −120.65 dB | 8.7 × 10⁻⁶ dB | 21 ms |
+| **`remez`** | **−126.30 dB** | 4.2 × 10⁻⁶ dB | 5 ms |
+
+At 2/1 with `taps=128`, deliberately too short for the specification, which is where the
+methods separate:
+
+| | Stopband | Passband ripple |
+|---|---|---|
+| `window,kaiser` | −65.31 dB | 4.7 × 10⁻³ dB |
+| `window,dolph` | −57.32 dB | 1.2 × 10⁻² dB |
+| `refine` | −69.13 dB | 1.7 × 10⁻³ dB |
+| **`remez`** | **−104.97 dB** | 4.9 × 10⁻⁵ dB |
+
+And at 160/147 — 44100 → 48000, a 25,281-coefficient prototype, the case that actually
+matters:
+
+| | Stopband | Design time |
+|---|---|---|
+| `window,kaiser` | −119.49 dB | 10 ms |
+| `window,dolph` | −90.53 dB | 15 ms |
+| **`refine`** | **−120.72 dB** | 1.85 s |
+| `remez` | refused: 25,281 taps | — |
+
+#### Refusing, and checking
+
+`verify=1` turns the specification into a promise: the design is built, measured, and if it
+missed, the shortfall is bought in taps — up to eight rounds of six per cent — before the
+whole thing is refused. Kaiser's order formula is an estimate and lands a few tenths short
+about as often as it lands over, so without this a `quality=good` filter is *about* 120 dB.
+
+**Parks–McClellan is checked against itself whether or not `verify` is set.** The exchange
+reports the deviation it settled on; the built filter is transformed and has to agree with
+it to within a decibel. That check found a real bug during development — the inverse cosine
+transform already halves every coefficient but the first, and halving again produced a
+filter that looked plausible and measured 15 dB wrong.
+
+#### What it measures
 
 #### What it measures
 

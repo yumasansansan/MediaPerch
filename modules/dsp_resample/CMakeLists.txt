@@ -8,7 +8,7 @@
 # for the same reason: a filter that is only ever tested through a device is a
 # filter nobody can put a number on.
 
-add_library(mediaperch_resample STATIC resample.cpp)
+add_library(mediaperch_resample STATIC resample.cpp design.cpp)
 target_include_directories(mediaperch_resample PUBLIC "${CMAKE_CURRENT_LIST_DIR}")
 target_link_libraries(mediaperch_resample PRIVATE mediaperch_flags)
 set_target_properties(mediaperch_resample PROPERTIES FOLDER "modules")

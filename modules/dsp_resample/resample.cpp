@@ -4,53 +4,10 @@
 
 #include <algorithm>
 #include <cmath>
-#include <numeric>
+#include <cstdint>
 
 namespace mp::resample {
 namespace {
-
-constexpr double k_pi = 3.14159265358979323846;
-
-/// The zeroth-order modified Bessel function, by its series.
-///
-/// It converges quickly for the arguments a Kaiser window uses (beta is under
-/// 20 for any attenuation anybody wants), and the series is four lines. A table
-/// would be four lines and a transcription risk.
-double bessel_i0(double x) noexcept
-{
-    double sum = 1.0;
-    double term = 1.0;
-    for (int k = 1; k < 64; ++k) {
-        term *= (x / (2.0 * k)) * (x / (2.0 * k));
-        sum += term;
-        if (term < sum * 1e-18) {
-            break;
-        }
-    }
-    return sum;
-}
-
-double sinc(double x) noexcept
-{
-    if (x == 0.0) {
-        return 1.0;
-    }
-    const double t = k_pi * x;
-    return std::sin(t) / t;
-}
-
-/// Kaiser's own formula for the shape parameter, from the attenuation.
-double kaiser_beta(double attenuation_db) noexcept
-{
-    if (attenuation_db > 50.0) {
-        return 0.1102 * (attenuation_db - 8.7);
-    }
-    if (attenuation_db >= 21.0) {
-        return 0.5842 * std::pow(attenuation_db - 21.0, 0.4) +
-               0.07886 * (attenuation_db - 21.0);
-    }
-    return 0.0;
-}
 
 std::uint32_t gcd(std::uint32_t a, std::uint32_t b) noexcept
 {
@@ -77,6 +34,12 @@ bool design_from_name(const std::string& name, Design& out)
     } else if (name == "best") {
         out.attenuation_db = 144.0;
         out.bandwidth = 0.98;
+    } else if (name == "extreme") {
+        // Past every container this program can write to, and past what the
+        // arithmetic under it is exact to. Here because "how far does this go"
+        // is a fair question and guessing at the answer is not.
+        out.attenuation_db = 180.0;
+        out.bandwidth = 0.99;
     } else {
         return false;
     }
@@ -85,7 +48,8 @@ bool design_from_name(const std::string& name, Design& out)
 
 std::string quality_names()
 {
-    return "fast (96 dB, 91%), good (120 dB, 95%), best (144 dB, 98%)";
+    return "fast (96 dB, 91%), good (120 dB, 95%), best (144 dB, 98%), "
+           "extreme (180 dB, 99%)";
 }
 
 bool Resampler::configure(std::uint32_t in_rate, std::uint32_t out_rate,
@@ -94,10 +58,6 @@ bool Resampler::configure(std::uint32_t in_rate, std::uint32_t out_rate,
     reset();
     if (in_rate == 0 || out_rate == 0 || channels == 0) {
         why = "a rate of zero is not a rate";
-        return false;
-    }
-    if (design.bandwidth <= 0.0 || design.bandwidth >= 1.0) {
-        why = "bandwidth must be between 0 and 1, exclusive";
         return false;
     }
 
@@ -112,87 +72,59 @@ bool Resampler::configure(std::uint32_t in_rate, std::uint32_t out_rate,
     // exactly that, because "resampling to the same rate changes nothing" is a
     // claim about the filter and not about a branch. `process` still takes the
     // branch: doing the arithmetic to rediscover it per sample would be silly.
-    //
-    // In cycles per sample of the intermediate rate, which runs at in_rate * up.
-    // The lower of the two Nyquist frequencies is the one that has to be
-    // protected: upsampling must not let images through, downsampling must not
-    // let anything above the new Nyquist fold back.
-    const double cutoff = 0.5 / static_cast<double>(std::max(up_, down_));
-    const double transition = 2.0 * (1.0 - design.bandwidth) * cutoff;
-    const double beta = kaiser_beta(design.attenuation_db);
-
-    // Kaiser's order estimate. The +1 and the rounding up are the difference
-    // between meeting the specification and nearly meeting it.
-    const double order =
-        (design.attenuation_db - 8.0) / (2.285 * 2.0 * k_pi * transition) + 1.0;
-    std::uint64_t taps =
-        static_cast<std::uint64_t>(std::ceil(order / static_cast<double>(up_)));
-    taps = std::max<std::uint64_t>(taps, 8);
-    taps += taps & 1u; // even, so the centre lands on a sample
-
-    if (taps * up_ > design.max_taps) {
-        why = "the ratio " + std::to_string(out_rate) + "/" + std::to_string(in_rate) +
-              " reduces to " + std::to_string(up_) + "/" + std::to_string(down_) +
-              ", which needs " + std::to_string(taps * up_) +
-              " coefficients. This is a rational resampler and that is more than it "
-              "will build; pick rates with a common factor, or an arbitrary-ratio "
-              "resampler, which this is not";
-        return false;
-    }
-    taps_ = static_cast<std::uint32_t>(taps);
-
-    const std::size_t length = static_cast<std::size_t>(taps_) * up_;
-    centre_ = length / 2;
-    const double c = static_cast<double>(centre_);
-
-    // A symmetric design of length+1 with its last tap -- which is exactly zero
-    // -- dropped. That keeps the window and the sinc centred on the same sample,
-    // which is what makes the response linear-phase and the 1:1 case exact.
-    proto_.resize(length);
-    const double i0_beta = bessel_i0(beta);
-    for (std::size_t n = 0; n < length; ++n) {
-        const double offset = static_cast<double>(n) - c;
-        const double ratio = offset / c;
-        const double window = bessel_i0(beta * std::sqrt(std::max(0.0, 1.0 - ratio * ratio))) /
-                              i0_beta;
-        proto_[n] = 2.0 * cutoff * sinc(2.0 * cutoff * offset) * window;
-    }
-
-    // Unity gain at DC. The whole prototype is scaled rather than each phase
-    // separately: normalising the phases one at a time would flatten DC by
-    // bending the response that was just designed.
-    const double sum = std::accumulate(proto_.begin(), proto_.end(), 0.0);
-    if (sum != 0.0) {
-        const double scale = static_cast<double>(up_) / sum;
-        for (double& tap : proto_) {
-            tap *= scale;
+    const bool same = designed_ && last_ == design && last_in_rate_ == in_rate &&
+                      last_out_rate_ == out_rate;
+    if (!same) {
+        if (!design_prototype(design, up_, down_, proto_, taps_, response_, why)) {
+            designed_ = false;
+            return false;
         }
+        last_ = design;
+        last_in_rate_ = in_rate;
+        last_out_rate_ = out_rate;
+        designed_ = true;
+    }
+    phase_taps_ = taps_ + 1;
+    centre_ = (proto_.size() - 1) / 2;
+
+    if (same) {
+        // Same filter, same phases: only the stream state has to start again.
+        held_ = phase_taps_ - 1;
+        hist_.assign(channels_, std::vector<double>(held_, 0.0));
+        base_ = -static_cast<std::int64_t>(held_);
+        return true;
     }
 
     // Per phase, and reversed, so the inner loop walks both arrays forwards.
-    coef_.assign(length, 0.0);
+    // Phase 0 is the one that reaches the prototype's last coefficient; the
+    // others are padded with the zero that keeps every phase the same length.
+    coef_.assign(static_cast<std::size_t>(up_) * phase_taps_, 0.0);
     for (std::uint32_t p = 0; p < up_; ++p) {
-        for (std::uint32_t j = 0; j < taps_; ++j) {
-            coef_[static_cast<std::size_t>(p) * taps_ + j] =
-                proto_[p + static_cast<std::size_t>(taps_ - 1 - j) * up_];
+        for (std::uint32_t j = 0; j < phase_taps_; ++j) {
+            const std::size_t index =
+                p + static_cast<std::size_t>(phase_taps_ - 1 - j) * up_;
+            if (index < proto_.size()) {
+                coef_[static_cast<std::size_t>(p) * phase_taps_ + j] = proto_[index];
+            }
         }
     }
 
     // The stream starts with the filter half full of silence, which is what
     // makes output frame 0 line up with input frame 0.
-    hist_.assign(channels_, std::vector<double>(taps_ - 1, 0.0));
-    held_ = taps_ - 1;
-    base_ = -static_cast<std::int64_t>(taps_ - 1);
+    held_ = phase_taps_ - 1;
+    hist_.assign(channels_, std::vector<double>(held_, 0.0));
+    base_ = -static_cast<std::int64_t>(held_);
     return true;
 }
 
 void Resampler::reset() noexcept
 {
+    const std::size_t seed = phase_taps_ > 1 ? phase_taps_ - 1 : 0;
     for (auto& channel : hist_) {
-        channel.assign(taps_ > 1 ? taps_ - 1 : 0, 0.0);
+        channel.assign(seed, 0.0);
     }
-    held_ = taps_ > 1 ? taps_ - 1 : 0;
-    base_ = -static_cast<std::int64_t>(held_);
+    held_ = seed;
+    base_ = -static_cast<std::int64_t>(seed);
     out_k_ = 0;
     taken_ = 0;
     flushed_ = false;
@@ -211,8 +143,8 @@ std::uint32_t Resampler::max_output(std::uint32_t in_frames) const noexcept
 void Resampler::produce(std::uint64_t limit, double* const* out, std::uint32_t capacity,
                         std::uint32_t& produced)
 {
-    const std::uint64_t available = static_cast<std::uint64_t>(
-        static_cast<std::int64_t>(base_) + static_cast<std::int64_t>(held_));
+    const auto available =
+        static_cast<std::uint64_t>(base_ + static_cast<std::int64_t>(held_));
 
     while (produced < capacity && out_k_ < limit) {
         const std::uint64_t m = out_k_ * down_ + centre_;
@@ -222,15 +154,15 @@ void Resampler::produce(std::uint64_t limit, double* const* out, std::uint32_t c
         }
         const auto p = static_cast<std::uint32_t>(m - i * up_);
         const auto at = static_cast<std::size_t>(static_cast<std::int64_t>(i) - base_);
-        if (at + 1 < taps_) {
+        if (at + 1 < phase_taps_) {
             break; // the oldest tap was discarded, which would be a bug here
         }
-        const double* co = coef_.data() + static_cast<std::size_t>(p) * taps_;
+        const double* co = coef_.data() + static_cast<std::size_t>(p) * phase_taps_;
 
         for (std::uint32_t c = 0; c < channels_; ++c) {
-            const double* x = hist_[c].data() + at + 1 - taps_;
+            const double* x = hist_[c].data() + at + 1 - phase_taps_;
             double acc = 0.0;
-            for (std::uint32_t j = 0; j < taps_; ++j) {
+            for (std::uint32_t j = 0; j < phase_taps_; ++j) {
                 acc += co[j] * x[j];
             }
             out[c][produced] = acc;
@@ -244,7 +176,7 @@ void Resampler::discard()
 {
     const std::uint64_t m = out_k_ * down_ + centre_;
     const std::int64_t oldest =
-        static_cast<std::int64_t>(m / up_) - static_cast<std::int64_t>(taps_) + 1;
+        static_cast<std::int64_t>(m / up_) - static_cast<std::int64_t>(phase_taps_) + 1;
     const std::int64_t drop = oldest - base_;
     if (drop <= 0) {
         return;
@@ -266,8 +198,10 @@ bool Resampler::process(const double* const* in, std::uint32_t in_frames,
         if (in_frames > capacity) {
             return false;
         }
-        for (std::uint32_t c = 0; c < channels_; ++c) {
-            std::copy_n(in[c], in_frames, out[c]);
+        if (in != nullptr) {
+            for (std::uint32_t c = 0; c < channels_; ++c) {
+                std::copy_n(in[c], in_frames, out[c]);
+            }
         }
         produced = in_frames;
         taken_ += in_frames;
@@ -304,9 +238,9 @@ bool Resampler::flush(double* const* out, std::uint32_t capacity, std::uint32_t&
         // through the taps. Feeding silence is what walks them out.
         flushed_ = true;
         for (auto& channel : hist_) {
-            channel.insert(channel.end(), taps_, 0.0);
+            channel.insert(channel.end(), phase_taps_, 0.0);
         }
-        held_ += taps_;
+        held_ += phase_taps_;
     }
 
     produce(limit, out, capacity, produced);

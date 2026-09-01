@@ -245,9 +245,14 @@ Options
                     setting it has and what that setting is now. A stage exists
                     to change the samples, so asking for one implies
                     --path processed. The one most people want is
-                      --dsp resample:rate=48000[,quality=fast|good|best]
+                      --dsp resample:rate=48000[,quality=fast|good|best|extreme]
                     which is the only way a rate the device refuses ever gets
-                    changed: nothing here resamples on its own
+                    changed: nothing here resamples on its own. Its filter is
+                    designed rather than tabulated, and how it is designed is
+                    also a setting -- design=window|remez|refine,
+                    window=kaiser|dolph, attenuation, bandwidth,
+                    passband_ripple, taps, verify. `--dsp list` prints them all
+                    with what each one is now
   --dither KIND     Path B only, and only where bits are actually being thrown
                     away. `triangular` (default) is the standard answer;
                     `highpass` is the same distribution with its noise tilted

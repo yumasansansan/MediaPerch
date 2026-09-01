@@ -77,6 +77,8 @@ MpResult MP_CALL dsp_configure(MpDsp* d, const MpFormat* in, std::uint32_t max_f
 
     const std::uint32_t target = d->rate != 0 ? d->rate : in->sample_rate;
     if (!d->engine.configure(in->sample_rate, target, in->channels, d->design, d->why)) {
+        // The host prints `why` through the chain's own refusal, which is the
+        // only place a person can be told *which* stage would not configure.
         return MP_ERR_FORMAT;
     }
 
@@ -163,6 +165,53 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
         d->quality = "custom";
         return MP_OK;
     }
+    if (std::strcmp(key, "design") == 0) {
+        if (!mp::resample::method_from_name(value, d->design.method)) {
+            return MP_ERR_INVALID;
+        }
+        return MP_OK;
+    }
+    if (std::strcmp(key, "window") == 0) {
+        if (!mp::resample::window_from_name(value, d->design.window)) {
+            return MP_ERR_INVALID;
+        }
+        return MP_OK;
+    }
+    if (std::strcmp(key, "passband_ripple") == 0) {
+        char* end = nullptr;
+        const double db = std::strtod(value, &end);
+        // Zero means "whatever the stopband gets", which is the only thing the
+        // window method can say. Anything else is a real second specification
+        // and only Parks-McClellan can spend it.
+        if (end == value || !std::isfinite(db) || db < 0.0 || db > 6.0) {
+            return MP_ERR_INVALID;
+        }
+        d->design.passband_ripple_db = db;
+        d->quality = "custom";
+        return MP_OK;
+    }
+    if (std::strcmp(key, "taps") == 0) {
+        char* end = nullptr;
+        const unsigned long taps = std::strtoul(value, &end, 10);
+        if (end == value || taps > 1u << 20) {
+            return MP_ERR_INVALID;
+        }
+        d->design.taps = static_cast<std::uint32_t>(taps);
+        return MP_OK;
+    }
+    if (std::strcmp(key, "max_taps") == 0) {
+        char* end = nullptr;
+        const unsigned long taps = std::strtoul(value, &end, 10);
+        if (end == value || taps < 64 || taps > (1u << 26)) {
+            return MP_ERR_INVALID;
+        }
+        d->design.max_taps = static_cast<std::uint32_t>(taps);
+        return MP_OK;
+    }
+    if (std::strcmp(key, "verify") == 0) {
+        d->design.verify = std::strcmp(value, "0") != 0 && std::strcmp(value, "false") != 0;
+        return MP_OK;
+    }
     return MP_ERR_UNSUPPORTED;
 }
 
@@ -192,19 +241,54 @@ MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
                       d->design.bandwidth);
         return MP_OK;
     case 4:
-        // Read-only, and the three numbers that say what was actually built.
-        std::snprintf(out, out_bytes, "ratio\t%u/%u\tup/down, reduced (read only)",
-                      d->engine.up(), d->engine.down());
+        std::snprintf(out, out_bytes, "design\t%s\twindow, remez or refine",
+                      mp::resample::method_name(d->design.method));
         return MP_OK;
     case 5:
-        std::snprintf(out, out_bytes,
-                      "taps\t%u\tmultiplies per output sample (read only)",
-                      d->engine.identity() ? 0u : d->engine.taps_per_phase());
+        std::snprintf(out, out_bytes, "window\t%s\tkaiser or dolph (design=window only)",
+                      mp::resample::window_name(d->design.window));
         return MP_OK;
     case 6:
         std::snprintf(out, out_bytes,
+                      "passband_ripple\t%.4f\tdB; 0 means the same as the stopband",
+                      d->design.passband_ripple_db);
+        return MP_OK;
+    case 7:
+        std::snprintf(out, out_bytes,
+                      "taps\t%u\tper phase; 0 derives it from the specification",
+                      d->design.taps);
+        return MP_OK;
+    case 8:
+        std::snprintf(out, out_bytes, "verify\t%s\trefuse a design that misses its spec",
+                      d->design.verify ? "1" : "0");
+        return MP_OK;
+    case 9:
+        // Everything past here is read-only: what was actually built, and what
+        // it actually measured. A setting says what was asked for; these say
+        // what came back.
+        std::snprintf(out, out_bytes, "ratio\t%u/%u\tup/down, reduced (read only)",
+                      d->engine.up(), d->engine.down());
+        return MP_OK;
+    case 10:
+        std::snprintf(out, out_bytes,
+                      "multiplies\t%u\tper output sample (read only)",
+                      d->engine.identity() ? 0u : d->engine.taps_per_phase());
+        return MP_OK;
+    case 11:
+        std::snprintf(out, out_bytes,
                       "latency\t%.1f\tinput frames, already compensated (read only)",
                       d->engine.identity() ? 0.0 : d->engine.latency_frames());
+        return MP_OK;
+    case 12:
+        std::snprintf(out, out_bytes,
+                      "measured_stopband\t%.2f\tdB, off the built filter (read only)",
+                      d->engine.response().stopband_db);
+        return MP_OK;
+    case 13:
+        std::snprintf(out, out_bytes,
+                      "measured_passband\t%.2e\tdB of ripple, off the built filter (read "
+                      "only)",
+                      d->engine.response().passband_ripple_db);
         return MP_OK;
     default:
         return MP_END;

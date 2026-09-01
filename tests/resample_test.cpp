@@ -12,11 +12,13 @@
 // number of cycles in the window analysed, so a single-bin Goertzel is exact
 // and there is no window function anywhere to explain away a result.
 
+#include <design.hpp>
 #include <resample.hpp>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <chrono>
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -138,6 +140,47 @@ mp::resample::Design quality(const char* name)
     return d;
 }
 
+/// The DFT, written out. Slow, obviously correct, and the only thing worth
+/// checking a fast one against.
+std::vector<std::complex<double>> naive_dft(const std::vector<std::complex<double>>& x)
+{
+    const std::size_t n = x.size();
+    std::vector<std::complex<double>> out(n, {0.0, 0.0});
+    for (std::size_t k = 0; k < n; ++k) {
+        for (std::size_t i = 0; i < n; ++i) {
+            const double angle =
+                -2.0 * k_pi * static_cast<double>(k) * static_cast<double>(i) /
+                static_cast<double>(n);
+            out[k] += x[i] * std::complex<double>{std::cos(angle), std::sin(angle)};
+        }
+    }
+    return out;
+}
+
+std::vector<std::complex<double>> ramp_signal(std::size_t n)
+{
+    std::vector<std::complex<double>> x(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        x[i] = {std::sin(0.7 * static_cast<double>(i)) + 0.25,
+                std::cos(0.31 * static_cast<double>(i))};
+    }
+    return x;
+}
+
+/// The prototype's own numbers, for a design that is being compared rather than
+/// played.
+mp::resample::Response designed(const mp::resample::Design& design, std::uint32_t up,
+                                std::uint32_t down, std::uint32_t& taps)
+{
+    std::vector<double> h;
+    mp::resample::Response achieved;
+    std::string why;
+    const bool ok = mp::resample::design_prototype(design, up, down, h, taps, achieved, why);
+    INFO(why);
+    REQUIRE(ok);
+    return achieved;
+}
+
 } // namespace
 
 TEST_CASE("resampling to the rate it already has is a unit impulse", "[resample]")
@@ -151,8 +194,8 @@ TEST_CASE("resampling to the rate it already has is a unit impulse", "[resample]
     REQUIRE(r.identity());
 
     const auto& h = r.prototype();
-    REQUIRE(h.size() % 2 == 0);
-    const std::size_t centre = h.size() / 2;
+    REQUIRE(h.size() % 2 == 1); // odd, so the centre is a sample and not a gap
+    const std::size_t centre = (h.size() - 1) / 2;
     for (std::size_t n = 0; n < h.size(); ++n) {
         INFO("tap " << n);
         REQUIRE(h[n] == Catch::Approx(n == centre ? 1.0 : 0.0).margin(1e-15));
@@ -371,3 +414,213 @@ TEST_CASE("there and back again", "[resample]")
     INFO("round trip SNR " << snr << " dB");
     CHECK(snr > 130.0);
 }
+
+
+// --------------------------------------------------------------------------
+// The design, rather than what it did
+// --------------------------------------------------------------------------
+
+TEST_CASE("the fast transform is the slow one", "[resample][design]")
+{
+    // Everything below measures a filter with an FFT, so the FFT is the first
+    // thing that has to be right.
+    for (const std::size_t n : {2u, 8u, 64u, 256u}) {
+        const auto x = ramp_signal(n);
+        auto fast = x;
+        mp::resample::fft(fast, false);
+        const auto slow = naive_dft(x);
+        for (std::size_t k = 0; k < n; ++k) {
+            INFO("n " << n << " bin " << k);
+            REQUIRE(fast[k].real() == Catch::Approx(slow[k].real()).margin(1e-9));
+            REQUIRE(fast[k].imag() == Catch::Approx(slow[k].imag()).margin(1e-9));
+        }
+        auto round_trip = fast;
+        mp::resample::fft(round_trip, true);
+        for (std::size_t i = 0; i < n; ++i) {
+            REQUIRE(round_trip[i].real() == Catch::Approx(x[i].real()).margin(1e-12));
+        }
+    }
+}
+
+TEST_CASE("a transform of a length that is not a power of two", "[resample][design]")
+{
+    // Bluestein, which exists because a Dolph window is as long as the filter
+    // and filter lengths are 11201 and 25281 rather than 16384.
+    for (const std::size_t n : {3u, 7u, 100u, 147u, 161u}) {
+        const auto x = ramp_signal(n);
+        auto fast = x;
+        mp::resample::dft_any(fast);
+        const auto slow = naive_dft(x);
+        for (std::size_t k = 0; k < n; ++k) {
+            INFO("n " << n << " bin " << k);
+            REQUIRE(fast[k].real() == Catch::Approx(slow[k].real()).margin(1e-8));
+            REQUIRE(fast[k].imag() == Catch::Approx(slow[k].imag()).margin(1e-8));
+        }
+    }
+}
+
+TEST_CASE("a Dolph-Chebyshev window puts every sidelobe at the level asked for",
+          "[resample][design]")
+{
+    // The defining property, and the one worth checking: a Kaiser window's
+    // sidelobes decay, this one's do not, and that is the whole trade.
+    const std::size_t n = 201;
+    const double attenuation = 80.0;
+    const auto w = mp::resample::dolph_window(n, attenuation);
+    REQUIRE(w.size() == n);
+    CHECK(w[(n - 1) / 2] == Catch::Approx(1.0));
+    for (std::size_t i = 0; i < n; ++i) {
+        REQUIRE(w[i] == Catch::Approx(w[n - 1 - i]).margin(1e-12));
+    }
+
+    const std::size_t transform = 8192;
+    std::vector<std::complex<double>> spectrum(transform, {0.0, 0.0});
+    for (std::size_t i = 0; i < n; ++i) {
+        spectrum[i] = {w[i], 0.0};
+    }
+    mp::resample::fft(spectrum, false);
+    const double peak = std::abs(spectrum[0]);
+
+    // Past the mainlobe, every sidelobe sits at the same height. One bin of an
+    // n-point window is transform/n bins here, and the mainlobe is a few of
+    // them wide, so start at five.
+    double worst = 0.0;
+    for (std::size_t k = 5 * transform / n; k <= transform / 2; ++k) {
+        worst = std::max(worst, std::abs(spectrum[k]) / peak);
+    }
+    const double measured = 20.0 * std::log10(worst);
+    INFO("worst sidelobe " << measured << " dB");
+    CHECK(measured < -attenuation + 1.0);
+    CHECK(measured > -attenuation - 6.0); // equiripple: not far below it either
+}
+
+TEST_CASE("every design meets the specification it was given", "[resample][design]")
+{
+    // The generator-with-checks pattern, applied to a filter: the design is
+    // measured before it is handed back, so a method that quietly converges to
+    // the wrong answer is a refusal rather than a quieter recording.
+    struct Case {
+        const char* name;
+        mp::resample::Method method;
+        mp::resample::Window window;
+        std::uint32_t up;
+        std::uint32_t down;
+    };
+    const Case cases[] = {
+        {"kaiser 160/147", mp::resample::Method::window, mp::resample::Window::kaiser, 160,
+         147},
+        {"dolph 160/147", mp::resample::Method::window, mp::resample::Window::dolph, 160,
+         147},
+        {"kaiser 2/1", mp::resample::Method::window, mp::resample::Window::kaiser, 2, 1},
+        {"remez 2/1", mp::resample::Method::remez, mp::resample::Window::kaiser, 2, 1},
+        {"refine 2/1", mp::resample::Method::refine, mp::resample::Window::kaiser, 2, 1},
+        {"remez 1/2", mp::resample::Method::remez, mp::resample::Window::kaiser, 1, 2},
+    };
+
+    for (const Case& c : cases) {
+        INFO("case " << c.name);
+        mp::resample::Design design = quality("good");
+        design.method = c.method;
+        design.window = c.window;
+        design.verify = true;
+        std::uint32_t taps = 0;
+        const auto achieved = designed(design, c.up, c.down, taps);
+        INFO(c.name << ": " << achieved.stopband_db << " dB, ripple "
+                    << achieved.passband_ripple_db << " dB, " << taps << " taps");
+        REQUIRE(achieved.stopband_db < -design.attenuation_db);
+        REQUIRE(achieved.passband_ripple_db < 0.01);
+    }
+}
+
+TEST_CASE("Parks-McClellan beats the window it replaces", "[resample][design]")
+{
+    // The claim the method is chosen for: at the same length, the optimal
+    // filter is further down than a windowed one. If this ever stops being
+    // true, the exchange is not converging and the whole method is theatre.
+    mp::resample::Design window = quality("good");
+    window.method = mp::resample::Method::window;
+    window.taps = 128;
+
+    mp::resample::Design remez = window;
+    remez.method = mp::resample::Method::remez;
+
+    std::uint32_t taps_a = 0;
+    std::uint32_t taps_b = 0;
+    const auto by_window = designed(window, 2, 1, taps_a);
+    const auto by_remez = designed(remez, 2, 1, taps_b);
+
+    REQUIRE(taps_a == taps_b);
+    INFO("window " << by_window.stopband_db << " dB, remez " << by_remez.stopband_db
+                   << " dB");
+    CHECK(by_remez.stopband_db < by_window.stopband_db - 3.0);
+}
+
+TEST_CASE("refining beats the window it started from", "[resample][design]")
+{
+    // And this is the one that matters, because it is the only method that
+    // works at the lengths 44100 -> 48000 needs.
+    mp::resample::Design window = quality("good");
+    window.taps = 96;
+
+    mp::resample::Design refined = window;
+    refined.method = mp::resample::Method::refine;
+
+    std::uint32_t taps_a = 0;
+    std::uint32_t taps_b = 0;
+    const auto by_window = designed(window, 4, 3, taps_a);
+    const auto by_refine = designed(refined, 4, 3, taps_b);
+
+    REQUIRE(taps_a == taps_b);
+    INFO("window " << by_window.stopband_db << " dB, refined " << by_refine.stopband_db
+                   << " dB");
+    CHECK(by_refine.stopband_db < by_window.stopband_db - 3.0);
+    // And it bought that without spending passband. At 96 taps a 120 dB
+    // specification is not reachable at all, so the window design already has a
+    // ripple of its own; what matters is that refining does not add to it.
+    CHECK(by_refine.passband_ripple_db <= by_window.passband_ripple_db + 1e-9);
+}
+
+TEST_CASE("a design that cannot be trusted is refused, not returned",
+          "[resample][design]")
+{
+    std::vector<double> h;
+    mp::resample::Response achieved;
+    std::uint32_t taps = 0;
+    std::string why;
+
+    // Parks-McClellan at a length where the exchange loses conditioning.
+    mp::resample::Design remez = quality("good");
+    remez.method = mp::resample::Method::remez;
+    REQUIRE_FALSE(mp::resample::design_prototype(remez, 160, 147, h, taps, achieved, why));
+    CHECK(why.find("Parks-McClellan") != std::string::npos);
+    CHECK(why.find("design=window") != std::string::npos);
+
+    // And refining at a length where the transforms would take longer than
+    // anybody would wait.
+    mp::resample::Design refine = quality("best");
+    refine.method = mp::resample::Method::refine;
+    REQUIRE_FALSE(mp::resample::design_prototype(refine, 2560, 147, h, taps, achieved, why));
+    CHECK(why.find("design=window") != std::string::npos);
+}
+
+TEST_CASE("more taps is the other axis, and it works", "[resample][design]")
+{
+    // `taps=` with the attenuation fixed: the transition band narrows and the
+    // stopband goes down. The brute-force answer to "can it do better", and the
+    // one that needs no new mathematics.
+    double previous = 0.0;
+    for (const std::uint32_t taps : {32u, 64u, 128u, 256u}) {
+        mp::resample::Design design = quality("good");
+        design.taps = taps;
+        std::uint32_t built = 0;
+        const auto achieved = designed(design, 2, 1, built);
+        INFO(taps << " taps: " << achieved.stopband_db << " dB");
+        REQUIRE(built == taps);
+        if (previous != 0.0) {
+            REQUIRE(achieved.stopband_db < previous);
+        }
+        previous = achieved.stopband_db;
+    }
+}
+
+
