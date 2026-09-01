@@ -42,19 +42,10 @@ inline constexpr unsigned k_windows = 8;
 inline constexpr unsigned k_max_sfb = 51;
 inline constexpr unsigned k_max_tns_order = 20;
 
-/// The AudioSpecificConfig, as far as AAC-LC needs it.
-struct Config {
-    unsigned object_type = 0;    ///< 2 is AAC-LC, and the only one accepted
-    unsigned rate_index = 0;     ///< index into the standard's 13 rates
-    std::uint32_t sample_rate = 0;
-    unsigned channel_config = 0; ///< 0 means "read a program config element"
-    bool frame_960 = false;      ///< frameLengthFlag; 960-sample frames
-};
-
-bool parse_asc(const std::uint8_t* asc, std::size_t bytes, Config& out) noexcept;
-
-/// The sample rate for one of the standard's 13 indices, or 0.
-std::uint32_t rate_for_index(unsigned index) noexcept;
+/// FFmpeg's seed for the noise generator, so noise-substituted bands can be
+/// compared with FFmpeg's output bit for bit. See `apply_pns` for why matching
+/// it is a testing convenience rather than a requirement of the format.
+inline constexpr std::uint32_t k_noise_seed = 0x1f2e3d4cu;
 
 /// Channels in the order AAC's elements produce them, mapped onto WAVE slots.
 ///
@@ -70,6 +61,26 @@ struct ChannelLayout {
 };
 
 const ChannelLayout& layout_for_config(unsigned channel_config) noexcept;
+
+/// The AudioSpecificConfig, as far as AAC-LC needs it.
+struct Config {
+    unsigned object_type = 0;    ///< 2 is AAC-LC, and the only one accepted
+    unsigned rate_index = 0;     ///< index into the standard's 13 rates
+    std::uint32_t sample_rate = 0;
+    unsigned channel_config = 0; ///< 0 means "read a program config element"
+    bool frame_960 = false;      ///< frameLengthFlag; 960-sample frames
+
+    /// Filled when `channel_config` is 0 and the AudioSpecificConfig carried a
+    /// program config element -- which is where FFmpeg's encoder puts the layout
+    /// for 7.1(wide) in an MP4. `count` is 0 when there was no PCE, as in a raw
+    /// ADTS stream, where the element arrives inside each frame instead.
+    ChannelLayout pce{};
+};
+
+bool parse_asc(const std::uint8_t* asc, std::size_t bytes, Config& out) noexcept;
+
+/// The sample rate for one of the standard's 13 indices, or 0.
+std::uint32_t rate_for_index(unsigned index) noexcept;
 
 /// Everything a frame needs while it is being decoded, held by the object
 /// rather than by the file.
@@ -99,6 +110,18 @@ public:
     [[nodiscard]] unsigned channels() const noexcept { return channels_; }
     [[nodiscard]] const float* pcm(unsigned channel) const noexcept { return pcm_[channel]; }
     [[nodiscard]] const char* error() const noexcept { return error_; }
+
+    /// The layout of the channels `pcm()` hands back.
+    ///
+    /// For channel configurations 1 to 12 this is a table. For configuration 0
+    /// it is whatever the program config element said -- from the
+    /// AudioSpecificConfig if the file had one, which an MP4 always does, and
+    /// otherwise from the first frame that carries a PCE, which is how a raw
+    /// ADTS stream delivers it. That is why this is a method on the decoder
+    /// rather than a free function taking the configuration number.
+    /// FFmpeg's encoder writes configuration 0 for 7.1(wide), so this is not a
+    /// corner nobody reaches.
+    [[nodiscard]] const ChannelLayout& layout() const noexcept { return layout_; }
 
     /// The window sequence the last frame used for a channel: 0 ONLY_LONG,
     /// 1 LONG_START, 2 EIGHT_SHORT, 3 LONG_STOP. Diagnostic, and the first thing
@@ -130,10 +153,11 @@ private:
     unsigned prev_shape_[k_max_channels] = {};
     float pcm_[k_max_channels][k_frame_len] = {};
     unsigned last_sequence_[k_max_channels] = {};
+    ChannelLayout layout_{};
     /// The noise generator for PNS bands. Its state runs across frames, so a
     /// decode is reproducible from the start of a track and not from anywhere
     /// else -- which is true of AAC anyway, because the transform is lapped.
-    std::uint32_t rng_ = 0x1f2e3d4cu;
+    std::uint32_t rng_ = k_noise_seed;
     std::unique_ptr<State> state_;
 };
 

@@ -15,23 +15,33 @@ mediaperch-probe decode --file X.flac --decoder native
 ffmpeg -i X.flac -f s16le out.raw     # then hash out.raw
 ```
 
-## The seven decoders
+## The eight decoders
 
-| | `decode_flac` | `decode_alac` | `decode_ogg` | `decode_mp3` | `decode_native` | `decode_mf` | `decode_ffmpeg` |
-|---|---|---|---|---|---|---|---|
-| Behind it | libFLAC | **nothing** | libvorbis, libopus | `dr_mp3` | `dr_wav`, `dr_flac` | Media Foundation | `ffmpeg`, `ffprobe` |
-| Covers | FLAC, every depth and rate | ALAC in M4A | Vorbis and Opus in Ogg | MP3, every MPEG version | WAV and its four containers, FLAC to 24 bits | AAC, WMA, and what is left | the long tail |
-| Priority | 120 | 115 | 110 | 105 | 100 | 50 | 30 |
-| Probe score for FLAC | 100 | — | — | — | **60** | 40 | 30 |
-| Comes from | `external/flac` | **this tree** | four Xiph submodules | `external/dr_libs` | `external/dr_libs` | already on the machine | **found at run time, never shipped** |
+| Module | Behind it | Covers | Priority | Comes from |
+|---|---|---|---|---|
+| `decode_flac` | libFLAC | FLAC, every depth and rate | 120 | `external/flac` |
+| `decode_alac` | **nothing** | ALAC in M4A | 115 | **this tree** |
+| `decode_ogg` | libvorbis, libopus | Vorbis and Opus in Ogg | 110 | four Xiph submodules |
+| `decode_aac` | **nothing** | AAC-LC in M4A and raw ADTS | 108 | **this tree** |
+| `decode_mp3` | `dr_mp3` | MP3, every MPEG version | 105 | `external/dr_libs` |
+| `decode_native` | `dr_wav`, `dr_flac` | WAV and its four containers, FLAC to 24 bits | 100 | `external/dr_libs` |
+| `decode_ffmpeg` | `ffmpeg`, `ffprobe` | the long tail | 60 | **found at run time, never shipped** |
+| `decode_mf` | Media Foundation | whatever nothing above it read | 50 | already on the machine |
 
 Score is the registry's primary key and priority only breaks ties, so the score
-is where a statement about *one format* belongs. `decode_native` scores FLAC at
-60, below every other FLAC reader here, because `dr_flac` is a reimplementation
-that cannot read 32-bit FLAC at all — and above `decode_mf` and `decode_ffmpeg`,
-so an install with no submodules and no FFmpeg still plays FLAC. Its WAV score
-stays at 100: there is no reference implementation to defer to, and `dr_wav` is
-measured bit-exact to 32 bits and 768 kHz.
+is where a statement about *one format* belongs. FLAC is the case with four
+readers:
+
+| Probe score for FLAC | `decode_flac` | `decode_native` | `decode_mf` | `decode_ffmpeg` |
+|---|---|---|---|---|
+| | 100 | **60** | 40 | 30 |
+
+`decode_native` scores FLAC at 60, below every other FLAC reader here, because
+`dr_flac` is a reimplementation that cannot read 32-bit FLAC at all — and above
+`decode_mf` and `decode_ffmpeg`, so an install with no submodules and no FFmpeg
+still plays FLAC. Its WAV score stays at 100: there is no reference
+implementation to defer to, and `dr_wav` is measured bit-exact to 32 bits and
+768 kHz.
 
 Three modules read FLAC on purpose. `decode_flac` outranks the others whenever it
 is installed, because for a lossless codec the reference implementation *is* the
@@ -40,12 +50,21 @@ at all should still play music. `decode_mf` scores itself lowest on FLAC and WAV
 not because it is worse — the hashes below say it is not — but because it reaches
 them through a pipeline that *could* insert a converter, and the others cannot.
 
-`decode_ffmpeg` sits last on purpose. It reads more than anything else here and
-knows each format less well than the module that specialises in it, so it takes
-what is left: ALAC, WavPack, Monkey's Audio, Matroska, OggFLAC, DSF and DFF. It
-also does not ship. It looks for `ffmpeg` and `ffprobe` beside itself and then on
-`PATH`, and declines every file when neither is there — which is exactly what an
-uninstalled module does.
+`decode_ffmpeg` sits second from last on purpose. It reads more than anything
+else here and knows each format less well than the module that specialises in
+it, so it takes what is left: WavPack, Monkey's Audio, Matroska, OggFLAC, DSF,
+DFF, and every AAC profile this tree does not implement. It also does not ship.
+It looks for `ffmpeg` and `ffprobe` beside itself and then on `PATH`, and
+declines every file when neither is there — which is exactly what an uninstalled
+module does.
+
+`decode_mf` is below it, and that is a change. Media Foundation started as the
+answer for MP3 and AAC and is now the last resort for both, because measuring it
+turned up four defects rather than one: it starts every gapless-tagged track tens
+of milliseconds late, it clips float WAV to integer, it scrambles multichannel
+ALAC, and it refuses 8 kHz and 7.1 AAC outright. It stays because it is on every
+Windows machine and needs nothing installed, which is worth something when
+nothing else in the list can read a file.
 
 Going through the executables rather than linking libavcodec is deliberate:
 FFmpeg's public structs change layout between major versions, so binding the DLLs
@@ -320,8 +339,9 @@ unmaintained one if somebody is actually looking.
 Probing reads four kilobytes. Opening reads the whole header and, because
 `mp::Decoder` requires one frame of real audio before it calls an open a
 success, a frame of audio too. So a decoder can score highest and still refuse,
-and there are now two that do it for good reasons — `decode_mf` on multichannel
-ALAC, `decode_native` on 32-bit FLAC.
+and there are now three that do it for good reasons — `decode_mf` on
+multichannel ALAC, `decode_native` on 32-bit FLAC, `decode_aac` on every AAC
+profile past LC.
 
 The registry therefore ranks every decoder that claims the file and the host
 walks the list, so a refusal costs the next candidate rather than the file:
@@ -329,17 +349,23 @@ walks the list, so a refusal costs the next candidate rather than the file:
 | File | Ranked | Opens | Used |
 |---|---|---|---|
 | 32-bit FLAC | flac, native, mf, ffmpeg | flac | `decode_flac` |
-| 7.1 ALAC | alac, mf, ffmpeg | alac | `decode_alac` |
-| AAC in M4A | alac, mf, ffmpeg | mf | `decode_mf` |
-| 8-channel AAC | alac, mf, ffmpeg | ffmpeg | `decode_ffmpeg` |
+| 7.1 ALAC | alac, aac, ffmpeg, mf | alac | `decode_alac` |
+| AAC-LC in M4A | alac, aac, ffmpeg, mf | aac | `decode_aac` |
+| 8-channel AAC | alac, aac, ffmpeg, mf | aac | `decode_aac` |
+| HE-AAC in M4A | alac, aac, ffmpeg, mf | ffmpeg | `decode_ffmpeg` |
 | Vorbis | ogg, ffmpeg | ogg | `decode_ogg` |
 
-The AAC row shows the cost, and it is deliberate. `decode_alac` scores 100 on
-every MP4, not only the ones with `alac` visible in the first four kilobytes —
+Four modules score 100 on an MP4 and the first three rows resolve to three
+different ones, which is the mechanism working rather than a cost. `decode_alac`
+scores 100 on every MP4, not only the ones with `alac` visible in the first four
+kilobytes —
 because whether it is visible depends on where the muxer put `moov`, and FFmpeg
 puts it last while `refalac` puts it first. Scoring on that would make the chosen
 decoder depend on which program wrote the file. Looking first costs two seeks and
 a few hundred kilobytes; the alternative costs the ability to reason about it.
+`decode_aac` does the same, and refuses at the same point: an ALAC track is not
+an `mp4a` track, and an AudioSpecificConfig that names object type 5 or 29 is
+HE-AAC and belongs to FFmpeg.
 
 `--decoder` does not get a fallback. Being told "use that one" and answering
 with a different one is not an answer; a forced decoder that refuses reports the
@@ -400,6 +426,118 @@ found. MP3 earns a fuzzer more than the others here, because its frame parser
 resynchronises after garbage and will keep decoding through a file that is
 mostly not MP3.
 
+## AAC-LC, written here
+
+`decode_mp3` exists because Media Foundation got one thing wrong. `decode_aac`
+exists because every AAC decoder that could have been used got something wrong,
+and each a different thing:
+
+| | What it does | Why that ended it |
+|---|---|---|
+| Media Foundation | starts 1024 frames — **21.3 ms** — late, refuses 8 kHz and 7.1 | no gapless metadata in any codec, and two formats it will not open |
+| FAAD2 | discards **two** frames where the file says one | output begins 1024 frames into the audio. Four ways of driving it gave the identical wrong placement |
+| libxaac | 16- or 24-bit **integers** only | AAC's inverse transform produces real numbers; taking integers is a quantisation performed where nobody can see it |
+| FDK-AAC | — | the licence is not GPL-compatible, so the question stops there |
+
+So the codec is in this tree, next to ALAC, for the reason §7 of
+[the plan](plan.md) gives: write it yourself when the codec is small enough that
+you can. It is 1,599 lines, plus 368 of generated tables. **SBR and PS are not
+here and are not planned** — they are another six thousand lines apiece, and an
+AudioSpecificConfig that asks for object type 5 or 29 is refused at the door so
+the file goes to `decode_ffmpeg`, which is what the fallback chain is for.
+
+### Lengths, against the file that was encoded
+
+Thirty-three files: every sample rate AAC-LC defines, channel configurations 1 to
+6 and 8, bit rates from 8 to 512 kbps, durations from 0.02 s to 10 s, in MP4 and
+in raw ADTS. A selection, and the rule the rest follow:
+
+| File | source | `decode_aac` | `decode_ffmpeg` |
+|---|---|---|---|
+| 8 kHz stereo | 8000 | **8000** | 8000 |
+| 96 kHz stereo | 96000 | **96000** | 96000 |
+| 5.1 at 48 kHz | 48000 | **48000** | 48000 |
+| 7.1(wide) at 48 kHz, 8 channels | 47104 | **47104** | 47104 |
+| 44.1 kHz stereo at 8 kbps | 44100 | **44100** | 44100 |
+| 0.02 s stereo | 960 | **960** | 960 |
+| 10 s stereo | 480000 | **480000** | 480000 |
+| raw ADTS, 44.1 kHz stereo | 44100 | 46080 | 46080 |
+
+**Every MP4 row equals the source exactly**, because the file says how much of
+the decoded audio it claims and this module reads the `elst` edit list that says
+it. The ADTS row is the control: a raw stream carries no such information
+anywhere, so the encoder's delay and padding stay in and a *longer* result is the
+correct one — both decoders keep the same 1980 extra frames, and neither invents
+a trim the file did not ask for.
+
+### Content, against FFmpeg's own decoder
+
+| File | SNR | max abs difference |
+|---|---|---|
+| 48 kHz mono | **134.86 dB** | 8.9 × 10⁻⁸ |
+| 8 kHz stereo | **135.82 dB** | 6.7 × 10⁻⁸ |
+| 96 kHz stereo | **134.76 dB** | 7.5 × 10⁻⁸ |
+| 5.1 at 48 kHz | **133.66 dB** | 8.9 × 10⁻⁸ |
+| 7.1 at 48 kHz | **134.05 dB** | 8.9 × 10⁻⁸ |
+| 7.1(wide), channel configuration 0 | **135.89 dB** | 7.5 × 10⁻⁸ |
+| raw ADTS 44.1 kHz | **134.38 dB** | 7.5 × 10⁻⁸ |
+
+Across the whole corpus — those thirty-three plus a 30-second file and a
+two-packet one — the range is **134.5 to 140.0 dB**, and the largest
+single-sample difference anywhere in any of them is **8.9 × 10⁻⁸** — −141 dBFS,
+below one LSB of a 24-bit sample, which is −138.5.
+
+Identical bytes are not the target here and could not be. AAC has no normative
+bit-exact decoder: ISO/IEC 14496-4 defines conformance as an RMS error bound, and
+the inverse transform is an algorithm choice — a direct cosine sum accumulated in
+`double` here, a split-radix FFT in `float` there. Two correct decoders differ by
+float rounding and that is what 135 dB is.
+
+Two places where they agree only because this decoder was made to:
+
+- **Noise substitution.** A band coded with codebook 13 has its *energy* fixed by
+  the file and its contents left to the decoder, so two conformant decoders put
+  different noise there and no comparison between them can be sample-exact. This
+  decoder uses FFmpeg's generator and FFmpeg's seed for exactly one reason: it
+  makes the rest of the decoder checkable against FFmpeg to the last bit. It is a
+  testing convenience and not a claim about the format.
+- **Channel order.** AAC's elements yield 5.1 as C, L, R, Ls, Rs, LFE — centre
+  first, because the single-channel element comes first. WAVE wants L, R, C, LFE,
+  Ls, Rs. Without the permutation a 5.1 decode measures −3 dB against a reference
+  while every individual channel is perfect.
+
+**MSVC and clang-cl produce identical output**, hash for hash, on every file
+above. Two compilers agreeing is not a proof of correctness, but a decoder whose
+result depends on which one built it has an undefined shift or an
+order-of-evaluation problem in it somewhere, and this says there is not one.
+
+### Bit accounting
+
+Every frame is checked a second way, and this one needs no reference decoder. A
+frame that parsed correctly ends *inside the last byte of its packet*; a parser
+that has gone wrong almost never does. Across the whole corpus — **36 files, 3567
+packets — every frame ends exactly on its packet boundary, with zero slack
+bits**. A single misread bit desynchronises a frame, and it cannot land on the
+boundary again by luck.
+
+### Configuration 0, and where the layout hides
+
+Eight channels was the last thing to work, and not for a reason that had anything
+to do with decoding. FFmpeg's encoder writes `channel_configuration = 0` for
+7.1(wide) and puts the layout in a `program_config_element` — in the
+AudioSpecificConfig for an MP4, in every frame for raw ADTS. A PCE gives counts
+and pair flags rather than positions, and its front elements are listed **from
+the centre outwards**: the leading single element is the centre, and where there
+are two pairs the *first* is front-left/right-of-centre and the second is the
+main left and right pair. Reading those the other way round decodes all eight
+channels perfectly and puts two of them in the wrong speakers — it measures
+−0.09 dB overall while every channel matches some FFmpeg channel at 136 dB, which
+is what pointed at the answer.
+
+Both places the element can live are exercised: the same eight channels muxed as
+raw ADTS, where the PCE arrives inside every frame instead, decode to **135.89
+dB** as well.
+
 ## WAV, across every axis it has
 
 WAV is the only format here with no compression to argue about, so agreement
@@ -446,8 +584,8 @@ copy of the source to 138.5 dB and matches a scaled copy to 7.5 dB, so it is
 clipping and not gain. This is a lossless format being altered, which is why
 `decode_native` scores 100 on WAV and `decode_mf` scores 40.
 
-64-bit float has no type in this ABI. `decode_native` and Media Foundation refuse
-it; `decode_ffmpeg` narrows it to `F32` and now says so:
+Media Foundation refuses 64-bit float outright, which is the honest answer.
+`decode_ffmpeg` narrows it to `F32` and now says so:
 
 ```
 [warn ] ... holds 64-bit floats and is being narrowed to 32; the output is not
@@ -527,13 +665,12 @@ as audio, and ends with padding the file said to discard:
 | Codec | Delay Media Foundation leaves in | Who reads it now |
 |---|---|---|
 | MP3 | 36.0 ms | `decode_mp3` |
-| AAC | 21.3 ms | `decode_mf` still — see [the plan](plan.md) §7 |
+| AAC | 21.3 ms | `decode_aac` |
 | Opus | 13.5 ms | `decode_ogg` |
 
 Audible at a track boundary, and enough to make gapless playback impossible.
-Nothing in this milestone plays back-to-back tracks yet, so nothing is broken
-today — but the decoder resolution table will have to account for it when
-something does.
+All four now have a decoder that reads the metadata, which is why the table above
+has no "still" left in it.
 
 Two smaller results from the same run. Media Foundation **refuses 8 kHz AAC and
 7.1 AAC** outright, which is the honest failure. And its 5.1 AAC channel order is

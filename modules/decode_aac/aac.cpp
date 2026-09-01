@@ -317,23 +317,62 @@ const float* window_for(unsigned shape, bool is_short) noexcept
     return shape != 0 ? g_win.kbd_long : g_win.sine_long;
 }
 
-/// The inverse MDCT, straight from the definition.
+/// The inverse MDCT.
 ///
-/// N output samples from N/2 coefficients, at O(N^2). That is slow -- two
-/// million multiply-adds per long window -- and it is deliberate for now: the
-/// definition is checkable by eye against the standard, and an FFT-based version
-/// can be swapped in once there is something correct to check it against.
+/// Still the definition -- one cosine sum per output sample -- but the cosine is
+/// a table lookup rather than a call. The argument
+///
+///     2*pi/N (i + n0)(k + 1/2),  with n0 = (N/2 + 1)/2
+///
+/// is not an integer multiple of anything convenient, but twice it is: doubling
+/// gives pi/(2N) * (2i + N/2 + 1) * (2k + 1), whose two factors are both whole
+/// numbers. One table of cos(pi*m/(2N)) over m < 4N therefore answers every one
+/// of them, and the index advances by a constant stride as k does. Two million
+/// transcendental calls per long window become two million table reads.
+///
+/// It is still O(N^2). An FFT would make it O(N log N) and is worth doing when
+/// there is a reason; the definition is what can be read against the standard,
+/// and this keeps that while making it usable.
+struct CosTable {
+    // Double, and the accumulator below is too. A float table costs about ten
+    // decibels against FFmpeg -- 123 rather than 135 -- because a thousand
+    // products are summed per output sample and the table's own rounding is
+    // inside every one of them. Sixty-four kilobytes is a cheap way to keep the
+    // agreement where it was.
+    double long_tab[8 * k_frame_len] = {};
+    double short_tab[8 * k_short_len] = {};
+};
+
+CosTable g_cos;
+
+void build_cos() noexcept
+{
+    for (unsigned m = 0; m < 8 * k_frame_len; ++m) {
+        g_cos.long_tab[m] = std::cos(std::numbers::pi * m / (4.0 * k_frame_len));
+    }
+    for (unsigned m = 0; m < 8 * k_short_len; ++m) {
+        g_cos.short_tab[m] = std::cos(std::numbers::pi * m / (4.0 * k_short_len));
+    }
+}
+
 void imdct(const float* spec, float* out, unsigned n) noexcept
 {
     const unsigned half = n / 2;
-    const double n0 = (static_cast<double>(half) + 1.0) / 2.0;
+    const unsigned modulus = 4u * n;
+    const double* table = (n == 2u * k_frame_len) ? g_cos.long_tab : g_cos.short_tab;
     const double scale = 2.0 / static_cast<double>(n);
+
     for (unsigned i = 0; i < n; ++i) {
+        const unsigned a = 2u * i + half + 1u; // 2i + N/2 + 1, and half *is* N/2
+        unsigned idx = a % modulus; // k = 0, so (2k + 1) = 1
+        const unsigned step = (2u * a) % modulus;
         double acc = 0.0;
-        const double a = 2.0 * std::numbers::pi / static_cast<double>(n) *
-                         (static_cast<double>(i) + n0);
         for (unsigned k = 0; k < half; ++k) {
-            acc += static_cast<double>(spec[k]) * std::cos(a * (static_cast<double>(k) + 0.5));
+            acc += static_cast<double>(spec[k]) * table[idx];
+            idx += step;
+            if (idx >= modulus) {
+                idx -= modulus;
+            }
         }
         out[i] = static_cast<float>(acc * scale);
     }
@@ -345,6 +384,169 @@ std::uint32_t rate_for_index(unsigned index) noexcept
 {
     return index < 13 ? k_rates[index] : 0;
 }
+
+namespace {
+
+/// Assigns speakers to the channels a program config element describes.
+///
+/// A PCE gives counts and pair flags, not positions: so many front elements, so
+/// many side, so many back, and whether each is a pair. The order the decoder
+/// produces channels in is exactly that order, and the speakers follow from the
+/// standard's rule that elements are listed **from the centre outwards** -- a
+/// leading single front element is the centre, front pairs run inwards-first (so
+/// with two of them the first is left and right *of centre* and the second is
+/// the main pair), side pairs are the sides, back pairs the backs, a single back
+/// element is the back centre, and the LFE is last.
+///
+/// That covers every layout an encoder writes configuration 0 for, including
+/// FFmpeg's 7.1(wide). Anything it cannot place leaves `count` at zero and the
+/// file goes to a decoder that can.
+void layout_from_pce(unsigned front, const bool* front_cpe, unsigned side, const bool* side_cpe,
+                     unsigned back, const bool* back_cpe, unsigned lfe,
+                     ChannelLayout& out) noexcept
+{
+    out = ChannelLayout{};
+
+    std::uint32_t speaker[k_max_channels] = {};
+    unsigned n = 0;
+
+    auto place = [&](std::uint32_t bit) {
+        if (n < k_max_channels) {
+            speaker[n++] = bit;
+        }
+    };
+
+    // Front elements are listed from the centre outwards, so which speaker a
+    // pair belongs to depends on how many pairs there are: one pair is the main
+    // left and right, and where there are two the *first* is the inner pair --
+    // front left and right of centre -- and the second is the main pair. Read
+    // the other way round, 7.1(wide) decodes with its front channels swapped and
+    // measures -3 dB against a reference while every individual channel is
+    // perfect, which is how this was found.
+    unsigned front_pairs = 0;
+    for (unsigned i = 0; i < front && i < 16; ++i) {
+        if (front_cpe[i]) {
+            ++front_pairs;
+        }
+    }
+    if (front_pairs > 2) {
+        return; // more front pairs than there are names for
+    }
+    unsigned pair_seen = 0;
+    for (unsigned i = 0; i < front && i < 16; ++i) {
+        if (!front_cpe[i]) {
+            place(0x4u); // front centre
+            continue;
+        }
+        const bool inner = (front_pairs == 2 && pair_seen == 0);
+        place(inner ? 0x40u : 0x1u); // front left of centre, or front left
+        place(inner ? 0x80u : 0x2u);
+        ++pair_seen;
+    }
+    for (unsigned i = 0; i < side && i < 16; ++i) {
+        if (!side_cpe[i]) {
+            return;
+        }
+        place(0x200u);
+        place(0x400u);
+    }
+    for (unsigned i = 0; i < back && i < 16; ++i) {
+        if (back_cpe[i]) {
+            place(0x10u);
+            place(0x20u);
+        } else {
+            place(0x100u); // back centre
+        }
+    }
+    for (unsigned i = 0; i < lfe; ++i) {
+        place(0x8u);
+    }
+
+    if (n == 0 || n > k_max_channels) {
+        return;
+    }
+    std::uint32_t mask = 0;
+    for (unsigned c = 0; c < n; ++c) {
+        if (speaker[c] == 0 || (mask & speaker[c]) != 0) {
+            return; // unplaceable, or the same speaker twice
+        }
+        mask |= speaker[c];
+    }
+
+    // WAVE order is ascending speaker bit.
+    unsigned slot = 0;
+    for (unsigned b = 0; b < 32; ++b) {
+        const std::uint32_t bit = 1u << b;
+        if ((mask & bit) == 0) {
+            continue;
+        }
+        for (unsigned c = 0; c < n; ++c) {
+            if (speaker[c] == bit) {
+                out.from[slot++] = static_cast<std::uint8_t>(c);
+                break;
+            }
+        }
+    }
+    out.mask = (n <= 2) ? 0u : mask;
+    out.count = static_cast<std::uint8_t>(n);
+}
+
+/// Reads a program_config_element and turns it into a layout.
+///
+/// The whole element is consumed either way, because in a raw_data_block the
+/// bits after it belong to the next element and the count has to stay honest.
+/// `out.count` is left at 0 when the layout is one this decoder cannot name.
+void read_pce(BitReader& r, ChannelLayout& out) noexcept
+{
+    r.read(4); // element_instance_tag
+    r.read(2); // object_type
+    r.read(4); // sampling_frequency_index
+    const unsigned front = r.read(4);
+    const unsigned side = r.read(4);
+    const unsigned back = r.read(4);
+    const unsigned lfe = r.read(2);
+    const unsigned assoc = r.read(3);
+    const unsigned cc = r.read(4);
+    if (r.bit() != 0) { // mono_mixdown_present
+        r.read(4);
+    }
+    if (r.bit() != 0) { // stereo_mixdown_present
+        r.read(4);
+    }
+    if (r.bit() != 0) { // matrix_mixdown_idx_present
+        r.read(3);
+    }
+    bool front_cpe[16] = {};
+    bool side_cpe[16] = {};
+    bool back_cpe[16] = {};
+    for (unsigned i = 0; i < front; ++i) {
+        front_cpe[i & 15u] = r.bit() != 0;
+        r.read(4);
+    }
+    for (unsigned i = 0; i < side; ++i) {
+        side_cpe[i & 15u] = r.bit() != 0;
+        r.read(4);
+    }
+    for (unsigned i = 0; i < back; ++i) {
+        back_cpe[i & 15u] = r.bit() != 0;
+        r.read(4);
+    }
+    for (unsigned i = 0; i < lfe + assoc; ++i) {
+        r.read(4);
+    }
+    for (unsigned i = 0; i < cc; ++i) {
+        r.read(5);
+    }
+    r.byte_align();
+    const std::uint32_t comment = r.read(8);
+    r.skip(static_cast<std::size_t>(comment) * 8);
+
+    if (!r.overrun()) {
+        layout_from_pce(front, front_cpe, side, side_cpe, back, back_cpe, lfe, out);
+    }
+}
+
+} // namespace
 
 const ChannelLayout& layout_for_config(unsigned channel_config) noexcept
 {
@@ -425,10 +627,20 @@ bool parse_asc(const std::uint8_t* asc, std::size_t bytes, Config& out) noexcept
     if (r.bit() != 0) { // extensionFlag: not defined for AAC-LC
         return false;
     }
+    // GASpecificConfig puts the program config element right here when the
+    // configuration field was 0, which is the only place an MP4 carries it.
+    ChannelLayout pce{};
+    if (channel_config == 0) {
+        read_pce(r, pce);
+        if (pce.count == 0) {
+            return false;
+        }
+    }
     if (r.overrun()) {
         return false;
     }
 
+    out.pce = pce;
     out.object_type = object_type;
     out.rate_index = rate_index < 13 ? rate_index : 0;
     out.sample_rate = rate;
@@ -622,10 +834,15 @@ bool read_pulse_data(BitReader& r, const Ics& ics, unsigned& pulse_start_sfb,
 /// computed. That is worth saying because it is the one place in AAC where a
 /// table would have been expected and is not needed.
 void tns_coefficients(const int* quant, unsigned order, unsigned coef_res,
-                      unsigned coef_compress, float* lpc) noexcept
+                      float* lpc) noexcept
 {
-    const unsigned bits = coef_res + 3u - coef_compress;
-    const double half = static_cast<double>(1u << (bits - 1u));
+    // The quantiser's resolution comes from `coef_res` alone. `coef_compress`
+    // says only that fewer bits were *transmitted* -- the scale the values are
+    // on does not change with it. Folding compress into this halves the divisor
+    // whenever a filter is compressed and bends every reflection coefficient
+    // slightly, which is invisible except as a few dB in the frames that use
+    // TNS at all.
+    const double half = static_cast<double>(1u << (coef_res + 2u));
     const double iqfac = (half - 0.5) / (std::numbers::pi / 2.0);
     const double iqfac_m = (half + 0.5) / (std::numbers::pi / 2.0);
 
@@ -694,7 +911,7 @@ bool read_tns_data(BitReader& r, const Ics& ics, Tns& tns) noexcept
                 out.length = length;
                 out.direction = direction;
                 if (order != 0) {
-                    tns_coefficients(quant, order, coef_res, compress, out.lpc);
+                    tns_coefficients(quant, order, coef_res, out.lpc);
                 }
             }
         }
@@ -710,8 +927,14 @@ void apply_tns(const Ics& ics, const Tns& tns, unsigned rate_index, float* coeff
         return;
     }
     const bool is_short = ics.window_sequence == k_eight_short;
-    const unsigned max_bands = is_short ? k_tns_max_bands_128[rate_index]
-                                        : k_tns_max_bands_1024[rate_index];
+    // The filter reaches no further than the lesser of the rate's TNS limit and
+    // the bands this frame actually coded. Clamping to only the first leaves the
+    // filter running over bands the frame never sent, which is a small error
+    // rather than a loud one -- it cost about 45 dB in the two frames of an 8 kHz
+    // file that use TNS, and nothing anywhere else.
+    const unsigned rate_limit = is_short ? k_tns_max_bands_128[rate_index]
+                                         : k_tns_max_bands_1024[rate_index];
+    const unsigned max_bands = rate_limit < ics.max_sfb ? rate_limit : ics.max_sfb;
     const unsigned win_len = is_short ? k_short_len : k_frame_len;
 
     for (unsigned w = 0; w < ics.num_windows; ++w) {
@@ -1002,7 +1225,13 @@ void apply_joint_stereo(State& st, unsigned left_index, unsigned right_index) no
                 continue;
             }
 
-            if (!st.ms_used[left_index][g][sb] || cb == k_cb_noise) {
+            // M/S needs two ordinary bands. Where either channel substituted
+            // noise for this band there is no side signal to add and subtract,
+            // and a band the standard leaves alone is one this must leave alone
+            // too: doing otherwise turns the left channel's noise into a
+            // difference nobody encoded.
+            if (!st.ms_used[left_index][g][sb] || cb >= k_cb_noise ||
+                left.sfb_cb[g][sb] >= k_cb_noise) {
                 continue;
             }
             for (unsigned w = 0; w < ics.group_len[g]; ++w) {
@@ -1131,6 +1360,7 @@ bool Decoder::init(const Config& cfg) noexcept
         }
     }
     build_windows();
+    build_cos();
     if (!build_tables()) {
         error_ = "a Huffman codebook is not a prefix code";
         return false;
@@ -1144,10 +1374,19 @@ bool Decoder::init(const Config& cfg) noexcept
         return false;
     }
     cfg_ = cfg;
+    layout_ = cfg.channel_config != 0 ? layout_for_config(cfg.channel_config) : cfg.pce;
     for (unsigned c = 0; c < k_max_channels; ++c) {
         std::memset(overlap_[c], 0, sizeof(overlap_[c]));
         prev_shape_[c] = 0;
     }
+    // The noise generator is part of the decoder's state, not a global source
+    // of entropy: two decodes of the same file have to produce the same noise,
+    // and a seek back to the start has to produce the same noise as an open.
+    // Leaving this out cost a day. `Decoder::open` reads one frame to prove the
+    // decoder works and then seeks back, so every file whose length is known --
+    // which means every MP4 -- was decoded with the generator two frames out of
+    // step, and every band the encoder filled with noise came out different.
+    rng_ = k_noise_seed;
     ready_ = true;
     return true;
 }
@@ -1307,39 +1546,13 @@ bool Decoder::decode_frame(const std::uint8_t* packet, std::size_t bytes) noexce
             break;
         }
         case k_id_pce: {
-            // Parsed only so the bit count stays honest; the channel map it
-            // carries is not used, because a file that needs one is a file this
-            // decoder has no layout for anyway.
-            r.read(4);           // element_instance_tag
-            r.read(2);           // object_type
-            r.read(4);           // sampling_frequency_index
-            const unsigned front = r.read(4);
-            const unsigned side = r.read(4);
-            const unsigned back = r.read(4);
-            const unsigned lfe = r.read(2);
-            const unsigned assoc = r.read(3);
-            const unsigned cc = r.read(4);
-            if (r.bit() != 0) {
-                r.read(4);
+            // A raw ADTS stream has no AudioSpecificConfig, so when its header
+            // says configuration 0 the layout arrives here, once per frame.
+            ChannelLayout from_frame{};
+            read_pce(r, from_frame);
+            if (cfg_.channel_config == 0 && from_frame.count != 0) {
+                layout_ = from_frame;
             }
-            if (r.bit() != 0) {
-                r.read(4);
-            }
-            if (r.bit() != 0) {
-                r.read(3);
-            }
-            for (unsigned i = 0; i < front + side + back; ++i) {
-                r.read(5); // element_is_cpe + element_tag_select
-            }
-            for (unsigned i = 0; i < lfe + assoc; ++i) {
-                r.read(4);
-            }
-            for (unsigned i = 0; i < cc; ++i) {
-                r.read(5);
-            }
-            r.byte_align();
-            const std::uint32_t comment = r.read(8);
-            r.skip(static_cast<std::size_t>(comment) * 8);
             break;
         }
         case k_id_cce:

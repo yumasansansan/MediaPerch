@@ -75,13 +75,22 @@ modules/             everything that can be loaded and unloaded at runtime.
                      the reference implementation is the specification and has
                      been unmaintained since 2011, so it was read, not linked.
 
+  decode_aac/        AAC-LC, written here as well: the codec, the ADTS framing and the
+                     same slice of MP4. Not an unmaintained reference this time --
+                     four maintained libraries were measured and each produced the
+                     wrong thing rather than a wrong sound. SBR and PS are refused
+                     and go to decode_ffmpeg.
+
   decode_ogg/        libvorbis and libopus, the Xiph reference decoders, as submodules.
                      Reports F32 because that is what they produce, which puts
                      every file it reads on Path B. Permutes Ogg channel order
                      into WAVE order and changes nothing else.
 
-  decode_mf/         Media Foundation source reader. Hardware video decode comes with it,
-                     and it is measurably bit-exact for WAV and FLAC as well.
+  decode_mf/         Media Foundation source reader, and now the last resort rather than
+                     the answer for MP3 and AAC. Hardware video decode comes with it
+                     and it is measurably bit-exact for WAV and FLAC -- but it reads
+                     gapless metadata in no codec, clips float WAV, and scrambles
+                     multichannel ALAC. It stays because it needs nothing installed.
   decode_ffmpeg/     the long tail, through the ffmpeg and ffprobe *programs*, found at
                      run time and never shipped. Nothing to build against, no ABI to
                      track, and the LGPL-or-GPL question stays with whoever installs it.

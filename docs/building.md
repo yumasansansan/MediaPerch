@@ -70,8 +70,9 @@ refuses outright. Upstream has fixed both on `master`. A submodule pins an exact
 either way, so the checkout is still reproducible; what is given up is a version number, not
 determinism.
 
-`decode_alac` is on none of these lists on purpose: the ALAC codec and the MP4 parsing are
-both in this tree, so that module builds from a checkout with no submodules at all.
+`decode_alac` and `decode_aac` are on none of these lists on purpose: the ALAC and AAC-LC
+codecs, the ADTS parsing and the MP4 parsing are all in this tree, so those two modules
+build from a checkout with no submodules at all.
 
 A missing submodule is not a build failure: `decode_flac` and `decode_ogg` print a warning
 and skip themselves, and the rest of the tree builds. Catch2 is fetched at configure time instead,

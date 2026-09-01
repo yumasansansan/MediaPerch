@@ -464,9 +464,10 @@ Three outcomes, and the user picks the default once in settings:
 | `decode_flac` | libFLAC, the Xiph reference decoder, as a submodule | FLAC, all depths and rates | for a lossless codec the reference implementation *is* the specification, which is worth a dependency in a way it would not be for a lossy one. Reads what `dr_flac` cannot, and checks its own output against the MD5 the encoder wrote into the file |
 | `decode_ogg` | libvorbis and libopus, the Xiph reference decoders, as submodules | Vorbis and Opus in Ogg | the same argument as `decode_flac`, arriving at a different place: these are the reference decoders, so they define what the codec means -- but the codecs are *lossy*, so what they define is a signal, not a byte pattern. This module reports MP_SAMPLE_F32 because that is what they produce, which puts every file it reads on Path B. See *Lossy codecs and Path A* below |
 | `decode_mp3` | `dr_mp3`, from the submodule `decode_native` already uses | MP3, every MPEG version and rate | not a better decoder -- it agrees with FFmpeg to 124 dB, which is float rounding for a codec whose conformance is defined as an RMS bound. It exists because Media Foundation does not implement gapless metadata and starts every MP3 36 ms late, and because dr_mp3 does and costs no new dependency |
-| `decode_mf` | Media Foundation `IMFSourceReader` | MP4/M4A, AAC, MP3, WMA — and WAV and FLAC, **also bit-exact** | ships with Windows, hardware-accelerated, and it is what brings §9 for free. Scores itself below `decode_native` on WAV and FLAC because it reaches them through a pipeline that *could* insert a converter, not because it did |
+| `decode_aac` | nothing at all: the codec, the ADTS parsing and the MP4 parsing are all in this tree | AAC-LC in M4A and raw ADTS, every rate and every layout to 7.1 | the same argument as `decode_alac` reaching a different place: not an unmaintained reference, but *four* candidate libraries each producing the wrong thing rather than a wrong sound. See *AAC-LC, which is also written rather than vendored* below |
+| `decode_mf` | Media Foundation `IMFSourceReader` | WMA, and whatever nothing above it read — and WAV and FLAC, **also bit-exact** | ships with Windows and needs nothing installed, which is what it is now for. It began as the answer for MP3 and AAC and is now the last resort for both: it implements gapless metadata in no codec, clips float WAV to integer, scrambles multichannel ALAC, and refuses 8 kHz and 7.1 AAC |
 | `decode_alac` | nothing at all: the codec and the MP4 parsing are both in this tree | ALAC in M4A, every depth to 32 bits and every layout to 7.1 | the reference is the specification *and* is unmaintained, so it was read rather than linked. See *ALAC, which is here and is written rather than vendored* below |
-| `decode_ffmpeg` | `ffmpeg` and `ffprobe`, **found at run time, never shipped** | WavPack, Monkey's Audio, Matroska, DSF/DFF, OggFLAC, and whatever else is installed | the fallback, at priority 30: every other module knows its own formats better. Not vendored, for the reasons in *Where dependencies come from* below |
+| `decode_ffmpeg` | `ffmpeg` and `ffprobe`, **found at run time, never shipped** | WavPack, Monkey's Audio, Matroska, DSF/DFF, OggFLAC, HE-AAC, and whatever else is installed | the fallback, at priority 60: every other module knows its own formats better, and it sits above `decode_mf` because measurement put it there. Not vendored, for the reasons in *Where dependencies come from* below |
 
 Three modules read FLAC, deliberately. `decode_flac` outranks `decode_native` on priority
 (120 against 100) so the reference wins whenever it is installed; `decode_native` remains
@@ -557,10 +558,15 @@ looking for these bugs and that somebody is expected to fix them. Checked direct
 | `vorbis` | yes |
 | `opus` | yes |
 | `opusfile` | yes |
+| `faad2` | yes |
+| `ffmpeg` | yes |
+| `libxaac` | yes |
 | `alac` | **no** -- and this is the one that is not linked |
 
 Every dependency this tree compiles is on the right side of that line. The one that is not
-is the one this tree does not link.
+is the one this tree does not link. Note the shape of the AAC rows: the three libraries this
+tree declined are all maintained and all fuzzed, so the third test is not what turned them
+down. The next section is what did.
 
 #### ALAC, which is here and is written rather than vendored
 
@@ -609,6 +615,69 @@ else's. That is a statement about responsibility rather than about quality.
 maintained.** After that it is old code with an authoritative name on it, and the choice is
 between an independent implementation and writing one.
 
+#### AAC-LC, which is also written rather than vendored
+
+ALAC was written here because its reference is unmaintained. AAC is the harder case, because
+nothing about it fails the three tests in the obvious way. Four decoders were available and
+all four are maintained; three of them are in OSS-Fuzz. What ended each was measurement:
+
+| | Measured | Verdict |
+|---|---|---|
+| Media Foundation | starts every AAC track 1024 frames -- 21.3 ms -- late, leaves the encoder padding on the end, refuses 8 kHz and refuses 7.1 | it implements no gapless metadata in any codec, and two formats it will not open at all |
+| FAAD2 (GPL-2.0-or-later, compatible) | discards **two** frames where the file's edit list says one | every track begins 1024 frames into the audio. Four different ways of driving the library produced the identical wrong placement, so it is the library's behaviour and not the harness |
+| libxaac (Apache-2.0, compatible, in OSS-Fuzz, shipped in Android) | emits 16- or 24-bit **integers** and nothing else | AAC's inverse transform produces real numbers. Taking integers from a decoder is a quantisation performed inside the decoder, where the user did not choose it and cannot see it -- the one thing this project's decoders are not allowed to do |
+| FDK-AAC | -- | the licence is not GPL-compatible. The question stops before any measurement |
+
+**Vendoring FFmpeg's AAC decoder alone was considered and rejected.** It is LGPL-2.1, so the
+licence permits it, and it is the decoder every measurement here is checked against. But
+`libavcodec/aac/` does not stand alone: it reaches into `get_bits.h`, `mdct15`, `sinewin`,
+`kbdwin`, `float_dsp`, `mem.h`, the `AVCodecContext` machinery and the fixed/float template
+system, and pulling the transitive closure of that is vendoring a slice of FFmpeg rather than
+a file. A slice that then has to be tracked against upstream by hand, which is the
+maintenance problem the third test exists to avoid, arriving by a different door.
+
+So the codec is in this tree: 1,599 lines, plus 368 of generated tables. **SBR and PS are
+not** -- another six thousand lines apiece for a profile that is refused at the
+AudioSpecificConfig and handed to `decode_ffmpeg`, which is what a fallback chain is for.
+
+**The part that is different from ALAC: correctness is not self-verifying.** A lossless
+decode either reproduces the encoder's input exactly or it does not, and that single check
+covers everything. AAC has no such check -- ISO/IEC 14496-4 defines conformance as an RMS
+error bound, so "correct" is a tolerance and any comparison is a judgement call. Four
+independent checks were built instead, and every one of them caught something the others
+did not:
+
+- **Bit accounting.** A frame that parsed correctly ends *inside the last byte of its
+  packet*. Across 36 files and 3567 packets every frame ends exactly on its boundary with
+  zero slack bits. A single misread bit desynchronises a frame and it cannot land on the
+  boundary again by luck, so this one check covers the whole parser without a reference
+  decoder in sight.
+- **Kraft equality** on the twelve Huffman codebooks, checked by the generator that
+  transcribes them: a complete prefix code satisfies the sum of 2^-length equalling one, so
+  a mistyped table is refused before it is written. The decoder then builds the tries at
+  `init()` and fails if any codeword is a prefix of another, which is a different claim and
+  the one decoding depends on.
+- **The Princen-Bradley identity** on the windows: w[i]^2 + w[N/2-1-i]^2 must be 1 for the
+  transform to reconstruct. A misread sine-window formula gave 0.000005, 0.184 and 2.0 --
+  the identity found it in one line, and the file that was being tested at the time used
+  the KBD window and hid it completely.
+- **FFmpeg, sample for sample**, which is where the remaining errors showed up: 134.5 to
+  140.0 dB across 35 files, largest single-sample difference 8.9 x 10^-8 anywhere, which is
+  -141 dBFS.
+  Exact equality is not available in principle -- the inverse transform is an algorithm
+  choice, a direct cosine sum in `double` here against a split-radix FFT in `float` there --
+  so 135 dB *is* the agreement, and anything below it is a bug.
+
+`docs/formats.md` has the tables. MSVC and clang-cl produce identical output on every file.
+`fuzz/aac_fuzzer.cpp` drives the container parser and the codec from the same input, as
+`alac_fuzzer.cpp` does: 437,595 executions in five minutes under libFuzzer, nothing found.
+
+**The rule this adds: "is it maintained" is necessary and not sufficient.** Three maintained,
+fuzzed, licence-compatible AAC libraries were available and each produced the wrong *thing*
+rather than a wrong sound -- wrong placement, wrong sample type, wrong refusals. None of that
+is visible from a dependency's README; all of it is visible in half an hour with a reference
+decoder and a length column.
+
 #### Why the lossy codecs still get their reference libraries
 
 The argument for the reference implementation was made about *lossless* codecs, where
@@ -633,8 +702,9 @@ when it is maintained and the codec is too large to own; write it yourself when 
 small enough that you can; and use the OS decoder when it is measurably right.** ALAC met
 the second test -- Rice coding and adaptive LPC, and an abandoned upstream. Vorbis and Opus
 meet the first: libvorbis and libopus are maintained, both are in OSS-Fuzz, and neither is a
-codec anybody should reimplement for fun. Media Foundation meets the third for WAV, FLAC,
-MP3 and AAC, and fails it for Ogg and for ALAC past stereo.
+codec anybody should reimplement for fun. Media Foundation meets the third for WAV and
+FLAC alone: it fails it for Ogg, for ALAC past stereo, and -- once gapless metadata was
+measured rather than assumed -- for MP3 and AAC as well.
 
 `decode_ogg` is also portable, which `decode_mf` is not, and it is a module: an install that
 wants neither the submodules nor the four hundred kilobytes simply does not build it and
@@ -992,6 +1062,52 @@ real time.
   the graph reads that as the end of the stream, and the track is skipped in silence. So
   `Decoder::open` decodes one frame and rewinds before declaring success. The check costs one
   frame and guards every decoder, including the ones not written yet.
+- **A decoder's random number generator is part of its state, and `init()` was not
+  resetting it.** AAC fills noise-substituted bands from a generator carried in the decoder.
+  `Decoder::open` decodes one frame to prove the decoder works and then seeks back, and that
+  check is skipped when the length is unknown -- so **raw ADTS decoded perfectly and the same
+  bitstream in an MP4 decoded at 8 dB**, because only the MP4 knows its own length. The
+  verification step changed the thing it was verifying. Every band was the right width and
+  carried the right energy and held different noise, which is the shape of error that a
+  length column and an SNR summary both describe as "wrong somewhere". `tests/aac_test.cpp`
+  now decodes a frame, calls `init()`, decodes it again and requires the same samples.
+- **A test file that does not exercise the feature reports success for it.** Every PNS
+  experiment ran against an 8 kHz reference that turned out to contain **no noise-substituted
+  bands at all**, so each change came back "no difference" and each was read as "no problem".
+  The tell was arriving at it backwards: inverting the sign of the generated noise changed
+  the output by 0.00 dB, which is impossible if any of it is being used. **A control that
+  cannot fail is not a control.** Encoding with `-aac_pns 0` and watching the disagreement
+  vanish is what turned a week of plausible theories into one file to look at.
+- **A reference decoder's internals can be read from its output.** FFmpeg's noise for a band
+  is not visible from outside, but MDCT analysis of a *reconstructed* signal returns the
+  coefficients that were synthesised -- so applying the forward transform to FFmpeg's PCM
+  recovered its spectral coefficients exactly, and they could be compared against the
+  generator's sequence directly. The method was validated on our own output first, where the
+  expected values were already known. **When the question is "what did the other
+  implementation compute", inverting its output beats reading its source.**
+- **Every channel perfect and two of them in the wrong speakers, again.** FFmpeg writes
+  `channel_configuration = 0` for 7.1(wide) and puts the layout in a program config element,
+  whose front elements are ordered **from the centre outwards** -- so the first pair after
+  the centre is front-left/right-*of-centre* and the second is the main left and right.
+  Reading them in the obvious order gave -0.09 dB overall while every one of the eight
+  channels matched *some* FFmpeg channel at 136 dB. The per-channel correlation matrix is
+  what made that legible; the overall figure said only "wrong". Same class of bug as Media
+  Foundation's ALAC channel order, found deliberately this time rather than by luck.
+- **Two constants and a table type, worth 45 dB between them.** The TNS filter's quantiser
+  step folded in `coef_compress`, which does not belong there -- fixing it took one file
+  from 101.5 dB to 135.8. The IMDCT cosine table was `float`, which cost 12 dB against the
+  same table in `double`; a lookup table is the last place to save memory, because every
+  output sample sums a thousand of its entries. And full scale was found by fitting the
+  ratio to FFmpeg's output -- 3.05175748667e-05, whose base-2 logarithm is 15.000000 -- which
+  is a legitimate way to recover a constant the specification states in units the code did
+  not use.
+- **The identity that checks a window found the bug the ear could not.** A sine window
+  written as `sin(pi/N * (2i+1))` instead of `sin(pi/N * (i+0.5))` decodes to something that
+  sounds like music. The Princen-Bradley condition -- `w[i]^2 + w[N/2-1-i]^2 == 1` -- gave
+  0.000005, 0.184 and 2.0 where it must give 1, in three lines of test code. It stayed hidden
+  as long as it did because the file being used happened to select the KBD window, which is a
+  different code path. **Check the mathematical property, not the audible result.**
+
 - **A vendored library's sanity ceiling reads as our refusal.** `dr_wav` rejects any file
   above `DRWAV_MAX_SAMPLE_RATE`, which defaults to 384000 — its own guard against garbage
   headers, not a WAV limit, since the field is 32 bits wide. A 768 kHz file therefore came
