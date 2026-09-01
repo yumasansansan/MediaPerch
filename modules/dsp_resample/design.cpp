@@ -47,6 +47,30 @@ double kaiser_beta(double attenuation_db) noexcept
     return 0.0;
 }
 
+/// How many eigenvalues of the symmetric tridiagonal (d, e) are below `x`.
+///
+/// The Sturm sequence, which is the whole of a bisection eigensolver: one
+/// division per row, no matrix, no allocation.
+std::size_t below(const std::vector<double>& d, const std::vector<double>& e, double x)
+{
+    constexpr double k_tiny = 1e-300;
+    std::size_t count = 0;
+    double q = d[0] - x;
+    if (q < 0.0) {
+        ++count;
+    }
+    for (std::size_t k = 1; k < d.size(); ++k) {
+        if (q == 0.0) {
+            q = k_tiny;
+        }
+        q = (d[k] - x) - e[k] * e[k] / q;
+        if (q < 0.0) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 std::size_t next_power_of_two(std::size_t n) noexcept
 {
     std::size_t k = 1;
@@ -166,6 +190,11 @@ void dft_any(std::vector<std::complex<double>>& a)
 // Windows
 // --------------------------------------------------------------------------
 
+double kaiser_beta_for(double attenuation_db) noexcept
+{
+    return kaiser_beta(attenuation_db);
+}
+
 std::vector<double> kaiser_window(std::size_t length, double attenuation_db)
 {
     std::vector<double> w(length, 0.0);
@@ -250,6 +279,152 @@ std::vector<double> dolph_window(std::size_t length, double attenuation_db)
         }
     }
     return w;
+}
+
+std::vector<double> dpss_window(std::size_t length, double nw)
+{
+    if (length < 4 || nw <= 0.0) {
+        return std::vector<double>(length, 1.0);
+    }
+
+    // Percival and Walden's tridiagonal, whose eigenvectors are the DPSS
+    // exactly. Solving this rather than the concentration problem itself is the
+    // difference between an O(n) computation and an O(n^3) one, and it is what
+    // makes a Slepian window available at 25,281 taps at all.
+    const double w = nw / static_cast<double>(length);
+    const auto n = static_cast<double>(length);
+    std::vector<double> d(length);
+    std::vector<double> e(length, 0.0);
+    for (std::size_t k = 0; k < length; ++k) {
+        const double centre = (n - 1.0 - 2.0 * static_cast<double>(k)) / 2.0;
+        d[k] = centre * centre * std::cos(2.0 * k_pi * w);
+        if (k > 0) {
+            e[k] = static_cast<double>(k) * (n - static_cast<double>(k)) / 2.0;
+        }
+    }
+
+    // Gershgorin, then bisection for the largest eigenvalue. The zeroth DPSS is
+    // the eigenvector that belongs to it.
+    double lo = d[0];
+    double hi = d[0];
+    for (std::size_t k = 0; k < length; ++k) {
+        const double radius =
+            std::abs(e[k]) + (k + 1 < length ? std::abs(e[k + 1]) : 0.0);
+        lo = std::min(lo, d[k] - radius);
+        hi = std::max(hi, d[k] + radius);
+    }
+    const double scale = std::max(std::abs(lo), std::abs(hi));
+    for (int i = 0; i < 200 && (hi - lo) > 1e-15 * scale; ++i) {
+        const double mid = 0.5 * (lo + hi);
+        if (below(d, e, mid) >= length) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    const double lambda = 0.5 * (lo + hi);
+
+    // Inverse iteration. The shift is a hair off the eigenvalue on purpose:
+    // exactly on it the system is singular, and a hair off it is what makes the
+    // solve project onto the eigenvector in one step.
+    std::vector<double> v(length, 1.0);
+    std::vector<double> c(length);
+    std::vector<double> u(length);
+    const double shift = lambda - 1e-9 * std::max(1.0, std::abs(lambda));
+    for (int iteration = 0; iteration < 6; ++iteration) {
+        // Thomas, with a guard for the pivot that a near-singular system will
+        // produce.
+        double beta = d[0] - shift;
+        if (std::abs(beta) < 1e-300) {
+            beta = 1e-300;
+        }
+        u[0] = v[0] / beta;
+        for (std::size_t k = 1; k < length; ++k) {
+            c[k] = e[k] / beta;
+            beta = (d[k] - shift) - e[k] * c[k];
+            if (std::abs(beta) < 1e-300) {
+                beta = 1e-300;
+            }
+            u[k] = (v[k] - e[k] * u[k - 1]) / beta;
+        }
+        for (std::size_t k = length - 1; k-- > 0;) {
+            u[k] -= c[k + 1] * u[k + 1];
+        }
+        double norm = 0.0;
+        for (const double value : u) {
+            norm += value * value;
+        }
+        norm = std::sqrt(norm);
+        if (norm == 0.0 || !std::isfinite(norm)) {
+            break;
+        }
+        for (std::size_t k = 0; k < length; ++k) {
+            v[k] = u[k] / norm;
+        }
+    }
+
+    // The zeroth DPSS is positive everywhere; inverse iteration may hand back
+    // its negative.
+    double sum = 0.0;
+    for (const double value : v) {
+        sum += value;
+    }
+    if (sum < 0.0) {
+        for (double& value : v) {
+            value = -value;
+        }
+    }
+    const double peak = *std::max_element(v.begin(), v.end());
+    if (peak > 0.0) {
+        for (double& value : v) {
+            value = std::max(0.0, value) / peak;
+        }
+    }
+    return v;
+}
+
+void to_minimum_phase(std::vector<double>& h, double floor_db)
+{
+    const std::size_t length = h.size();
+    if (length < 2) {
+        return;
+    }
+    // Room for the cepstrum to decay in. Too little and it wraps, which shows
+    // up as a filter whose magnitude is not the one it was given.
+    const std::size_t n =
+        std::min<std::size_t>(next_power_of_two(length * 16), std::size_t{1} << 22);
+
+    std::vector<std::complex<double>> spectrum(n, {0.0, 0.0});
+    for (std::size_t i = 0; i < length; ++i) {
+        spectrum[i] = {h[i], 0.0};
+    }
+    fft(spectrum, false);
+
+    double peak = 0.0;
+    for (const auto& value : spectrum) {
+        peak = std::max(peak, std::abs(value));
+    }
+    const double floor = peak * std::pow(10.0, floor_db / 20.0);
+    for (auto& value : spectrum) {
+        value = {std::log(std::max(std::abs(value), floor)), 0.0};
+    }
+
+    // The real cepstrum, folded onto its causal half. Everything a minimum
+    // phase filter is follows from that fold.
+    fft(spectrum, true);
+    for (std::size_t k = 1; k < n / 2; ++k) {
+        spectrum[k] *= 2.0;
+        spectrum[n - k] = {0.0, 0.0};
+    }
+    fft(spectrum, false);
+    for (auto& value : spectrum) {
+        value = std::exp(value);
+    }
+    fft(spectrum, true);
+
+    for (std::size_t i = 0; i < length; ++i) {
+        h[i] = spectrum[i].real();
+    }
 }
 
 // --------------------------------------------------------------------------
@@ -656,10 +831,29 @@ bool window_from_name(const std::string& name, Window& out)
         out = Window::kaiser;
     } else if (name == "dolph" || name == "chebyshev") {
         out = Window::dolph;
+    } else if (name == "dpss" || name == "slepian") {
+        out = Window::dpss;
     } else {
         return false;
     }
     return true;
+}
+
+bool phase_from_name(const std::string& name, Phase& out)
+{
+    if (name == "linear") {
+        out = Phase::linear;
+    } else if (name == "minimum" || name == "min") {
+        out = Phase::minimum;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+const char* phase_name(Phase p) noexcept
+{
+    return p == Phase::minimum ? "minimum" : "linear";
 }
 
 const char* method_name(Method m) noexcept
@@ -680,6 +874,8 @@ const char* window_name(Window w) noexcept
     switch (w) {
     case Window::dolph:
         return "dolph";
+    case Window::dpss:
+        return "dpss";
     case Window::kaiser:
         break;
     }
@@ -779,9 +975,21 @@ bool design_prototype(const Design& design, std::uint32_t up, std::uint32_t down
                 tap *= gain;
             }
         } else {
-            const std::vector<double> w = design.window == Window::dolph
-                                              ? dolph_window(size, design.attenuation_db)
-                                              : kaiser_window(size, design.attenuation_db);
+            std::vector<double> w;
+            switch (design.window) {
+            case Window::dolph:
+                w = dolph_window(size, design.attenuation_db);
+                break;
+            case Window::dpss:
+                // Kaiser's beta is pi times the time-bandwidth product the
+                // Slepian window is defined by, which is exactly the sense in
+                // which one approximates the other.
+                w = dpss_window(size, kaiser_beta(design.attenuation_db) / k_pi);
+                break;
+            case Window::kaiser:
+                w = kaiser_window(size, design.attenuation_db);
+                break;
+            }
             out.assign(size, 0.0);
             for (std::size_t n = 0; n < size; ++n) {
                 const double offset = static_cast<double>(n) - static_cast<double>(centre);
@@ -859,6 +1067,21 @@ bool design_prototype(const Design& design, std::uint32_t up, std::uint32_t down
                 keep = out;
             }
             out = keep;
+        }
+
+        if (design.phase == Phase::minimum) {
+            // The magnitude is settled; this moves the energy to the front of
+            // it. The floor is where the logarithm stops looking: twenty
+            // decibels under the stopband is far enough to be a null and near
+            // enough to still be a number.
+            to_minimum_phase(out, -(design.attenuation_db + 20.0));
+            const double sum = std::accumulate(out.begin(), out.end(), 0.0);
+            if (sum != 0.0) {
+                const double scale = gain / sum;
+                for (double& tap : out) {
+                    tap *= scale;
+                }
+            }
         }
 
         achieved = measure(out, passband_edge, stopband_edge, gain);

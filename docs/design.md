@@ -220,14 +220,13 @@ spectrum, so they are forced to be roughly equal. A resampler wants them wildly 
 a thousandth of a decibel in the passband, a hundred and forty in the stopband — and this
 method has no way to say so.
 
-Two windows. `window=kaiser` is the default and is itself a closed-form approximation to
-the Slepian (DPSS) window, which is the optimum of the window family; the gap between them
-is a fraction of a decibel, which is why there is no `window=dpss` and why the effort went
-into changing method instead. `window=dolph` is Dolph–Chebyshev: every sidelobe at exactly
-the level asked for, and the narrowest mainlobe that allows. It is **measurably worse here**
-(below), because sidelobes that never decay leak more into a filter's stopband than
-sidelobes that do, and because the window has spikes at both ends. It is kept because that
-is a fact worth being able to reproduce rather than a claim.
+Three windows. `window=kaiser` is the default and is a closed-form approximation to the
+Slepian (DPSS) window. `window=dpss` is the Slepian window itself — the sequence with the
+most of its energy inside a given band, which is the optimum of this whole family. There is
+no closed form for it, so it is computed as the leading eigenvector of a tridiagonal matrix
+(Percival and Walden's formulation, bisection then inverse iteration), which is O(n) and
+therefore available even at 25,281 taps. `window=dolph` is Dolph–Chebyshev: every sidelobe
+at exactly the level asked for, and the narrowest mainlobe that allows.
 
 **`design=remez`** is Parks–McClellan. It minimises the *weighted* maximum error over the
 whole filter, and the alternation theorem says the answer is the best any filter of that
@@ -245,14 +244,29 @@ instead of an interpolation over ten thousand nodes. It is the only method here 
 improve on a window at the length 44100 → 48000 actually needs, and what it buys there is
 1.2 dB for about two seconds of work. That is the honest size of it.
 
-Three things were considered and are deliberately not here. **DPSS** is the window family's
-true optimum and Kaiser is within a fraction of a decibel of it. **Multistage decomposition**
-would cut 160/147 into cascaded stages and save most of the multiplies — an efficiency
-question rather than a fidelity one, and this filter already runs 45 seconds of 768 kHz
-without an underrun. **Minimum phase** would halve the taps for the same magnitude response
-and remove the pre-ringing, at the cost of the property the graph relies on — that output
-frame *k* lines up with input frame *k·M/L* — so it is a change to the alignment contract
-and not a flag.
+#### The phase, which is a different question from the response
+
+`phase=linear` (the default) is symmetric taps: every frequency delayed by the same amount,
+which is the property the graph relies on — output frame *k* is input frame *k·M/L*, exactly,
+and a track boundary lands where it should. Half the filter of pre-ringing comes with it,
+because a symmetric impulse response rings before the transient as much as after.
+
+`phase=minimum` keeps the same magnitude response and moves the energy to the front, by
+folding the real cepstrum onto its causal half. Measured on a 158-tap filter at 2/1: the
+energy centroid moves from 0.498 of the filter to **0.035**, and the stopband holds
+(−119.97 dB linear, −119.53 dB minimum — the difference is what the cepstrum's own
+truncation costs). There is no pre-ringing left at all.
+
+**What it costs is the alignment, and that is not recoverable.** A minimum-phase filter's
+delay is a different number at every frequency, so there is no integer to subtract. The
+report says so rather than rounding it away:
+
+```
+latency  6.36  input frames left after alignment; minimum phase, so not exact
+```
+
+Linear phase reports `0.00 … exact`. This is a trade between two audible things and not a
+better setting, which is exactly why it is a setting.
 
 #### The methods, measured against each other
 
@@ -288,6 +302,56 @@ matters:
 | `window,dolph` | −90.53 dB | 15 ms |
 | **`refine`** | **−120.72 dB** | 1.85 s |
 | `remez` | refused: 25,281 taps | — |
+
+And the two windows against Kaiser, at 2/1:
+
+| Taps | `kaiser` | `dpss` | `dolph` |
+|---|---|---|---|
+| 96 | −39.18 dB | −40.20 dB | — |
+| 128 | −65.31 dB | **−67.61 dB** | −57.32 dB |
+| 158 | −119.97 dB | **−120.24 dB** | −89.49 dB |
+| 158 at 160/147 | −119.49 dB | **−120.71 dB** | −90.53 dB |
+
+So **the Slepian window is worth 0.3 to 2.3 dB over the closed form that approximates it**,
+for 17 ms instead of 10 at 25,281 taps — which is the whole answer to how much Kaiser's
+convenience costs, and it turns out to be about as much as `refine` buys for a hundred
+times the work. Dolph–Chebyshev is *worse*, by thirty decibels, and that is not a mistake:
+sidelobes that never decay leak more into a filter's stopband than sidelobes that do, and
+the window has spikes at both ends. It is kept because that is a fact worth being able to
+reproduce.
+
+#### Doing it in steps
+
+A conversion does not have to be one filter. `stages=auto` searches for the cheapest way to
+split the ratio, and the saving where the ratio is large is not small:
+
+| | One stage | `stages=auto` | |
+|---|---|---|---|
+| 2822400 → 192000 | 2,295 mult/frame | **481** — `2/7 → 1/3 → 5/7` | 4.8× |
+| 44100 → 768000 | 159 | **30** — `10/7 → 2/1 → 128/21` | 5.3× |
+| 192000 → 48000 | 627 | **381** — `1/2 → 1/2` | 1.6× |
+| 96000 → 44100 | 341 | **271** — `3/5 → 49/64` | 1.3× |
+| 44100 → 48000 | 159 | 159 — one stage | — |
+
+**Why it works.** Every stage has to pass everything up to the *final* passband edge and
+stop everything that would fold into it. For the last stage those two frequencies are a hair
+apart, which is what makes it long. For a stage running at 2.8 MHz they are a mile apart —
+the first thing that could fold in sits near the *intermediate* Nyquist — so its filter is
+37 taps instead of 2,295.
+
+**Why it is off by default.** The stages' ripples add. Measured on the DSD-rate conversion:
+one stage is −119.92 dB with 8.6 × 10⁻⁶ dB of passband ripple; three stages are −118.72 dB
+with 3.5 × 10⁻⁵ dB. That is a fifth of a decibel of stopband and four times the ripple, for
+a fifth of the arithmetic. A fair trade, and one the person listening should make rather
+than find. The plan is reported either way:
+
+```
+plan  2/7 (37 taps) -> 1/3 (75 taps) -> 5/7 (221 taps)
+```
+
+And the last row of the table is the honest one: **44100 → 48000 has nothing to gain**,
+because there is no intermediate rate meaningfully above the final one, and the planner
+returning a single stage there is the right answer rather than a failure to find something.
 
 #### Refusing, and checking
 

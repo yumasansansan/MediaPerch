@@ -250,9 +250,10 @@ Options
                     changed: nothing here resamples on its own. Its filter is
                     designed rather than tabulated, and how it is designed is
                     also a setting -- design=window|remez|refine,
-                    window=kaiser|dolph, attenuation, bandwidth,
-                    passband_ripple, taps, verify. `--dsp list` prints them all
-                    with what each one is now
+                    window=kaiser|dpss|dolph, phase=linear|minimum,
+                    stages=1|auto, attenuation, bandwidth, passband_ripple,
+                    taps, verify. `--dsp list` prints them all with what each
+                    one is now, and what the filter it built measured
   --dither KIND     Path B only, and only where bits are actually being thrown
                     away. `triangular` (default) is the standard answer;
                     `highpass` is the same distribution with its noise tilted

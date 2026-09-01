@@ -181,6 +181,51 @@ mp::resample::Response designed(const mp::resample::Design& design, std::uint32_
     return achieved;
 }
 
+/// Runs a whole signal through a cascade, in blocks, and drains it.
+std::vector<std::vector<double>> run_cascade(mp::resample::Cascade& r,
+                                             const std::vector<std::vector<double>>& in,
+                                             std::uint32_t block)
+{
+    const auto channels = static_cast<std::uint32_t>(in.size());
+    const std::size_t frames = in[0].size();
+    std::vector<std::vector<double>> out(channels);
+    std::vector<std::vector<double>> scratch(channels);
+    std::vector<double*> out_planes(channels);
+    std::vector<const double*> in_planes(channels);
+
+    const std::uint32_t capacity = r.max_output(block) + 16;
+    for (std::uint32_t c = 0; c < channels; ++c) {
+        scratch[c].resize(capacity);
+        out_planes[c] = scratch[c].data();
+    }
+    const auto drain = [&](std::uint32_t produced) {
+        for (std::uint32_t c = 0; c < channels; ++c) {
+            out[c].insert(out[c].end(), scratch[c].begin(),
+                          scratch[c].begin() + static_cast<std::ptrdiff_t>(produced));
+        }
+    };
+
+    for (std::size_t at = 0; at < frames;) {
+        const auto n = static_cast<std::uint32_t>(std::min<std::size_t>(block, frames - at));
+        for (std::uint32_t c = 0; c < channels; ++c) {
+            in_planes[c] = in[c].data() + at;
+        }
+        std::uint32_t produced = 0;
+        REQUIRE(r.process(in_planes.data(), n, out_planes.data(), capacity, produced));
+        drain(produced);
+        at += n;
+    }
+    for (int round = 0; round < 4096; ++round) {
+        std::uint32_t produced = 0;
+        REQUIRE(r.flush(out_planes.data(), capacity, produced));
+        if (produced == 0) {
+            break;
+        }
+        drain(produced);
+    }
+    return out;
+}
+
 } // namespace
 
 TEST_CASE("resampling to the rate it already has is a unit impulse", "[resample]")
@@ -624,3 +669,180 @@ TEST_CASE("more taps is the other axis, and it works", "[resample][design]")
 }
 
 
+
+
+// --------------------------------------------------------------------------
+// The other three axes: the window family's optimum, the phase, and the plan
+// --------------------------------------------------------------------------
+
+TEST_CASE("the Slepian window is what Kaiser approximates, and it is better",
+          "[resample][design]")
+{
+    // Kaiser's closed form is a fit to this. The question worth answering is
+    // how much the fit costs, and the answer is a number rather than a feeling.
+    for (const std::uint32_t taps : {96u, 128u, 158u}) {
+        mp::resample::Design kaiser = quality("good");
+        kaiser.taps = taps;
+        mp::resample::Design slepian = kaiser;
+        slepian.window = mp::resample::Window::dpss;
+
+        std::uint32_t a = 0;
+        std::uint32_t b = 0;
+        const auto by_kaiser = designed(kaiser, 2, 1, a);
+        const auto by_dpss = designed(slepian, 2, 1, b);
+        INFO(taps << " taps: kaiser " << by_kaiser.stopband_db << " dB, dpss "
+                  << by_dpss.stopband_db << " dB");
+        REQUIRE(a == b);
+        // Better, and not by much: the approximation is a good one, which is
+        // why it is the default and why this is worth writing down once.
+        CHECK(by_dpss.stopband_db < by_kaiser.stopband_db);
+        CHECK(by_dpss.stopband_db > by_kaiser.stopband_db - 6.0);
+    }
+}
+
+TEST_CASE("a minimum-phase filter keeps the magnitude and moves the energy",
+          "[resample][design]")
+{
+    mp::resample::Design linear = quality("good");
+    linear.taps = 158;
+    mp::resample::Design minimum = linear;
+    minimum.phase = mp::resample::Phase::minimum;
+
+    std::vector<double> lin;
+    std::vector<double> min;
+    mp::resample::Response lin_r;
+    mp::resample::Response min_r;
+    std::uint32_t taps = 0;
+    std::string why;
+    REQUIRE(mp::resample::design_prototype(linear, 2, 1, lin, taps, lin_r, why));
+    REQUIRE(mp::resample::design_prototype(minimum, 2, 1, min, taps, min_r, why));
+    REQUIRE(lin.size() == min.size());
+
+    // Same magnitude response, to within what the cepstrum's own truncation
+    // costs.
+    INFO("linear " << lin_r.stopband_db << " dB, minimum " << min_r.stopband_db << " dB");
+    CHECK(min_r.stopband_db < lin_r.stopband_db + 1.0);
+    CHECK(min_r.passband_ripple_db < 0.001);
+
+    // And the energy is at the front rather than the middle, which is the whole
+    // point: a linear-phase filter rings before the transient as much as after
+    // it, and this one cannot.
+    const auto centroid = [](const std::vector<double>& h) {
+        double weight = 0.0;
+        double moment = 0.0;
+        for (std::size_t i = 0; i < h.size(); ++i) {
+            weight += h[i] * h[i];
+            moment += h[i] * h[i] * static_cast<double>(i);
+        }
+        return moment / weight / static_cast<double>(h.size());
+    };
+    CHECK(centroid(lin) == Catch::Approx(0.5).margin(0.01));
+    CHECK(centroid(min) < 0.1);
+}
+
+TEST_CASE("splitting the conversion into steps costs less, and the planner finds it",
+          "[resample][cascade]")
+{
+    // The saving is real and it is large where the ratio is large. It is also
+    // absent where it should be: 44100 -> 48000 has nothing to gain, and the
+    // planner returning one stage there is the right answer rather than a
+    // failure.
+    struct Case { std::uint32_t in; std::uint32_t out; double least_saving; };
+    const Case cases[] = {
+        {2822400, 192000, 3.0}, // a DSD rate down to something a DAC takes
+        {192000, 48000, 1.4},
+        {44100, 768000, 3.0},
+        {44100, 48000, 1.0}, // nothing to gain, and none is taken
+    };
+    for (const Case& c : cases) {
+        mp::resample::Design design = quality("good");
+        const auto single = mp::resample::plan_stages(c.in, c.out, design, 1);
+        const auto best = mp::resample::plan_stages(c.in, c.out, design, 4);
+        const double one = mp::resample::plan_cost(c.in, c.out, design, single);
+        const double many = mp::resample::plan_cost(c.in, c.out, design, best);
+        INFO(c.in << " -> " << c.out << ": " << one << " vs " << many << " over "
+                  << best.size() << " stages");
+        REQUIRE(single.size() == 1);
+        CHECK(one / many >= c.least_saving);
+    }
+}
+
+TEST_CASE("a cascade produces what one stage would have", "[resample][cascade]")
+{
+    // The point of the plan is that it is cheaper, not that it is different.
+    // A tone through four stages has to come out the same tone.
+    mp::resample::Design design = quality("good");
+    design.stages = 0;
+
+    mp::resample::Cascade cascade;
+    std::string why;
+    REQUIRE(cascade.configure(192000, 48000, 1, 4096, design, why));
+    INFO(why);
+    REQUIRE(cascade.size() > 1); // otherwise this tests nothing
+
+    const std::vector<std::vector<double>> in{sine(192000, 1000.0, 192000, 0.5)};
+    const auto out = run_cascade(cascade, in, 1024);
+
+    // The length the ratio says, within a frame per stage: each step rounds up
+    // on its own and the roundings do not have to agree.
+    const std::size_t want = (in[0].size() * 1 + 3) / 4;
+    INFO("produced " << out[0].size() << ", wanted " << want);
+    CHECK(out[0].size() >= want - cascade.size());
+    CHECK(out[0].size() <= want + cascade.size());
+
+    // 4800 frames at 48000 is 0.1 s: 100 whole cycles of 1 kHz.
+    const std::size_t from = 9600;
+    const std::size_t n = 4800;
+    REQUIRE(out[0].size() > from + n);
+    CHECK(std::abs(bin(out[0], from, n, 100.0)) == Catch::Approx(0.5).epsilon(1e-4));
+    const double residual = thd_n_db(out[0], from, n, 100.0);
+    INFO("cascade THD+N " << residual << " dB");
+    // The stages' own noise adds, so this is a little worse than one stage --
+    // and it is still a hundred and twenty decibels down.
+    CHECK(residual < -120.0);
+}
+
+TEST_CASE("a cascade drops nothing above the new Nyquist either",
+          "[resample][cascade]")
+{
+    mp::resample::Design design = quality("good");
+    design.stages = 0;
+    mp::resample::Cascade cascade;
+    std::string why;
+    REQUIRE(cascade.configure(192000, 48000, 1, 4096, design, why));
+
+    // 30 kHz is above 24 kHz and folds to 18 kHz at 48000: 1800 cycles in a
+    // 0.1 s window.
+    const std::vector<std::vector<double>> in{sine(192000, 30000.0, 192000, 0.5)};
+    const auto out = run_cascade(cascade, in, 4096);
+    const std::size_t from = 9600;
+    const std::size_t n = 4800;
+    REQUIRE(out[0].size() > from + n);
+
+    const double folded = 20.0 * std::log10(std::abs(bin(out[0], from, n, 1800.0)) / 0.5);
+    INFO("the alias is at " << folded << " dB");
+    CHECK(folded < -115.0);
+}
+
+TEST_CASE("the block size does not change a cascade either", "[resample][cascade]")
+{
+    mp::resample::Design design = quality("fast");
+    design.stages = 0;
+    const std::vector<std::vector<double>> in{sine(40000, 997.0, 192000, 0.4)};
+
+    mp::resample::Cascade once;
+    std::string why;
+    REQUIRE(once.configure(192000, 48000, 1, 40000, design, why));
+    const auto whole = run_cascade(once, in, 40000);
+
+    for (const std::uint32_t block : {1u, 13u, 576u, 4096u}) {
+        mp::resample::Cascade r;
+        REQUIRE(r.configure(192000, 48000, 1, block, design, why));
+        const auto pieces = run_cascade(r, in, block);
+        INFO("block " << block);
+        REQUIRE(pieces[0].size() == whole[0].size());
+        for (std::size_t i = 0; i < whole[0].size(); ++i) {
+            REQUIRE(pieces[0][i] == whole[0][i]);
+        }
+    }
+}

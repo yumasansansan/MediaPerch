@@ -33,7 +33,7 @@ const MpHost* g_host = nullptr;
 } // namespace
 
 struct MpDsp {
-    mp::resample::Resampler engine;
+    mp::resample::Cascade engine;
     mp::resample::Design design{};
     std::string quality = "good";
     /// 0 until somebody says. A resampler with no target rate is a copy, and
@@ -76,7 +76,8 @@ MpResult MP_CALL dsp_configure(MpDsp* d, const MpFormat* in, std::uint32_t max_f
     }
 
     const std::uint32_t target = d->rate != 0 ? d->rate : in->sample_rate;
-    if (!d->engine.configure(in->sample_rate, target, in->channels, d->design, d->why)) {
+    if (!d->engine.configure(in->sample_rate, target, in->channels, max_frames, d->design,
+                             d->why)) {
         // The host prints `why` through the chain's own refusal, which is the
         // only place a person can be told *which* stage would not configure.
         return MP_ERR_FORMAT;
@@ -177,6 +178,12 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
         }
         return MP_OK;
     }
+    if (std::strcmp(key, "phase") == 0) {
+        if (!mp::resample::phase_from_name(value, d->design.phase)) {
+            return MP_ERR_INVALID;
+        }
+        return MP_OK;
+    }
     if (std::strcmp(key, "passband_ripple") == 0) {
         char* end = nullptr;
         const double db = std::strtod(value, &end);
@@ -206,6 +213,19 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
             return MP_ERR_INVALID;
         }
         d->design.max_taps = static_cast<std::uint32_t>(taps);
+        return MP_OK;
+    }
+    if (std::strcmp(key, "stages") == 0) {
+        if (std::strcmp(value, "auto") == 0) {
+            d->design.stages = 0;
+            return MP_OK;
+        }
+        char* end = nullptr;
+        const unsigned long stages = std::strtoul(value, &end, 10);
+        if (end == value || stages > 6) {
+            return MP_ERR_INVALID;
+        }
+        d->design.stages = static_cast<std::uint32_t>(stages);
         return MP_OK;
     }
     if (std::strcmp(key, "verify") == 0) {
@@ -245,9 +265,43 @@ MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
                       mp::resample::method_name(d->design.method));
         return MP_OK;
     case 5:
-        std::snprintf(out, out_bytes, "window\t%s\tkaiser or dolph (design=window only)",
+        std::snprintf(out, out_bytes,
+                      "window\t%s\tkaiser, dpss or dolph (design=window only)",
                       mp::resample::window_name(d->design.window));
         return MP_OK;
+    case 14:
+        std::snprintf(out, out_bytes,
+                      "phase\t%s\tlinear keeps the alignment exact; minimum has no "
+                      "pre-ringing and no exact alignment",
+                      mp::resample::phase_name(d->design.phase));
+        return MP_OK;
+    case 15:
+        if (d->design.stages == 0) {
+            std::snprintf(out, out_bytes,
+                          "stages\tauto\thow many steps the conversion may take");
+        } else {
+            std::snprintf(out, out_bytes,
+                          "stages\t%u\thow many steps the conversion may take; auto "
+                          "searches for the cheapest",
+                          d->design.stages);
+        }
+        return MP_OK;
+    case 16: {
+        // The plan that was actually built, which is the only way to see what
+        // `stages=auto` decided.
+        std::string plan;
+        for (std::size_t i = 0; i < d->engine.size(); ++i) {
+            if (i != 0) {
+                plan += " -> ";
+            }
+            plan += std::to_string(d->engine.stage(i).up()) + "/" +
+                    std::to_string(d->engine.stage(i).down()) + " (" +
+                    std::to_string(d->engine.stage(i).taps_per_phase()) + " taps)";
+        }
+        std::snprintf(out, out_bytes, "plan\t%s\tthe steps that were built (read only)",
+                      plan.c_str());
+        return MP_OK;
+    }
     case 6:
         std::snprintf(out, out_bytes,
                       "passband_ripple\t%.4f\tdB; 0 means the same as the stopband",
@@ -270,14 +324,14 @@ MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
                       d->engine.up(), d->engine.down());
         return MP_OK;
     case 10:
-        std::snprintf(out, out_bytes,
-                      "multiplies\t%u\tper output sample (read only)",
-                      d->engine.identity() ? 0u : d->engine.taps_per_phase());
+        std::snprintf(out, out_bytes, "multiplies\t%.0f\tper output frame (read only)",
+                      d->engine.identity() ? 0.0 : d->engine.multiplies());
         return MP_OK;
     case 11:
         std::snprintf(out, out_bytes,
-                      "latency\t%.1f\tinput frames, already compensated (read only)",
-                      d->engine.identity() ? 0.0 : d->engine.latency_frames());
+                      "latency\t%.2f\tinput frames left after alignment; %s (read only)",
+                      d->engine.identity() ? 0.0 : d->engine.latency_frames(),
+                      d->engine.aligned() ? "exact" : "minimum phase, so not exact");
         return MP_OK;
     case 12:
         std::snprintf(out, out_bytes,

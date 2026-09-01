@@ -3,7 +3,8 @@
 // Designing the prototype, and then checking that the design is what was asked
 // for.
 //
-// Three methods live here, and the difference between them is not a preference.
+// Three methods, three windows and two phases live here, and the differences
+// between them are not preferences.
 //
 // **The window method** multiplies the ideal lowpass -- a sinc -- by a window.
 // It is closed-form, unconditionally stable, and works at any length. Its limit
@@ -12,9 +13,9 @@
 // equal. A resampler wants them wildly unequal (a thousandth of a decibel in
 // the passband, a hundred and sixty in the stopband) and this method cannot say
 // so. Kaiser's window is itself a closed-form approximation to the Slepian
-// (DPSS) window, which is the optimum of this family -- the gap is a fraction of
-// a decibel, which is why there is no `window=dpss` here and why the effort went
-// into the other method instead.
+// (DPSS) window, which is the optimum of this family; `window=dpss` computes
+// that optimum, and the measured gap between them is 0.3 to 2.3 dB depending on
+// the length.
 //
 // **Parks-McClellan** minimises the *weighted* maximum error over the whole
 // filter, and the alternation theorem says the answer is the best any filter of
@@ -33,16 +34,16 @@
 // Parks-McClellan is, and it does not need to be -- it is measured, and what it
 // buys over a Kaiser window at the same length is a number rather than a claim.
 //
-// Deliberately not here, and why. **DPSS** (the Slepian window Kaiser
-// approximates) is the window family's true optimum, and the gap to Kaiser is a
-// fraction of a decibel -- the effort went to changing method instead, which is
-// worth tens. **Multistage decomposition** would cut 160/147 into cascaded
-// stages and save most of the multiplies; that is an efficiency question rather
-// than a fidelity one, and this filter already runs 45 seconds of 768 kHz
-// without an underrun. **Minimum phase** would halve the taps for the same
-// magnitude and remove the pre-ringing, at the cost of the property the graph
-// currently relies on -- that output frame k lines up with input frame
-// k * down / up -- so it is a change to the alignment contract and not a flag.
+// Two more axes are here and are not about the response at all. **Phase**:
+// `phase=minimum` keeps the magnitude and moves the energy to the front of the
+// filter, which removes the pre-ringing and costs the exact alignment -- a
+// minimum-phase filter's delay is a different number at every frequency, so
+// there is no integer to subtract, and the report says so. **Stages**:
+// `stages=auto` splits the ratio, because a step that is not the last only has
+// to protect the band the last one keeps, and at a high intermediate rate that
+// is a much wider transition than the ratio alone suggests. Measured, it turns
+// 2,295 multiplies per frame into 481 for a DSD rate down to 192 kHz, and finds
+// nothing at all for 44100 -> 48000, which is the right answer there.
 //
 // Every design is measured against its own specification before it is returned.
 // An iterative algorithm that quietly converges to the wrong answer is the exact
@@ -66,6 +67,26 @@ enum class Window : std::uint32_t {
     /// stops improving -- and the window has spikes at both ends, which is a
     /// real effect and is why this is measured rather than assumed.
     dolph,
+    /// The Slepian window: the sequence with the most of its energy inside a
+    /// given band, which is the optimum of this whole family and the thing
+    /// Kaiser's closed form approximates. Computed as the leading eigenvector
+    /// of a tridiagonal matrix rather than from a formula, because there is no
+    /// formula. Here to answer "how much is the approximation costing" with a
+    /// number.
+    dpss,
+};
+
+enum class Phase : std::uint32_t {
+    /// Symmetric taps: every frequency delayed by the same amount, which is
+    /// what lets the graph say output frame k is input frame k * down / up.
+    /// The delay is half the filter, and half a filter of pre-ringing comes
+    /// with it.
+    linear,
+    /// The same magnitude response with its energy moved to the front. No
+    /// pre-ringing at all, and no exact alignment either: the delay becomes
+    /// small, frequency-dependent, and no longer an integer number of frames.
+    /// A different trade, not a better one, and the reason it is a setting.
+    minimum,
 };
 
 enum class Method : std::uint32_t {
@@ -86,6 +107,7 @@ enum class Method : std::uint32_t {
 struct Design {
     Method method = Method::window;
     Window window = Window::kaiser;
+    Phase phase = Phase::linear;
 
     /// Stopband attenuation, in dB. Also the aliasing floor.
     double attenuation_db = 120.0;
@@ -103,6 +125,16 @@ struct Design {
     std::uint32_t taps = 0;
     /// The prototype's ceiling, in coefficients.
     std::uint32_t max_taps = 1u << 22;
+    /// How many steps the conversion may take. 1 is one filter for the whole
+    /// ratio; 0 searches for the cheapest split it can find.
+    ///
+    /// **An efficiency setting, not a fidelity one.** A step that is not the
+    /// last only has to protect the band the last one will keep, and at a high
+    /// intermediate rate that band is a long way from Nyquist -- so its
+    /// transition can be enormous and its filter short. What it costs is that
+    /// the ripples of the steps add up, which is why it is off by default and
+    /// why the aggregate is reported rather than assumed.
+    std::uint32_t stages = 1;
     /// Refuse a design that misses its own specification, buying the shortfall
     /// in taps first where the length was left open. Parks-McClellan is always
     /// checked against its own deviation whatever this says: an exchange that
@@ -115,8 +147,10 @@ struct Design {
 
 [[nodiscard]] bool method_from_name(const std::string& name, Method& out);
 [[nodiscard]] bool window_from_name(const std::string& name, Window& out);
+[[nodiscard]] bool phase_from_name(const std::string& name, Phase& out);
 [[nodiscard]] const char* method_name(Method m) noexcept;
 [[nodiscard]] const char* window_name(Window w) noexcept;
+[[nodiscard]] const char* phase_name(Phase p) noexcept;
 
 /// What a filter actually does, read off its response rather than assumed.
 struct Response {
@@ -162,6 +196,21 @@ void dft_any(std::vector<std::complex<double>>& a);
 [[nodiscard]] std::vector<double> kaiser_window(std::size_t length, double attenuation_db);
 /// A Dolph-Chebyshev window: every sidelobe at exactly `attenuation_db`.
 [[nodiscard]] std::vector<double> dolph_window(std::size_t length, double attenuation_db);
+/// The zeroth-order discrete prolate spheroidal sequence, for a time-bandwidth
+/// product of `nw`. Kaiser's `beta` corresponds to `nw = beta / pi`.
+[[nodiscard]] std::vector<double> dpss_window(std::size_t length, double nw);
+/// Kaiser's shape parameter for a stopband, exposed because the DPSS window
+/// takes the same specification in different units.
+[[nodiscard]] double kaiser_beta_for(double attenuation_db) noexcept;
+
+/// Replaces `h` with the minimum-phase filter of the same magnitude response.
+///
+/// The real cepstrum, folded: a spectrum's magnitude decides its minimum-phase
+/// counterpart, and folding the cepstrum onto the causal half is how that
+/// counterpart is computed. `floor_db` is where the logarithm is clamped --
+/// a stopband null is a true zero, and the logarithm of zero has no folded
+/// version.
+void to_minimum_phase(std::vector<double>& h, double floor_db);
 
 /// Parks-McClellan for a Type I (odd length, symmetric) lowpass.
 ///
