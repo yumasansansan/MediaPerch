@@ -15,20 +15,6 @@
       }
     },
     {
-      "name": "vs",
-      "inherits": "base",
-      "displayName": "Visual Studio 2026 (multi-config)",
-      "description": "Opens as a real .sln. Needs no developer prompt.",
-      "generator": "Visual Studio 18 2026",
-      "architecture": {
-        "value": "x64",
-        "strategy": "set"
-      },
-      "cacheVariables": {
-        "MEDIAPERCH_EXPECT_TOOLSET": "MSVC"
-      }
-    },
-    {
       "name": "ninja-msvc",
       "inherits": "base",
       "displayName": "Ninja + MSVC",
@@ -49,7 +35,7 @@
     },
     {
       "name": "measure",
-      "inherits": "vs",
+      "inherits": "ninja-msvc",
       "displayName": "Release, with the measuring apparatus kept",
       "description": "An optimised build that still has `compare` and `verify`, so the decode-quality check can run at Release speed rather than Debug speed.",
       "cacheVariables": {
@@ -90,21 +76,6 @@
   ],
   "buildPresets": [
     {
-      "name": "vs-debug",
-      "configurePreset": "vs",
-      "configuration": "Debug"
-    },
-    {
-      "name": "vs-release",
-      "configurePreset": "vs",
-      "configuration": "Release"
-    },
-    {
-      "name": "vs-relwithdebinfo",
-      "configurePreset": "vs",
-      "configuration": "RelWithDebInfo"
-    },
-    {
       "name": "ninja-msvc",
       "configurePreset": "ninja-msvc"
     },
@@ -139,28 +110,6 @@
     }
   ],
   "testPresets": [
-    {
-      "name": "vs-debug",
-      "configurePreset": "vs",
-      "configuration": "Debug",
-      "output": {
-        "outputOnFailure": true
-      },
-      "execution": {
-        "noTestsAction": "error"
-      }
-    },
-    {
-      "name": "vs-release",
-      "configurePreset": "vs",
-      "configuration": "Release",
-      "output": {
-        "outputOnFailure": true
-      },
-      "execution": {
-        "noTestsAction": "error"
-      }
-    },
     {
       "name": "measure",
       "configurePreset": "measure",

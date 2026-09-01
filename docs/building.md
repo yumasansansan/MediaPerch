@@ -86,23 +86,36 @@ choice between an LGPL and a GPL build.
 
 ## The presets
 
+**From a developer prompt** — `VC\Auxiliary\Build\vcvars64.bat`, once per shell.
+Every preset here is Ninja, and Ninja does not go looking for Visual Studio; the
+section below is about what happens when you forget.
+
 ```bash
-cmake --preset vs && cmake --build --preset vs-release && ctest --preset vs-release
+cmake --preset ninja-msvc && cmake --build --preset ninja-msvc-release && ctest --preset ninja-msvc-release
 ```
 
-**Release, not Debug, unless you are debugging.** The decoders here do real
-arithmetic on real amounts of audio, and a Debug build is between five and ten
-times slower at it: the whole test suite takes **177 seconds in Debug and 41 in
-Release**, and the decode-quality check inside it goes from 174 to 39. Every
-preset below has a `-release` build and test preset beside its `-debug` one.
+**Release, not Debug, unless you are debugging.** The decoders do real arithmetic
+on real amounts of audio, and a Debug build is five to ten times slower at it:
+the whole test suite takes **177 seconds in Debug and 41 in Release**, and the
+decode-quality check inside it goes from 174 to 39.
 
-| Preset | Generator | For |
+| Preset | Toolchain | For |
 |---|---|---|
-| `vs` | Visual Studio 2026 | day to day. Opens as a real `.sln`, needs no developer prompt |
-| `ninja-msvc` | Ninja Multi-Config | faster, but run it from a developer prompt |
-| `measure` | Visual Studio 2026 | Release **with the measuring apparatus kept** — see below |
-| `core-only` | Ninja Multi-Config | what CI builds to keep `src/core` portable |
-| `asan` | Ninja, Clang | the parsers under ASan and UBSan, like the fuzzers |
+| `ninja-msvc` | MSVC | day to day. `-debug`, `-release` and `-relwithdebinfo` build presets |
+| `measure` | MSVC | Release **with the measuring apparatus kept** — see below |
+| `core-only` | MSVC | what CI builds to keep `src/core` portable |
+| `asan` | Clang | the parsers under ASan and UBSan |
+| `fuzz` | Clang | the libFuzzer targets |
+
+**There is one generator, and it is Ninja.** A Visual Studio generator was here
+and is not any more, because keeping both meant two of everything: two build
+trees, two sets of build and test presets, and a `compile_commands.json` that
+existed in one of them and not the other — which `.clang-tidy` and clangd both
+need. The fuzzers and the sanitized build settle the question on their own: both
+drive Clang's GNU driver with libFuzzer, which no Visual Studio generator can do,
+so Ninja was never removable and the only choice was whether to keep a second
+one. Visual Studio opens this tree with **File ▸ Open ▸ Folder**, which reads
+`CMakePresets.json` directly and debugs the same binaries.
 
 ## What a Release build leaves out
 
@@ -233,11 +246,12 @@ under "libvorbis is big".
 It will not any more, and that is worth explaining because the failure it replaces
 was silent.
 
-**The Ninja generator does not go looking for Visual Studio.** The `vs` generator finds
-the toolset by itself; Ninja takes whatever `cc` and `c++` are on `PATH`. Outside a
-developer prompt that is MinGW GCC on a GitHub runner, Strawberry Perl's `gcc` or LLVM's
-`clang++` on a typical developer machine — and then the whole project builds, cleanly, with
-nothing in the log admitting the toolchain was not the one the preset is named after.
+**The Ninja generator does not go looking for Visual Studio.** It takes whatever `cc` and
+`c++` are on `PATH`. Outside a developer prompt that is MinGW GCC on a GitHub runner,
+Strawberry Perl's `gcc` or LLVM's `clang++` on a typical developer machine — and then the
+whole project builds, cleanly, with nothing in the log admitting the toolchain was not the
+one the preset is named after. **This is the price of having one generator**, and it is
+paid with two guards rather than with a second build tree.
 
 Two guards, because they catch different mistakes:
 
@@ -246,9 +260,8 @@ Two guards, because they catch different mistakes:
 - **The GCC rejection** in `cmake/CompilerOptions.cmake`, which fires however you got
   there, preset or not.
 
-Either way the fix is the same: run `VC\Auxiliary\Build\vcvars64.bat` first, or use the
-`vs` preset, which needs no developer prompt at all. To build with some other compiler
-deliberately, configure with `-D MEDIAPERCH_EXPECT_TOOLSET=`.
+Either way the fix is the same: run `VC\Auxiliary\Build\vcvars64.bat` first. To build
+with some other compiler deliberately, configure with `-D MEDIAPERCH_EXPECT_TOOLSET=`.
 
 ## Standards, and the one thing to know about them
 

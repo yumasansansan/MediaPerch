@@ -25,7 +25,7 @@ twice.
 | Modularity | decoders, sinks, DSP and the video presenter are runtime-loaded shared libraries behind one C ABI |
 | Shell | separate process, optional, replaceable. The engine is complete without it |
 | Windows floor | Windows 10 2004 for audio; Windows 11 22H2 for Advanced Color; Windows 11 24H2 for the desktop HDR-state APIs, degrading gracefully below each |
-| IDE | Visual Studio 2026, opened as a real `.sln`, as with DragonPerch |
+| IDE | Visual Studio 2026, opened as a folder: one CMake generator, Ninja, and `CMakePresets.json` is what the IDE reads |
 | Licence | `GPL-3.0-or-later`. Compatible with FFmpeg in either its LGPL or GPL configuration |
 
 Non-goals for v1: macOS, a scripting language, network streaming clients, a library
