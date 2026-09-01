@@ -15,10 +15,16 @@
 
 #include <cstdint>
 #include <span>
+#include <string>
+#include <string_view>
 
 namespace mp {
 
 struct ShaperCurve {
+    /// 0 for a curve that is not tied to one: ReSampler's are designed for
+    /// 44.1 kHz and documented as usable elsewhere, where the shape stretches
+    /// with the rate and its notches move off the frequencies they were placed
+    /// at. SSRC's are fitted per rate and are never substituted across them.
     std::uint32_t sample_rate;
     /// SSRC's own numbering. Low is gentle, high is aggressive; 98 is a plain
     /// first-order shaper and 99 is none at all.
@@ -42,6 +48,15 @@ struct ShaperCurve {
 
 /// The intensities available at this rate, for a caller that has to offer them.
 [[nodiscard]] std::uint32_t highest_intensity(std::uint32_t sample_rate) noexcept;
+
+/// The index of the rate-independent curve called `name`, or -1.
+///
+/// The names are the leading word of `ShaperCurve::name`, up to the colon:
+/// `wannamaker9`, `lipshitz`, `standard` and the rest.
+[[nodiscard]] int find_named_shaper(std::string_view name) noexcept;
+
+/// Every rate-independent curve's name, for the message that lists them.
+[[nodiscard]] std::string named_shapers();
 
 } // namespace mp
 

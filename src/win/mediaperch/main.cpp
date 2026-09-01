@@ -14,6 +14,7 @@
 #include "mediaperch/negotiation.hpp"
 #include "mediaperch/passthrough.hpp"
 #include "mediaperch/processed.hpp"
+#include "mediaperch/shaper_tables.hpp"
 #include "mediaperch/repack.hpp"
 #include "mediaperch/sine.hpp"
 #include "mediaperch/sink.hpp"
@@ -217,8 +218,9 @@ bool parse(int argc, char** argv, Options& out)
         } else if (arg == "--shape") {
             if (i + 1 >= argc || !mp::noise_shaping_from_name(argv[++i], out.shaping)) {
                 std::fprintf(stderr,
-                             "--shape takes 0 to 9 for a binomial order, or "
-                             "shibata[:intensity]\n");
+                             "--shape takes 0 to 9 for a binomial order, "
+                             "shibata[:intensity], or one of:\n  %s\n",
+                             mp::named_shapers().c_str());
                 return false;
             }
         } else if (arg == "--float") {

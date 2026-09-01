@@ -48,6 +48,14 @@ std::vector<double> shaper_taps(const NoiseShaping& shaping, std::uint32_t sampl
         // would put the noise an octave from where it belongs, so this is
         // nothing at all, and `taps()` says so.
         return {};
+    case NoiseShaping::Kind::named: {
+        const auto curves = shaper_curves();
+        if (shaping.strength >= curves.size()) {
+            return {};
+        }
+        const ShaperCurve& curve = curves[shaping.strength];
+        return std::vector<double>{curve.coefficients, curve.coefficients + curve.length};
+    }
     }
     return {};
 }
@@ -62,6 +70,38 @@ const ShaperCurve* find_shaper(std::uint32_t sample_rate, std::uint32_t intensit
         }
     }
     return nullptr;
+}
+
+int find_named_shaper(std::string_view name) noexcept
+{
+    const auto curves = shaper_curves();
+    for (std::size_t i = 0; i < curves.size(); ++i) {
+        if (curves[i].sample_rate != 0) {
+            continue;
+        }
+        const std::string_view full{curves[i].name};
+        const std::size_t colon = full.find(':');
+        if (full.substr(0, colon) == name) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+std::string named_shapers()
+{
+    std::string out;
+    for (const ShaperCurve& curve : shaper_curves()) {
+        if (curve.sample_rate != 0) {
+            continue;
+        }
+        const std::string_view full{curve.name};
+        if (!out.empty()) {
+            out += ", ";
+        }
+        out += full.substr(0, full.find(':'));
+    }
+    return out;
 }
 
 std::uint32_t highest_intensity(std::uint32_t sample_rate) noexcept
@@ -123,6 +163,12 @@ bool noise_shaping_from_name(std::string_view name, NoiseShaping& out) noexcept
         return result.ec == std::errc{} && result.ptr == last;
     };
 
+    if (const int index = find_named_shaper(name); index >= 0) {
+        out.kind = NoiseShaping::Kind::named;
+        out.strength = static_cast<std::uint32_t>(index);
+        return true;
+    }
+
     if (name.starts_with("shibata")) {
         out.kind = NoiseShaping::Kind::shibata;
         out.strength = 0;
@@ -156,6 +202,23 @@ std::string noise_shaping_describe(const NoiseShaping& shaping, std::uint32_t sa
         }
         return "shibata: no curve for " + std::to_string(sample_rate) +
                " Hz at intensity " + std::to_string(shaping.strength) + ", so none";
+    case NoiseShaping::Kind::named: {
+        const auto curves = shaper_curves();
+        if (shaping.strength >= curves.size()) {
+            return "none";
+        }
+        const ShaperCurve& curve = curves[shaping.strength];
+        std::string out = std::string{curve.name} + " (" +
+                          std::to_string(curve.length) + " taps)";
+        if (sample_rate != 44100) {
+            // ReSampler's own documented position, repeated where somebody
+            // will read it: the curve still works, and its notches are no
+            // longer on the frequencies they were placed at.
+            out += ", designed for 44.1 kHz and stretched to " +
+                   std::to_string(sample_rate);
+        }
+        return out;
+    }
     }
     return "none";
 }

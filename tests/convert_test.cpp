@@ -469,7 +469,8 @@ TEST_CASE("the transcribed curves are the ones in the source", "[convert][shaper
     CHECK(curve->coefficients[0] == -0.59543782472610473633);
     CHECK(curve->coefficients[11] == -0.031739629805088043213);
 
-    CHECK(mp::shaper_curves().size() == 67);
+    // 67 rate-fitted curves from SSRC and 12 published ones from ReSampler.
+    CHECK(mp::shaper_curves().size() == 79);
 
     // Every rate a decoder in this tree can produce at CD and DVD rates.
     CHECK(mp::find_shaper(48000, 0) != nullptr);
@@ -552,7 +553,11 @@ TEST_CASE("the shaper names a user types are read the way they look",
 
     CHECK_FALSE(mp::noise_shaping_from_name("10", out));      // past the order
     CHECK_FALSE(mp::noise_shaping_from_name("shibata6", out)); // missing colon
-    CHECK_FALSE(mp::noise_shaping_from_name("lipshitz", out)); // not transcribed
+    REQUIRE(mp::noise_shaping_from_name("lipshitz", out)); // transcribed now
+    CHECK(out.kind == mp::NoiseShaping::Kind::named);
+    REQUIRE(mp::noise_shaping_from_name("wannamaker9", out));
+    CHECK(out.kind == mp::NoiseShaping::Kind::named);
+    CHECK_FALSE(mp::noise_shaping_from_name("nonesuch", out));
     CHECK_FALSE(mp::noise_shaping_from_name("", out));
 
     // And the report says what actually happened, not what was asked for.
@@ -560,4 +565,154 @@ TEST_CASE("the shaper names a user types are read the way they look",
               .starts_with("shibata: ATH"));
     CHECK(mp::noise_shaping_describe({mp::NoiseShaping::Kind::shibata, 0}, 176400)
               .find("no curve") != std::string::npos);
+}
+
+TEST_CASE("the published curves are the ones ReSampler carries, in this convention",
+          "[convert][shaper]")
+{
+    // ReSampler subtracts the filtered history where SSRC adds it, so its
+    // coefficients are negated on the way in. Getting that backwards shapes the
+    // noise *into* the midband using the same numbers, which is worse than no
+    // shaping and sounds like nothing is wrong -- so the sign is pinned here.
+    //
+    // wan3 in ReSampler is { 1.623, -0.982, 0.109 }.
+    const int index = mp::find_named_shaper("wannamaker3");
+    REQUIRE(index >= 0);
+    const mp::ShaperCurve& curve = mp::shaper_curves()[static_cast<std::size_t>(index)];
+    REQUIRE(curve.length == 3);
+    CHECK(curve.sample_rate == 0); // not tied to one
+    CHECK(curve.coefficients[0] == -1.623);
+    CHECK(curve.coefficients[1] == 0.982);
+    CHECK(curve.coefficients[2] == -0.109);
+
+    // Twelve of them, and every one is reachable by the name a user types.
+    int named = 0;
+    for (const auto& c : mp::shaper_curves()) {
+        if (c.sample_rate == 0) {
+            ++named;
+            const std::string_view full{c.name};
+            CHECK(mp::find_named_shaper(full.substr(0, full.find(':'))) >= 0);
+        }
+    }
+    CHECK(named == 12);
+    CHECK(mp::named_shapers().find("wannamaker24") != std::string::npos);
+}
+
+TEST_CASE("a published curve shapes at any rate, and says it was stretched",
+          "[convert][shaper]")
+{
+    constexpr std::size_t frames = 4000;
+    std::vector<float> input(frames * 2, 0.3F / 32768.0F);
+    const auto bytes = from_floats(input);
+
+    mp::NoiseShaping shaping;
+    REQUIRE(mp::noise_shaping_from_name("wannamaker9", shaping));
+
+    auto drift = [&](std::uint32_t rate) {
+        mp::ConvertConfig c;
+        c.dither = mp::DitherKind::none;
+        c.shaping = shaping;
+        mp::Format in = make(mp::SampleType::f32);
+        mp::Format out_format = make(mp::SampleType::s16);
+        in.sample_rate = rate;
+        out_format.sample_rate = rate;
+        mp::Converter conv{in, out_format, c};
+        REQUIRE(conv.shaping_taps() == 9);
+        std::vector<std::uint8_t> out(input.size() * 2);
+        conv.run(bytes.data(), out.data(), frames);
+        double sum = 0.0;
+        for (std::size_t i = 0; i < frames; ++i) {
+            sum += static_cast<double>(as_s16(out.data() + i * 2 * 2)) - 0.3;
+        }
+        return std::abs(sum);
+    };
+
+    // Works at the rate it was designed for and at one it was not -- which is
+    // the difference from SSRC's, and it is a property rather than an accident.
+    CHECK(drift(44100) < 200.0);
+    CHECK(drift(96000) < 200.0);
+
+    CHECK(mp::noise_shaping_describe(shaping, 44100).find("stretched") ==
+          std::string::npos);
+    CHECK(mp::noise_shaping_describe(shaping, 96000).find("stretched") !=
+          std::string::npos);
+}
+
+// --------------------------------------------------------------------------
+// The wide end
+//
+// Path B is not only for narrowing. Somebody who wants a volume control, or the
+// DSP that will hang off this later, sends their audio through it whatever the
+// device takes -- including a device that takes exactly what the source is.
+
+TEST_CASE("f64 to f64 through Path B is the gain and nothing else",
+          "[convert][f64]")
+{
+    // The question this answers: what happens to a 64-bit float source on a
+    // 64-bit float device when the user asked for processing? Nothing but the
+    // multiply. There is no quantiser, so there is no dither, no shaping and no
+    // clamp -- and the arithmetic is one correctly-rounded binary64 operation
+    // per sample, which is about -320 dB of error.
+    const std::vector<double> input{0.1, -0.25, 1.0, -1.0, 3.5, -1e-30, 0.0};
+    std::vector<std::uint8_t> bytes(input.size() * 8);
+    std::memcpy(bytes.data(), input.data(), bytes.size());
+    std::vector<std::uint8_t> out(bytes.size());
+
+    SECTION("at unity it is a copy, and says it is not lossy")
+    {
+        mp::Converter conv{make(mp::SampleType::f64), make(mp::SampleType::f64)};
+        REQUIRE(conv.possible());
+        CHECK_FALSE(conv.lossy());
+        CHECK(conv.quantising() == false);
+        CHECK(conv.shaping_taps() == 0);
+        conv.run(bytes.data(), out.data(), input.size() / 2);
+        CHECK(std::memcmp(bytes.data(), out.data(), bytes.size()) == 0);
+    }
+
+    SECTION("with a gain it is exactly the multiply")
+    {
+        mp::ConvertConfig c;
+        c.gain = 0.5;
+        // Asking for dither and shaping as well, to prove neither can reach a
+        // destination that has no quantiser to dither.
+        c.dither = mp::DitherKind::triangular;
+        c.shaping.kind = mp::NoiseShaping::Kind::binomial;
+        c.shaping.strength = 3;
+
+        mp::Converter conv{make(mp::SampleType::f64), make(mp::SampleType::f64), c};
+        REQUIRE(conv.possible());
+        CHECK(conv.lossy()); // a gain is a change, whatever the precision
+        CHECK_FALSE(conv.quantising());
+        CHECK(conv.shaping_taps() == 0);
+        conv.run(bytes.data(), out.data(), input.size() / 2);
+
+        for (std::size_t i = 0; i < input.size(); ++i) {
+            double got = 0.0;
+            std::memcpy(&got, out.data() + i * 8, 8);
+            INFO("sample " << i);
+            // Not "close to": exactly. Halving is exact in binary floating
+            // point, and nothing else touched it -- including the 3.5 that is
+            // past full scale, which an integer destination would have clamped.
+            REQUIRE(got == input[i] * 0.5);
+        }
+    }
+}
+
+TEST_CASE("f32 to f64 through Path B loses nothing either", "[convert][f64]")
+{
+    const std::vector<float> input{0.1F, -0.25F, 1.0F, 2.5F};
+    const auto bytes = from_floats(input);
+    std::vector<std::uint8_t> out(input.size() * 8);
+
+    mp::Converter conv{make(mp::SampleType::f32), make(mp::SampleType::f64), exactly()};
+    REQUIRE(conv.possible());
+    CHECK_FALSE(conv.lossy());
+    conv.run(bytes.data(), out.data(), input.size() / 2);
+
+    for (std::size_t i = 0; i < input.size(); ++i) {
+        double got = 0.0;
+        std::memcpy(&got, out.data() + i * 8, 8);
+        INFO("sample " << i);
+        REQUIRE(got == static_cast<double>(input[i]));
+    }
 }

@@ -102,6 +102,19 @@ destination *is* `f32`. An `f64` device, if one existed, would take the source u
 through Path A: `f64` is a sample type in the ABI, `classify` calls an `f64` source on an
 `f64` device `exact`, and that is a `memcpy`.
 
+**Path B is not only for narrowing.** A 64-bit float source on a 64-bit float device, sent
+through Path B for a volume control, gets *the multiply and nothing else*: there is no
+quantiser, so no dither, no shaping and no clamp run, and the arithmetic is one
+correctly-rounded binary64 operation per sample — about −320 dB of error, and exact for any
+gain that is a power of two. A value of 3.5, past what an integer device could hold, comes
+out as 3.5. The same is true of f32 → f64. `tests/convert_test.cpp` asserts equality rather
+than closeness for both.
+
+The one narrowing that gets no dither is **f64 or f32 → f32**, and that is deliberate: a
+float destination's error is proportional to the signal rather than fixed, so it is already
+uncorrelated in the way dither exists to produce, and its 24-bit significand puts it about
+144 dB down at every level.
+
 **And nothing useful can be done on the way in.** Widening is exact, so there is no
 information to recover and nothing to improve: what is sometimes done at this point —
 "bit-depth expansion", guessing at the dither that was removed — is speculative
@@ -164,8 +177,35 @@ braces — and wrote the file **without a word**. It now counts the entries in t
 before it counts the ones it parsed, and refuses if they differ. `tests/convert_test.cpp`
 holds spot values read out of the source by eye.
 
-`ReSampler` (LGPL-2.1, also compatible) is the other implementation worth reading here and
-its curves are not transcribed yet.
+#### The published curves
+
+`--shape <name>` selects one of **12 curves from
+[ReSampler](https://github.com/jniemann66/ReSampler)** (Judd Niemann, LGPL-2.1, also
+compatible): Lipshitz, Vanderkooy and Wannamaker's from *Minimally Audible Noise Shaping*,
+Wannamaker's from *Psychoacoustically Optimal Noise Shaping*, and ReSampler's own.
+
+```
+flat, modified-e, lipshitz, improved-e, wannamaker3, wannamaker9,
+wannamaker24, standard, high28, high30, high32, blue
+```
+
+These are designed for 44.1 kHz and are usable at other rates, where the shape stretches
+and the notches move off the frequencies they were placed at — ReSampler's own documented
+position, and the report says `designed for 44.1 kHz and stretched to 48000` rather than
+leaving it to be discovered. That is the difference from SSRC's: those are fitted per rate
+and are never substituted across one.
+
+**The two sources do not share a sign convention, and this is the thing to get right.**
+SSRC *adds* the filtered error history to the sample before quantising; ReSampler
+*subtracts* it. The same coefficients under the wrong convention shape the noise **into**
+the midband instead of out of it — which is worse than no shaping and sounds like nothing
+is wrong. ReSampler's are negated at transcription so one convention, SSRC's, is the only
+one at run time, and `tests/convert_test.cpp` pins three of Wannamaker's numbers with their
+signs so the day somebody "fixes" it is the day a test goes red.
+
+`classic` is the one profile not transcribed: it is a cascaded biquad in ReSampler rather
+than an FIR, so its numbers are not taps and carrying them across would build a filter that
+is not what the name means.
 
 ### Choosing the path
 

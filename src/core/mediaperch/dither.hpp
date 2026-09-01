@@ -80,12 +80,18 @@ struct NoiseShaping {
         /// Measured against the absolute threshold of hearing rather than
         /// derived, and therefore indexed by sample rate as well as intensity.
         shibata,
+        /// One of the published curves ReSampler carries -- Lipshitz's,
+        /// Wannamaker's, and its own -- transcribed by the same generator.
+        /// Designed for 44.1 kHz and usable at other rates, where the shape
+        /// stretches and its notches move off where they were placed.
+        named,
     };
 
     Kind kind = Kind::none;
     /// `binomial`: the order, 1 to `k_max_order`.
     /// `shibata`: SSRC's intensity. Low is gentle; 98 is a plain first-order
     /// shaper and 99 is none.
+    /// `named`: an index into `shaper_curves()`, resolved from the name.
     std::uint32_t strength = 0;
 
     static constexpr std::uint32_t k_max_order = 9;
@@ -94,7 +100,8 @@ struct NoiseShaping {
 [[nodiscard]] const char* dither_kind_name(DitherKind kind) noexcept;
 [[nodiscard]] bool dither_kind_from_name(std::string_view name, DitherKind& out) noexcept;
 
-/// `0`..`9` for a binomial order, or `shibata:N` for one of SSRC's curves.
+/// `0`..`9` for a binomial order, `shibata[:N]` for one of SSRC's rate-fitted
+/// curves, or one of the names in `named_shapers()` for a published one.
 [[nodiscard]] bool noise_shaping_from_name(std::string_view name, NoiseShaping& out) noexcept;
 /// What the shaper actually resolved to, for the report a user reads.
 [[nodiscard]] std::string noise_shaping_describe(const NoiseShaping& shaping,
