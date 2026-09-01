@@ -59,6 +59,15 @@ struct Options {
     double gain = 1.0;
     mp::DitherKind dither = mp::DitherKind::triangular;
     mp::NoiseShaping shaping{};
+    /// The dither generator's seed. A setting because reproducibility is one,
+    /// and because two runs that differ only in this are the cleanest way to
+    /// hear what dither is doing.
+    std::uint32_t dither_seed = 0x1f2e3d4cu;
+    /// The ring, in device periods, and how long the render thread waits for a
+    /// device that has stopped signalling. Both were constants until somebody
+    /// with a busier machine needed the first one bigger.
+    std::uint32_t ring_periods = 8;
+    std::uint32_t wait_timeout_ms = 2000;
     /// `name` or `name:key=value,key=value`, in the order given, which is the
     /// order they run in.
     std::vector<std::string> dsp;
@@ -253,7 +262,11 @@ Options
                     window=kaiser|dpss|dolph, phase=linear|minimum,
                     stages=1|auto, attenuation, bandwidth, passband_ripple,
                     taps, cepstrum, phase_floor, verify. `--dsp list` prints them all with what each
-                    one is now, and what the filter it built measured
+                    one is now, and what the filter it built measured.
+                    `--dsp mix:channels=2` is the other geometry: every
+                    coefficient of the matrix is a setting, the matrix that was
+                    built is reported, and an upmix places what exists rather
+                    than inventing what does not
   --dither KIND     Path B only, and only where bits are actually being thrown
                     away. `triangular` (default) is the standard answer;
                     `highpass` is the same distribution with its noise tilted
@@ -272,6 +285,14 @@ Options
                     Refuses rather than guesses when two of them match, because
                     opening the wrong endpoint in exclusive mode takes that
                     device away from everything else on the machine
+  --dither-seed N   the dither generator's seed. Fixed rather than drawn from a
+                    clock, so two decodes of one file produce the same bytes;
+                    change it to hear the same setting a second time
+  --ring-periods N  ring capacity in device periods, default 8. At a 3 ms period
+                    that is 24 ms of slack for a decode thread that is not
+                    real-time, and a busy machine may want more
+  --wait-timeout MS how long the render thread waits for a device that has
+                    stopped signalling before calling it gone. Default 2000
   --shared          shared mode instead of exclusive
   --loopback        `verify` also records from a capture endpoint and reports
                     whether the loopback returned the bytes unchanged. Read
@@ -321,6 +342,15 @@ bool parse(int argc, char** argv, Options& out)
             if (i + 1 < argc) {
                 out.gain = std::strtod(argv[++i], nullptr);
             }
+        } else if (arg == "--dither-seed") {
+            if (i + 1 < argc) {
+                out.dither_seed =
+                    static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 0));
+            }
+        } else if (arg == "--ring-periods") {
+            value(out.ring_periods);
+        } else if (arg == "--wait-timeout") {
+            value(out.wait_timeout_ms);
         } else if (arg == "--dsp") {
             if (i + 1 >= argc) {
                 std::fprintf(stderr, "--dsp takes a stage name, or `list`\n");
@@ -820,6 +850,15 @@ mp::win::ModuleRegistry::DecoderChoice first_that_opens(
     return ranked.empty() ? mp::win::ModuleRegistry::DecoderChoice{} : ranked.front();
 }
 
+/// The two numbers that decide how much slack the decode thread has.
+mp::PassthroughConfig buffering(const Options& options)
+{
+    mp::PassthroughConfig config;
+    config.ring_periods = std::max(2u, options.ring_periods);
+    config.wait_timeout_ms = options.wait_timeout_ms;
+    return config;
+}
+
 /// One `--dsp` argument: `name` or `name:key=value,key=value`.
 ///
 /// The name may leave off the `dsp_` the module calls itself by, the same way
@@ -1093,10 +1132,11 @@ int play(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
         conversion.gain = options.gain;
         conversion.dither = options.dither;
         conversion.shaping = options.shaping;
+        conversion.seed = options.dither_seed;
         mp::ProcessedGraph graph{*source,          sink,
                                  negotiated.accepted, period,
                                  conversion,       &hooks,
-                                 mp::PassthroughConfig{},
+                                 buffering(options),
                                  chain.empty() ? nullptr : &chain};
         const int rc = run_graph(graph, hooks, negotiated.accepted, limit);
         // What each stage made of it, in the stage's own words. `dsp_gain`
@@ -1114,7 +1154,7 @@ int play(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
 
     mp::PassthroughGraph graph{*source,   sink,
                                negotiated.accepted, period,
-                               negotiated.fidelity, &hooks};
+                               negotiated.fidelity, &hooks, buffering(options)};
     return run_graph(graph, hooks, negotiated.accepted, limit);
 }
 

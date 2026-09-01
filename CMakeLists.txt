@@ -75,6 +75,7 @@ if(MEDIAPERCH_BUILD_PLATFORM)
     add_subdirectory(modules/decode_mp3)
     add_subdirectory(modules/dsp_gain)
     add_subdirectory(modules/dsp_resample)
+    add_subdirectory(modules/dsp_mix)
 endif()
 
 if(MEDIAPERCH_BUILD_PLATFORM AND WIN32)

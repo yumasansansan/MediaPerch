@@ -422,6 +422,78 @@ the ones that would otherwise be found on somebody else's hardware:
   click at a track boundary, so it is an equality and not a tolerance. The
   filter's tail is drained rather than truncated, and not padded past its end.
 
+### The channel matrix
+
+The third and last geometry a stage can change: the converter changes the sample type,
+`dsp_resample` changes the rate, and `dsp_mix` changes the channel count. With it, the only
+thing that can still make a device refuse a file is a device that refuses everything.
+
+**The rule the whole matrix follows is one sentence:** a channel goes to its own speaker if
+that speaker exists downstream, and is distributed only when it does not. Getting that
+backwards is what makes a 5.1 file played on 5.1 equipment come out with its centre smeared
+into the front pair, and `tests/mix_test.cpp` asserts the identity at 1, 2, 4, 6 and 8
+channels for exactly that reason.
+
+What "distributed" means is settings, all of them, with the convention as the default:
+
+| | Default | |
+|---|---|---|
+| `centre` | −3 dB | the centre into each front speaker |
+| `surround` | −3 dB | each surround into the front on its own side |
+| `lfe` | off | the effects channel is **dropped** |
+| `normalise` | `energy` | `none`, `peak` or `energy` |
+| `synthesise` | off | derive a channel nothing feeds |
+| `matrix` | auto | the coefficients, written out |
+
+**The effects channel is dropped by default and that is a decision.** It is not part of the
+programme the way the others are — it is an effects channel with its own calibration — and
+folding it into a stereo pair at the level it was mixed at is a well-known way to make a
+downmix boom. `lfe=-6` puts it back.
+
+**Upmixing does not invent.** Stereo into 5.1 puts the left channel in the left speaker, the
+right in the right, and *silence* in the centre, the surrounds and the LFE. Deriving a
+centre and a surround that were never recorded is speculation of the same kind as guessing
+the dither a 16-bit master had removed, which §"nothing useful can be done on the way in"
+refuses by name. `synthesise=1` does it anyway, because somebody will want it and because
+refusing to implement it would only move it somewhere with less scrutiny — and even then it
+will not derive an LFE, which is a crossover with an opinion about a frequency rather than
+a matrix.
+
+**Two normalisations, because there are two questions.** `peak` scales so that no row's
+coefficients sum above one, which cannot clip for any input at all and costs 7.66 dB on a
+5.1 downmix — for a case, every channel simultaneously at full scale and in phase, that
+music does not contain. `energy` scales to unit power, keeps the loudness of uncorrelated
+content, and costs 3.01 dB. `energy` is the default. Either way it is **one scale for the
+whole matrix** rather than one per row: scaling rows separately would be tidier arithmetic
+and would move the stereo image, and a downmix that shifts the balance is worse than one
+that is quiet.
+
+A layout nobody agrees on is refused rather than guessed: three channels could be L/R/C or
+L/R/S and those are not the same recording, so without a mask there is no answer and the
+matrix says so.
+
+```
+$ mediaperch-probe play --device-name KA5 --file eight-channel.flac --dsp mix:channels=2
+built  0.6320,0.0000,0.4474,0.0000,0.4474,0.0000,0.4474,0.0000;0.0000,0.6320,…
+level  -3.99   dB the matrix was scaled by to normalise
+peak   0.005591  loudest sample produced
+```
+
+#### Order in the chain, and why it only costs
+
+Every stage in this chain is linear, so a gain, a resample and a mix **commute exactly** —
+put them in any order and the samples that come out are the same to within the last bit of
+a double. What does not commute is the arithmetic: resampling six channels and then
+throwing four of them away is three times the work of throwing them away first.
+
+- A **downmix** is cheapest first: `--dsp mix:channels=2 --dsp resample:rate=48000`.
+- An **upmix** is cheapest last: `--dsp resample:rate=48000 --dsp mix:channels=6`.
+- A gain costs one multiply per sample wherever it goes.
+
+Nothing here reorders anything. The chain runs in the order it was given and the report
+prints that order, because a player that quietly rearranges its own signal path is a player
+whose signal path nobody can reason about.
+
 ### Dither
 
 Rounding alone is not a small error, it is a *correlated* one: the residue is a function of
@@ -587,9 +659,12 @@ modules/             everything that can be loaded and unloaded at runtime.
                      but for native DSD above what DoP can carry. Practical since
                      Steinberg relicensed the ASIO SDK under GPLv3 in October 2025.
   dsp_gain/          the first MpDspVtbl module: a gain, and the peak it saw.
-  dsp_resample/      polyphase, Kaiser-windowed sinc, designed at configure. The
+  dsp_resample/      polyphase, designed at configure by one of three methods. The
                      stage that answers with a rate it was not given.
-  dsp_*/             convolve, crossfeed, ReplayGain. Never present in passthrough.
+  dsp_mix/           the channel matrix. The third geometry, and the one whose
+                     answer is a choice rather than an approximation.
+  dsp_*/             equaliser, convolve, crossfeed, ReplayGain. Never present
+                     in passthrough.
   video_d3d11/       presentation, and the three tone-map providers.
 shell/windows/       the WinUI 3 window. C#, Native AOT, **optional**: the engine runs
                      with none of it on disk, the same way DragonPerch's daemon does.

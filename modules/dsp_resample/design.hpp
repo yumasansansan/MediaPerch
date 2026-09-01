@@ -146,6 +146,27 @@ struct Design {
     /// stopband's shape; clamping low makes the cepstrum longer and needs more
     /// room above.
     double phase_floor_db = 0.0;
+    /// `design=remez` only: the longest prototype the exchange will attempt.
+    ///
+    /// Past about a thousand extremal points the Lagrange interpolation at the
+    /// heart of Parks-McClellan loses conditioning in double precision, and a
+    /// diverged exchange produces a filter-shaped thing that is not a filter.
+    /// The default is where that has been seen to start. It is a setting
+    /// because somebody will want to find out where it really is, and because
+    /// the design is checked against its own deviation afterwards either way --
+    /// so raising this cannot make a bad filter reach the audio, only make the
+    /// refusal take longer.
+    std::uint32_t remez_max_taps = 4097;
+    /// `design=refine` only: how many projection rounds, and how many fruitless
+    /// ones to sit through before believing it has finished. Alternating
+    /// projection is not monotone, so patience is what stops it giving up on
+    /// the first round that does not improve.
+    std::uint32_t refine_rounds = 60;
+    std::uint32_t refine_patience = 6;
+    /// How many points the response is sampled at when it is measured. Eight
+    /// per tap is the rule; this is the ceiling, which is what stops a
+    /// million-tap prototype taking a second to check.
+    std::uint32_t measure_points = 1u << 21;
     /// How many steps the conversion may take. 1 is one filter for the whole
     /// ratio; 0 searches for the cheapest split it can find.
     ///
@@ -188,7 +209,8 @@ struct Response {
 /// `gain` is what the passband is compared against -- `up` for a polyphase
 /// prototype, whose DC gain is the interpolation factor.
 [[nodiscard]] Response measure(const std::vector<double>& h, double passband_edge,
-                               double stopband_edge, double gain);
+                               double stopband_edge, double gain,
+                               std::size_t most_points = std::size_t{1} << 21);
 
 /// The prototype for a polyphase resampler.
 ///

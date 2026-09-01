@@ -433,7 +433,7 @@ void to_minimum_phase(std::vector<double>& h, double floor_db, std::uint32_t ove
 // --------------------------------------------------------------------------
 
 Response measure(const std::vector<double>& h, double passband_edge, double stopband_edge,
-                 double gain)
+                 double gain, std::size_t most_points)
 {
     Response out;
     if (h.empty() || gain == 0.0) {
@@ -445,7 +445,8 @@ Response measure(const std::vector<double>& h, double passband_edge, double stop
     // this honest for the very longest filters, and `points` is reported so a
     // caller can see the resolution it got.
     const std::size_t want = next_power_of_two(std::max<std::size_t>(h.size() * 8, 4096));
-    const std::size_t n = std::min<std::size_t>(want, std::size_t{1} << 21);
+    const std::size_t n =
+        std::min<std::size_t>(want, next_power_of_two(std::max<std::size_t>(most_points, 4096)));
 
     std::vector<std::complex<double>> spectrum(n, {0.0, 0.0});
     for (std::size_t i = 0; i < h.size(); ++i) {
@@ -946,7 +947,7 @@ bool design_prototype(const Design& design, std::uint32_t up, std::uint32_t down
             // the memory. Past about a thousand nodes it loses conditioning in
             // double precision, and a filter that came out of a diverged
             // exchange looks like a filter.
-            constexpr std::size_t k_remez_limit = 4097;
+            const std::size_t k_remez_limit = design.remez_max_taps;
             if (size > k_remez_limit) {
                 why = "Parks-McClellan is exact and this prototype is " +
                       std::to_string(size) + " taps; past " +
@@ -1033,7 +1034,7 @@ bool design_prototype(const Design& design, std::uint32_t up, std::uint32_t down
                     ? std::pow(10.0, design.passband_ripple_db / 20.0) - 1.0
                     : std::pow(10.0, -design.attenuation_db / 20.0);
 
-            const Response start = measure(out, passband_edge, stopband_edge, gain);
+            const Response start = measure(out, passband_edge, stopband_edge, gain, design.measure_points);
             // Never worse in the passband than the window design it started
             // from, and never worse than what was asked for. At a length where
             // the specification cannot be met at all, the first of those is the
@@ -1049,7 +1050,9 @@ bool design_prototype(const Design& design, std::uint32_t up, std::uint32_t down
             // first one leaves most of the gain on the table. Patience is what
             // that costs -- eight fruitless rounds before believing it.
             int patience = 0;
-            for (int round = 0; round < 60 && patience < 6; ++round) {
+            for (int round = 0; round < static_cast<int>(design.refine_rounds) &&
+                                patience < static_cast<int>(design.refine_patience);
+                 ++round) {
                 // Ask for a little better than what it has, until it stops
                 // delivering. Asking for the specification instead would stop
                 // the moment the specification was met, which is the opposite of
@@ -1057,7 +1060,7 @@ bool design_prototype(const Design& design, std::uint32_t up, std::uint32_t down
                 const double target_stop = std::pow(10.0, best.stopband_db / 20.0) * 0.9;
                 project(out, transform, passband_edge, stopband_edge, gain, target_pass,
                         target_stop);
-                const Response now = measure(out, passband_edge, stopband_edge, gain);
+                const Response now = measure(out, passband_edge, stopband_edge, gain, design.measure_points);
                 if (now.stopband_db >= best.stopband_db - 1e-4 ||
                     now.passband_ripple_db > ripple_limit) {
                     ++patience;
@@ -1088,7 +1091,7 @@ bool design_prototype(const Design& design, std::uint32_t up, std::uint32_t down
             }
         }
 
-        achieved = measure(out, passband_edge, stopband_edge, gain);
+        achieved = measure(out, passband_edge, stopband_edge, gain, design.measure_points);
 
         // Parks-McClellan is always checked against *itself*, which is a
         // different question from whether the specification was met. A

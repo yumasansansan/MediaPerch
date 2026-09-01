@@ -215,6 +215,28 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
         d->design.max_taps = static_cast<std::uint32_t>(taps);
         return MP_OK;
     }
+    const auto counted = [&](unsigned long low, unsigned long high,
+                             std::uint32_t& target) {
+        char* end = nullptr;
+        const unsigned long parsed = std::strtoul(value, &end, 10);
+        if (end == value || parsed < low || parsed > high) {
+            return false;
+        }
+        target = static_cast<std::uint32_t>(parsed);
+        return true;
+    };
+    if (std::strcmp(key, "remez_max_taps") == 0) {
+        return counted(65, 1u << 20, d->design.remez_max_taps) ? MP_OK : MP_ERR_INVALID;
+    }
+    if (std::strcmp(key, "refine_rounds") == 0) {
+        return counted(1, 10000, d->design.refine_rounds) ? MP_OK : MP_ERR_INVALID;
+    }
+    if (std::strcmp(key, "refine_patience") == 0) {
+        return counted(1, 1000, d->design.refine_patience) ? MP_OK : MP_ERR_INVALID;
+    }
+    if (std::strcmp(key, "measure_points") == 0) {
+        return counted(4096, 1u << 24, d->design.measure_points) ? MP_OK : MP_ERR_INVALID;
+    }
     if (std::strcmp(key, "cepstrum") == 0) {
         char* end = nullptr;
         const unsigned long factor = std::strtoul(value, &end, 10);
@@ -321,6 +343,29 @@ MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
                           "phase_floor\tauto\tdB below the peak where the logarithm "
                           "stops; auto is 20 under the stopband");
         }
+        return MP_OK;
+    case 19:
+        std::snprintf(out, out_bytes,
+                      "remez_max_taps\t%u\tthe longest prototype design=remez will "
+                      "attempt",
+                      d->design.remez_max_taps);
+        return MP_OK;
+    case 20:
+        std::snprintf(out, out_bytes,
+                      "refine_rounds\t%u\tprojection rounds (design=refine only)",
+                      d->design.refine_rounds);
+        return MP_OK;
+    case 21:
+        std::snprintf(out, out_bytes,
+                      "refine_patience\t%u\tfruitless rounds before stopping "
+                      "(design=refine only)",
+                      d->design.refine_patience);
+        return MP_OK;
+    case 22:
+        std::snprintf(out, out_bytes,
+                      "measure_points\t%u\tceiling on the transform the response is "
+                      "read from",
+                      d->design.measure_points);
         return MP_OK;
     case 16: {
         // The plan that was actually built, which is the only way to see what

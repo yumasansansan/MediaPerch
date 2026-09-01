@@ -294,8 +294,10 @@ negotiation offers the device and how much room the graph allocates all follow f
 answer. It is asked for and never inserted automatically -- §6's refusal is the point of
 this program, and a resampler that appears whenever a device is fussy would quietly end it.
 
-Nothing remixes yet, so a device that wants a different **channel count** is still a
-refusal, and that is now the only geometric conversion missing.
+`modules/dsp_mix` is the third and last geometry: the channel matrix. With the sample type,
+the rate and the channel count all reachable, **the only thing that can still make a device
+refuse a file is a device that refuses everything** -- and every one of them is asked for
+rather than inserted, which is what keeps §6's refusal meaning something.
 
 ### Switching between them
 

@@ -45,6 +45,13 @@ if(TARGET mediaperch_resample)
     target_link_libraries(mediaperch_tests PRIVATE mediaperch_resample)
 endif()
 
+# A downmix is a decision, so the test reads the coefficients rather than
+# listening to what came out.
+if(TARGET mediaperch_mix)
+    target_sources(mediaperch_tests PRIVATE mix_test.cpp)
+    target_link_libraries(mediaperch_tests PRIVATE mediaperch_mix)
+endif()
+
 target_link_libraries(mediaperch_tests
     PRIVATE MediaPerch::core Catch2::Catch2WithMain mediaperch_flags)
 
