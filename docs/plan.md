@@ -17,7 +17,7 @@ twice.
 |---|---|
 | Core language | C++23 (C++20 as the guaranteed floor for library features) |
 | Module language | **anything that can export a C symbol.** v1 is C and C++ only; the ABI has this shape so that a second language stays a cheap option rather than a rewrite — see §2 |
-| Toolchains | MSVC and clang-cl on Windows; Clang on Linux when there is a Linux head. **GCC is not supported anywhere** — a third warning dialect and a third set of quirks for a platform Clang already covers — and configuration refuses it rather than drifting into it |
+| Toolchains | MSVC on Windows; Clang, GNU driver, for the fuzzers and for Linux when there is a Linux head. **GCC is not supported anywhere**, and neither is clang-cl — a compiler that accepts MSVC's spellings and means different things by several of them costs a second reading of every flag in the build. Configuration refuses both rather than drifting into either |
 | Layer | as low as practical. Prefer the platform API over a wrapper when the wrapper adds no capability we need |
 | Audio | WASAPI **exclusive**, event-driven, MMCSS `Pro Audio`. Shared mode is a fallback, not the design centre |
 | Bit-exactness | a testable property, not a marketing word. §12 says how it is tested |

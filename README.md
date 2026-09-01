@@ -34,7 +34,7 @@ FFmpeg found at run time — all hash-identical to each other and to the referen
 everything they read, up to 32-bit at 1,048,575 Hz;
 format negotiation against real drivers; the passthrough graph on two threads; WASAPI
 exclusive down to a 2 ms period; 768 kHz / 32-bit on a USB DAC. 62 tests plus libFuzzer
-targets, on MSVC and clang-cl.
+targets, on MSVC.
 
 ```
 mediaperch-probe devices     # opens nothing, disturbs nothing

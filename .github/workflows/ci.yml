@@ -240,37 +240,3 @@ jobs:
         run: |
           $maps = (Get-ChildItem build/ninja-msvc/bin/Release/*.map).FullName
           python tools/mapsize.py --top 8 @maps
-
-  # A second compiler catches what the first lets through -- and clang is the one
-  # with complete C23, so it is also what proves the ABI header is not quietly
-  # relying on an MSVC extension. clang-cl still needs the MSVC headers and
-  # libraries, so it needs the same developer environment.
-  clang:
-    name: clang-cl, build and test
-    runs-on: windows-2025-vs2026
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: true
-
-      - name: MSVC developer environment
-        shell: cmd
-        run: ${{ env.VS_DEV_ENV }}
-
-      - name: Configure
-        run: cmake --preset ninja-clang
-
-      - name: Build, Debug
-        run: cmake --build --preset ninja-clang-debug
-
-      - name: Test, Debug
-        run: ctest --preset ninja-clang-debug
-
-      # Release is a different compiler and linker path here -- clang-cl does
-      # ThinLTO where MSVC does /GL and /LTCG -- so the MSVC Release job does
-      # not cover it.
-      - name: Build, Release
-        run: cmake --build --preset ninja-clang-release
-
-      - name: Test, Release
-        run: ctest --preset ninja-clang-release

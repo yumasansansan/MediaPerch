@@ -39,18 +39,6 @@
       }
     },
     {
-      "name": "ninja-clang",
-      "inherits": "base",
-      "displayName": "Ninja + clang-cl",
-      "description": "The second compiler. Catches what MSVC lets through, and has full C23.",
-      "generator": "Ninja Multi-Config",
-      "cacheVariables": {
-        "CMAKE_C_COMPILER": "clang-cl",
-        "CMAKE_CXX_COMPILER": "clang-cl",
-        "MEDIAPERCH_EXPECT_TOOLSET": "Clang"
-      }
-    },
-    {
       "name": "core-only",
       "inherits": "ninja-msvc",
       "displayName": "Core alone",
@@ -70,16 +58,22 @@
     },
     {
       "name": "asan",
-      "inherits": "ninja-clang",
-      "displayName": "Ninja + clang-cl, sanitized",
+      "inherits": "base",
+      "displayName": "Clang, sanitized",
+      "description": "The parsers under ASan and UBSan. Clang's GNU driver, like the fuzzers, and like them it builds the core and the modules without the Windows head.",
+      "generator": "Ninja",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "MEDIAPERCH_EXPECT_TOOLSET": "Clang",
+        "MEDIAPERCH_BUILD_PLATFORM": "OFF",
         "MEDIAPERCH_SANITIZE": "ON"
       }
     },
     {
       "name": "fuzz",
-      "displayName": "Fuzzers (clang-cl + libFuzzer)",
+      "displayName": "Fuzzers (Clang + libFuzzer)",
       "description": "libFuzzer over every parser that reads somebody else's file. Uses the GNU-driver clang++ rather than clang-cl: CMake drives lld-link directly for clang-cl, so -fsanitize never reaches the link and the sanitizer runtimes come out undefined.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
@@ -87,7 +81,6 @@
         "CMAKE_CXX_COMPILER": "clang++",
         "MEDIAPERCH_EXPECT_TOOLSET": "Clang",
         "MEDIAPERCH_BUILD_FUZZERS": "ON",
-        "MEDIAPERCH_LTO": "OFF",
         "MEDIAPERCH_BUILD_TESTS": "OFF",
         "MEDIAPERCH_BUILD_PLATFORM": "OFF"
       },
@@ -129,16 +122,6 @@
       "name": "ninja-msvc-relwithdebinfo",
       "configurePreset": "ninja-msvc",
       "configuration": "RelWithDebInfo"
-    },
-    {
-      "name": "ninja-clang-debug",
-      "configurePreset": "ninja-clang",
-      "configuration": "Debug"
-    },
-    {
-      "name": "ninja-clang-release",
-      "configurePreset": "ninja-clang",
-      "configuration": "Release"
     },
     {
       "name": "measure",
@@ -203,28 +186,6 @@
       "name": "ninja-msvc-release",
       "configurePreset": "ninja-msvc",
       "configuration": "Release",
-      "output": {
-        "outputOnFailure": true
-      },
-      "execution": {
-        "noTestsAction": "error"
-      }
-    },
-    {
-      "name": "ninja-clang-release",
-      "configurePreset": "ninja-clang",
-      "configuration": "Release",
-      "output": {
-        "outputOnFailure": true
-      },
-      "execution": {
-        "noTestsAction": "error"
-      }
-    },
-    {
-      "name": "ninja-clang-debug",
-      "configurePreset": "ninja-clang",
-      "configuration": "Debug",
       "output": {
         "outputOnFailure": true
       },

@@ -6,7 +6,7 @@
 | | |
 |---|---|
 | Windows | 10 version 2004 or later. Windows 11 24H2 for the HDR paths, when they exist |
-| Compiler | Visual Studio 2026 (MSVC 19.51 or later), and LLVM/clang-cl as the second opinion. **GCC is not supported on any platform** — Linux will be Clang too — and configuration fails on purpose if it is used |
+| Compiler | Visual Studio 2026 (MSVC 19.51 or later) on Windows; LLVM Clang, GNU driver, for the fuzzers and for Linux when there is a Linux head. **Neither GCC nor clang-cl is supported** — configuration fails on purpose for both |
 | CMake | 3.28 or later |
 | Ninja | for every preset except `vs` |
 
@@ -100,10 +100,9 @@ preset below has a `-release` build and test preset beside its `-debug` one.
 |---|---|---|
 | `vs` | Visual Studio 2026 | day to day. Opens as a real `.sln`, needs no developer prompt |
 | `ninja-msvc` | Ninja Multi-Config | faster, but run it from a developer prompt |
-| `ninja-clang` | Ninja Multi-Config, clang-cl | the second compiler. Catches what MSVC lets through |
 | `measure` | Visual Studio 2026 | Release **with the measuring apparatus kept** — see below |
 | `core-only` | Ninja Multi-Config | what CI builds to keep `src/core` portable |
-| `asan` | Ninja Multi-Config, clang-cl | the address and undefined-behaviour sanitizers |
+| `asan` | Ninja, Clang | the parsers under ASan and UBSan, like the fuzzers |
 
 ## What a Release build leaves out
 
@@ -157,21 +156,39 @@ point, which is precisely the transformation the measurements in
 [formats.md](formats.md) exist to prove did not happen. Speed that costs a digit
 is not speed this project wants.
 
-Four options remain, and none of them changes the arithmetic:
+**A Release build prints `D9025: '/Ob3' takes precedence over '/Ob2'` once per
+file of libFLAC, and that is correct.** libFLAC's own CMakeLists prepends
+`/O2 /Ob2 /Oi /Ot /Oy` to the Release flags; `/Ob3` is added after them and
+wins, which is the intent. Silencing it would mean either patching a submodule
+or inlining less.
+
+Link-time optimisation is not a switch either: it is part of what Release *is*.
+The two builds that do without it are the sanitized one and the fuzzers, which
+exist to observe the program rather than to be fast -- cross-module inlining
+moves the frames a sanitizer report and a fuzzer crash both point at. Everything
+else gets it, and **a toolchain that cannot do it stops the configure** rather
+than quietly building something else: a Release binary without LTO is not the
+binary this project measures, and the difference would arrive months later
+looking like an unexplained regression.
+
+Three options remain, and none of them changes the arithmetic:
 
 | Option | Default | What it does |
 |---|---|---|
-| `MEDIAPERCH_LTO` | **ON** | optimise across translation units in every optimised configuration |
 | `MEDIAPERCH_DIAGNOSTICS` | OFF | keep the measuring commands in an optimised build |
 | `MEDIAPERCH_LINK_MAP` | OFF | a `.map` beside every binary, for `tools/mapsize.py` |
-| `MEDIAPERCH_SANITIZE` | OFF | ASan and UBSan |
+| `MEDIAPERCH_SANITIZE` | OFF | ASan and UBSan, and no LTO with them |
 
-**LTO is a hard failure when it is unavailable, not a silent fallback.**
-`check_ipo_supported` runs at configure time and a toolchain that cannot do it
-stops the configure with the reason and with `-D MEDIAPERCH_LTO=OFF` written out
-as the way past. The alternative is worse than it sounds: the binary somebody
-measures would not be the binary somebody else measured, and the difference
-would arrive months later looking like an unexplained regression.
+`cmake/CompilerOptions.cmake` is one block per toolchain, and there are two:
+**MSVC** on Windows and **Clang's GNU driver** everywhere else. Each lists its
+own warnings, hardening and optimisation in full, and they share no spelling.
+
+That is why **clang-cl is refused rather than supported**. It is Clang wearing
+MSVC's words and meaning different things by several of them — `/Ob3` maps to a
+different inliner, `/Zc:preprocessor` is a no-op it warns about, MSVC warning
+numbers name nothing — so every flag in the file needed a second reading to work
+out which compilers it reached. Two toolchains that share nothing are simpler
+than three that share most things, and Linux arrives with a real Clang anyway.
 
 ## What makes a binary big
 
