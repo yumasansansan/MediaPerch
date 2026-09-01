@@ -75,9 +75,23 @@ Generated with ffmpeg and `flac 1.5`, decoded by this tree, played on this endpo
 | MP3, AAC, Vorbis, Opus, WavPack — all report F32 | refused | **converted to S32** |
 | AIFF S16/44100 | **memcpy** | — |
 
-The refusals are the interesting half. Everything in the "still refused" column needs a
-resampler or a channel mixer, neither of which exists yet, and **nothing was quietly
-converted to make it play** — which is the whole argument of §6.
+The refusals are the interesting half. **Nothing was quietly converted to make it play**,
+which is the whole argument of §6.
+
+Since then `dsp_resample` exists, and every refusal in that column whose cause was the
+*rate* is now playable when it is asked for — including the two extremes:
+
+```
+$ mediaperch-probe play --device-name KA5 --file wav_s32_2822400_2.wav       --dsp resample:rate=192000
+ratio 10/147, 2294 taps per output frame, 2.00 s played, 0 underruns
+
+$ mediaperch-probe play --device-name KA5 --file flac32_32_1048575_2.flac       --dsp resample:rate=96000
+1.00 s played, 0 underruns
+```
+
+A 45-second run of 44100 → 768000 at `quality=best` — 34.5 million frames, 2560/147, 474
+taps each — also reported zero underruns at the 3 ms period. What is still refused is what
+needs a **channel** conversion: the 8-channel files, and the mono one.
 
 ## Realtek onboard — "スピーカー"
 

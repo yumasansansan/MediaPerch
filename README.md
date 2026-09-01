@@ -33,7 +33,7 @@ Working: four decoders chosen by probe — libFLAC, two single headers, Media Fo
 FFmpeg found at run time — all hash-identical to each other and to the reference on
 everything they read, up to 32-bit at 1,048,575 Hz;
 format negotiation against real drivers; the passthrough graph on two threads; WASAPI
-exclusive down to a 2 ms period; 768 kHz / 32-bit on a USB DAC. 126 tests plus libFuzzer
+exclusive down to a 2 ms period; 768 kHz / 32-bit on a USB DAC. 136 tests plus libFuzzer
 targets, on MSVC.
 
 ```

@@ -38,6 +38,13 @@ if(TARGET mediaperch_alac)
     target_link_libraries(mediaperch_tests PRIVATE mediaperch_alac mediaperch_mp4 mediaperch_aac)
 endif()
 
+# The resampler is measured, not sampled: the tests take its response apart with
+# a DFT and compare it with the specification it was designed to.
+if(TARGET mediaperch_resample)
+    target_sources(mediaperch_tests PRIVATE resample_test.cpp)
+    target_link_libraries(mediaperch_tests PRIVATE mediaperch_resample)
+endif()
+
 target_link_libraries(mediaperch_tests
     PRIVATE MediaPerch::core Catch2::Catch2WithMain mediaperch_flags)
 

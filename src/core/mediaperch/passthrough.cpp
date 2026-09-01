@@ -111,11 +111,22 @@ MpResult PassthroughGraph::start()
     const std::size_t got = ring_.read(buffer, want);
     if (got < want) {
         std::memset(static_cast<std::uint8_t*>(buffer) + got, 0, want - got);
+        // A file shorter than one device period, which is 3 ms. Rare, real, and
+        // silence at the start rather than at the end.
+        silent_frames_.fetch_add((want - got) / wire_frame_bytes_,
+                                 std::memory_order_relaxed);
     }
     r = sink_->commit(frames, 0);
     if (r != MP_OK) {
         return r;
     }
+    // **Counted here, not only in the render loop.** This period is played:
+    // `Initialize` allocates two buffers and this fills the first one, which is
+    // what the device begins with. Leaving it out made every report in this
+    // program one period short of what the device was actually handed -- 3 ms,
+    // consistently, which is exactly the size of thing that gets explained away
+    // as a rounding error rather than counted.
+    frames_rendered_.fetch_add(frames, std::memory_order_relaxed);
 
     running_.store(true, std::memory_order_release);
 

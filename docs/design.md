@@ -182,6 +182,72 @@ module through `describe` rather than out of a table in the host -- which is the
 the call: a shell can offer a stage it was never compiled against. `--shape list` does the
 same for the dither and shaping algorithms, of which there are rather a lot.
 
+### The resampler
+
+The stage `MpDspVtbl` was shaped for, and the first one whose answer to
+`configure` is a different sample rate. `--dsp resample:rate=48000`.
+
+It is a **polyphase FIR with a Kaiser-windowed sinc, designed at `configure`
+rather than transcribed**. That is the opposite choice from the noise-shaping
+curves and for the same reason: those are measurements of hearing and cannot be
+derived, this has a closed form four lines long, and a table of numbers copied
+out of another project is a table nobody in this tree could check.
+
+The ratio is rational and reduced — 44100 → 48000 is 160/147 — and each output
+sample costs one phase of the filter, not the whole of it. Two numbers decide
+everything else:
+
+| | Stopband | Passband | Taps at 160/147 |
+|---|---|---|---|
+| `quality=fast` | 96 dB | 91% of Nyquist | 70 |
+| `quality=good` **(default)** | 120 dB | 95% | 158 |
+| `quality=best` | 144 dB | 98% | 474 |
+
+`attenuation` and `bandwidth` are also settable directly, which is what the
+presets set.
+
+**A rate pair that does not reduce is refused, by name.** 44100 → 44101 reduces
+to 44101/44100: every phase is a separate filter and there are 44101 of them.
+`configure` says so and names the count rather than allocating seven million
+coefficients. An arbitrary-ratio resampler interpolates between phases and is a
+different program, worth writing deliberately rather than discovering by
+accident.
+
+**It is never inserted automatically.** A resampler that appears whenever a
+device is fussy is how a bit-exact player stops being one quietly. `--path auto`
+still refuses a device that wants a rate the file does not have; asking for the
+stage is what changes that, and the report then says `PROCESSED`.
+
+#### What it measures
+
+`tests/resample_test.cpp` takes the response apart with a coherent single-bin
+DFT — every frequency it uses completes a whole number of cycles in the window
+analysed, so there is no window function anywhere to explain a result away.
+Against the `good` preset, whose design target is 120 dB:
+
+| Measured | Design asked for | Got |
+|---|---|---|
+| THD+N under a 1 kHz tone, 44.1 → 48 kHz | −120 dB | **−152 dB** |
+| A 30 kHz tone downsampled 96 → 44.1 kHz, folded to 14.1 kHz | −120 dB | **−138 dB** |
+| Passband error, 50 Hz to 20 kHz | flat | **< 5 × 10⁻⁶ dB** |
+| 44.1 → 48 → 44.1 kHz round trip, `best` | — | **161 dB SNR** |
+
+Kaiser's order estimate is conservative, which is why every row beats its
+target. Three more properties are asserted rather than measured, and they are
+the ones that would otherwise be found on somebody else's hardware:
+
+- **1:1 is a unit impulse.** Not a branch — the filter is really designed at
+  44100 → 44100, and every tap but the centre one is exactly zero, because an
+  integer centre and a cutoff at Nyquist put them on the sinc's own zeros.
+  `process` does take the branch; the test is there so that the branch is
+  skipping a redundant filter rather than hiding a broken one.
+- **The block size changes nothing, bit for bit.** The device decides the
+  period: 132 frames here, 4096 elsewhere. The same input in blocks of 1, 7,
+  132, 1000 and 4096 produces byte-identical output.
+- **The output is exactly `ceil(n × L / M)` frames.** A frame either way is a
+  click at a track boundary, so it is an equality and not a tolerance. The
+  filter's tail is drained rather than truncated, and not padded past its end.
+
 ### Dither
 
 Rounding alone is not a small error, it is a *correlated* one: the residue is a function of
@@ -347,7 +413,9 @@ modules/             everything that can be loaded and unloaded at runtime.
                      but for native DSD above what DoP can carry. Practical since
                      Steinberg relicensed the ASIO SDK under GPLv3 in October 2025.
   dsp_gain/          the first MpDspVtbl module: a gain, and the peak it saw.
-  dsp_*/             resample, convolve, crossfeed. Never present in passthrough.
+  dsp_resample/      polyphase, Kaiser-windowed sinc, designed at configure. The
+                     stage that answers with a rate it was not given.
+  dsp_*/             convolve, crossfeed, ReplayGain. Never present in passthrough.
   video_d3d11/       presentation, and the three tone-map providers.
 shell/windows/       the WinUI 3 window. C#, Native AOT, **optional**: the engine runs
                      with none of it on disk, the same way DragonPerch's daemon does.

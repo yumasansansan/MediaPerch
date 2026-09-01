@@ -244,7 +244,10 @@ Options
                     `--dsp list` prints every stage that is loaded, with every
                     setting it has and what that setting is now. A stage exists
                     to change the samples, so asking for one implies
-                    --path processed
+                    --path processed. The one most people want is
+                      --dsp resample:rate=48000[,quality=fast|good|best]
+                    which is the only way a rate the device refuses ever gets
+                    changed: nothing here resamples on its own
   --dither KIND     Path B only, and only where bits are actually being thrown
                     away. `triangular` (default) is the standard answer;
                     `highpass` is the same distribution with its noise tilted
@@ -614,8 +617,10 @@ void report_refusal(const mp::Negotiated& negotiated)
         std::fprintf(stderr,
                      "--path processed asks Path B for a format this device will take, and\n"
                      "it took none of the %zu offered: %s\n"
-                     "Path B converts the sample type and applies a gain. It does not\n"
-                     "resample and does not change the channel count.\n",
+                     "Path B converts the sample type and applies a gain, and a\n"
+                     "`--dsp resample:rate=N` stage changes the sample rate. Nothing here\n"
+                     "changes the channel count, so a device that wants a different one\n"
+                     "is still a refusal.\n",
                      negotiated.tried, result_name(negotiated.last_error));
         return;
     case mp::PathPolicy::automatic:
