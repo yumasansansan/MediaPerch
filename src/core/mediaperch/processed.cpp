@@ -256,9 +256,6 @@ void ProcessedGraph::render_loop() noexcept
         const std::size_t got = ring_.read(buffer, want);
         if (got < want) {
             std::memset(static_cast<std::uint8_t*>(buffer) + got, 0, want - got);
-            underruns_.fetch_add(1, std::memory_order_relaxed);
-            silent_frames_.fetch_add((want - got) / wire_frame_bytes_,
-                                     std::memory_order_relaxed);
         }
 
         const MpResult committed = sink_->commit(frames, 0);
@@ -268,8 +265,26 @@ void ProcessedGraph::render_loop() noexcept
         }
         frames_rendered_.fetch_add(frames, std::memory_order_relaxed);
 
-        if (drained_.load(std::memory_order_acquire) && ring_.readable() < wire_frame_bytes_) {
-            running_.store(false, std::memory_order_release);
+        // Nothing left to play and nothing coming.
+        const bool finishing =
+            drained_.load(std::memory_order_acquire) && ring_.readable() < wire_frame_bytes_;
+        if (got < want) {
+            // **A file's last period is not an underrun.** The device is owed a
+            // whole period and the file ended in the middle of one, so the rest
+            // is padded -- which is the end of the stream, not starvation, and
+            // counting it as starvation would make the underrun count useless
+            // for the only thing anybody plays. Asked after the commit rather
+            // than before it, which is as much time as can be given to the
+            // decode thread to have published that it finished.
+            auto& counter = finishing ? tail_frames_ : silent_frames_;
+            counter.fetch_add((want - got) / wire_frame_bytes_, std::memory_order_relaxed);
+            if (!finishing) {
+                underruns_.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+
+        if (finishing) {
+            running_.store(false, std::memory_order_release); // rather than silence for ever
         }
     }
 
@@ -284,6 +299,7 @@ ProcessedGraph::Stats ProcessedGraph::stats() const noexcept
     out.frames_rendered = frames_rendered_.load(std::memory_order_relaxed);
     out.underruns = underruns_.load(std::memory_order_relaxed);
     out.silent_frames = silent_frames_.load(std::memory_order_relaxed);
+    out.tail_frames = tail_frames_.load(std::memory_order_relaxed);
     out.wait_timeouts = wait_timeouts_.load(std::memory_order_relaxed);
     out.frames_decoded = frames_decoded_.load(std::memory_order_relaxed);
     return out;

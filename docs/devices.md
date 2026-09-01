@@ -36,15 +36,19 @@ Configured (shared-mode engine format): 192000 Hz, 24-bit, `nBlockAlign = 6`.
 
 Configured: 384000 Hz, 32-bit, `nBlockAlign = 8`.
 
-Every combination of {44100, 48000, 96000, 192000, 384000, 705600, 768000} Hz and
-{16, 24, 32} bits was accepted. The minimum period is 3.00 ms at every rate.
-
 | Asked for | Accepted as | Candidate |
 |---|---|---|
-| any rate / 16 | `S16`, no mask | 1 |
-| any rate / 24 | `S24_PACKED`, no mask | 3 |
-| any rate / 32 | `S32`, no mask | 1 |
+| any rate in range / 16 | `S16`, no mask | 1 |
+| any rate in range / 24 | `S24_PACKED`, no mask | 3 |
+| any rate in range / 32 | `S32`, no mask | 1 |
 
+- **The rate is a continuous range, not a list.** 44100 is accepted and 44099 is not; 768000
+  is accepted and 768001 is not; and **123457 Hz is accepted**, which no dropdown anywhere
+  offers. Measured by bisection with `negotiate`, one rate at a time. Whether the DAC clocks
+  an arbitrary rate or resamples it internally cannot be seen from this side of
+  `ReleaseBuffer`, and the negotiation answer is the same either way: the device says yes.
+- **Stereo only.** 1 channel and 6 channels are refused at every width, so a mono file and a
+  5.1 file both need a mixer that does not exist yet — and are refused rather than folded.
 - **768 kHz works**, and so does 705600. The shared-mode dropdown stops at 384000, which is
   a reminder that the dropdown is a setting and not a capability list.
 - **Needs no channel mask**, at any width — the opposite of the virtual cable.
@@ -52,6 +56,28 @@ Every combination of {44100, 48000, 96000, 192000, 384000, 705600, 768000} Hz an
   are refused; candidate 3 is accepted. Two independent devices, same answer.
 - Played 8 s at 768000/32 — 6,179,328 frames, 49 MB/s through the ring — with zero
   underruns under MMCSS `Pro Audio`, on the memcpy path.
+- 60 s of an MP3 through Path B at 44100/32, minimum period, zero underruns.
+
+### What a 33-file format matrix did on it
+
+Generated with ffmpeg and `flac 1.5`, decoded by this tree, played on this endpoint with
+`--device-name KA5`. Every file decoded; the table is what negotiation then did with it.
+
+| Source | Path A | With `--path auto` |
+|---|---|---|
+| WAV U8/8000/mono, S16/44100/16ch, S32/2822400 | refused | still refused: the rate or the channel count |
+| WAV S16/44100, S24/96000, S32/192000 stereo | **memcpy** | — |
+| WAV F32/384000, F64/768000 stereo | refused: no float | **converted to S32** |
+| FLAC 16/44100, 16/655350, 24/96000, 24 and 32/192000 stereo | **memcpy** | — |
+| FLAC 32/1048575, the format's own ceiling, and every 8-channel file | refused | still refused |
+| ALAC 16/44100, 24/96000, 24/192000, 24/384000 stereo | **memcpy** | — |
+| ALAC 8-channel | refused | still refused |
+| MP3, AAC, Vorbis, Opus, WavPack — all report F32 | refused | **converted to S32** |
+| AIFF S16/44100 | **memcpy** | — |
+
+The refusals are the interesting half. Everything in the "still refused" column needs a
+resampler or a channel mixer, neither of which exists yet, and **nothing was quietly
+converted to make it play** — which is the whole argument of §6.
 
 ## Realtek onboard — "スピーカー"
 

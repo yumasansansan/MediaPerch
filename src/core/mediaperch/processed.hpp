@@ -133,6 +133,7 @@ private:
     std::atomic<std::uint64_t> frames_rendered_{0};
     std::atomic<std::uint64_t> underruns_{0};
     std::atomic<std::uint64_t> silent_frames_{0};
+    std::atomic<std::uint64_t> tail_frames_{0};
     std::atomic<std::uint64_t> wait_timeouts_{0};
     std::atomic<std::uint64_t> frames_decoded_{0};
 };

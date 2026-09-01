@@ -955,6 +955,12 @@ real time.
   MediaPerch will do that by default with an opt-out for people who want to keep the DAC.
 - **`AUDCLNT_STREAMFLAGS_EVENTCALLBACK` is required for the low-latency path**, and
   `Initialize` then allocates two buffers used ping-pong. Prefill the first before `Start`.
+- **`main`'s `argv` is in the process code page, and the ABI says UTF-8.** On a Japanese
+  machine the two differ, and a file whose name is not ASCII reaches a decoder as bytes that
+  name nothing — which surfaces as "no decoder recognised this file" and reads as a decoder
+  bug rather than an encoding one. `CommandLineToArgvW` over `GetCommandLineW` is the only
+  copy of the arguments that was never lossy. `SetConsoleOutputCP(CP_UTF8)` is the other
+  half: without it the player cannot print the name of the file it just opened.
 - **MMCSS: `AvSetMmThreadCharacteristics(L"Pro Audio")`**, reverted on stop. WASAPI itself
   applies `Pro Audio` to its transport threads below a 10 ms device period and `Audio` above
   it, so the numbers line up.

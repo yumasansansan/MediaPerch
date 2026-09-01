@@ -47,6 +47,9 @@ public:
         /// Device buffers that the ring could not fill completely.
         std::uint64_t underruns = 0;
         std::uint64_t silent_frames = 0;
+        /// Frames of silence written to fill the device's last period after the
+        /// source ended. Expected, and not an underrun.
+        std::uint64_t tail_frames = 0;
         /// The device did not signal within the timeout. Usually means it went away.
         std::uint64_t wait_timeouts = 0;
         std::uint64_t frames_decoded = 0;
@@ -124,6 +127,7 @@ private:
     std::atomic<std::uint64_t> frames_rendered_{0};
     std::atomic<std::uint64_t> underruns_{0};
     std::atomic<std::uint64_t> silent_frames_{0};
+    std::atomic<std::uint64_t> tail_frames_{0};
     std::atomic<std::uint64_t> wait_timeouts_{0};
     std::atomic<std::uint64_t> frames_decoded_{0};
 };

@@ -16,7 +16,7 @@ add_library(MediaPerch::win ALIAS mediaperch_win)
 target_include_directories(mediaperch_win PUBLIC "${CMAKE_CURRENT_LIST_DIR}")
 target_link_libraries(mediaperch_win
     PUBLIC MediaPerch::core
-    PRIVATE mediaperch_flags mediaperch_waveformat avrt ole32 bcrypt)
+    PRIVATE mediaperch_flags mediaperch_waveformat avrt ole32 bcrypt shell32)
 
 set_target_properties(mediaperch_win PROPERTIES FOLDER "win")
 

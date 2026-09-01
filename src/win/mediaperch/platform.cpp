@@ -382,6 +382,46 @@ std::FILE* open_utf8(const std::string& path, const wchar_t* mode) noexcept
     return file;
 }
 
+std::vector<std::string> command_line_utf8()
+{
+    std::vector<std::string> out;
+    int count = 0;
+    wchar_t** wide = CommandLineToArgvW(GetCommandLineW(), &count);
+    if (wide == nullptr) {
+        return out;
+    }
+    out.reserve(static_cast<std::size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        const int bytes =
+            WideCharToMultiByte(CP_UTF8, 0, wide[i], -1, nullptr, 0, nullptr, nullptr);
+        if (bytes <= 1) {
+            out.emplace_back();
+            continue;
+        }
+        std::string narrow(static_cast<std::size_t>(bytes - 1), '\0');
+        WideCharToMultiByte(CP_UTF8, 0, wide[i], -1, narrow.data(), bytes, nullptr, nullptr);
+        out.push_back(std::move(narrow));
+    }
+    LocalFree(wide);
+    return out;
+}
+
+ConsoleUtf8::ConsoleUtf8() noexcept : previous_(GetConsoleOutputCP())
+{
+    if (previous_ != CP_UTF8) {
+        SetConsoleOutputCP(CP_UTF8);
+    }
+}
+
+ConsoleUtf8::~ConsoleUtf8()
+{
+    // Put it back: the code page belongs to the console window, not to this
+    // process, and leaving it changed outlives the program.
+    if (previous_ != 0 && previous_ != CP_UTF8) {
+        SetConsoleOutputCP(previous_);
+    }
+}
+
 std::filesystem::path module_directory()
 {
     wchar_t buffer[MAX_PATH * 2]{};

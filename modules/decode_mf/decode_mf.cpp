@@ -139,9 +139,16 @@ MpResult MP_CALL decoder_probe(const char* path, const std::uint8_t* head, std::
     // are the ones nothing else in the tree handles.
     if (has(head, bytes, "ftyp", 4)) {
         *out_score = 100; // MP4, M4A
-    } else if (has(head, bytes, "ID3", 0) ||
-               (bytes >= 2 && head[0] == 0xFF && (head[1] & 0xE0) == 0xE0)) {
-        *out_score = 100; // MP3
+    } else if (bytes >= 2 && head[0] == 0xFF && (head[1] & 0xE0) == 0xE0) {
+        *out_score = 100; // MP3: an actual frame header, at the front
+    } else if (has(head, bytes, "ID3", 0)) {
+        // **An ID3v2 tag identifies nothing.** FLAC and WAV files carry them
+        // too, and a tag with cover art in it is easily larger than the four
+        // kilobytes a probe is given -- which is exactly the case where
+        // decode_mp3 has to claim weakly because the frame header is out of
+        // reach. Claiming 100 here took every ordinary tagged MP3 away from the
+        // decoder that does gapless, and this decoder does not.
+        *out_score = 60;
     } else if (has(head, bytes, "\x30\x26\xB2\x75", 0)) {
         *out_score = 100; // ASF, WMA
     } else if (has(head, bytes, "RIFF", 0) && has(head, bytes, "WAVE", 8)) {

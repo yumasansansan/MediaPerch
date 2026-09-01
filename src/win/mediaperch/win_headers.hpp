@@ -12,3 +12,5 @@
 
 #include <avrt.h>
 #include <objbase.h>
+// CommandLineToArgvW: the only correct splitter for Windows quoting rules.
+#include <shellapi.h>

@@ -329,7 +329,13 @@ modules/             everything that can be loaded and unloaded at runtime.
                      into WAVE order and changes nothing else.
 
   decode_mf/         Media Foundation source reader, and now the last resort rather than
-                     the answer for MP3 and AAC. Hardware video decode comes with it
+                     the answer for MP3 and AAC. Its probe once claimed 100 for
+                     anything beginning "ID3", which took every tagged MP3 — that
+                     is, nearly all of them — away from the decoder that does
+                     gapless: a tag with cover art in it is larger than the four
+                     kilobytes a probe is given, so dr_mp3 can only claim 60 there.
+                     An ID3 tag identifies nothing, so this claims 60 as well and
+                     priority decides, which is what priority is for. Hardware video decode comes with it
                      and it is measurably bit-exact for WAV and FLAC -- but it reads
                      gapless metadata in no codec, clips float WAV, and scrambles
                      multichannel ALAC. It stays because it needs nothing installed.

@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -41,12 +42,18 @@ struct Options {
     std::string capture; // capture endpoint id; empty = find one by name
     int capture_index = -1;
     int device_index = -1; // -1 = the system default
+    /// Part of an endpoint's name, matched case-insensitively. An alternative
+    /// to the index, which changes when a device is plugged in.
+    std::string device_name;
     std::uint32_t rate = 44100;
     std::uint32_t bits = 16;
     std::uint32_t channels = 2;
     double hz = 1000.0;
     double amplitude = 0.5;
     unsigned seconds = 10;
+    /// Whether `--seconds` was actually asked for. A file plays to its end
+    /// unless somebody said otherwise; a tone has no end and needs the default.
+    bool seconds_given = false;
     std::uint64_t seek = 0;
     mp::PathPolicy path = mp::PathPolicy::bit_exact;
     double gain = 1.0;
@@ -252,6 +259,10 @@ Options
                     a seek to N must equal the hash of the last (length - N)
                     frames of a straight decode, which is what makes seeking
                     testable at all
+  --device-name S   the endpoint whose name contains S, case-insensitively.
+                    Refuses rather than guesses when two of them match, because
+                    opening the wrong endpoint in exclusive mode takes that
+                    device away from everything else on the machine
   --shared          shared mode instead of exclusive
   --loopback        `verify` also records from a capture endpoint and reports
                     whether the loopback returned the bytes unchanged. Read
@@ -412,7 +423,12 @@ bool parse(int argc, char** argv, Options& out)
                 return false;
             }
             out.seek = std::strtoull(argv[++i], nullptr, 10);
+        } else if (arg == "--device-name") {
+            if (i + 1 < argc) {
+                out.device_name = argv[++i];
+            }
         } else if (arg == "--seconds") {
+            out.seconds_given = true;
             std::uint32_t s = 0;
             value(s);
             out.seconds = s;
@@ -505,17 +521,69 @@ int list_devices(const MpSinkVtbl& sink)
 }
 
 /// Resolve --device N into an endpoint id. Empty means the default endpoint.
-bool device_id_for(const MpSinkVtbl& sink, int index, std::string& out)
+/// ASCII-lowered, which is all a substring match on a device name needs.
+std::string lowered(std::string_view text)
 {
-    if (index < 0) {
+    std::string out{text};
+    for (char& c : out) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+    return out;
+}
+
+/// The endpoint to open: an index, part of a name, or the default.
+///
+/// **An ambiguous name is refused rather than resolved.** In exclusive mode
+/// opening the wrong endpoint is not a small mistake -- it takes that device
+/// away from everything else on the machine -- so a name that matches two
+/// devices ends the command instead of picking one.
+bool device_id_for(const MpSinkVtbl& sink, const Options& options, std::string& out)
+{
+    if (!options.device_name.empty()) {
+        const std::string want = lowered(options.device_name);
+        std::vector<std::pair<std::string, std::string>> hits; // name, id
+        MpDeviceInfo info{};
+        for (std::uint32_t index = 0;; ++index) {
+            info.size = sizeof(info);
+            const MpResult r = sink.enumerate(index, &info);
+            if (r == MP_END) {
+                break;
+            }
+            if (r != MP_OK) {
+                std::fprintf(stderr, "enumerate failed: %s\n", result_name(r));
+                return false;
+            }
+            if (lowered(info.name).find(want) != std::string::npos) {
+                hits.emplace_back(info.name, info.id);
+            }
+        }
+        if (hits.empty()) {
+            std::fprintf(stderr, "no endpoint matches `%s`\n", options.device_name.c_str());
+            return false;
+        }
+        if (hits.size() > 1) {
+            std::fprintf(stderr, "`%s` matches %zu endpoints:\n", options.device_name.c_str(),
+                         hits.size());
+            for (const auto& hit : hits) {
+                std::fprintf(stderr, "  %s\n", hit.first.c_str());
+            }
+            return false;
+        }
+        out = hits.front().second;
+        return true;
+    }
+
+    if (options.device_index < 0) {
         out.clear();
         return true;
     }
     MpDeviceInfo info{};
     info.size = sizeof(info);
-    const MpResult r = sink.enumerate(static_cast<std::uint32_t>(index), &info);
+    const MpResult r = sink.enumerate(static_cast<std::uint32_t>(options.device_index), &info);
     if (r != MP_OK) {
-        std::fprintf(stderr, "no device with index %d\n", index);
+        std::fprintf(stderr, "no device with index %d\n", options.device_index);
         return false;
     }
     out = info.id;
@@ -582,7 +650,7 @@ int negotiate(const MpSinkVtbl& vtbl, const Options& options)
     }
 
     std::string device_id;
-    if (!device_id_for(vtbl, options.device_index, device_id)) {
+    if (!device_id_for(vtbl, options, device_id)) {
         return 1;
     }
     mp::Sink sink = open_sink(vtbl, device_id, options.shared);
@@ -645,7 +713,7 @@ int negotiate(const MpSinkVtbl& vtbl, const Options& options)
 /// ask it how it went.
 template <typename Graph>
 int run_graph(Graph& graph, mp::win::RenderThreadHooks& hooks, const mp::Format& wire,
-              const Options& options)
+              unsigned limit_seconds)
 {
 
     const MpResult started = graph.start();
@@ -669,10 +737,12 @@ int run_graph(Graph& graph, mp::win::RenderThreadHooks& hooks, const mp::Format&
     }
 
     const auto began = std::chrono::steady_clock::now();
-    const auto until = began + std::chrono::seconds{options.seconds};
+    // A file with a known end plays to it; a tone is asked to stop.
+    const bool timed = limit_seconds != 0;
+    const auto until = began + std::chrono::seconds{limit_seconds};
     auto next_report = began + std::chrono::seconds{5};
 
-    while (std::chrono::steady_clock::now() < until && graph.running()) {
+    while ((!timed || std::chrono::steady_clock::now() < until) && graph.running()) {
         std::this_thread::sleep_for(std::chrono::milliseconds{100});
         const auto now = std::chrono::steady_clock::now();
         if (now >= next_report) {
@@ -701,6 +771,11 @@ int run_graph(Graph& graph, mp::win::RenderThreadHooks& hooks, const mp::Format&
                     static_cast<unsigned long long>(stats.silent_frames));
     }
     std::printf("\ntimeouts   %llu\n", static_cast<unsigned long long>(stats.wait_timeouts));
+    if (stats.tail_frames != 0) {
+        // Said plainly, because it looks like a fault and is not one.
+        std::printf("tail       %llu frames of padding: the file ended mid-period\n",
+                    static_cast<unsigned long long>(stats.tail_frames));
+    }
 
     const MpResult error = graph.error();
     if (error != MP_OK) {
@@ -708,6 +783,30 @@ int run_graph(Graph& graph, mp::win::RenderThreadHooks& hooks, const mp::Format&
         return 1;
     }
     return stats.underruns == 0 ? 0 : 2;
+}
+
+/// The best-ranked decoder that can actually open the file.
+///
+/// Probing is cheap and reads four kilobytes; opening is the real test, and
+/// mp::Decoder makes it a real test by requiring one frame of audio to come out.
+/// A decoder can score highest and still refuse -- decode_mf declines
+/// multichannel ALAC, decode_native cannot read a 32-bit FLAC -- and the right
+/// answer to that is the next candidate.
+///
+/// Falls back to the first entry when nothing opens, so the error the user sees
+/// comes from the decoder that claimed the file most confidently rather than
+/// from whichever one happened to be last.
+mp::win::ModuleRegistry::DecoderChoice first_that_opens(
+    const std::vector<mp::win::ModuleRegistry::DecoderChoice>& ranked,
+    const std::string& path)
+{
+    for (const auto& candidate : ranked) {
+        mp::Decoder probe;
+        if (probe.open(*candidate.vtbl, path.c_str()) == MP_OK) {
+            return candidate;
+        }
+    }
+    return ranked.empty() ? mp::win::ModuleRegistry::DecoderChoice{} : ranked.front();
 }
 
 /// One `--dsp` argument: `name` or `name:key=value,key=value`.
@@ -800,17 +899,54 @@ int list_dsp_modules(const mp::win::ModuleRegistry& registry)
 int play(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
          const Options& options)
 {
-    if (options.float_source) {
-        std::fprintf(stderr,
-                     "--float is for `negotiate`: the tone generator writes integers.\n");
-        return 1;
+    // Either a file or the tone generator. Both are an ISource and the graph
+    // cannot tell them apart, which is the reason `Decoder` is one.
+    mp::Decoder decoder;
+    std::optional<mp::SineSource> tone;
+    mp::ISource* source = nullptr;
+    std::string decoder_name;
+
+    if (!options.file.empty()) {
+        const auto ranked = registry.decoders_for(options.file, options.decoder_id);
+        const auto choice = first_that_opens(ranked, options.file);
+        if (choice.vtbl == nullptr) {
+            std::fprintf(stderr, "no decoder %s %s\n",
+                         options.decoder_id.empty() ? "recognised" : "called",
+                         options.decoder_id.empty() ? options.file.c_str()
+                                                    : options.decoder_id.c_str());
+            return 1;
+        }
+        const MpResult opened = decoder.open(*choice.vtbl, options.file.c_str());
+        if (opened != MP_OK) {
+            std::fprintf(stderr, "%s could not open %s: %s%s%s\n", choice.desc->id,
+                         options.file.c_str(), result_name(opened),
+                         decoder.why().empty() ? "" : " -- ", decoder.why().c_str());
+            return 1;
+        }
+        if (options.seek != 0 && decoder.seek(options.seek) != MP_OK) {
+            std::fprintf(stderr, "could not seek to frame %llu\n",
+                         static_cast<unsigned long long>(options.seek));
+            return 1;
+        }
+        decoder_name = choice.desc->id;
+        source = &decoder;
+    } else {
+        if (options.float_source) {
+            std::fprintf(stderr,
+                         "--float is for `negotiate`: the tone generator writes integers.\n");
+            return 1;
+        }
+        const mp::Format wanted = requested_format(options);
+        if (!mp::is_valid(wanted)) {
+            std::fprintf(stderr, "that is not a format: %s\n",
+                         mp::describe(wanted).c_str());
+            return 1;
+        }
+        tone.emplace(wanted, options.hz, options.amplitude);
+        source = &*tone;
     }
-    const mp::Format source_format = requested_format(options);
-    if (!mp::is_valid(source_format)) {
-        std::fprintf(stderr, "that is not a format: %s\n",
-                     mp::describe(source_format).c_str());
-        return 1;
-    }
+
+    const mp::Format source_format = source->format();
 
     mp::DspChain chain;
     std::string why;
@@ -822,7 +958,7 @@ int play(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
     }
 
     std::string device_id;
-    if (!device_id_for(vtbl, options.device_index, device_id)) {
+    if (!device_id_for(vtbl, options, device_id)) {
         return 1;
     }
     mp::Sink sink = open_sink(vtbl, device_id, options.shared);
@@ -907,34 +1043,51 @@ int play(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
     }
     std::printf("buffer     %u frames (%.2f ms)\n", period,
                 1000.0 * period / negotiated.accepted.sample_rate);
-    std::printf("tone       %.1f Hz at %.3f of full scale (%.1f dBFS) for %u s\n\n",
-                options.hz, options.amplitude,
-                options.amplitude > 0.0 ? 20.0 * std::log10(options.amplitude) : -144.0,
-                options.seconds);
 
-    // How much of the container this tone actually uses. A quiet tone is safe
-    // for headphones and proves correspondingly less about a 32-bit path, and
-    // saying so is cheaper than someone assuming otherwise. The bit-exactness
-    // proof is the capture test, not this.
-    const std::uint32_t container_bits =
-        8 * mp::container_bytes(negotiated.accepted.sample_type);
-    const double peak = options.amplitude * (std::pow(2.0, container_bits - 1) - 1.0);
-    const auto used = peak >= 1.0 ? static_cast<int>(std::floor(std::log2(peak))) + 2 : 0;
-    std::printf("exercises  %d of %u bits\n\n", used, container_bits);
+    unsigned limit = options.seconds;
+    if (source == &decoder) {
+        const std::uint64_t length = decoder.length_frames();
+        std::printf("file       %s\n", options.file.c_str());
+        std::printf("decoder    %s%s\n", decoder_name.c_str(),
+                    options.decoder_id.empty() ? "" : "  [forced]");
+        std::printf("source     %s", mp::describe(source_format).c_str());
+        if (length != 0) {
+            std::printf(", %llu frames (%.2f s)", static_cast<unsigned long long>(length),
+                        static_cast<double>(length) / source_format.sample_rate);
+        }
+        std::printf("\n\n");
+        // The file has an end, so the run does. `--seconds` still caps it for
+        // somebody who only wants to hear the beginning of an hour-long file.
+        limit = options.seconds_given ? options.seconds : 0;
+    } else {
+        std::printf("tone       %.1f Hz at %.3f of full scale (%.1f dBFS) for %u s\n\n",
+                    options.hz, options.amplitude,
+                    options.amplitude > 0.0 ? 20.0 * std::log10(options.amplitude) : -144.0,
+                    options.seconds);
 
-    mp::SineSource source{source_format, options.hz, options.amplitude};
+        // How much of the container this tone actually uses. A quiet tone is
+        // safe for headphones and proves correspondingly less about a 32-bit
+        // path, and saying so is cheaper than someone assuming otherwise. The
+        // bit-exactness proof is the capture test, not this.
+        const std::uint32_t container_bits =
+            8 * mp::container_bytes(negotiated.accepted.sample_type);
+        const double peak = options.amplitude * (std::pow(2.0, container_bits - 1) - 1.0);
+        const auto used = peak >= 1.0 ? static_cast<int>(std::floor(std::log2(peak))) + 2 : 0;
+        std::printf("exercises  %d of %u bits\n\n", used, container_bits);
+    }
+
     mp::win::RenderThreadHooks hooks;
     if (processing) {
         mp::ConvertConfig conversion;
         conversion.gain = options.gain;
         conversion.dither = options.dither;
         conversion.shaping = options.shaping;
-        mp::ProcessedGraph graph{source,           sink,
+        mp::ProcessedGraph graph{*source,          sink,
                                  negotiated.accepted, period,
                                  conversion,       &hooks,
                                  mp::PassthroughConfig{},
                                  chain.empty() ? nullptr : &chain};
-        const int rc = run_graph(graph, hooks, negotiated.accepted, options);
+        const int rc = run_graph(graph, hooks, negotiated.accepted, limit);
         // What each stage made of it, in the stage's own words. `dsp_gain`
         // reports the loudest sample it saw, which is the cheapest evidence
         // that the chain was in the path at all.
@@ -948,35 +1101,13 @@ int play(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
         return rc;
     }
 
-    mp::PassthroughGraph graph{source, sink, negotiated.accepted, period, negotiated.fidelity,
-                               &hooks};
-    return run_graph(graph, hooks, negotiated.accepted, options);
+    mp::PassthroughGraph graph{*source,   sink,
+                               negotiated.accepted, period,
+                               negotiated.fidelity, &hooks};
+    return run_graph(graph, hooks, negotiated.accepted, limit);
 }
 
 
-/// The best-ranked decoder that can actually open the file.
-///
-/// Probing is cheap and reads four kilobytes; opening is the real test, and
-/// mp::Decoder makes it a real test by requiring one frame of audio to come out.
-/// A decoder can score highest and still refuse -- decode_mf declines
-/// multichannel ALAC, decode_native cannot read a 32-bit FLAC -- and the right
-/// answer to that is the next candidate.
-///
-/// Falls back to the first entry when nothing opens, so the error the user sees
-/// comes from the decoder that claimed the file most confidently rather than
-/// from whichever one happened to be last.
-mp::win::ModuleRegistry::DecoderChoice first_that_opens(
-    const std::vector<mp::win::ModuleRegistry::DecoderChoice>& ranked,
-    const std::string& path)
-{
-    for (const auto& candidate : ranked) {
-        mp::Decoder probe;
-        if (probe.open(*candidate.vtbl, path.c_str()) == MP_OK) {
-            return candidate;
-        }
-    }
-    return ranked.empty() ? mp::win::ModuleRegistry::DecoderChoice{} : ranked.front();
-}
 
 int decode(const MpDecoderVtbl& vtbl, const Options& options)
 {
@@ -1512,7 +1643,7 @@ int verify(const MpSinkVtbl& sink_vtbl, const MpDecoderVtbl& decoder_vtbl,
 
     // ---- open the device, through the tee from the start ------------------
     std::string device_id;
-    if (!device_id_for(sink_vtbl, options.device_index, device_id)) {
+    if (!device_id_for(sink_vtbl, options, device_id)) {
         return 1;
     }
 
@@ -1751,6 +1882,22 @@ int no_diagnostics(const char* command)
 
 int main(int argc, char** argv)
 {
+    const mp::win::ConsoleUtf8 console;
+
+    // Windows hands `main` its arguments in the process code page. Everything
+    // past this point -- the ABI, the module boundary, every path in this file
+    // -- is UTF-8, so take the arguments from the command line Windows actually
+    // kept rather than from the lossy copy the CRT made.
+    const std::vector<std::string> args = mp::win::command_line_utf8();
+    std::vector<char*> utf8_argv;
+    if (static_cast<int>(args.size()) == argc) {
+        utf8_argv.reserve(args.size());
+        for (const std::string& arg : args) {
+            utf8_argv.push_back(const_cast<char*>(arg.c_str()));
+        }
+        argv = utf8_argv.data();
+    }
+
     Options options;
     if (!parse(argc, argv, options)) {
         return 1;

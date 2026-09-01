@@ -145,6 +145,34 @@ private:
 /// kilobytes in every binary that touches a file.
 [[nodiscard]] std::FILE* open_utf8(const std::string& path, const wchar_t* mode) noexcept;
 
+/// The command line as UTF-8, taken from the wide one Windows really has.
+///
+/// **`main`'s `argv` is in the process code page, and the ABI says paths are
+/// UTF-8.** On a machine whose code page is 932 those are not the same thing,
+/// and every file whose name is not ASCII arrives at a decoder as bytes that
+/// are not the name of anything -- which looks exactly like "no decoder
+/// recognised this file". The wide command line is the only one that was never
+/// lossy, so it is the one this reads.
+[[nodiscard]] std::vector<std::string> command_line_utf8();
+
+/// Makes the console speak UTF-8 for as long as it exists, and puts it back.
+///
+/// Without it a UTF-8 filename in the report is mojibake, which turns "the
+/// player cannot open this file" and "the player cannot print its name" into
+/// the same picture.
+class ConsoleUtf8 {
+public:
+    ConsoleUtf8() noexcept;
+    ~ConsoleUtf8();
+    ConsoleUtf8(const ConsoleUtf8&) = delete;
+    ConsoleUtf8& operator=(const ConsoleUtf8&) = delete;
+    ConsoleUtf8(ConsoleUtf8&&) = delete;
+    ConsoleUtf8& operator=(ConsoleUtf8&&) = delete;
+
+private:
+    unsigned int previous_ = 0;
+};
+
 /// Everything that loaded, and the rules for choosing between them.
 ///
 /// This is §7 of the plan made real. Until it existed the tool named the decoder
