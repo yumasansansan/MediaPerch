@@ -31,7 +31,7 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <vector>
+#include <memory>
 
 namespace mp::aac {
 
@@ -40,6 +40,7 @@ inline constexpr unsigned k_frame_len = 1024;
 inline constexpr unsigned k_short_len = 128;
 inline constexpr unsigned k_windows = 8;
 inline constexpr unsigned k_max_sfb = 51;
+inline constexpr unsigned k_max_tns_order = 20;
 
 /// The AudioSpecificConfig, as far as AAC-LC needs it.
 struct Config {
@@ -55,29 +56,57 @@ bool parse_asc(const std::uint8_t* asc, std::size_t bytes, Config& out) noexcept
 /// The sample rate for one of the standard's 13 indices, or 0.
 std::uint32_t rate_for_index(unsigned index) noexcept;
 
-/// One channel's worth of a decoded frame, before the filterbank.
-struct Channel {
-    unsigned window_sequence = 0; ///< ONLY_LONG, LONG_START, EIGHT_SHORT, LONG_STOP
-    unsigned window_shape = 0;    ///< 0 sine, 1 KBD
-    unsigned max_sfb = 0;
-    unsigned num_window_groups = 1;
-    unsigned group_len[k_windows] = {1};
-    float coeffs[k_frame_len] = {}; ///< dequantised spectrum, grouped
+/// Channels in the order AAC's elements produce them, mapped onto WAVE slots.
+///
+/// A decoder hands channels back in the order their elements appeared, which for
+/// 5.1 is C, L, R, Ls, Rs, LFE -- centre first, because the single-channel
+/// element comes first. WAVE wants L, R, C, LFE, Ls, Rs. Without this table a
+/// 5.1 decode measures -3 dB against a reference and sounds like the centre
+/// channel wandered, which is exactly what Media Foundation does to ALAC.
+struct ChannelLayout {
+    std::uint32_t mask;   ///< MP_SPEAKER_* bits, 0 for mono and stereo
+    std::uint8_t count;   ///< 0 if this configuration has no layout here
+    std::uint8_t from[8]; ///< for each WAVE slot, the decoded channel that fills it
 };
+
+const ChannelLayout& layout_for_config(unsigned channel_config) noexcept;
+
+/// Everything a frame needs while it is being decoded, held by the object
+/// rather than by the file.
+///
+/// It is a lot of memory -- eight channels of spectrum, scale factors, codebook
+/// assignments and TNS state -- which is why it is behind a pointer instead of
+/// inline. Making it file-static would have been smaller and would have meant
+/// two Decoders on two threads quietly corrupting each other.
+struct State;
 
 class Decoder {
 public:
+    Decoder() noexcept;
+    ~Decoder() noexcept;
+    Decoder(const Decoder&) = delete;
+    Decoder& operator=(const Decoder&) = delete;
+
     bool init(const Config& cfg) noexcept;
 
-    /// Parses one raw_data_block and dequantises its spectrum.
+    /// Decodes one raw_data_block into `k_frame_len` samples per channel.
     ///
     /// Returns false on anything malformed. On success `channels()` is how many
-    /// channels the frame carried and `channel(i)` is each one's spectrum.
+    /// channels the frame carried and `pcm(i)` is each one's output, in the
+    /// order the elements appeared.
     bool decode_frame(const std::uint8_t* packet, std::size_t bytes) noexcept;
 
     [[nodiscard]] unsigned channels() const noexcept { return channels_; }
-    [[nodiscard]] const Channel& channel(unsigned i) const noexcept { return chan_[i]; }
+    [[nodiscard]] const float* pcm(unsigned channel) const noexcept { return pcm_[channel]; }
     [[nodiscard]] const char* error() const noexcept { return error_; }
+
+    /// The window sequence the last frame used for a channel: 0 ONLY_LONG,
+    /// 1 LONG_START, 2 EIGHT_SHORT, 3 LONG_STOP. Diagnostic, and the first thing
+    /// to look at when one frame in a file is wrong and the rest are not.
+    [[nodiscard]] unsigned window_sequence(unsigned channel) const noexcept
+    {
+        return last_sequence_[channel];
+    }
 
     /// Bits the last frame consumed, and the bits it was given. A frame that
     /// parsed correctly ends inside the last byte of its packet; a parser that
@@ -93,7 +122,19 @@ private:
     unsigned channels_ = 0;
     std::size_t bits_used_ = 0;
     std::size_t bits_given_ = 0;
-    Channel chan_[k_max_channels];
+
+    /// The second half of the previous frame's windowed output, per channel.
+    /// AAC's transform is lapped: a frame is only finished once the next one
+    /// has been added to it.
+    float overlap_[k_max_channels][k_frame_len] = {};
+    unsigned prev_shape_[k_max_channels] = {};
+    float pcm_[k_max_channels][k_frame_len] = {};
+    unsigned last_sequence_[k_max_channels] = {};
+    /// The noise generator for PNS bands. Its state runs across frames, so a
+    /// decode is reproducible from the start of a track and not from anywhere
+    /// else -- which is true of AAC anyway, because the transform is lapped.
+    std::uint32_t rng_ = 0x1f2e3d4cu;
+    std::unique_ptr<State> state_;
 };
 
 } // namespace mp::aac

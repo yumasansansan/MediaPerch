@@ -7,6 +7,8 @@
 #include "aac_tables.hpp"
 
 #include <cmath>
+#include <new>
+#include <numbers>
 #include <cstring>
 
 namespace mp::aac {
@@ -233,13 +235,149 @@ bool build_tables() noexcept
     return true;
 }
 
-} // namespace
+// ------------------------------------------------------------- the filterbank
 
-// ------------------------------------------------------------------ config
+/// The zeroth-order modified Bessel function, for the KBD window.
+double bessel_i0(double x) noexcept
+{
+    double sum = 1.0;
+    double term = 1.0;
+    for (int i = 1; i < 50; ++i) {
+        term *= (x * x) / (4.0 * static_cast<double>(i) * static_cast<double>(i));
+        sum += term;
+        if (term < sum * 1e-17) {
+            break;
+        }
+    }
+    return sum;
+}
+
+/// Sine and Kaiser-Bessel-derived windows, long and short.
+///
+/// Both are computed rather than tabulated: the sine window is a sine, and KBD
+/// is a running sum of a Kaiser window normalised and square-rooted. Tabulating
+/// them would add two thousand more constants to check.
+struct Windows {
+    float sine_long[k_frame_len] = {};
+    float sine_short[k_short_len] = {};
+    float kbd_long[k_frame_len] = {};
+    float kbd_short[k_short_len] = {};
+};
+
+Windows g_win;
+bool g_win_ready = false;
+
+void build_kbd(float* out, unsigned n, double alpha) noexcept
+{
+    // w[j] = I0(pi*alpha*sqrt(1 - (2j/n - 1)^2)), then the running sum of those,
+    // normalised by the total and square-rooted.
+    double kaiser[k_frame_len + 1];
+    double total = 0.0;
+    for (unsigned j = 0; j <= n; ++j) {
+        const double x = 2.0 * static_cast<double>(j) / static_cast<double>(n) - 1.0;
+        kaiser[j] = bessel_i0(std::numbers::pi * alpha * std::sqrt(1.0 - x * x));
+        total += kaiser[j];
+    }
+    double running = 0.0;
+    for (unsigned i = 0; i < n; ++i) {
+        running += kaiser[i];
+        out[i] = static_cast<float>(std::sqrt(running / total));
+    }
+}
+
+void build_windows() noexcept
+{
+    if (g_win_ready) {
+        return;
+    }
+    // W_SIN_LEFT,N(i) = sin(pi/N (i + 1/2)) for 0 <= i < N/2, with N the whole
+    // window length -- so a quarter sine rising from ~0 to 1 across the half,
+    // not a half sine peaking in the middle. The difference is invisible until
+    // it is checked against Princen-Bradley: the right one satisfies
+    // w[i]^2 + w[N/2-1-i]^2 == 1 and the wrong one does not, which is exactly
+    // the condition the overlap relies on to cancel.
+    for (unsigned i = 0; i < k_frame_len; ++i) {
+        g_win.sine_long[i] = static_cast<float>(
+            std::sin(std::numbers::pi / (2.0 * k_frame_len) * (i + 0.5)));
+    }
+    for (unsigned i = 0; i < k_short_len; ++i) {
+        g_win.sine_short[i] = static_cast<float>(
+            std::sin(std::numbers::pi / (2.0 * k_short_len) * (i + 0.5)));
+    }
+    build_kbd(g_win.kbd_long, k_frame_len, 4.0);
+    build_kbd(g_win.kbd_short, k_short_len, 6.0);
+    g_win_ready = true;
+}
+
+const float* window_for(unsigned shape, bool is_short) noexcept
+{
+    if (is_short) {
+        return shape != 0 ? g_win.kbd_short : g_win.sine_short;
+    }
+    return shape != 0 ? g_win.kbd_long : g_win.sine_long;
+}
+
+/// The inverse MDCT, straight from the definition.
+///
+/// N output samples from N/2 coefficients, at O(N^2). That is slow -- two
+/// million multiply-adds per long window -- and it is deliberate for now: the
+/// definition is checkable by eye against the standard, and an FFT-based version
+/// can be swapped in once there is something correct to check it against.
+void imdct(const float* spec, float* out, unsigned n) noexcept
+{
+    const unsigned half = n / 2;
+    const double n0 = (static_cast<double>(half) + 1.0) / 2.0;
+    const double scale = 2.0 / static_cast<double>(n);
+    for (unsigned i = 0; i < n; ++i) {
+        double acc = 0.0;
+        const double a = 2.0 * std::numbers::pi / static_cast<double>(n) *
+                         (static_cast<double>(i) + n0);
+        for (unsigned k = 0; k < half; ++k) {
+            acc += static_cast<double>(spec[k]) * std::cos(a * (static_cast<double>(k) + 0.5));
+        }
+        out[i] = static_cast<float>(acc * scale);
+    }
+}
+
+} // namespace
 
 std::uint32_t rate_for_index(unsigned index) noexcept
 {
     return index < 13 ? k_rates[index] : 0;
+}
+
+const ChannelLayout& layout_for_config(unsigned channel_config) noexcept
+{
+    // Decoded order per configuration, from ISO/IEC 14496-3 Table 1.19:
+    //   1  C                            2  L R
+    //   3  C L R                        4  C L R Cs
+    //   5  C L R Ls Rs                  6  C L R Ls Rs LFE
+    //   7  C L R Ls Rs Lr Rr LFE       11  C L R Ls Rs Cs LFE
+    //  12  C L R Ls Rs Lr Rr LFE
+    //
+    // `from[slot]` is the decoded channel that belongs in that WAVE slot, with
+    // the slots in ascending SPEAKER_* bit order.
+    static const ChannelLayout table[15] = {
+        /* 0  */ {0u, 0, {0}},
+        /* 1  */ {0u, 1, {0}},
+        /* 2  */ {0u, 2, {0, 1}},
+        /* 3  */ {0x1u | 0x2u | 0x4u, 3, {1, 2, 0}},
+        /* 4  */ {0x1u | 0x2u | 0x4u | 0x100u, 4, {1, 2, 0, 3}},
+        /* 5  */ {0x1u | 0x2u | 0x4u | 0x10u | 0x20u, 5, {1, 2, 0, 3, 4}},
+        /* 6  */ {0x1u | 0x2u | 0x4u | 0x8u | 0x10u | 0x20u, 6, {1, 2, 0, 5, 3, 4}},
+        /* 7  */ {0x1u | 0x2u | 0x4u | 0x8u | 0x10u | 0x20u | 0x200u | 0x400u, 8,
+                  {1, 2, 0, 7, 5, 6, 3, 4}},
+        /* 8  */ {0u, 0, {0}},
+        /* 9  */ {0u, 0, {0}},
+        /* 10 */ {0u, 0, {0}},
+        /* 11 */ {0x1u | 0x2u | 0x4u | 0x8u | 0x100u | 0x200u | 0x400u, 7,
+                  {1, 2, 0, 6, 5, 3, 4}},
+        /* 12 */ {0x1u | 0x2u | 0x4u | 0x8u | 0x10u | 0x20u | 0x200u | 0x400u, 8,
+                  {1, 2, 0, 7, 5, 6, 3, 4}},
+        /* 13 */ {0u, 0, {0}},
+        /* 14 */ {0u, 0, {0}},
+    };
+    return table[channel_config < 15 ? channel_config : 0];
 }
 
 bool parse_asc(const std::uint8_t* asc, std::size_t bytes, Config& out) noexcept
@@ -302,6 +440,20 @@ bool parse_asc(const std::uint8_t* asc, std::size_t bytes, Config& out) noexcept
 // ----------------------------------------------------------------- decoder
 
 namespace {
+
+/// One TNS filter, as read and then as coefficients.
+struct TnsFilter {
+    unsigned order = 0;
+    unsigned length = 0;
+    unsigned direction = 0;
+    float lpc[k_max_tns_order + 1] = {};
+};
+
+struct Tns {
+    bool present = false;
+    unsigned n_filt[k_windows] = {};
+    TnsFilter filt[k_windows][4];
+};
 
 struct Ics {
     unsigned window_sequence = 0;
@@ -463,7 +615,43 @@ bool read_pulse_data(BitReader& r, const Ics& ics, unsigned& pulse_start_sfb,
     return true;
 }
 
-bool read_tns_data(BitReader& r, const Ics& ics) noexcept
+/// Quantised reflection coefficients to LPC, by the standard's recursion.
+///
+/// The reflection values are not a table: the standard defines them as
+/// `sin(q / iqfac)`, with a slightly different scale for negative q, so they are
+/// computed. That is worth saying because it is the one place in AAC where a
+/// table would have been expected and is not needed.
+void tns_coefficients(const int* quant, unsigned order, unsigned coef_res,
+                      unsigned coef_compress, float* lpc) noexcept
+{
+    const unsigned bits = coef_res + 3u - coef_compress;
+    const double half = static_cast<double>(1u << (bits - 1u));
+    const double iqfac = (half - 0.5) / (std::numbers::pi / 2.0);
+    const double iqfac_m = (half + 0.5) / (std::numbers::pi / 2.0);
+
+    double parcor[k_max_tns_order] = {};
+    for (unsigned i = 0; i < order; ++i) {
+        const double q = quant[i];
+        parcor[i] = std::sin(q / (q >= 0.0 ? iqfac : iqfac_m));
+    }
+
+    double a[k_max_tns_order + 1] = {};
+    double b[k_max_tns_order + 1] = {};
+    for (unsigned m = 1; m <= order; ++m) {
+        for (unsigned i = 1; i < m; ++i) {
+            b[i] = a[i] + parcor[m - 1] * a[m - i];
+        }
+        for (unsigned i = 1; i < m; ++i) {
+            a[i] = b[i];
+        }
+        a[m] = parcor[m - 1];
+    }
+    for (unsigned i = 0; i <= order; ++i) {
+        lpc[i] = static_cast<float>(a[i]);
+    }
+}
+
+bool read_tns_data(BitReader& r, const Ics& ics, Tns& tns) noexcept
 {
     const bool is_short = ics.window_sequence == k_eight_short;
     const unsigned n_filt_bits = is_short ? 1u : 2u;
@@ -471,29 +659,100 @@ bool read_tns_data(BitReader& r, const Ics& ics) noexcept
     const unsigned order_bits = is_short ? 3u : 5u;
     const unsigned max_order = is_short ? 7u : 20u;
 
+    tns.present = true;
     for (unsigned w = 0; w < ics.num_windows; ++w) {
         const unsigned n_filt = r.read(n_filt_bits);
+        tns.n_filt[w] = n_filt > 4 ? 4 : n_filt;
         unsigned coef_res = 0;
         if (n_filt != 0) {
             coef_res = r.bit();
         }
         for (unsigned f = 0; f < n_filt; ++f) {
-            r.read(length_bits);
+            const unsigned length = r.read(length_bits);
             const unsigned order = r.read(order_bits);
             if (order > max_order) {
                 return false;
             }
+            unsigned direction = 0;
+            int quant[k_max_tns_order] = {};
+            unsigned compress = 0;
             if (order != 0) {
-                r.bit(); // direction
-                const unsigned compress = r.bit();
+                direction = r.bit();
+                compress = r.bit();
                 const unsigned coef_bits = coef_res + 3u - compress;
                 for (unsigned i = 0; i < order; ++i) {
-                    r.read(coef_bits);
+                    const std::uint32_t raw = r.read(coef_bits);
+                    // Signed, in `coef_bits` bits.
+                    const std::int32_t sign = 1 << (coef_bits - 1);
+                    quant[i] = static_cast<int>(raw) -
+                               ((static_cast<std::int32_t>(raw) & sign) != 0 ? (sign << 1) : 0);
+                }
+            }
+            if (f < 4) {
+                TnsFilter& out = tns.filt[w][f];
+                out.order = order;
+                out.length = length;
+                out.direction = direction;
+                if (order != 0) {
+                    tns_coefficients(quant, order, coef_res, compress, out.lpc);
                 }
             }
         }
     }
     return true;
+}
+
+/// The inverse of the encoder's temporal noise shaping: an all-pole filter run
+/// across frequency rather than time.
+void apply_tns(const Ics& ics, const Tns& tns, unsigned rate_index, float* coeffs) noexcept
+{
+    if (!tns.present) {
+        return;
+    }
+    const bool is_short = ics.window_sequence == k_eight_short;
+    const unsigned max_bands = is_short ? k_tns_max_bands_128[rate_index]
+                                        : k_tns_max_bands_1024[rate_index];
+    const unsigned win_len = is_short ? k_short_len : k_frame_len;
+
+    for (unsigned w = 0; w < ics.num_windows; ++w) {
+        unsigned bottom = ics.num_swb;
+        for (unsigned f = 0; f < tns.n_filt[w]; ++f) {
+            const TnsFilter& filt = tns.filt[w][f];
+            const unsigned top = bottom;
+            bottom = filt.length < top ? top - filt.length : 0;
+            if (filt.order == 0) {
+                continue;
+            }
+            const unsigned lo_band = bottom < max_bands ? bottom : max_bands;
+            const unsigned hi_band = top < max_bands ? top : max_bands;
+            if (lo_band > ics.num_swb || hi_band > ics.num_swb) {
+                continue;
+            }
+            int start = static_cast<int>(ics.swb_offset[lo_band]);
+            const int end = static_cast<int>(ics.swb_offset[hi_band]);
+            const int size = end - start;
+            if (size <= 0) {
+                continue;
+            }
+            int inc = 1;
+            if (filt.direction != 0) {
+                inc = -1;
+                start = end - 1;
+            }
+            start += static_cast<int>(w * win_len);
+
+            for (int m = 0; m < size; ++m) {
+                const unsigned taps =
+                    static_cast<unsigned>(m) < filt.order ? static_cast<unsigned>(m) : filt.order;
+                float acc = coeffs[start];
+                for (unsigned i = 1; i <= taps; ++i) {
+                    acc -= coeffs[start - static_cast<int>(i) * inc] * filt.lpc[i];
+                }
+                coeffs[start] = acc;
+                start += inc;
+            }
+        }
+    }
 }
 
 /// The spectrum itself, and the only place a codebook is used.
@@ -585,6 +844,66 @@ bool read_spectral_data(BitReader& r, const Ics& ics, const std::uint8_t sfb_cb[
     return true;
 }
 
+/// Perceptual noise substitution: a band the encoder replaced with a level.
+///
+/// Codebook 13 says "there was noise here, this loud" and sends no coefficients
+/// at all. A decoder that skips those bands -- as this one did at first -- emits
+/// silence across them, which on the opening frame of a noise signal was 22 of
+/// 49 bands and showed up as output eight times too quiet and uncorrelated with
+/// anything.
+///
+/// **The samples in such a band are arbitrary by design.** The standard fixes
+/// the band's energy and says nothing about which noise fills it, so two
+/// conformant decoders differ there and no comparison between them can be
+/// sample-exact. The generator here is the one FFmpeg uses, seed included, for
+/// exactly one reason: it makes the rest of this decoder checkable against
+/// FFmpeg to the last bit. It is a testing convenience and not a claim about
+/// the format.
+std::uint32_t lcg_next(std::uint32_t state) noexcept
+{
+    return state * 1664525u + 1013904223u;
+}
+
+void apply_pns(const Ics& ics, const std::uint8_t sfb_cb[][k_max_sfb],
+               const int sf[][k_max_sfb], std::uint32_t& rng, float* out) noexcept
+{
+    const unsigned win_len = (ics.window_sequence == k_eight_short) ? k_short_len : k_frame_len;
+    unsigned group_start = 0;
+
+    for (unsigned g = 0; g < ics.num_window_groups; ++g) {
+        for (unsigned sb = 0; sb < ics.max_sfb; ++sb) {
+            if (sfb_cb[g][sb] != k_cb_noise) {
+                continue;
+            }
+            const unsigned lo = ics.swb_offset[sb];
+            const unsigned hi = ics.swb_offset[sb + 1];
+            // Not the same exponent as a normal band. A normal scalefactor is
+            // a gain, 2^((sf-100)/4); a noise scalefactor names the band's total
+            // *energy*, 2^(sf/2), so the amplitude the band is normalised to is
+            // its square root.
+            const float gain = std::pow(2.0F, static_cast<float>(sf[g][sb]) * 0.25F);
+            for (unsigned w = 0; w < ics.group_len[g]; ++w) {
+                const unsigned base = (group_start + w) * win_len;
+                double energy = 0.0;
+                for (unsigned k = lo; k < hi && base + k < k_frame_len; ++k) {
+                    rng = lcg_next(rng);
+                    const float v = static_cast<float>(static_cast<std::int32_t>(rng));
+                    out[base + k] = v;
+                    energy += static_cast<double>(v) * v;
+                }
+                if (energy <= 0.0) {
+                    continue;
+                }
+                const float scale = static_cast<float>(gain / std::sqrt(energy));
+                for (unsigned k = lo; k < hi && base + k < k_frame_len; ++k) {
+                    out[base + k] *= scale;
+                }
+            }
+        }
+        group_start += ics.group_len[g];
+    }
+}
+
 /// x = sign(q) * |q|^(4/3) * 2^((sf - 100) / 4)
 void dequantise(const Ics& ics, const std::uint8_t sfb_cb[][k_max_sfb],
                 const int sf[][k_max_sfb], const int quant[k_frame_len],
@@ -623,10 +942,195 @@ void dequantise(const Ics& ics, const std::uint8_t sfb_cb[][k_max_sfb],
 
 } // namespace
 
+/// Per-channel working state, one frame's worth.
+struct State {
+    struct Chan {
+        Ics ics;
+        Tns tns;
+        std::uint8_t sfb_cb[k_windows][k_max_sfb] = {};
+        int sf[k_windows][k_max_sfb] = {};
+        float coeffs[k_frame_len] = {};
+    };
+    Chan chan[k_max_channels];
+    int quant[k_frame_len] = {};
+    /// For a channel pair: the second channel of the pair, and whether M/S is on
+    /// for each band. `pair_of[i]` is the other channel, or -1.
+    int pair_of[k_max_channels] = {};
+    bool ms_used[k_max_channels][k_windows][k_max_sfb] = {};
+};
+
+namespace {
+
+// ------------------------------------------------------------- joint stereo
+
+/// Mid/side and intensity, both of which turn one channel's spectrum into two.
+///
+/// They are disjoint by construction: intensity is signalled by the *right*
+/// channel's codebook being 14 or 15, and a band coded that way is never also
+/// M/S. So the two loops below cannot both touch the same band, whatever order
+/// they run in.
+void apply_joint_stereo(State& st, unsigned left_index, unsigned right_index) noexcept
+{
+    State::Chan& left = st.chan[left_index];
+    State::Chan& right = st.chan[right_index];
+    const Ics& ics = left.ics;
+    const unsigned win_len = (ics.window_sequence == k_eight_short) ? k_short_len : k_frame_len;
+
+    unsigned group_start = 0;
+    for (unsigned g = 0; g < ics.num_window_groups; ++g) {
+        for (unsigned sb = 0; sb < ics.max_sfb; ++sb) {
+            const unsigned cb = right.sfb_cb[g][sb];
+            const unsigned lo = ics.swb_offset[sb];
+            const unsigned hi = ics.swb_offset[sb + 1];
+
+            if (cb == k_cb_intensity || cb == k_cb_intensity2) {
+                // The right channel is a scaled copy of the left. cb 15 keeps
+                // the sign, cb 14 inverts it, and M/S on the band inverts it
+                // again.
+                float sign = (cb == k_cb_intensity) ? 1.0F : -1.0F;
+                if (st.ms_used[left_index][g][sb]) {
+                    sign = -sign;
+                }
+                const float scale =
+                    sign * std::pow(0.5F, static_cast<float>(right.sf[g][sb]) * 0.25F);
+                for (unsigned w = 0; w < ics.group_len[g]; ++w) {
+                    const unsigned base = (group_start + w) * win_len;
+                    for (unsigned k = lo; k < hi && base + k < k_frame_len; ++k) {
+                        right.coeffs[base + k] = left.coeffs[base + k] * scale;
+                    }
+                }
+                continue;
+            }
+
+            if (!st.ms_used[left_index][g][sb] || cb == k_cb_noise) {
+                continue;
+            }
+            for (unsigned w = 0; w < ics.group_len[g]; ++w) {
+                const unsigned base = (group_start + w) * win_len;
+                for (unsigned k = lo; k < hi && base + k < k_frame_len; ++k) {
+                    const float mid = left.coeffs[base + k];
+                    const float side = right.coeffs[base + k];
+                    left.coeffs[base + k] = mid + side;
+                    right.coeffs[base + k] = mid - side;
+                }
+            }
+        }
+        group_start += ics.group_len[g];
+    }
+}
+
+// --------------------------------------------------------------- filterbank
+
+/// One frame of spectrum to one frame of samples.
+///
+/// AAC's transform is lapped: each IMDCT produces twice as many samples as the
+/// frame is long, and a frame is only finished once the next one has been added
+/// to its tail. `overlap` carries that tail between calls, which is why a
+/// decoder cannot be asked for frame N without having decoded N-1 -- and why
+/// seeking to anywhere but the start of a track needs a frame of warm-up.
+///
+/// The left half of every window uses the *previous* frame's window shape and
+/// the right half uses this one's. That is not symmetry for its own sake: the
+/// two halves have to be the same curve where they overlap or the reconstruction
+/// does not cancel.
+void filterbank(const Ics& ics, const float* coeffs, float* overlap, unsigned prev_shape,
+                float* out) noexcept
+{
+    float z[2 * k_frame_len] = {};
+    const float* w_prev_long = window_for(prev_shape, false);
+    const float* w_cur_long = window_for(ics.window_shape, false);
+    const float* w_prev_short = window_for(prev_shape, true);
+    const float* w_cur_short = window_for(ics.window_shape, true);
+
+    if (ics.window_sequence == k_eight_short) {
+        float tmp[2 * k_short_len];
+        for (unsigned w = 0; w < k_windows; ++w) {
+            imdct(coeffs + w * k_short_len, tmp, 2 * k_short_len);
+            // Window w's rising half meets window w-1's falling half, so it uses
+            // the previous *window's* shape -- which for the first is the
+            // previous frame's.
+            const float* rise = (w == 0) ? w_prev_short : w_cur_short;
+            for (unsigned n = 0; n < k_short_len; ++n) {
+                tmp[n] *= rise[n];
+                tmp[k_short_len + n] *= w_cur_short[k_short_len - 1 - n];
+            }
+            const unsigned at = 448u + w * k_short_len;
+            for (unsigned n = 0; n < 2 * k_short_len; ++n) {
+                z[at + n] += tmp[n];
+            }
+        }
+    } else {
+        imdct(coeffs, z, 2 * k_frame_len);
+        switch (ics.window_sequence) {
+        case k_long_start:
+            for (unsigned n = 0; n < k_frame_len; ++n) {
+                z[n] *= w_prev_long[n];
+            }
+            // 1024..1471 pass through, 1472..1599 fall on a short window,
+            // 1600..2047 are zero: this is the frame that hands over to eight
+            // short ones.
+            for (unsigned n = 0; n < k_short_len; ++n) {
+                z[1472 + n] *= w_cur_short[k_short_len - 1 - n];
+            }
+            for (unsigned n = 1600; n < 2 * k_frame_len; ++n) {
+                z[n] = 0.0F;
+            }
+            break;
+        case k_long_stop:
+            for (unsigned n = 0; n < 448; ++n) {
+                z[n] = 0.0F;
+            }
+            for (unsigned n = 0; n < k_short_len; ++n) {
+                z[448 + n] *= w_prev_short[n];
+            }
+            // 576..1023 pass through.
+            for (unsigned n = 0; n < k_frame_len; ++n) {
+                z[k_frame_len + n] *= w_cur_long[k_frame_len - 1 - n];
+            }
+            break;
+        default: // ONLY_LONG
+            for (unsigned n = 0; n < k_frame_len; ++n) {
+                z[n] *= w_prev_long[n];
+                z[k_frame_len + n] *= w_cur_long[k_frame_len - 1 - n];
+            }
+            break;
+        }
+    }
+
+    // Full scale, and the one constant in this file that is a convention rather
+    // than arithmetic.
+    //
+    // The standard's inverse quantisation puts samples on a scale where full
+    // scale is 32768 -- it was written when the output was a 16-bit integer.
+    // Float output is that divided by 2^15. Measured against FFmpeg on the same
+    // file the fitted ratio came out at 3.05175748667e-05, whose base-two
+    // logarithm is 15.000000, so this is the convention and not a fudge.
+    constexpr float k_full_scale = 1.0F / 32768.0F;
+
+    for (unsigned n = 0; n < k_frame_len; ++n) {
+        out[n] = (z[n] + overlap[n]) * k_full_scale;
+        overlap[n] = z[k_frame_len + n];
+    }
+}
+
+} // namespace
+
+
+Decoder::Decoder() noexcept = default;
+Decoder::~Decoder() noexcept = default;
+
 bool Decoder::init(const Config& cfg) noexcept
 {
     ready_ = false;
     error_ = "";
+    if (state_ == nullptr) {
+        state_.reset(new (std::nothrow) State());
+        if (state_ == nullptr) {
+            error_ = "out of memory";
+            return false;
+        }
+    }
+    build_windows();
     if (!build_tables()) {
         error_ = "a Huffman codebook is not a prefix code";
         return false;
@@ -640,6 +1144,10 @@ bool Decoder::init(const Config& cfg) noexcept
         return false;
     }
     cfg_ = cfg;
+    for (unsigned c = 0; c < k_max_channels; ++c) {
+        std::memset(overlap_[c], 0, sizeof(overlap_[c]));
+        prev_shape_[c] = 0;
+    }
     ready_ = true;
     return true;
 }
@@ -656,11 +1164,18 @@ bool Decoder::decode_frame(const std::uint8_t* packet, std::size_t bytes) noexce
     BitReader r{packet, bytes};
     bits_given_ = r.size();
 
-    static std::uint8_t sfb_cb[k_windows][k_max_sfb];
-    static int sf[k_windows][k_max_sfb];
-    static int quant[k_frame_len];
+    State& st = *state_;
+    for (unsigned c = 0; c < k_max_channels; ++c) {
+        st.pair_of[c] = -1;
+    }
 
-    auto read_ics = [&](Ics& ics, Channel& out, bool have_common, const Ics& common) -> bool {
+    auto read_ics = [&](unsigned index, bool have_common, const Ics& common) -> bool {
+        State::Chan& ch = st.chan[index];
+        Ics& ics = ch.ics;
+        std::uint8_t (&sfb_cb)[k_windows][k_max_sfb] = ch.sfb_cb;
+        int (&sf)[k_windows][k_max_sfb] = ch.sf;
+        int* quant = st.quant;
+        ch.tns = Tns{};
         const unsigned global_gain = r.read(8);
         if (!have_common) {
             if (!read_ics_info(r, cfg_, ics)) {
@@ -688,7 +1203,7 @@ bool Decoder::decode_frame(const std::uint8_t* packet, std::size_t bytes) noexce
             }
         }
         if (r.bit() != 0) { // tns_data_present
-            if (!read_tns_data(r, ics)) {
+            if (!read_tns_data(r, ics, ch.tns)) {
                 error_ = "individual_channel_stream: bad tns_data";
                 return false;
             }
@@ -702,14 +1217,8 @@ bool Decoder::decode_frame(const std::uint8_t* packet, std::size_t bytes) noexce
             return false;
         }
 
-        out.window_sequence = ics.window_sequence;
-        out.window_shape = ics.window_shape;
-        out.max_sfb = ics.max_sfb;
-        out.num_window_groups = ics.num_window_groups;
-        for (unsigned g = 0; g < k_windows; ++g) {
-            out.group_len[g] = ics.group_len[g];
-        }
-        dequantise(ics, sfb_cb, sf, quant, out.coeffs);
+        dequantise(ics, sfb_cb, sf, quant, ch.coeffs);
+        apply_pns(ics, sfb_cb, sf, rng_, ch.coeffs);
         return true;
     };
 
@@ -731,8 +1240,8 @@ bool Decoder::decode_frame(const std::uint8_t* packet, std::size_t bytes) noexce
                 return false;
             }
             r.read(4); // element_instance_tag
-            Ics ics;
-            if (!read_ics(ics, chan_[channels_], false, ics)) {
+            const Ics unused;
+            if (!read_ics(channels_, false, unused)) {
                 return false;
             }
             ++channels_;
@@ -756,22 +1265,23 @@ bool Decoder::decode_frame(const std::uint8_t* packet, std::size_t bytes) noexce
                     error_ = "channel_pair_element: reserved ms_mask_present";
                     return false;
                 }
-                if (ms_mask_present == 1) {
-                    for (unsigned g = 0; g < common.num_window_groups; ++g) {
-                        for (unsigned s = 0; s < common.max_sfb; ++s) {
-                            r.bit();
+                for (unsigned g = 0; g < common.num_window_groups; ++g) {
+                    for (unsigned sb = 0; sb < common.max_sfb; ++sb) {
+                        bool used = ms_mask_present == 2;
+                        if (ms_mask_present == 1) {
+                            used = r.bit() != 0;
                         }
+                        st.ms_used[channels_][g][sb] = used;
                     }
                 }
             }
-            Ics left;
-            Ics right;
-            if (!read_ics(left, chan_[channels_], common_window, common)) {
+            if (!read_ics(channels_, common_window, common)) {
                 return false;
             }
-            if (!read_ics(right, chan_[channels_ + 1], common_window, common)) {
+            if (!read_ics(channels_ + 1, common_window, common)) {
                 return false;
             }
+            st.pair_of[channels_] = static_cast<int>(channels_ + 1);
             channels_ += 2;
             break;
         }
@@ -854,6 +1364,21 @@ bool Decoder::decode_frame(const std::uint8_t* packet, std::size_t bytes) noexce
     if (channels_ == 0) {
         error_ = "the frame carried no channels";
         return false;
+    }
+
+    // Joint stereo, then TNS, then the filterbank -- the standard's order, and
+    // not interchangeable: M/S and intensity work on the quantised spectrum's
+    // scale, TNS shapes what comes out of that, and only then is it a signal.
+    for (unsigned c = 0; c < channels_; ++c) {
+        if (st.pair_of[c] >= 0) {
+            apply_joint_stereo(st, c, static_cast<unsigned>(st.pair_of[c]));
+        }
+    }
+    for (unsigned c = 0; c < channels_; ++c) {
+        apply_tns(st.chan[c].ics, st.chan[c].tns, cfg_.rate_index, st.chan[c].coeffs);
+        filterbank(st.chan[c].ics, st.chan[c].coeffs, overlap_[c], prev_shape_[c], pcm_[c]);
+        last_sequence_[c] = st.chan[c].ics.window_sequence;
+        prev_shape_[c] = st.chan[c].ics.window_shape;
     }
     return true;
 }
