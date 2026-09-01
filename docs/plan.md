@@ -1143,6 +1143,44 @@ real time.
   judges**, because when it is wrong it is wrong in the direction of saying
   nothing.
 
+- **A linker keeps what is *referenced*, not what is reachable, and 48 KB of a
+  decoder turned out to be an encoder.** `mp_decode_ogg.dll` is the largest
+  thing this project ships, and the largest single object inside it is
+  libvorbis's `psy.obj` -- the psychoacoustic model, which only an encoder uses.
+  It is there because `_vds_shared_init` is one function serving both directions
+  and calls `_vp_psy_init` inside `if(encp)`: the branch never runs in a decoder,
+  the *reference* is unconditional, and the linker cannot tell the difference. It
+  brings `tonemasks` with it, 22 KB of tables that nothing will ever read.
+  Removing it means patching a submodule, so it stays -- but it is measured and
+  written down rather than assumed to be "libvorbis being big".
+- **A size number without an attribution is not a measurement.** `tools/mapsize.py`
+  reads a linker map and charges every byte to the object that brought it, which
+  is what turned "the Ogg module is 365 KB" into the finding above in about a
+  minute. Writing it was three false starts, each of which is a lesson in
+  measuring: a regex that assumed a fixed column width attributed a third of the
+  binary to a symbol called `i`; taking address deltas across section boundaries
+  charged the alignment padding to whichever function happened to be last; and
+  counting `.bss` -- which occupies image space and no file space -- put 188 KB
+  of zeroed lookup tables against a 78 KB DLL. **A tool that reports plausible
+  numbers is more dangerous than one that crashes**, and the only reason these
+  were caught is that the totals were checked against the size on disk.
+- **"Simple" in C++ means "does not pull anything in", not "short to write".**
+  `std::to_string` on an `unsigned` reaches the same shortest-round-trip float
+  machinery `std::format` does -- Ryu's tables and the locale facets around them
+  -- because it has to be ready for a `double`. `std::ofstream` brings iostreams,
+  a static initialiser and the locale facets again. Neither reads as expensive at
+  the call site, and between them they were 8.5 KB of a 123 KB executable whose
+  entire use for them was printing a sample rate and writing bytes to a file.
+  `std::to_chars` and `std::fopen` do the same work with no tables at all.
+- **The measuring apparatus was 27% of the probe.** `compare` and `verify` are
+  how the hard bugs here were found and are not needed to play a file; leaving
+  them out of an optimised build takes it from 169.5 KB to 123.5. The libraries
+  are still compiled and still unit-tested in every configuration -- they are in
+  static libraries, so nothing links them once nothing calls them, and the code
+  cannot rot from disuse. Asking a build without them for one exits 77 rather
+  than failing, so a test runner can tell "this build cannot answer that" from
+  "the answer was wrong".
+
 - **A vendored library's sanity ceiling reads as our refusal.** `dr_wav` rejects any file
   above `DRWAV_MAX_SAMPLE_RATE`, which defaults to 384000 — its own guard against garbage
   headers, not a WAV limit, since the field is 32 bits wide. A 768 kHz file therefore came

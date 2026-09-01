@@ -2,6 +2,7 @@
 #include "mediaperch/format.hpp"
 
 #include <array>
+#include <charconv>
 
 namespace mp {
 namespace {
@@ -146,20 +147,38 @@ std::uint32_t conventional_channel_mask(std::uint32_t channels) noexcept
     }
 }
 
+namespace {
+
+/// A number appended without dragging a formatter in behind it.
+///
+/// `std::to_string` and `std::format` both reach the same shortest-round-trip
+/// machinery -- Ryu's tables and the locale facets around them -- because they
+/// have to be ready for a `double`. This is only ever asked for a sample rate
+/// or a channel count, and `std::to_chars` on an integer is a divide loop with
+/// no tables at all.
+void append(std::string& out, std::uint32_t value)
+{
+    char digits[16];
+    const std::to_chars_result done = std::to_chars(digits, digits + sizeof(digits), value);
+    out.append(digits, done.ptr);
+}
+
+} // namespace
+
 std::string describe(const Format& f)
 {
     std::string out;
     out.reserve(64);
-    out += std::to_string(f.sample_rate);
+    append(out, f.sample_rate);
     out += " Hz / ";
-    out += std::to_string(f.channels);
+    append(out, f.channels);
     out += " ch / ";
     out += sample_type_name(f.sample_type);
 
     const std::uint32_t valid = effective_valid_bits(f);
     if (valid != natural_valid_bits(f.sample_type)) {
         out += " (";
-        out += std::to_string(valid);
+        append(out, valid);
         out += " valid)";
     }
     if (f.encoding != Encoding::pcm) {

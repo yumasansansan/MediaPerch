@@ -60,6 +60,15 @@
       }
     },
     {
+      "name": "measure",
+      "inherits": "vs",
+      "displayName": "Release, with the measuring apparatus kept",
+      "description": "An optimised build that still has `compare` and `verify`, so the decode-quality check can run at Release speed rather than Debug speed.",
+      "cacheVariables": {
+        "MEDIAPERCH_DIAGNOSTICS": "ON"
+      }
+    },
+    {
       "name": "asan",
       "inherits": "ninja-clang",
       "displayName": "Ninja + clang-cl, sanitized",
@@ -78,6 +87,7 @@
         "CMAKE_CXX_COMPILER": "clang++",
         "MEDIAPERCH_EXPECT_TOOLSET": "Clang",
         "MEDIAPERCH_BUILD_FUZZERS": "ON",
+        "MEDIAPERCH_LTO": "OFF",
         "MEDIAPERCH_BUILD_TESTS": "OFF",
         "MEDIAPERCH_BUILD_PLATFORM": "OFF"
       },
@@ -94,6 +104,11 @@
     {
       "name": "vs-release",
       "configurePreset": "vs",
+      "configuration": "Release"
+    },
+    {
+      "name": "vs-relwithdebinfo",
+      "configurePreset": "vs",
       "configuration": "RelWithDebInfo"
     },
     {
@@ -108,12 +123,27 @@
     {
       "name": "ninja-msvc-release",
       "configurePreset": "ninja-msvc",
+      "configuration": "Release"
+    },
+    {
+      "name": "ninja-msvc-relwithdebinfo",
+      "configurePreset": "ninja-msvc",
       "configuration": "RelWithDebInfo"
     },
     {
       "name": "ninja-clang-debug",
       "configurePreset": "ninja-clang",
       "configuration": "Debug"
+    },
+    {
+      "name": "ninja-clang-release",
+      "configurePreset": "ninja-clang",
+      "configuration": "Release"
+    },
+    {
+      "name": "measure",
+      "configurePreset": "measure",
+      "configuration": "Release"
     },
     {
       "name": "core-only",
@@ -138,8 +168,52 @@
       }
     },
     {
+      "name": "vs-release",
+      "configurePreset": "vs",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "measure",
+      "configurePreset": "measure",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
       "name": "ninja-msvc",
       "configurePreset": "ninja-msvc",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "ninja-msvc-release",
+      "configurePreset": "ninja-msvc",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "ninja-clang-release",
+      "configurePreset": "ninja-clang",
+      "configuration": "Release",
       "output": {
         "outputOnFailure": true
       },

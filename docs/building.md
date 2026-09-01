@@ -87,16 +87,129 @@ choice between an LGPL and a GPL build.
 ## The presets
 
 ```bash
-cmake --preset vs && cmake --build --preset vs-debug && ctest --preset vs-debug
+cmake --preset vs && cmake --build --preset vs-release && ctest --preset vs-release
 ```
+
+**Release, not Debug, unless you are debugging.** The decoders here do real
+arithmetic on real amounts of audio, and a Debug build is between five and ten
+times slower at it: the whole test suite takes **177 seconds in Debug and 41 in
+Release**, and the decode-quality check inside it goes from 174 to 39. Every
+preset below has a `-release` build and test preset beside its `-debug` one.
 
 | Preset | Generator | For |
 |---|---|---|
 | `vs` | Visual Studio 2026 | day to day. Opens as a real `.sln`, needs no developer prompt |
 | `ninja-msvc` | Ninja Multi-Config | faster, but run it from a developer prompt |
 | `ninja-clang` | Ninja Multi-Config, clang-cl | the second compiler. Catches what MSVC lets through |
+| `measure` | Visual Studio 2026 | Release **with the measuring apparatus kept** — see below |
 | `core-only` | Ninja Multi-Config | what CI builds to keep `src/core` portable |
 | `asan` | Ninja Multi-Config, clang-cl | the address and undefined-behaviour sanitizers |
+
+## What a Release build leaves out
+
+A build that ships has no test suite and no measuring apparatus in it. The
+apparatus is `mediaperch-probe compare` and `mediaperch-probe verify` — how every
+hard bug in this project was found, and not one byte of it needed to play a
+file. Leaving it out is **46 KB of a 169 KB probe**, most of it the analysis in
+`compare.obj` and `verify.obj`, which live in static libraries and are simply
+never linked once nothing calls them.
+
+The libraries are still built and still unit-tested in every configuration. It
+is only the executable that does without, so the code cannot rot:
+
+| | `compare` and `verify` | Why |
+|---|---|---|
+| Debug | present | it is what you are there for |
+| Release | **absent** | it is not what ships |
+| Release, `-D MEDIAPERCH_DIAGNOSTICS=ON` | present | the `measure` preset is exactly this |
+
+Asking a build without them for one says so and exits 77 — the code a test
+runner reads as *skipped* rather than *failed*, so `ctest` on a shipping build
+reports the decode-quality check as not run instead of pretending it passed.
+
+```bash
+cmake --preset measure && cmake --build --preset measure && ctest --preset measure
+```
+
+## Optimisation, and link-time optimisation
+
+Every flag is in `cmake/CompilerOptions.cmake`, and the file is arranged around
+one distinction:
+
+- **Policy** — the warning dialect, the exception model — attaches to the
+  `mediaperch_flags` interface target, which only this project's own targets
+  link. Imposing `/W4` on libvorbis fails a build that has nothing wrong with it.
+- **Optimisation** goes through `add_compile_options` at directory scope, so it
+  reaches everything the build compiles, submodules included. libFLAC, libvorbis
+  and libopus are most of the bytes that ship; optimising only the tenth of the
+  binary this project wrote would be a strange place to stop.
+
+**An optimised build takes every optimisation there is, and there is no option
+to take fewer.** A per-flag switch is a promise to keep every combination of
+them working, and the only combination anybody ships is the one where they are
+all on; the rest would be untested configurations wearing the same name. So
+Release is `/O2 /Oi /Ot /Gy /Gw /Ob3` with `/OPT:REF /OPT:ICF` and link-time
+optimisation, and asking for less means editing the file.
+
+**Except anything that trades accuracy for speed.** `/fp:fast` is the obvious
+one, and it is deliberately absent: it lets the compiler reassociate floating
+point, which is precisely the transformation the measurements in
+[formats.md](formats.md) exist to prove did not happen. Speed that costs a digit
+is not speed this project wants.
+
+Four options remain, and none of them changes the arithmetic:
+
+| Option | Default | What it does |
+|---|---|---|
+| `MEDIAPERCH_LTO` | **ON** | optimise across translation units in every optimised configuration |
+| `MEDIAPERCH_DIAGNOSTICS` | OFF | keep the measuring commands in an optimised build |
+| `MEDIAPERCH_LINK_MAP` | OFF | a `.map` beside every binary, for `tools/mapsize.py` |
+| `MEDIAPERCH_SANITIZE` | OFF | ASan and UBSan |
+
+**LTO is a hard failure when it is unavailable, not a silent fallback.**
+`check_ipo_supported` runs at configure time and a toolchain that cannot do it
+stops the configure with the reason and with `-D MEDIAPERCH_LTO=OFF` written out
+as the way past. The alternative is worse than it sounds: the binary somebody
+measures would not be the binary somebody else measured, and the difference
+would arrive months later looking like an unexplained regression.
+
+## What makes a binary big
+
+The flags are settled and there is nothing left to tune there. What is left is
+what the source asks for, and in C++ a single innocuous-looking call can pull in
+more than the module around it.
+
+| Instead of | Use | What it drags in |
+|---|---|---|
+| `std::format`, `std::to_string` | `std::to_chars`, `std::snprintf` | the shortest-round-trip float machinery — Ryu's tables and the locale facets around them — even when the argument is an `unsigned` |
+| `<iostream>`, `<fstream>`, `<sstream>` | `std::fopen`/`std::fwrite`, and `mp::win::open_utf8` for a UTF-8 path | locale facets, the `std::ios_base::Init` static, and the stream buffer hierarchy, in every binary that touches a file |
+| `std::filesystem::path` as a filename | `std::string` | `path`'s conversions, `error_code` and the directory machinery behind them |
+| `std::regex` | a hand-written parser | more code than any parser in this tree |
+
+Measured on the probe: replacing three `std::to_string` calls and the three
+`std::ofstream`/`std::ifstream` uses took it from **123.5 KB to 115.0 KB**,
+without changing a line of what it does. `mp::win::open_utf8` exists because the
+narrow CRT calls go through the process code page and cannot open half the files
+on a machine that is not English — the wide call can, and costs nothing.
+
+**`tools/mapsize.py` is how to find the next one.** Configure with
+`-D MEDIAPERCH_LINK_MAP=ON` — off by default, because it writes a `.map` beside
+every binary — and it charges every byte of a linked image to the object that
+brought it:
+
+```bash
+python tools/mapsize.py --symbols build/vs/bin/Release/mp_decode_ogg.map
+```
+
+**What that found.** The largest single object in the largest module is
+libvorbis's `psy.obj`, 48 KB of psychoacoustic model — which only an *encoder*
+uses, in a module that only decodes. It is there because `_vds_shared_init`
+serves both directions and calls `_vp_psy_init` inside `if(encp)`: the branch
+never runs in a decoder, the reference is unconditional, and **a linker keeps
+what is referenced rather than what is reachable**. It brings `tonemasks` with
+it, 22 KB of tables nothing will ever read. Removing it means patching a
+submodule, so it stays — but it is measured and written down rather than filed
+under "libvorbis is big".
 
 ## If it configures with the wrong compiler
 
@@ -158,6 +271,6 @@ All three run as part of `ctest`, so they cannot be skipped by not remembering t
   It takes a couple of minutes, so it carries a label:
 
   ```
-  ctest --preset vs-debug -LE quality     # everything except this
-  ctest --preset vs-debug -R decode_quality   # only this
+  ctest --preset measure -LE quality          # everything except this
+  ctest --preset measure -R decode_quality    # only this
   ```

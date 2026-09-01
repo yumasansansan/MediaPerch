@@ -9,7 +9,6 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
-#include <fstream>
 
 namespace mp::win {
 namespace {
@@ -293,15 +292,9 @@ std::vector<ModuleRegistry::DecoderChoice> ModuleRegistry::decoders_for(
     // probe that opens the file has already done the expensive thing twice.
     std::array<std::uint8_t, 4096> head{};
     std::size_t head_bytes = 0;
-    {
-        const std::filesystem::path where{
-            std::u8string{reinterpret_cast<const char8_t*>(path.c_str())}};
-        std::ifstream file{where, std::ios::binary};
-        if (file) {
-            file.read(reinterpret_cast<char*>(head.data()),
-                      static_cast<std::streamsize>(head.size()));
-            head_bytes = static_cast<std::size_t>(file.gcount());
-        }
+    if (std::FILE* file = open_utf8(path, L"rb")) {
+        head_bytes = std::fread(head.data(), 1, head.size(), file);
+        std::fclose(file);
     }
 
     std::vector<DecoderChoice> ranked;
@@ -348,6 +341,21 @@ std::vector<ModuleRegistry::DecoderChoice> ModuleRegistry::decoders_for(
                          return a.desc->priority > b.desc->priority;
                      });
     return ranked;
+}
+
+std::FILE* open_utf8(const std::string& path, const wchar_t* mode) noexcept
+{
+    const int wide = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
+    if (wide <= 0) {
+        return nullptr;
+    }
+    std::vector<wchar_t> name(static_cast<std::size_t>(wide));
+    MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, name.data(), wide);
+    std::FILE* file = nullptr;
+    if (_wfopen_s(&file, name.data(), mode) != 0) {
+        return nullptr;
+    }
+    return file;
 }
 
 std::filesystem::path module_directory()

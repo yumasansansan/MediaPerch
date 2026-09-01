@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -134,6 +135,15 @@ private:
 
 /// Where modules live: beside the executable, as in DragonPerch.
 [[nodiscard]] std::filesystem::path module_directory();
+
+/// `fopen` for a UTF-8 path, which the narrow CRT cannot do.
+///
+/// The narrow calls go through the process code page, so half the files on a
+/// Japanese or Russian machine cannot be opened by name. The wide call can, and
+/// unlike `std::ifstream` it brings no iostreams, no locale facets and no
+/// `std::filesystem::path` conversion with it -- the whole of which is several
+/// kilobytes in every binary that touches a file.
+[[nodiscard]] std::FILE* open_utf8(const std::string& path, const wchar_t* mode) noexcept;
 
 /// Everything that loaded, and the rules for choosing between them.
 ///

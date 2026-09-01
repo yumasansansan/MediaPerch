@@ -67,7 +67,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        configuration: [Debug, RelWithDebInfo]
+        configuration: [Debug, RelWithDebInfo, Release]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -175,19 +175,71 @@ jobs:
         shell: cmd
         run: ${{ env.VS_DEV_ENV }}
 
+      # Release, and with MEDIAPERCH_DIAGNOSTICS on so the measuring commands
+      # are actually in the binary: a shipping build leaves them out, and this
+      # job exists to use them. Release rather than Debug because the check
+      # decodes about a minute of audio a dozen times over, and a Debug decoder
+      # turns two minutes into twenty.
       - name: Configure
-        run: cmake --preset ninja-msvc -D MEDIAPERCH_REQUIRE_FFMPEG=ON
+        run: >
+          cmake --preset ninja-msvc
+          -D MEDIAPERCH_REQUIRE_FFMPEG=ON -D MEDIAPERCH_DIAGNOSTICS=ON
 
       - name: Build
-        run: cmake --build --preset ninja-msvc --config RelWithDebInfo
+        run: cmake --build --preset ninja-msvc --config Release
 
-      # MEDIAPERCH_REQUIRE_FFMPEG turns a missing FFmpeg from a skip into a
-      # failure, so the day this stops finding it is the day the job goes red
-      # rather than the day it quietly starts checking nothing.
+      # MEDIAPERCH_REQUIRE_FFMPEG turns a missing FFmpeg -- or a build without
+      # the measuring commands -- from a skip into a failure, so the day either
+      # stops being true is the day the job goes red rather than the day it
+      # quietly starts checking nothing.
       - name: Measure
         run: >
-          ctest --preset ninja-msvc --build-config RelWithDebInfo
+          ctest --preset ninja-msvc --build-config Release
           -R decode_quality --output-on-failure --no-tests=error
+
+  # What actually ships: optimised, link-time optimised, no test suite and no
+  # measuring apparatus. It is a separate job because it is a *different build* --
+  # MEDIAPERCH_DIAGNOSTICS changes what is compiled, so a configuration that
+  # never gets built is a configuration that will not compile one day.
+  #
+  # The sizes are printed rather than asserted. A threshold here would fail on
+  # somebody else's toolchain update and teach everyone to raise it; a number in
+  # the log is something a person can look at when a pull request doubles it.
+  ship:
+    name: the build that ships, and what it weighs
+    runs-on: windows-2025-vs2026
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - name: MSVC developer environment
+        shell: cmd
+        run: ${{ env.VS_DEV_ENV }}
+
+      - name: Configure
+        run: >
+          cmake --preset ninja-msvc
+          -D MEDIAPERCH_BUILD_TESTS=OFF -D MEDIAPERCH_LINK_MAP=ON
+
+      - name: Build
+        run: cmake --build --preset ninja-msvc --config Release
+
+      - name: What it weighs
+        run: |
+          Get-ChildItem build/ninja-msvc/bin/Release -Include *.exe,*.dll -Recurse |
+            Sort-Object Length -Descending |
+            Format-Table @{n='KB';e={'{0,8:N1}' -f ($_.Length/1KB)}}, Name -AutoSize
+          '{0:N1} KB total' -f ((Get-ChildItem build/ninja-msvc/bin/Release -Include *.exe,*.dll -Recurse |
+            Measure-Object Length -Sum).Sum / 1KB)
+
+      # Where those bytes came from, attributed to the object files that brought
+      # them. Cheap to run and the only thing that turns "it got bigger" into a
+      # name.
+      - name: Where the bytes are
+        run: |
+          $maps = (Get-ChildItem build/ninja-msvc/bin/Release/*.map).FullName
+          python tools/mapsize.py --top 8 @maps
 
   # A second compiler catches what the first lets through -- and clang is the one
   # with complete C23, so it is also what proves the ABI header is not quietly
@@ -208,8 +260,17 @@ jobs:
       - name: Configure
         run: cmake --preset ninja-clang
 
-      - name: Build
+      - name: Build, Debug
         run: cmake --build --preset ninja-clang-debug
 
-      - name: Test
+      - name: Test, Debug
         run: ctest --preset ninja-clang-debug
+
+      # Release is a different compiler and linker path here -- clang-cl does
+      # ThinLTO where MSVC does /GL and /LTCG -- so the MSVC Release job does
+      # not cover it.
+      - name: Build, Release
+        run: cmake --build --preset ninja-clang-release
+
+      - name: Test, Release
+        run: ctest --preset ninja-clang-release

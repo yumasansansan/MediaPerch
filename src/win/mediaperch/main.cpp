@@ -21,8 +21,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
-#include <filesystem>
-#include <fstream>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -597,14 +595,14 @@ int decode(const MpDecoderVtbl& vtbl, const Options& options)
     const mp::Format format = decoder.format();
     const std::size_t stride = mp::frame_bytes(format);
 
-    // std::filesystem::path rather than fopen: the path arrives as UTF-8, and a
-    // narrow CRT call cannot open half the files on this machine.
-    std::ofstream raw;
+    // mp::win::open_utf8 rather than fopen: the path arrives as UTF-8, and a
+    // narrow CRT call cannot open half the files on this machine. Rather than
+    // std::ofstream either, which brings iostreams and the locale facets behind
+    // them into a binary whose only use for them is writing bytes.
+    std::FILE* raw = nullptr;
     if (!options.raw.empty()) {
-        const std::filesystem::path where{
-            std::u8string{reinterpret_cast<const char8_t*>(options.raw.c_str())}};
-        raw.open(where, std::ios::binary);
-        if (!raw) {
+        raw = mp::win::open_utf8(options.raw, L"wb");
+        if (raw == nullptr) {
             std::fprintf(stderr, "cannot write %s\n", options.raw.c_str());
             return 1;
         }
@@ -619,13 +617,14 @@ int decode(const MpDecoderVtbl& vtbl, const Options& options)
             break;
         }
         hash.update(chunk.data(), got);
-        if (raw.is_open()) {
-            raw.write(reinterpret_cast<const char*>(chunk.data()),
-                      static_cast<std::streamsize>(got));
+        if (raw != nullptr) {
+            std::fwrite(chunk.data(), 1, got, raw);
         }
         total += got;
     }
-    raw.close();
+    if (raw != nullptr) {
+        std::fclose(raw);
+    }
 
     std::printf("file       %s\n", options.file.c_str());
     std::printf("format     %s\n", mp::describe(format).c_str());
@@ -640,6 +639,23 @@ int decode(const MpDecoderVtbl& vtbl, const Options& options)
     std::printf("sha256     %s\n", hash.hex().c_str());
     return 0;
 }
+
+
+// --------------------------------------------------------------------------
+// The measuring apparatus, from here to the end of this namespace.
+//
+// `compare` holds a decode against the audio that was encoded; `verify` plays a
+// file into a virtual cable and reads the other end. Both are how the hard bugs
+// in this project were found and neither is needed to play a file, so a build
+// that ships leaves them out: about 26 KB of the probe, most of it the analysis
+// in mediaperch_core:compare.obj and mediaperch_win:verify.obj, which are in
+// static libraries and therefore never linked once nothing calls them.
+//
+// Compiled in for Debug always, and for any configuration when the build is
+// configured with -D MEDIAPERCH_DIAGNOSTICS=ON. The libraries themselves are
+// built and unit-tested either way -- it is only the shipping executable that
+// does without.
+#if MEDIAPERCH_DIAGNOSTICS
 
 
 /// Reads a whole file as interleaved float, whatever the decoder hands back.
@@ -1269,10 +1285,10 @@ int verify(const MpSinkVtbl& sink_vtbl, const MpDecoderVtbl& decoder_vtbl,
         if (!options.raw.empty()) {
             const auto write = [](const std::string& where, const void* data,
                                   std::size_t bytes) {
-                const std::filesystem::path p{
-                    std::u8string{reinterpret_cast<const char8_t*>(where.c_str())}};
-                std::ofstream out{p, std::ios::binary};
-                out.write(static_cast<const char*>(data), static_cast<std::streamsize>(bytes));
+                if (std::FILE* out = mp::win::open_utf8(where, L"wb")) {
+                    std::fwrite(data, 1, bytes, out);
+                    std::fclose(out);
+                }
             };
             write(options.raw + ".sent", stream.data(), stream.size());
             write(options.raw + ".recorded", capture.data().data(), capture.data().size());
@@ -1298,6 +1314,26 @@ int verify(const MpSinkVtbl& sink_vtbl, const MpDecoderVtbl& decoder_vtbl,
 
     return status;
 }
+
+
+#else // MEDIAPERCH_DIAGNOSTICS
+
+/// What the measuring commands do in a build that left them out.
+///
+/// Not silence, and not a pretend success: a test harness has to be able to
+/// tell "this build cannot answer that" from "the answer was wrong", so this
+/// says which it is and exits 77 -- the code a test runner reads as skipped.
+int no_diagnostics(const char* command)
+{
+    std::fprintf(stderr,
+                 "`%s` is a measuring command, and this build does not have one.\n"
+                 "Configure with -D MEDIAPERCH_DIAGNOSTICS=ON to put the measuring\n"
+                 "apparatus back. A Debug build always has it.\n",
+                 command);
+    return 77;
+}
+
+#endif // MEDIAPERCH_DIAGNOSTICS
 
 } // namespace
 
@@ -1363,6 +1399,7 @@ int main(int argc, char** argv)
         }
         std::printf("decoder    %s (%s)%s\n", choice.desc->id, choice.desc->name,
                     options.decoder_id.empty() ? "" : "  [forced]");
+#if MEDIAPERCH_DIAGNOSTICS
         if (options.command == "compare") {
             if (options.source.empty()) {
                 std::fprintf(stderr, "compare needs --source\n");
@@ -1372,6 +1409,12 @@ int main(int argc, char** argv)
         }
         return options.command == "decode" ? decode(*choice.vtbl, options)
                                            : verify(sink, *choice.vtbl, options);
+#else
+        if (options.command == "decode") {
+            return decode(*choice.vtbl, options);
+        }
+        return no_diagnostics(options.command.c_str());
+#endif
     }
 
     usage();

@@ -116,6 +116,13 @@ endfunction()
 
 set(failed "")
 set(ran 0)
+set(skipped FALSE)
+
+# 77 is what the probe returns when it was built without the measuring
+# commands, which a build that ships is. Skipping then is right locally and
+# wrong in CI, so MEDIAPERCH_REQUIRE_FFMPEG doubles as "this run is not allowed
+# to skip anything" -- it is set exactly where that is true.
+set(MEDIAPERCH_NO_DIAGNOSTICS 77)
 
 function(check label encoded source)
     message(STATUS "")
@@ -127,6 +134,10 @@ function(check label encoded source)
         ERROR_VARIABLE complained)
     string(STRIP "${said}${complained}" said)
     message(STATUS "${said}")
+    if(status EQUAL MEDIAPERCH_NO_DIAGNOSTICS)
+        set(skipped TRUE PARENT_SCOPE)
+        return()
+    endif()
     math(EXPR ran "${ran} + 1")
     set(ran "${ran}" PARENT_SCOPE)
     if(NOT status EQUAL 0)
@@ -246,6 +257,16 @@ check("AAC, raw ADTS stereo 44.1 kHz" "${W}/q_adts.aac" "${W}/src_2_44100.wav"
 # ---------------------------------------------------------------- the verdict
 
 message(STATUS "")
+if(skipped)
+    if(MEDIAPERCH_REQUIRE_FFMPEG)
+        message(FATAL_ERROR
+            "This build has no measuring commands, so nothing was checked. "
+            "Configure with -D MEDIAPERCH_DIAGNOSTICS=ON.")
+    endif()
+    message(STATUS "this build has no measuring commands -- nothing checked. "
+                   "Configure with -D MEDIAPERCH_DIAGNOSTICS=ON, or use a Debug build.")
+    return()
+endif()
 list(LENGTH failed how_many)
 if(how_many GREATER 0)
     string(REPLACE ";" "\n  " pretty "${failed}")
