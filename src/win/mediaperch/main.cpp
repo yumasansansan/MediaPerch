@@ -12,6 +12,9 @@
 #include "mediaperch/compare.hpp"
 #include "mediaperch/decoder.hpp"
 #include "mediaperch/dsp.hpp"
+#if MEDIAPERCH_HAS_LOUDNESS
+#    include <loudness.hpp>
+#endif
 #include "mediaperch/negotiation.hpp"
 #include "mediaperch/passthrough.hpp"
 #include "mediaperch/processed.hpp"
@@ -57,6 +60,8 @@ struct Options {
     std::uint64_t seek = 0;
     mp::PathPolicy path = mp::PathPolicy::bit_exact;
     double gain = 1.0;
+    /// `loudness`: what the ReplayGain figure is measured against.
+    double target_lufs = -18.0;
     mp::DitherKind dither = mp::DitherKind::triangular;
     mp::NoiseShaping shaping{};
     /// The dither generator's seed. A setting because reproducibility is one,
@@ -277,6 +282,8 @@ Options
   --shape WHICH     Path B only: a binomial order 0 to 9, `shibata[:N]` for a
                     measured ATH-weighted curve, or a published one by name.
                     `--shape list` (or `--dither list`) prints all of them
+  --target LUFS     `loudness`: what the ReplayGain figure aims at. -18 is
+                    ReplayGain 2.0's own reference
   --seek FRAMES     `decode` seeks here first, then hashes the rest. The hash of
                     a seek to N must equal the hash of the last (length - N)
                     frames of a straight decode, which is what makes seeking
@@ -319,7 +326,7 @@ bool parse(int argc, char** argv, Options& out)
             std::exit(0);
         } else if (arg == "devices" || arg == "negotiate" || arg == "play" ||
                    arg == "verify" || arg == "decode" || arg == "modules" ||
-                   arg == "compare") {
+                   arg == "compare" || arg == "loudness") {
             out.command = arg;
         } else if (arg == "--file") {
             if (i + 1 < argc) {
@@ -337,6 +344,10 @@ bool parse(int argc, char** argv, Options& out)
                 if (out.decoder_id.rfind("decode_", 0) != 0) {
                     out.decoder_id = "decode_" + out.decoder_id;
                 }
+            }
+        } else if (arg == "--target") {
+            if (i + 1 < argc) {
+                out.target_lufs = std::strtod(argv[++i], nullptr);
             }
         } else if (arg == "--gain") {
             if (i + 1 < argc) {
@@ -825,6 +836,96 @@ int run_graph(Graph& graph, mp::win::RenderThreadHooks& hooks, const mp::Format&
     }
     return stats.underruns == 0 ? 0 : 2;
 }
+
+#if MEDIAPERCH_HAS_LOUDNESS
+/// Scans a whole file and says how loud it is.
+///
+/// The measurement a player needs *before* it plays: ReplayGain cannot be
+/// applied in the same pass it is measured in, because a track's integrated
+/// loudness is not known until the track has finished. So this is the pass that
+/// finds the number, and `--dsp replaygain:gain_db=` is the pass that uses it.
+///
+/// It is the same meter the stage runs, which is the point of it being a
+/// library: a number this prints and a number the stage reports cannot disagree.
+int loudness(const MpDecoderVtbl& vtbl, const Options& options)
+{
+    mp::Decoder decoder;
+    const MpResult opened = decoder.open(vtbl, options.file.c_str());
+    if (opened != MP_OK) {
+        std::fprintf(stderr, "could not open %s: %s%s%s\n", options.file.c_str(),
+                     result_name(opened), decoder.why().empty() ? "" : " -- ",
+                     decoder.why().c_str());
+        return 1;
+    }
+
+    const mp::Format source = decoder.format();
+    const mp::Format bus = mp::dsp_bus_format(source);
+    mp::Converter to_bus{source, bus, mp::ConvertConfig{}};
+    if (!to_bus.possible()) {
+        std::fprintf(stderr, "cannot read %s as samples\n",
+                     mp::describe(source).c_str());
+        return 1;
+    }
+
+    mp::loudness::Meter meter;
+    std::string why;
+    if (!meter.configure(source.sample_rate, source.channels, source.channel_mask, why)) {
+        std::fprintf(stderr, "%s\n", why.c_str());
+        return 1;
+    }
+
+    constexpr std::uint32_t k_chunk = 16384;
+    std::vector<std::uint8_t> raw(static_cast<std::size_t>(k_chunk) *
+                                  mp::frame_bytes(source));
+    std::vector<double> interleaved(static_cast<std::size_t>(k_chunk) * source.channels);
+    std::vector<double> planar(interleaved.size());
+    std::vector<const double*> planes(source.channels);
+
+    std::uint64_t frames_read = 0;
+    for (;;) {
+        const std::size_t got = decoder.read(raw.data(), raw.size());
+        const std::size_t frames = got / mp::frame_bytes(source);
+        if (frames == 0) {
+            break;
+        }
+        to_bus.run(raw.data(), interleaved.data(), frames);
+        for (std::uint32_t c = 0; c < source.channels; ++c) {
+            double* plane = planar.data() + static_cast<std::size_t>(c) * frames;
+            for (std::size_t n = 0; n < frames; ++n) {
+                plane[n] = interleaved[n * source.channels + c];
+            }
+            planes[c] = plane;
+        }
+        meter.add(planes.data(), static_cast<std::uint32_t>(frames));
+        frames_read += frames;
+    }
+
+    std::printf("file       %s\n", options.file.c_str());
+    std::printf("source     %s, %llu frames (%.2f s)\n", mp::describe(source).c_str(),
+                static_cast<unsigned long long>(frames_read),
+                static_cast<double>(frames_read) / source.sample_rate);
+    const double measured = meter.integrated_lufs();
+    if (measured <= mp::loudness::Meter::silence() / 2.0) {
+        std::printf("loudness   silence: nothing passed the -70 LUFS gate\n");
+        return 0;
+    }
+    std::printf("loudness   %.2f LUFS integrated, over %llu blocks\n", measured,
+                static_cast<unsigned long long>(meter.blocks()));
+    std::printf("peak       %.2f dBFS (sample peak; true peak is not measured)\n",
+                meter.sample_peak_db());
+    const double gain = meter.replay_gain_db(options.target_lufs);
+    std::printf("replaygain %+.2f dB to reach %.1f LUFS\n", gain, options.target_lufs);
+    const double after = meter.sample_peak() * std::pow(10.0, gain / 20.0);
+    if (after > 1.0) {
+        std::printf("           applying it would put the peak at %+.2f dBFS, so the\n"
+                    "           stage will hold it to %+.2f dB unless told not to\n",
+                    20.0 * std::log10(after), -20.0 * std::log10(meter.sample_peak()));
+    }
+    std::printf("\n  --dsp replaygain:gain_db=%.2f,peak=%.6f\n", gain,
+                meter.sample_peak());
+    return 0;
+}
+#endif
 
 /// The best-ranked decoder that can actually open the file.
 ///
@@ -1997,7 +2098,7 @@ int main(int argc, char** argv)
         return play(sink, registry, options);
     }
     if (options.command == "decode" || options.command == "verify" ||
-        options.command == "compare") {
+        options.command == "compare" || options.command == "loudness") {
         if (options.file.empty()) {
             std::fprintf(stderr, "%s needs --file\n", options.command.c_str());
             return 1;
@@ -2015,6 +2116,16 @@ int main(int argc, char** argv)
         }
         std::printf("decoder    %s (%s)%s\n", choice.desc->id, choice.desc->name,
                     options.decoder_id.empty() ? "" : "  [forced]");
+#if MEDIAPERCH_HAS_LOUDNESS
+        if (options.command == "loudness") {
+            return loudness(*choice.vtbl, options);
+        }
+#else
+        if (options.command == "loudness") {
+            std::fprintf(stderr, "this build has no loudness meter\n");
+            return 1;
+        }
+#endif
 #if MEDIAPERCH_DIAGNOSTICS
         if (options.command == "compare") {
             if (options.source.empty()) {

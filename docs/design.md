@@ -479,6 +479,87 @@ level  -3.99   dB the matrix was scaled by to normalise
 peak   0.005591  loudest sample produced
 ```
 
+### The equaliser
+
+A cascade of second-order sections, and **the frequency axis is continuous and stays
+continuous**. A band is a frequency in hertz, a gain in decibels and a Q — not a slider in
+a bank of thirty-one — so two bands a hertz apart are two different filters and nothing
+snaps to a preset. Eight kinds: `peak`, `lowshelf`, `highshelf`, `lowpass`, `highpass`,
+`bandpass`, `notch`, `allpass`, from Bristow-Johnson's cookbook, written out rather than
+referenced because they are eight lines and a reference that goes missing is a filter
+nobody can check.
+
+```
+--dsp "eq:bands=lowshelf:80:+4:0.707;peak:2500:-3:1.5;highshelf:9000:+2:0.707"
+
+sections  3
+headroom  +4.00   dB the loudest frequency gains
+response  20=+3.98 47=+3.55 112=+0.83 267=+0.02 632=-0.09 1500=-0.83
+          3557=-1.31 8434=+0.73 20000=+2.00
+```
+
+**`response` is computed from the coefficients, not measured**, and it is the same function
+a display would draw the curve with — so what is drawn and what is heard cannot drift
+apart. `tests/eq_test.cpp` checks every gain claim *twice*: once against that curve and once
+by running a sine through, because a coefficient set can be right while the difference
+equation using it is wrong, and the reverse.
+
+`headroom` is the one number to read before putting an equaliser in front of a quantiser:
++4 dB of boost means a track that already peaked at −1 dBFS will now clip. Nothing is
+applied automatically about it, because a limiter that appears by itself is exactly what
+this program is not.
+
+Three details worth stating. **A band above Nyquist is refused, not warped down to fit** — a
+24 kHz shelf in a 44.1 kHz stream has no analogue below Nyquist, and accommodating it makes
+it audible. **A leading `-` disables a band without forgetting it**, because deleting a
+setting to mute it and typing it again to hear it is how settings get lost. And the sections
+run in **transposed direct form II**, which is the form whose rounding behaves itself when a
+section's poles crowd the unit circle — which is every band under a hundred hertz at a
+hundred and ninety-two thousand samples a second.
+
+### ReplayGain, measured rather than read
+
+ITU-R BS.1770 K-weighting, 400 ms blocks overlapping by three quarters, and the two gates —
+absolute at −70 LUFS, then relative at 10 LU below the mean of what survives.
+
+**The measurement and the application cannot happen in the same pass**, and the design says
+so out loud: a track's integrated loudness is not known until the track has finished, so a
+stage that normalised what it was hearing would be a compressor. `mediaperch-probe loudness`
+is the scan; `--dsp replaygain:gain_db=…` is the pass that uses what the scan found. The
+stage keeps metering while it plays and reports what it hears, which is a second opinion on
+the first.
+
+```
+$ mediaperch-probe loudness --file "01_01_Soranji.m4a"
+source     96000 Hz / 2 ch / S24_PACKED, 33042432 frames (344.19 s)
+loudness   -7.56 LUFS integrated, over 3438 blocks
+peak       -0.20 dBFS (sample peak; true peak is not measured)
+replaygain -10.44 dB to reach -18.0 LUFS
+
+  --dsp replaygain:gain_db=-10.44,peak=0.977237
+```
+
+**It is measured here rather than read from a tag** for three reasons: a tag is a number
+somebody else's encoder wrote, in a version of the specification they chose, from a decode
+that may not match this one — and this tree has no metadata module yet anyway. Measuring
+costs two second-order sections per channel. When there is something to read a tag with, the
+tag becomes the second opinion.
+
+`prevent_clipping` is on by default and does one thing: with the track's peak known, the
+applied gain is never more than the peak allows. A tag asking for +6 dB on a track that
+peaks at −0.2 dBFS gets +0.20 dB and the report says so. Quietly obliging is how a
+normaliser earns a reputation.
+
+**The tests are the standard's own.** EBU Tech 3341 names conformance signals and says what
+a compliant meter must read for each, to a tenth of a decibel: a stereo 1 kHz sine at
+−23 dBFS reads −23.0 LUFS, and it does here at 44.1, 48 and 96 kHz. The surround weights
+(1.41) and the LFE's exclusion are checked the same way, as is the gating — twenty seconds
+of tone followed by twenty of silence measures what the tone measures, which is the whole
+difference between BS.1770-1 and everything after it. The 48 kHz K-weighting coefficients
+the standard prints are pinned to ten decimal places, and the filter is **re-derived at
+every rate** rather than transcribed at one and warped elsewhere, which is the mistake that
+makes a meter read half a decibel out at 96 kHz.
+
 #### Order in the chain, and why it only costs
 
 Every stage in this chain is linear, so a gain, a resample and a mix **commute exactly** —
@@ -663,8 +744,11 @@ modules/             everything that can be loaded and unloaded at runtime.
                      stage that answers with a rate it was not given.
   dsp_mix/           the channel matrix. The third geometry, and the one whose
                      answer is a choice rather than an approximation.
-  dsp_*/             equaliser, convolve, crossfeed, ReplayGain. Never present
-                     in passthrough.
+  biquad/            second-order sections, shared: the equaliser is a cascade a
+                     person chose and the loudness meter is one BS.1770 chose.
+  dsp_eq/            the equaliser, anywhere on the axis.
+  dsp_replaygain/    the loudness meter, and the gain a previous scan found.
+  dsp_*/             convolve and crossfeed. Never present in passthrough.
   video_d3d11/       presentation, and the three tone-map providers.
 shell/windows/       the WinUI 3 window. C#, Native AOT, **optional**: the engine runs
                      with none of it on disk, the same way DragonPerch's daemon does.

@@ -23,6 +23,16 @@ set_target_properties(mediaperch_win PROPERTIES FOLDER "win")
 # Milestone 1's entire user interface.
 add_executable(mediaperch_probe mediaperch/main.cpp)
 target_link_libraries(mediaperch_probe PRIVATE MediaPerch::win mediaperch_flags)
+
+# The `loudness` command is the ReplayGain stage's own meter, run over a whole
+# file instead of over a block. Sharing the library is what makes the number the
+# probe prints and the number the stage reports the same number.
+if(TARGET mediaperch_loudness)
+    target_link_libraries(mediaperch_probe PRIVATE mediaperch_loudness)
+    target_compile_definitions(mediaperch_probe PRIVATE MEDIAPERCH_HAS_LOUDNESS=1)
+else()
+    target_compile_definitions(mediaperch_probe PRIVATE MEDIAPERCH_HAS_LOUDNESS=0)
+endif()
 set_target_properties(mediaperch_probe PROPERTIES
     OUTPUT_NAME "mediaperch-probe"
     FOLDER "win")

@@ -52,6 +52,20 @@ if(TARGET mediaperch_mix)
     target_link_libraries(mediaperch_tests PRIVATE mediaperch_mix)
 endif()
 
+# An equaliser's curve is computable, so the test computes it rather than
+# listening for it -- and then runs a tone through to check the two agree.
+if(TARGET mediaperch_biquad)
+    target_sources(mediaperch_tests PRIVATE eq_test.cpp)
+    target_link_libraries(mediaperch_tests PRIVATE mediaperch_biquad)
+endif()
+
+# A loudness meter has a published calibration point, so the test uses it: EBU
+# Tech 3341's conformance signals, and the numbers they are supposed to give.
+if(TARGET mediaperch_loudness)
+    target_sources(mediaperch_tests PRIVATE loudness_test.cpp)
+    target_link_libraries(mediaperch_tests PRIVATE mediaperch_loudness)
+endif()
+
 target_link_libraries(mediaperch_tests
     PRIVATE MediaPerch::core Catch2::Catch2WithMain mediaperch_flags)
 
