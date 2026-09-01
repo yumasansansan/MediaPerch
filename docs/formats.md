@@ -692,6 +692,89 @@ $ mediaperch-probe decode --file corrupt.flac --decoder flac
 That is one flipped byte in the middle of the audio, found by the file's own
 checksum. No other decoder here can be told it is wrong by its input.
 
+## Against the audio that was encoded
+
+Everything above compares one decoder with another. That answers *do these
+agree* and it cannot answer *are they both wrong*, so there is now a second
+measurement that holds each decoder against the uncompressed file that went into
+the encoder -- the only reference outside every decoder. `mediaperch-probe
+compare` makes it, `cmake/DecodeQuality.cmake` drives twelve rows of it, and CI
+runs the lot on every push.
+
+**What it can prove is narrower than it sounds.** The encoder threw information
+away on purpose: at 256 kbps the decode sits 17 dB from the source, while two
+correct decoders sit 134 dB from each other. The encoder's loss is common to
+both and about six orders of magnitude larger, so **this cannot rank two
+decoders on fidelity** and no amount of care with the thresholds will make it.
+
+What it can do is the part no decoder-to-decoder comparison can:
+
+| Measured | Against | Why it needs the source |
+|---|---|---|
+| length | the frame count of the file that was encoded | agreeing with FFmpeg about a length says nothing if FFmpeg is wrong too |
+| alignment | zero, by cross-correlation | this is the bug Media Foundation has in four codecs and FAAD2 has in one |
+| channel order | a correlation matrix, every channel against every channel | two channels swapped is invisible to any broadband figure |
+| band energies | the source's own spectrum | a perceptual encoder is *designed* to preserve band energy, so a band that is wrong is a bug where a different waveform is not |
+| a fidelity floor | a per-row threshold | it assumes nothing about any other decoder |
+
+The signal is a sweep plus white noise, one distinct pair per channel. The sweep
+is there because **a test signal has to be able to locate itself** -- a steady
+tone correlates with itself once per period and every peak is a plausible answer,
+which is the mistake the MP3 delay measurement made once already. The measurement
+reports how far its correlation peak stands above everything outside its own
+shoulder, so a signal that cannot answer the question says so instead of
+producing a number. The noise is there because it is what makes channels tell
+each other apart, and because noise is what drives an AAC encoder to substitute
+noise -- a sweep alone never reaches that code path at all.
+
+### The twelve rows
+
+| Row | Length | Start | Channels | Worst band | Against the source |
+|---|---|---|---|---|---|
+| FLAC, stereo 44.1 kHz | exact | +0 | in order | 0.00 dB | **identical** |
+| ALAC, stereo 44.1 kHz | exact | +0 | in order | 0.00 dB | **identical** |
+| ALAC, 5.1 at 48 kHz | exact | +0 | in order | 0.00 dB | **identical** |
+| MP3, stereo 44.1 kHz 256k | exact | +0 | in order | 0.07 dB | 13.75 dB |
+| AAC, stereo 44.1 kHz 256k | exact | +0 | in order | 0.15 dB | 16.57 dB |
+| AAC, stereo 44.1 kHz 32k | exact | +0 | in order | — | 0.42 dB |
+| AAC, mono 48 kHz 192k | exact | +0 | — | 0.10 dB | 23.40 dB |
+| AAC, stereo 8 kHz 64k | exact | +0 | in order | 0.30 dB | 20.38 dB |
+| AAC, stereo 96 kHz 512k | exact | +0 | in order | 0.05 dB | 5.05 dB |
+| AAC, 5.1 at 48 kHz 768k | exact | +0 | in order | 0.90 dB | 7.04 dB |
+| AAC, 7.1(wide) at 48 kHz 1024k | exact | +0 | in order | 0.72 dB | 7.96 dB |
+| AAC, raw ADTS stereo 44.1 kHz | *longer* | **+1024** | in order | 0.15 dB | 16.57 dB |
+
+The three lossless rows are the strictest in the file: nothing was thrown away,
+so the decode has to *equal* the source, and it does. The last row is the
+control. Raw ADTS carries no gapless metadata, so the encoder's delay is
+correctly still in the audio -- the decode is a whole frame late and longer than
+the source, and both are right. Every other check still applies to it, because
+the alignment is found first and the rest is measured where the audio actually
+landed. A decode that starts *early* fails whatever the format.
+
+### Does the check work? Three bugs put back
+
+A test that has never failed is a test nobody has reason to believe. Each of the
+three real bugs from this milestone was put back into the decoder and the twelve
+rows re-run:
+
+| Bug put back | Source-referenced checks | Agreement with FFmpeg |
+|---|---|---|
+| the program config element's front pairs read outwards-in | **caught** -- channel order, and the alignment collapsed with it | caught |
+| the `elst` edit list ignored | **caught** -- 7 of 12 rows, every one on "starts 1024 frames from where the source does" | caught |
+| the noise generator not reset by `init()` | **passed every one** | **caught** -- 24 dB where 125 was required |
+
+The third row is the interesting one and it is why both halves of the check
+exist. A noise-substituted band is arbitrary by design: the file fixes its
+*energy* and leaves its contents to the decoder. So a decoder filling those bands
+from the wrong point in its generator produces bands of the right width, in the
+right place, at the right energy -- the source cannot see the difference, and
+did not. What sees it is holding the two decoders against *each other*, which is
+the measurement the source was supposed to replace.
+
+Neither comparison is the better one. They fail in different directions, which is
+the only reason to have two.
+
 ## Bit-exactness
 
 Every decoder that can read a file produces the same bytes as every other. Four

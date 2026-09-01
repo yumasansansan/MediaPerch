@@ -134,6 +134,61 @@ jobs:
             build/fuzz/bin/timeout-*
           if-no-files-found: ignore
 
+  # Every other check in this tree compares one decoder with another, which can
+  # only say whether they agree. This one holds each decoder against the
+  # uncompressed audio that went into the encoder: length, alignment, which
+  # channel came out of which speaker, per-band energy, and a fidelity floor
+  # that assumes nothing about FFmpeg -- plus the one thing the source cannot
+  # check, which is agreement with FFmpeg sample for sample.
+  #
+  # It runs on every push because the three bugs it was built after were all
+  # invisible to a build and to a unit test: a decoder that starts a track a
+  # frame late, one that puts two channels in the wrong speakers, and one that
+  # fills noise bands from a generator two frames out of step. Each of those
+  # produced a file that decoded, was the right length in two cases out of
+  # three, and sounded plausible.
+  quality:
+    name: decoders against the audio that was encoded
+    runs-on: windows-2025-vs2026
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      # FFmpeg is a test tool here and nothing else: it builds the corpus and it
+      # is the second opinion. Nothing in the product links it, and
+      # decode_ffmpeg looks for it at run time rather than being built against
+      # it -- so this installs a tool, not a dependency. It goes before the
+      # developer environment because that step captures PATH into GITHUB_ENV,
+      # and a PATH captured before an install is a PATH without it.
+      - name: FFmpeg, for the corpus and the second opinion
+        run: |
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg -y --no-progress
+          }
+          # Logged on purpose: this job's thresholds are measurements, and the
+          # encoder that produced the corpus is half of what was measured. The
+          # day a row moves, the first question is whether this line changed.
+          ffmpeg -version | Select-Object -First 1
+
+      - name: MSVC developer environment
+        shell: cmd
+        run: ${{ env.VS_DEV_ENV }}
+
+      - name: Configure
+        run: cmake --preset ninja-msvc -D MEDIAPERCH_REQUIRE_FFMPEG=ON
+
+      - name: Build
+        run: cmake --build --preset ninja-msvc --config RelWithDebInfo
+
+      # MEDIAPERCH_REQUIRE_FFMPEG turns a missing FFmpeg from a skip into a
+      # failure, so the day this stops finding it is the day the job goes red
+      # rather than the day it quietly starts checking nothing.
+      - name: Measure
+        run: >
+          ctest --preset ninja-msvc --build-config RelWithDebInfo
+          -R decode_quality --output-on-failure --no-tests=error
+
   # A second compiler catches what the first lets through -- and clang is the one
   # with complete C23, so it is also what proves the ABI header is not quietly
   # relying on an MSVC extension. clang-cl still needs the MSVC headers and

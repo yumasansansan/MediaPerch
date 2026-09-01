@@ -8,6 +8,8 @@
 # build if an OS header appears anyway.
 
 add_library(mediaperch_core STATIC
+    mediaperch/compare.cpp
+    mediaperch/compare.hpp
     mediaperch/decoder.cpp
     mediaperch/decoder.hpp
     mediaperch/format.cpp

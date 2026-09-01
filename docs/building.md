@@ -132,9 +132,9 @@ subset of C and C++, because the whole point of that file is to be readable by a
 we do not control. See §14 of [the plan](plan.md) for exactly which C23 features MSVC 19.51
 has and which it does not.
 
-## The two checks that are not unit tests
+## The three checks that are not unit tests
 
-Both run as part of `ctest`, so they cannot be skipped by not remembering them.
+All three run as part of `ctest`, so they cannot be skipped by not remembering them.
 
 - **`core_purity`** greps `src/core` for OS headers and platform conditionals and fails the
   test run if either appears. `src/core` is built alone in CI as well, so the rule is
@@ -144,3 +144,20 @@ Both run as part of `ctest`, so they cannot be skipped by not remembering them.
   been tested for that job. The `MP_STATIC_ASSERT` block in the header fires there under C's
   rules, so a layout disagreement between the two languages is a build failure here rather
   than a runtime surprise on somebody else's machine.
+- **`decode_quality`** builds a dozen files with FFmpeg and holds every decoder against the
+  uncompressed audio that was encoded: length, alignment, channel order, band energies and a
+  fidelity floor, plus agreement with FFmpeg sample for sample. `docs/formats.md` has the
+  numbers and the three deliberately-reintroduced bugs it was checked against.
+
+  It is the one test here that needs a tool the build does not: **FFmpeg, on `PATH`**. Without
+  one it skips itself and says so, which is right on a machine that has no FFmpeg and wrong in
+  CI -- so CI configures with `-D MEDIAPERCH_REQUIRE_FFMPEG=ON` and a missing FFmpeg fails the
+  job instead. FFmpeg is a *test tool* here and nothing else: nothing in the product links it,
+  and `decode_ffmpeg` looks for it at run time.
+
+  It takes a couple of minutes, so it carries a label:
+
+  ```
+  ctest --preset vs-debug -LE quality     # everything except this
+  ctest --preset vs-debug -R decode_quality   # only this
+  ```

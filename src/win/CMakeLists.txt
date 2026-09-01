@@ -27,5 +27,9 @@ set_target_properties(mediaperch_probe PROPERTIES
     OUTPUT_NAME "mediaperch-probe"
     FOLDER "win")
 
-# The probe is useless without modules beside it.
-add_dependencies(mediaperch_probe mp_sink_wasapi mp_decode_native mp_decode_mf)
+# The probe is useless without modules beside it -- and the decode-quality test
+# drives it against every codec in the tree, so every module it could choose has
+# to be there before that test runs.
+add_dependencies(mediaperch_probe
+    mp_sink_wasapi mp_decode_native mp_decode_mf mp_decode_ffmpeg
+    mp_decode_alac mp_decode_aac mp_decode_mp3)

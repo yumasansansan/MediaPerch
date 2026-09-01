@@ -52,6 +52,12 @@ endif()
 include(CompilerOptions)
 
 # The module ABI. Header only, pure C, and the one thing every layer may see.
+# The decode-quality test needs FFmpeg to build its corpus, and skips itself
+# without one. That is right locally and wrong in CI, where a check that
+# silently does not run is worse than no check at all.
+option(MEDIAPERCH_REQUIRE_FFMPEG
+       "Fail the decode-quality test when FFmpeg is missing rather than skipping it" OFF)
+
 add_library(mediaperch_abi INTERFACE)
 add_library(MediaPerch::abi ALIAS mediaperch_abi)
 target_include_directories(mediaperch_abi INTERFACE "${CMAKE_CURRENT_LIST_DIR}/include")

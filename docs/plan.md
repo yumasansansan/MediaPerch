@@ -1108,6 +1108,41 @@ real time.
   as long as it did because the file being used happened to select the KBD window, which is a
   different code path. **Check the mathematical property, not the audible result.**
 
+- **"Compare it with the original file" is a different measurement, not a better
+  one.** The obvious way to prove a lossy decoder is right is to hold it against
+  the uncompressed audio that was encoded, and the obvious expectation is that
+  this would show which of two decoders is closer. It cannot: at 256 kbps the
+  decode sits 17 dB from the source and two correct decoders sit 134 dB from each
+  other, so the encoder's loss is common to both and six orders of magnitude
+  larger than anything that separates them. What the source *can* do is
+  everything a decoder-to-decoder comparison cannot -- length, alignment, which
+  channel came out of which speaker, per-band energy, and a floor that assumes
+  nothing about FFmpeg. Both are now in CI, and the reason both are is the next
+  entry.
+- **The three bugs of this milestone were put back one at a time, and one of them
+  walked through every source-referenced check.** Reading the program config
+  element outwards-in was caught on channel order; ignoring the edit list was
+  caught on alignment, in seven rows of twelve. Failing to reset the noise
+  generator passed length, alignment, channel order, band energy and the fidelity
+  floor -- because a noise-substituted band is arbitrary by design, so the wrong
+  noise at the right energy in the right band is invisible to the source and only
+  visible against the other decoder, which caught it by a hundred decibels.
+  **A test that has never failed is a test nobody has reason to believe**, and
+  deliberately breaking the decoder is the cheapest way to find out which checks
+  were doing work.
+- **The instrument had a bug the unit tests found before any file did.** The
+  alignment search correlated channel 0 with channel 0 -- so when the channels
+  were permuted, the two were unrelated at every lag, the search settled on
+  noise, and *everything measured afterwards*, including the channel matrix that
+  would have reported the permutation, was measured at a meaningless offset. A
+  sum over channels is invariant under permutation, which is exactly the property
+  wanted, and the search runs on that now. The same tests found the band check
+  reporting a 9 dB disagreement in a band holding a millionth of the energy,
+  where what it was measuring was the analysis window's own leakage. **Code that
+  decides whether other code passes has to be tested harder than the code it
+  judges**, because when it is wrong it is wrong in the direction of saying
+  nothing.
+
 - **A vendored library's sanity ceiling reads as our refusal.** `dr_wav` rejects any file
   above `DRWAV_MAX_SAMPLE_RATE`, which defaults to 384000 — its own guard against garbage
   headers, not a WAV limit, since the field is 32 bits wide. A 768 kHz file therefore came

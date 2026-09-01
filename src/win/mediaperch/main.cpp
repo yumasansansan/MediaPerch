@@ -9,6 +9,7 @@
 
 #include "mediaperch/platform.hpp"
 
+#include "mediaperch/compare.hpp"
 #include "mediaperch/decoder.hpp"
 #include "mediaperch/negotiation.hpp"
 #include "mediaperch/passthrough.hpp"
@@ -45,6 +46,17 @@ struct Options {
     double amplitude = 0.5;
     unsigned seconds = 10;
     std::uint64_t seek = 0;
+    std::string source;          // `compare`: the audio that was encoded
+    std::string rival_id = "decode_ffmpeg"; // and a second decoder to sit beside
+    double min_snr_db = 0.0;
+    double band_tol_db = 0.0;
+    double min_lag_margin_db = 6.0;
+    double min_channel_margin_db = 6.0;
+    double max_peak_ratio = 2.0;
+    double vs_rival_db = 0.0;
+    std::uint32_t band_limit_hz = 0;
+    int lag_window = 2048;
+    bool exact_length = true;
     bool shared = false;
     bool loopback = false;
     bool verbose = false;
@@ -63,6 +75,10 @@ void usage()
   modules     list what loaded, and what each one claims to be
   decode      decode a file and print SHA-256 of the PCM it produced. Touches no
               device. Compare it with a reference decoder to check this one.
+  compare     decode a file and hold the result against the audio that was
+              encoded: length, alignment, channel order, fidelity and band
+              energies. Touches no device. Exits non-zero if a requirement is
+              not met, so it can be a test.
   verify      play a file into a loopback and record the other end, then compare
               SHA-256 of what was sent with SHA-256 of what came back.
               TAKES TWO ENDPOINTS -- a render one and a capture one -- and is
@@ -87,6 +103,28 @@ Options
                     sample afterwards. It does decide how much of the container
                     the tone exercises, which `play` reports.
   --seconds N       play duration, default 10
+  --source PATH     `compare`: the uncompressed file that was encoded
+  --rival ID        `compare`: a second decoder to measure beside this one, or
+                    `none`. Default decode_ffmpeg
+  --min-snr DB      `compare`: the fidelity floor against the source. Depends on
+                    the bit rate, so there is no useful default
+  --band-limit HZ   `compare`: check band energies up to here. 0 skips it
+  --band-tol DB     `compare`: how far a band may sit from the source's
+  --min-lag-margin DB   `compare`: how far the correlation peak must stand above
+                    every lag outside its own shoulder. Guards against a test
+                    signal that cannot locate itself
+  --min-channel-margin DB  `compare`: likewise for telling channels apart
+  --vs-rival DB     `compare`: how closely this decoder must agree with the rival
+                    *directly*, sample for sample. The source cannot check this:
+                    two decoders can differ and both stay the same distance from
+                    the audio that was encoded
+  --max-peak-ratio R    `compare`: how far past the source's peak the decode may
+                    go. A codec quantising hard overshoots, and at 32 kbps it
+                    overshoots by more than twice. Default 2
+  --lag-window N    `compare`: frames either way to search for the start.
+                    Default 2048, two AAC frames
+  --untrimmed       `compare`: the decode may be longer than the source, which
+                    is correct for a format with no gapless metadata
   --seek FRAMES     `decode` seeks here first, then hashes the rest. The hash of
                     a seek to N must equal the hash of the last (length - N)
                     frames of a straight decode, which is what makes seeking
@@ -116,7 +154,8 @@ bool parse(int argc, char** argv, Options& out)
             usage();
             std::exit(0);
         } else if (arg == "devices" || arg == "negotiate" || arg == "play" ||
-                   arg == "verify" || arg == "decode" || arg == "modules") {
+                   arg == "verify" || arg == "decode" || arg == "modules" ||
+                   arg == "compare") {
             out.command = arg;
         } else if (arg == "--file") {
             if (i + 1 < argc) {
@@ -135,6 +174,52 @@ bool parse(int argc, char** argv, Options& out)
                     out.decoder_id = "decode_" + out.decoder_id;
                 }
             }
+        } else if (arg == "--source") {
+            if (i + 1 < argc) {
+                out.source = argv[++i];
+            }
+        } else if (arg == "--rival") {
+            if (i + 1 < argc) {
+                out.rival_id = argv[++i];
+                if (out.rival_id != "none" && out.rival_id.rfind("decode_", 0) != 0) {
+                    out.rival_id = "decode_" + out.rival_id;
+                }
+            }
+        } else if (arg == "--min-snr") {
+            if (i + 1 < argc) {
+                out.min_snr_db = std::strtod(argv[++i], nullptr);
+            }
+        } else if (arg == "--min-lag-margin") {
+            if (i + 1 < argc) {
+                out.min_lag_margin_db = std::strtod(argv[++i], nullptr);
+            }
+        } else if (arg == "--min-channel-margin") {
+            if (i + 1 < argc) {
+                out.min_channel_margin_db = std::strtod(argv[++i], nullptr);
+            }
+        } else if (arg == "--vs-rival") {
+            if (i + 1 < argc) {
+                out.vs_rival_db = std::strtod(argv[++i], nullptr);
+            }
+        } else if (arg == "--max-peak-ratio") {
+            if (i + 1 < argc) {
+                out.max_peak_ratio = std::strtod(argv[++i], nullptr);
+            }
+        } else if (arg == "--band-tol") {
+            if (i + 1 < argc) {
+                out.band_tol_db = std::strtod(argv[++i], nullptr);
+            }
+        } else if (arg == "--band-limit") {
+            value(out.band_limit_hz);
+        } else if (arg == "--lag-window") {
+            if (i + 1 < argc) {
+                out.lag_window = std::atoi(argv[++i]);
+            }
+        } else if (arg == "--untrimmed") {
+            // A raw stream carries no gapless metadata, so it is *correct* for
+            // the decode to be longer than the audio that was encoded. Every
+            // other check still applies, alignment included.
+            out.exact_length = false;
         } else if (arg == "--capture") {
             if (i + 1 < argc) {
                 out.capture_index = std::atoi(argv[++i]);
@@ -553,6 +638,211 @@ int decode(const MpDecoderVtbl& vtbl, const Options& options)
     }
     std::printf("bytes      %llu\n", static_cast<unsigned long long>(total));
     std::printf("sha256     %s\n", hash.hex().c_str());
+    return 0;
+}
+
+
+/// Reads a whole file as interleaved float, whatever the decoder hands back.
+///
+/// The conversion is the encoder's: an integer sample divided by the magnitude
+/// of its own full scale, which is what every encoder does to its input and
+/// therefore the only division that makes a comparison with the source mean
+/// anything. It is a conversion, and it belongs here in a measuring tool rather
+/// than in any decoder.
+bool read_as_float(const MpDecoderVtbl& vtbl, const std::string& path, mp::Format& format,
+                   std::vector<float>& out)
+{
+    mp::Decoder decoder;
+    if (decoder.open(vtbl, path.c_str()) != MP_OK) {
+        return false;
+    }
+    format = decoder.format();
+    const std::size_t stride = mp::frame_bytes(format);
+    if (stride == 0) {
+        return false;
+    }
+    std::vector<std::uint8_t> chunk(64 * 1024 / stride * stride);
+    std::vector<std::uint8_t> raw;
+    for (;;) {
+        const std::size_t got = decoder.read(chunk.data(), chunk.size());
+        if (got == 0) {
+            break;
+        }
+        raw.insert(raw.end(), chunk.begin(), chunk.begin() + got);
+    }
+
+    const std::size_t samples = raw.size() / mp::container_bytes(format.sample_type);
+    out.resize(samples);
+    const std::uint8_t* p = raw.data();
+    for (std::size_t i = 0; i < samples; ++i) {
+        switch (format.sample_type) {
+        case mp::SampleType::u8:
+            out[i] = (static_cast<float>(p[i]) - 128.0F) / 128.0F;
+            break;
+        case mp::SampleType::s16: {
+            std::int16_t v = 0;
+            std::memcpy(&v, p + i * 2, 2);
+            out[i] = static_cast<float>(v) / 32768.0F;
+            break;
+        }
+        case mp::SampleType::s24_packed: {
+            const std::int32_t v = static_cast<std::int32_t>(
+                (static_cast<std::uint32_t>(p[i * 3 + 2]) << 24) |
+                (static_cast<std::uint32_t>(p[i * 3 + 1]) << 16) |
+                (static_cast<std::uint32_t>(p[i * 3 + 0]) << 8));
+            out[i] = static_cast<float>(v >> 8) / 8388608.0F;
+            break;
+        }
+        case mp::SampleType::s24_in_32:
+        case mp::SampleType::s32: {
+            std::int32_t v = 0;
+            std::memcpy(&v, p + i * 4, 4);
+            out[i] = static_cast<float>(static_cast<double>(v) / 2147483648.0);
+            break;
+        }
+        case mp::SampleType::f32:
+            std::memcpy(&out[i], p + i * 4, 4);
+            break;
+        case mp::SampleType::f64: {
+            double v = 0.0;
+            std::memcpy(&v, p + i * 8, 8);
+            out[i] = static_cast<float>(v);
+            break;
+        }
+        case mp::SampleType::none:
+            return false;
+        }
+    }
+    return true;
+}
+
+void report(const char* who, const mp::Comparison& m)
+{
+    std::printf("%-8s frames %llu  %.2f dB  rms %.3e  peak %.4f  lag %+d (%.1f dB clear)\n", who,
+                static_cast<unsigned long long>(m.frames_subject), m.snr_db, m.rms_error,
+                m.peak_subject, m.lag, m.lag_margin_db);
+    if (m.bands_checked != 0) {
+        std::printf("         %u bands checked, worst %.2f dB at %u Hz\n", m.bands_checked,
+                    m.worst_band_db, m.worst_band_hz);
+    }
+    std::printf("         channels ");
+    for (unsigned c = 0; c < m.best_for.size(); ++c) {
+        std::printf("%u<-%u ", c, m.best_for[c]);
+    }
+    std::printf(" (%.1f dB clear)\n", m.channel_margin_db);
+}
+
+int compare_command(mp::win::ModuleRegistry& registry, const MpDecoderVtbl& vtbl,
+                    const Options& options)
+{
+    // The source goes through the decoder chain like anything else, so this
+    // works for a WAV, a FLAC or anything else lossless -- and the module that
+    // reads it is measured elsewhere, which is what makes it usable as truth.
+    const auto source_ranked = registry.decoders_for(options.source, "");
+    const auto source_choice = first_that_opens(source_ranked, options.source);
+    if (source_choice.vtbl == nullptr) {
+        std::fprintf(stderr, "no decoder recognised the source %s\n", options.source.c_str());
+        return 1;
+    }
+
+    mp::Format source_format;
+    std::vector<float> source;
+    if (!read_as_float(*source_choice.vtbl, options.source, source_format, source)) {
+        std::fprintf(stderr, "cannot read the source %s\n", options.source.c_str());
+        return 1;
+    }
+
+    mp::Format subject_format;
+    std::vector<float> subject;
+    if (!read_as_float(vtbl, options.file, subject_format, subject)) {
+        std::fprintf(stderr, "cannot decode %s\n", options.file.c_str());
+        return 1;
+    }
+
+    std::printf("source     %s\n", mp::describe(source_format).c_str());
+    std::printf("subject    %s\n", mp::describe(subject_format).c_str());
+
+    if (subject_format.channels != source_format.channels ||
+        subject_format.sample_rate != source_format.sample_rate) {
+        std::fprintf(stderr,
+                     "FAIL  the decode is %u ch at %u Hz and the source is %u ch at %u Hz\n",
+                     subject_format.channels, subject_format.sample_rate,
+                     source_format.channels, source_format.sample_rate);
+        return 1;
+    }
+
+    const unsigned channels = source_format.channels;
+    const std::uint64_t source_frames = source.size() / channels;
+    const std::uint64_t subject_frames = subject.size() / channels;
+
+    const mp::Comparison mine =
+        mp::compare(source.data(), source_frames, subject.data(), subject_frames, channels,
+                    source_format.sample_rate, options.band_limit_hz, options.lag_window);
+    report("ours", mine);
+
+    // A second decoder, measured the same way. It cannot rank the two -- the
+    // encoder's loss is common to both and is millions of times larger than the
+    // difference between them -- but it does say whether this decoder gave
+    // anything away that the other one kept.
+    bool rival_ok = true;
+    if (options.rival_id != "none") {
+        const auto rival = registry.decoders_for(options.file, options.rival_id);
+        if (!rival.empty()) {
+            mp::Format rival_format;
+            std::vector<float> other;
+            if (read_as_float(*rival.front().vtbl, options.file, rival_format, other) &&
+                rival_format.channels == channels) {
+                const mp::Comparison theirs = mp::compare(
+                    source.data(), source_frames, other.data(), other.size() / channels, channels,
+                    source_format.sample_rate, options.band_limit_hz, options.lag_window);
+                report(rival.front().desc->id + 7, theirs);
+                // Equal to within a part in ten thousand, which for these two is
+                // eleven orders of magnitude of headroom: the point is to catch a
+                // decoder that lost something, not to declare a winner.
+                if (mine.rms_error > theirs.rms_error * 1.0001) {
+                    std::printf("FAIL  further from the source than %s: %.6e against %.6e\n",
+                                rival.front().desc->id, mine.rms_error, theirs.rms_error);
+                    rival_ok = false;
+                }
+                // And the two held against each other rather than against the
+                // source, which is a different question with a different
+                // answer. Substituted noise is the case that needs it: a
+                // noise-substituted band is arbitrary by design, so two
+                // decoders can put different noise in one and sit the same
+                // distance from the source while disagreeing completely with
+                // each other. The source cannot see that. This can.
+                const mp::Comparison between =
+                    mp::compare(other.data(), other.size() / channels, subject.data(),
+                                subject_frames, channels, source_format.sample_rate, 0,
+                                options.lag_window);
+                std::printf("against  %s directly: %.2f dB\n", rival.front().desc->id + 7,
+                            between.snr_db);
+                if (between.snr_db < options.vs_rival_db) {
+                    std::printf("FAIL  %.2f dB from %s, and %.2f was required\n", between.snr_db,
+                                rival.front().desc->id, options.vs_rival_db);
+                    rival_ok = false;
+                }
+            }
+        }
+    }
+
+    mp::Requirements required;
+    required.exact_length = options.exact_length;
+    required.lag_zero = options.exact_length;
+    required.min_snr_db = options.min_snr_db;
+    required.min_lag_margin_db = options.min_lag_margin_db;
+    required.min_channel_margin_db = options.min_channel_margin_db;
+    required.max_peak_ratio = options.max_peak_ratio;
+    required.max_band_db = options.band_tol_db;
+
+    const auto problems = mp::failures(mine, required);
+    for (const auto& why : problems) {
+        std::printf("FAIL  %s\n", why.c_str());
+    }
+    if (!problems.empty() || !rival_ok) {
+        return 1;
+    }
+    std::printf("PASS\n");
     return 0;
 }
 
@@ -1054,7 +1344,8 @@ int main(int argc, char** argv)
     if (options.command == "play") {
         return play(sink, options);
     }
-    if (options.command == "decode" || options.command == "verify") {
+    if (options.command == "decode" || options.command == "verify" ||
+        options.command == "compare") {
         if (options.file.empty()) {
             std::fprintf(stderr, "%s needs --file\n", options.command.c_str());
             return 1;
@@ -1072,6 +1363,13 @@ int main(int argc, char** argv)
         }
         std::printf("decoder    %s (%s)%s\n", choice.desc->id, choice.desc->name,
                     options.decoder_id.empty() ? "" : "  [forced]");
+        if (options.command == "compare") {
+            if (options.source.empty()) {
+                std::fprintf(stderr, "compare needs --source\n");
+                return 1;
+            }
+            return compare_command(registry, *choice.vtbl, options);
+        }
         return options.command == "decode" ? decode(*choice.vtbl, options)
                                            : verify(sink, *choice.vtbl, options);
     }

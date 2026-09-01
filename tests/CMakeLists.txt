@@ -17,6 +17,7 @@ add_executable(mediaperch_tests
     # toolchain we do not control, and a header only ever compiled as C++ has not
     # been tested for that.
     abi_header_c.c
+    compare_test.cpp
     format_test.cpp
     graph_test.cpp
     negotiation_test.cpp
@@ -50,3 +51,20 @@ add_test(NAME core_purity
     COMMAND "${CMAKE_COMMAND}"
             -D "MEDIAPERCH_CORE_DIR=${CMAKE_SOURCE_DIR}/src/core"
             -P "${CMAKE_SOURCE_DIR}/cmake/CorePurity.cmake")
+
+# Also not a unit test: the decoders held against the audio that was encoded,
+# which needs FFmpeg to build the corpus and so cannot be a Catch2 case. It
+# skips itself where FFmpeg is absent; CI passes MEDIAPERCH_REQUIRE_FFMPEG so a
+# check that silently does not run is a failure there rather than a shrug.
+if(TARGET mediaperch_probe)
+    add_test(NAME decode_quality
+        COMMAND "${CMAKE_COMMAND}"
+                -D "MEDIAPERCH_PROBE=$<TARGET_FILE:mediaperch_probe>"
+                -D "MEDIAPERCH_WORK=${CMAKE_CURRENT_BINARY_DIR}/quality"
+                -D "MEDIAPERCH_REQUIRE_FFMPEG=${MEDIAPERCH_REQUIRE_FFMPEG}"
+                -P "${CMAKE_SOURCE_DIR}/cmake/DecodeQuality.cmake")
+    # It builds a dozen files with FFmpeg and decodes each of them three times,
+    # which is a couple of minutes -- so it carries a label, and `ctest -LE
+    # quality` is the way to leave it out of a quick local run.
+    set_tests_properties(decode_quality PROPERTIES TIMEOUT 900 LABELS quality)
+endif()
