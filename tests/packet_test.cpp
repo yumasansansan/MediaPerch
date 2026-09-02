@@ -55,6 +55,11 @@ struct World {
     std::uint64_t play = 0;
     bool self_decodes = false;
     std::uint32_t stream_count = 1;
+    /// How many packets before the target a seek lands on, as a codec that
+    /// needs pre-roll would ask for.
+    std::uint32_t preroll = 0;
+    /// A demuxer that will not say where its packets are.
+    bool untimed = false;
     /// What the codec has been told, so the test can see the seek handshake.
     int resets = 0;
     std::uint32_t decoded_packets = 0;
@@ -131,13 +136,20 @@ MpResult MP_CALL demux_read_packet(MpDemux*, void* dst, std::size_t dst_bytes,
     std::memcpy(dst, &first, 4);
     out->bytes = g.packet_bytes;
     out->frame = first;
+    // This fake knows where every packet is, so it says so. A demuxer that did
+    // not would leave the host unable to discard what precedes a seek target.
+    out->flags = g.untimed ? 0u : MP_PACKET_TIMED;
     ++g.next_packet;
     return MP_OK;
 }
 
 MpResult MP_CALL demux_seek(MpDemux*, std::uint64_t frame)
 {
-    g.next_packet = static_cast<std::uint32_t>(frame / g.frames_per_packet);
+    // To the packet containing the frame, and `g.preroll` packets before that
+    // when the test is standing in for a codec that needs warming. Both leave
+    // audio in front of the target for the host to discard.
+    const std::uint32_t index = static_cast<std::uint32_t>(frame / g.frames_per_packet);
+    g.next_packet = index > g.preroll ? index - g.preroll : 0;
     return MP_OK;
 }
 
@@ -368,6 +380,62 @@ TEST_CASE("a seek resets the codec and lands on the right sample", "[packet]")
     CHECK(g.resets == before + 1);
 
     const auto out = drain(source);
+    REQUIRE(out == frames(32, 96));
+}
+
+TEST_CASE("a seek lands on the frame asked for, not on the packet holding it",
+          "[packet]")
+{
+    // **A demuxer seeks to a packet.** Sixteen frames to a packet here, so a
+    // seek to 37 lands on the packet that starts at 32 and five frames of audio
+    // arrive that the caller did not ask for. Discarding them is the host's,
+    // because a demuxer cannot: it does not decode, so it cannot count frames
+    // out of a packet it only located.
+    g = World{};
+    mp::PacketSource source;
+    std::string why;
+    REQUIRE(source.open(demux_vtbl(), "x", finds_flac(), why));
+
+    REQUIRE(source.seek(37));
+    const auto out = drain(source);
+    REQUIRE(out == frames(37, 91));
+}
+
+TEST_CASE("a codec's pre-roll is decoded and then thrown away", "[packet]")
+{
+    // AAC's overlap and MP3's bit reservoir mean the packet containing a frame
+    // is not enough to decode it correctly: the demuxer deliberately hands back
+    // earlier packets as well. They are decoded -- that is the point, it is what
+    // warms the codec -- and then discarded by the same count that a mid-packet
+    // seek uses, because it is the same question.
+    g = World{};
+    g.preroll = 2;
+    mp::PacketSource source;
+    std::string why;
+    REQUIRE(source.open(demux_vtbl(), "x", finds_flac(), why));
+
+    REQUIRE(source.seek(64));
+    const auto out = drain(source);
+    REQUIRE(out == frames(64, 64));
+}
+
+TEST_CASE("a demuxer that will not vouch for a packet's position is believed",
+          "[packet]")
+{
+    // MP_PACKET_TIMED is a demuxer saying `frame` is real. Without it, zero is
+    // both "the start of the stream" and "I do not timestamp", and a host that
+    // discarded on the difference would silently swallow the first seconds of
+    // every file from such a module. It does not discard instead, which is the
+    // old behaviour and the safe one.
+    g = World{};
+    g.untimed = true;
+    mp::PacketSource source;
+    std::string why;
+    REQUIRE(source.open(demux_vtbl(), "x", finds_flac(), why));
+
+    REQUIRE(source.seek(37));
+    const auto out = drain(source);
+    // The packet holding frame 37 starts at 32, and nothing trimmed it.
     REQUIRE(out == frames(32, 96));
 }
 

@@ -1031,14 +1031,52 @@ modules/             everything that can be loaded and unloaded at runtime, sort
                      the same way, into bin/<config>/modules/<kind>/, because an
                      install should be a directory somebody can look at and see what
                      is in it. cmake/Module.cmake is where a module says which it is.
+  demux/wav/         WAV, RIFX, RF64, W64 and AIFF, on dr_wav. It states what the
+                     file holds -- the width, the valid bits, whether the samples
+                     are float, that 8-bit WAV is unsigned -- because all of that
+                     was the container's statement and never the codec's.
+  demux/flac/        the native FLAC container, written here. A FLAC frame carries
+                     no length, so its end is found by running the format's own
+                     CRC-16 forward and testing every position where it reads zero.
+                     shared/flacframe/ is that, fuzzed on its own.
+  demux/mpeg/        MPEG audio layers I to III: the frame headers, the ID3v2 skip
+                     and the LAME/Xing tag, which is where an MP3's real length and
+                     its encoder delay live. Reads all three layers, so an MP2 stops
+                     being FFmpeg's problem. It claims 60 rather than 100 behind a
+                     tag larger than a probe's window -- a tag with cover art in it
+                     is larger than four kilobytes, and an ID3 tag identifies
+                     nothing, so the honest score is "the audio is out of reach"
+                     rather than "this is not an MP3".
+  demux/adts/        raw AAC's framing. Assembles the AudioSpecificConfig an MP4
+                     would have carried out of the first frame header, so codec/aac/
+                     cannot tell the two containers apart.
   demux/mp4/         MP4, M4A, MOV and 3GP: the container, written here. Reads moov
                      wherever it is, which is what makes "read the codec, then pick
                      the decoder" possible at all -- a probe sees four kilobytes and
                      moov is often at the end.
   demux/ogg/         Ogg through libogg, the reference container and nothing else.
                      Identifies Opus, Vorbis, FLAC and Speex from the first page and
-                     hands each one on; the two it has no codec for are named rather
-                     than refused as "an Ogg I cannot read".
+                     hands each one on. Ogg timestamps pages rather than packets, so
+                     only the first packet of a page carries a position and the
+                     demuxer says which ones those are.
+  demux/ffmpeg/      the long tail, and a pipeline rather than a container reader:
+                     every stream is MP_STREAM_SELF_DECODES. Enumerates every audio
+                     track, which the decoder it replaced threw away.
+  demux/mf/          Media Foundation, the same shape, and the floor beneath
+                     everything. Hardware video decode comes with it and it is
+                     measurably bit-exact for WAV and FLAC -- but it reads gapless
+                     metadata in no codec, clips float WAV, and scrambles
+                     multichannel ALAC, so it is what a file reaches when nothing
+                     else will read it at all. One stream, deliberately: making
+                     the least trustworthy path more capable is the wrong
+                     direction. It stays because it needs nothing installed.
+  codec/pcm/         a memcpy, and no dependency of any kind. Every container that
+                     names MP_CODEC_PCM has a decoder because of this file.
+  codec/flac/        libFLAC, driven one frame at a time: the configuration blob is
+                     the beginning of a FLAC file, so the decoder is opened on
+                     forty-two synthesised bytes and then fed packets.
+  codec/mp3/         dr_mp3's low-level entry point, which takes a frame and gives
+                     back its samples. Layers I, II and III.
   codec/alac/        ALAC, written here. The codec half of decode/alac/: a config
                      blob and packets in, the file's own samples out.
   codec/aac/         AAC-LC, written here, the same way.
@@ -1047,6 +1085,11 @@ modules/             everything that can be loaded and unloaded at runtime, sort
                      the encoder was given, because that is what Opus is.
   codec/vorbis/      libvorbis, likewise, rather than vorbisfile.
 
+  decode/            **the eight v1 decoders, being retired.** Each was a container
+                     reader and a codec in one object; each now has a demux/ and
+                     codec/ pair above producing the same bytes, proved file by
+                     file in docs/formats.md. They go with MP_KIND_DECODER, and so
+                     does this block.
   decode/native/     FLAC and WAV from two single headers. No build system at all: an
                      install with nothing else on disk still plays music.
   decode/flac/       libFLAC, the Xiph reference, as a submodule. Outranks the above
@@ -1065,27 +1108,16 @@ modules/             everything that can be loaded and unloaded at runtime, sort
                      same slice of MP4. Not an unmaintained reference this time --
                      four maintained libraries were measured and each produced the
                      wrong thing rather than a wrong sound. SBR and PS are refused
-                     and go to decode_ffmpeg.
+                     and go to demux_ffmpeg.
 
   decode/ogg/        libvorbis and libopus, the Xiph reference decoders, as submodules.
                      Reports F32 because that is what they produce, which puts
                      every file it reads on Path B. Permutes Ogg channel order
                      into WAVE order and changes nothing else.
 
-  decode/mf/         Media Foundation source reader, and now the last resort rather than
-                     the answer for MP3 and AAC. Its probe once claimed 100 for
-                     anything beginning "ID3", which took every tagged MP3 — that
-                     is, nearly all of them — away from the decoder that does
-                     gapless: a tag with cover art in it is larger than the four
-                     kilobytes a probe is given, so dr_mp3 can only claim 60 there.
-                     An ID3 tag identifies nothing, so this claims 60 as well and
-                     priority decides, which is what priority is for. Hardware video decode comes with it
-                     and it is measurably bit-exact for WAV and FLAC -- but it reads
-                     gapless metadata in no codec, clips float WAV, and scrambles
-                     multichannel ALAC. It stays because it needs nothing installed.
-  decode/ffmpeg/     the long tail, through the ffmpeg and ffprobe *programs*, found at
-                     run time and never shipped. Nothing to build against, no ABI to
-                     track, and the LGPL-or-GPL question stays with whoever installs it.
+                     (decode/mf/ and decode/ffmpeg/ are not in this block: those
+                     two were converted in place rather than duplicated, so they
+                     are demux/mf/ and demux/ffmpeg/ above.)
   sink/wasapi/       exclusive and shared, event-driven, both.
   sink/asio/         someday. Not for accuracy -- exclusive mode is already exact --
                      but for native DSD above what DoP can carry. Practical since

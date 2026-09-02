@@ -333,7 +333,7 @@ MpResult MP_CALL demux_read_packet(MpDemux* d, void* dst, std::size_t dst_bytes,
         return MP_ERR_IO;
     }
     out->bytes = packet.size;
-    out->flags = MP_PACKET_SYNC;
+    out->flags = MP_PACKET_SYNC | MP_PACKET_TIMED;
     out->frame = static_cast<std::uint64_t>(d->next_packet) * d->track.frames_per_packet;
     ++d->next_packet;
     return MP_OK;

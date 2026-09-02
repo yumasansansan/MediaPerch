@@ -119,9 +119,23 @@ struct MpDemux {
     std::uint64_t pre_skip = 0;
 
     bool ended = false;
+
+    /// **Where the current page begins, in the stream's own granules.**
+    ///
+    /// Ogg does not timestamp packets. A page carries the granule of the *end*
+    /// of the last packet that finishes on it, and -1 when no packet finishes
+    /// there at all -- so the position a packet *starts* at is only known for
+    /// the first packet of a page, and only because the page before it said
+    /// where it ended. That is what these two are: `page_end` is the running
+    /// granule and `page_start` is what it was one page ago.
+    std::uint64_t page_start = 0;
+    std::uint64_t page_end = 0;
+    bool first_in_page = false;
+
     /// A packet libogg handed over that the caller's buffer could not hold.
     std::vector<std::uint8_t> pending;
     std::uint64_t pending_frame = 0;
+    bool pending_timed = false;
     std::string path;
 };
 
@@ -140,6 +154,13 @@ bool next_page(MpDemux* d) noexcept
         if (got == 1) {
             if (ogg_page_serialno(&page) == d->serial) {
                 ogg_stream_pagein(&d->stream, &page);
+                // The page that just arrived begins where the last one ended.
+                d->page_start = d->page_end;
+                const ogg_int64_t granule = ogg_page_granulepos(&page);
+                if (granule >= 0) {
+                    d->page_end = static_cast<std::uint64_t>(granule);
+                }
+                d->first_in_page = true;
                 return true;
             }
             continue;
@@ -275,8 +296,34 @@ MpResult MP_CALL demux_open(const char* path, MpDemux** out) noexcept
                         d->config.push_back(static_cast<std::uint8_t>((n >> (8 * b)) & 0xFFu));
                     }
                 }
-                d->config.insert(d->config.end(), packet.packet,
-                                 packet.packet + packet.bytes);
+                if (codec == MP_CODEC_FLAC) {
+                    // **Ogg wraps FLAC's own header, and the wrapper is not
+                    // configuration.** The packet is `FLAC`, two version
+                    // bytes, a header count, then a whole native FLAC stream
+                    // header -- `fLaC`, a metadata-block header, and STREAMINFO.
+                    // The ABI says MP_CODEC_FLAC's blob is that STREAMINFO
+                    // alone, so the mapping is read past rather than passed on;
+                    // otherwise every FLAC codec would have to know which
+                    // container it was called from, which is the thing v2
+                    // exists to prevent.
+                    constexpr long k_streaminfo_at = 5 + 1 + 1 + 2 + 4 + 4;
+                    if (packet.bytes >= k_streaminfo_at + 34) {
+                        d->config.insert(d->config.end(),
+                                         packet.packet + k_streaminfo_at,
+                                         packet.packet + k_streaminfo_at + 34);
+                        const std::uint8_t* si = packet.packet + k_streaminfo_at;
+                        const std::uint32_t packed =
+                            (static_cast<std::uint32_t>(si[10]) << 24) |
+                            (static_cast<std::uint32_t>(si[11]) << 16) |
+                            (static_cast<std::uint32_t>(si[12]) << 8) |
+                            static_cast<std::uint32_t>(si[13]);
+                        d->rate = packed >> 12;
+                        d->channels = ((packed >> 9) & 0x7u) + 1;
+                    }
+                } else {
+                    d->config.insert(d->config.end(), packet.packet,
+                                     packet.packet + packet.bytes);
+                }
                 if (codec == MP_CODEC_OPUS && packet.bytes >= 19) {
                     d->channels = packet.packet[9];
                     d->pre_skip = static_cast<std::uint64_t>(packet.packet[10]) |
@@ -428,7 +475,7 @@ MpResult MP_CALL demux_read_packet(MpDemux* d, void* dst, std::size_t dst_bytes,
         }
         std::memcpy(dst, d->pending.data(), d->pending.size());
         out->bytes = static_cast<std::uint32_t>(d->pending.size());
-        out->flags = MP_PACKET_SYNC;
+        out->flags = MP_PACKET_SYNC | (d->pending_timed ? MP_PACKET_TIMED : 0u);
         out->frame = d->pending_frame;
         d->pending.clear();
         return MP_OK;
@@ -445,18 +492,23 @@ MpResult MP_CALL demux_read_packet(MpDemux* d, void* dst, std::size_t dst_bytes,
                 // consumed" has to be arranged rather than assumed: it is kept
                 // here and returned on the next call.
                 d->pending.assign(packet.packet, packet.packet + packet.bytes);
-                d->pending_frame = packet.granulepos == -1
-                                       ? 0
-                                       : static_cast<std::uint64_t>(packet.granulepos);
+                d->pending_timed = d->first_in_page;
+                d->pending_frame = d->page_start;
+                d->first_in_page = false;
                 out->bytes = static_cast<std::uint32_t>(packet.bytes);
                 return MP_ERR_NO_MEMORY;
             }
             std::memcpy(dst, packet.packet, static_cast<std::size_t>(packet.bytes));
             out->bytes = static_cast<std::uint32_t>(packet.bytes);
-            out->flags = MP_PACKET_SYNC;
-            out->frame = packet.granulepos == -1
-                             ? 0
-                             : static_cast<std::uint64_t>(packet.granulepos);
+            // **Only the first packet of a page has a position**, and saying so
+            // is what MP_PACKET_TIMED is for: the granule Ogg keeps is the end
+            // of a page, so the packets after the first one on it are between
+            // two known points and nothing short of decoding says where. After
+            // a seek the demuxer lands on a page boundary, so the packet the
+            // host needs a position for is always the one that has it.
+            out->flags = MP_PACKET_SYNC | (d->first_in_page ? MP_PACKET_TIMED : 0u);
+            out->frame = d->page_start;
+            d->first_in_page = false;
             return MP_OK;
         }
         if (got < 0) {
@@ -476,12 +528,16 @@ MpResult MP_CALL demux_seek(MpDemux* d, std::uint64_t frame) noexcept
     if (d == nullptr) {
         return MP_ERR_INVALID;
     }
-    // **Linear, and that is a choice rather than an oversight.** Ogg keeps its
-    // position in the granule of each page, so seeking properly means bisecting
-    // the file on page boundaries -- which is what `vorbisfile` does and what
-    // this should do. Restarting and reading forward is correct, costs one pass
-    // over the file, and is honest about being the simple version; the fast one
-    // is worth writing when something asks for it.
+    // **By pages, because pages are the only thing Ogg timestamps.** A page
+    // says the granule its last finished packet ends at, so the page whose end
+    // is past the target is the page the target is inside, and its first packet
+    // starts where the page before it ended.
+    //
+    // **Linear, and that is a choice rather than an oversight.** Seeking
+    // properly means bisecting the file on page boundaries, which is what
+    // `vorbisfile` does. Restarting and reading forward is correct, costs one
+    // pass over the file, and is honest about being the simple version; the
+    // fast one is worth writing when something asks for it.
     if (_fseeki64(d->fp, 0, SEEK_SET) != 0) {
         return MP_ERR_IO;
     }
@@ -489,29 +545,41 @@ MpResult MP_CALL demux_seek(MpDemux* d, std::uint64_t frame) noexcept
     ogg_sync_reset(&d->sync);
     d->ended = false;
     d->pending.clear();
+    d->page_start = 0;
+    d->page_end = 0;
+    d->first_in_page = false;
 
-    // Past the headers again, and then forward to the page holding `frame`.
-    int skipped = 0;
+    // The target in the stream's own granules. Opus counts its pre-skip in
+    // them, and the host has already added it, so the two scales agree.
+    const std::uint64_t target = frame;
+
+    // Past the header pages, and then forward until a page ends after the
+    // target. `next_page` leaves that page fed into the stream and `page_start`
+    // holding where it began, which is exactly what `read_packet` needs next.
+    int headers = 0;
     for (int guard = 0; guard < 1000000; ++guard) {
-        ogg_packet packet;
-        const int got = ogg_stream_packetout(&d->stream, &packet);
-        if (got == 1) {
-            if (skipped < d->header_packets) {
-                ++skipped;
-                continue;
-            }
-            if (packet.granulepos != -1 &&
-                static_cast<std::uint64_t>(packet.granulepos) > frame + d->pre_skip) {
-                return MP_OK;
-            }
-            continue;
-        }
-        if (got < 0) {
-            continue;
-        }
         if (!next_page(d)) {
             d->ended = true;
             return MP_OK; // past the end, which is a legal place to seek to
+        }
+        if (headers < d->header_packets) {
+            // The header packets are read out and thrown away, so that what
+            // comes next is audio rather than an identification header.
+            ogg_packet packet;
+            while (headers < d->header_packets &&
+                   ogg_stream_packetout(&d->stream, &packet) == 1) {
+                ++headers;
+            }
+            d->first_in_page = true;
+            continue;
+        }
+        if (d->page_end > target) {
+            return MP_OK;
+        }
+        // Everything on this page is before the target: read it out so the next
+        // page starts clean.
+        ogg_packet packet;
+        while (ogg_stream_packetout(&d->stream, &packet) == 1) {
         }
     }
     return MP_ERR_INTERNAL;

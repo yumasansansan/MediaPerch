@@ -310,12 +310,14 @@ and this tree already vendors them separately: `external/ogg` is the container, 
 | `modules/shared/mp4/mp4.cpp` | `demux_mp4` | **already a container parser**, already shared by two modules. It gains a vtable and stops being a library |
 | `decode_alac/alac.cpp` | `codec_alac` | **already a pure codec**: it takes a config blob and packets |
 | `decode_aac/aac.cpp` | `codec_aac` | likewise. Both keep their fuzz targets unchanged |
+| `decode_aac`'s ADTS framer | `demux_adts` | **the row this table was missing.** `decode_aac` had three parts, not two: a codec, half an MP4 parser, and a framer for raw AAC. Leaving the third out would have taken `.aac` from a first-class format to an FFmpeg-only one |
 | `decode_mp3` | `demux_mpeg` + `codec_mp3` | the "container" is frame headers and the LAME tag, which is a demuxer's work; `dr_mp3` decodes |
-| `decode_native` | `demux_wav` + `codec_pcm`, and `demux_flac` + `codec_flac` | `dr_wav` and `dr_flac` are separable; PCM's codec is a memcpy, which is the honest description of what Path A already does |
-| `decode_flac` | `demux_flac` + `codec_flac` (libFLAC) | libFLAC's stream decoder takes a read callback, so it can be driven either way. Outranks the `dr_flac` pair on priority as it does today |
+| `decode_native` | `demux_wav` + `codec_pcm` | `dr_wav` reads the container; PCM's codec is a memcpy, which is the honest description of what Path A already does. **`codec_pcm` has no dependency at all**, so every container that carries uncompressed audio -- MP4, Matroska, CAF, the day they name it -- gets a decoder for free |
+| `decode_native`'s FLAC half | *dropped* | it was `demux_flac` + a dr_flac codec, and the second was written and then removed: `demux_flac` needs no library either, so the pair added a reimplementation with a known 32-bit hole and nothing else. FLAC without libFLAC now falls to FFmpeg like any other unimplemented codec |
+| `decode_flac` | `demux_flac` (written here) + `codec_flac` (libFLAC) | the container is ours because a FLAC frame carries no length and finding its end is a scan the reference decoder does not expose; the codec is libFLAC driven one frame at a time, opened on the STREAMINFO the container hands over. **OggFLAC starts playing as a consequence**, through `demux_ogg` and the same codec |
 | `decode_ogg` | `demux_ogg` (libogg) + `codec_vorbis` + `codec_opus` | the case that pays for itself: OggFLAC and Speex stop being "an Ogg this module cannot read" and become an Ogg whose codec nobody has yet |
-| `decode_mf` | `demux_mf`, every stream `SELF_DECODES` | it can enumerate streams, which is more than it does now |
-| `decode_ffmpeg` | `demux_ffmpeg`, every stream `SELF_DECODES` | `ffprobe` already enumerates streams; the module throws that away today and asks for one |
+| `decode_mf` | `demux_mf`, every stream `SELF_DECODES` | one stream, deliberately. A source reader can enumerate them, but this is the floor and making the least trustworthy path more capable is the wrong direction |
+| `decode_ffmpeg` | `demux_ffmpeg`, every stream `SELF_DECODES` | `ffprobe` already enumerated streams and the module threw that away and asked for `a:0`. It reports all of them now, and `select` picks -- so a film with a commentary track has two tracks rather than one |
 
 Two things fall out of the table that are worth naming. **The MP4 problem disappears
 entirely**: `demux_mp4` reads `moov` wherever it is, in `open`, where reading a file is
@@ -356,18 +358,40 @@ Each step leaves the tree building and playing music.
    codecs, and OggFLAC and Speex now get read by `demux_ogg` and refused by name — "nothing
    here decodes that codec" instead of "this is an Ogg I cannot read", which is the
    difference the split was for.
-5. `demux_wav`, `demux_flac`, `demux_mpeg` and their codecs.
-6. `demux_mf` and `demux_ffmpeg` with `SELF_DECODES`.
+5. **Done, and it needed a fourth demuxer the table above missed.** `demux_wav`
+   + `codec_pcm`, `demux_flac` + `codec_flac`, `demux_mpeg` + `codec_mp3` -- and
+   `demux_adts`, because `decode_aac` had three parts rather than two and the
+   ADTS framer was one of them. Without it a raw `.aac` would have gone from a
+   format with a first-class reader to one only FFmpeg could open, which is
+   exactly what "each step leaves the tree playing music" forbids.
+6. **Done.** `demux_mf` and `demux_ffmpeg` with `SELF_DECODES`, converted in
+   place rather than added beside the decoders they replace -- so what is left
+   for step 7 is deletion and nothing else. `demux_ffmpeg` enumerates every
+   audio stream, which is the capability the v2 shape bought here: the module
+   used to ask `ffprobe` for `a:0` and throw the rest away, so a film with a
+   commentary track had one track as far as this program was concerned.
+   `mediaperch-probe`'s `compare`, `verify` and `loudness` went across with
+   them, because the module they measured against was one of the two.
 7. `MP_KIND_DECODER` is deleted, and with it the last of "try them in order".
 
 **Every demuxer is a parser that reads a file somebody else wrote, so every
-demuxer wants a fuzzer** -- and one harness for all of them rather than one
-each, written once there are several to point it at. `demux_mp4`'s parsing is
-already covered, because `alac_fuzzer` links the same `shared/mp4/mp4.cpp`;
-`demux_ogg`'s page handling is libogg's, which Xiph fuzzes upstream, but its
-header identification and config assembly are ours and are not yet fuzzed. That
-is a step-6 deliverable, when `demux_wav`, `demux_flac` and `demux_mpeg` have
-arrived and there is a shape worth generalising.
+demuxer wants a fuzzer.** Where the parsing is somebody else's it is fuzzed
+somewhere else -- dr_wav and dr_mp3 by their own targets here, libogg by Xiph
+upstream -- and where it is ours it is fuzzed here: `demux_mp4` through
+`alac_fuzzer`, which links the same `shared/mp4/mp4.cpp`, and FLAC's framing
+through `flacframe_fuzzer`, added with step 5.
+
+That one earned its keep in ninety seconds. FLAC frames carry no length, so
+`demux_flac` finds the end of one by running the format's CRC-16 forward and
+testing every position where it reads zero -- and the scan started by reading
+the shortest frame the header implied, which can be more bytes than it was
+given. Eighteen bytes beginning `FF FB`, an MPEG sync that also satisfies FLAC's
+fourteen-bit one, read past the end of the buffer. Reachable for real on a file
+whose last frame is truncated. The input is in `fuzz/corpus/flac`.
+
+Still not fuzzed and worth saying so: `demux_mpeg`'s LAME-tag reader and
+`demux_adts`'s header parser, both of which are ours and both of which read
+attacker-controlled bytes. They want the same treatment.
 
 **Step 7 is not optional and is not "later".** A migration that leaves both structures in
 the tree has not replaced anything: it has added a second way to do the same thing, and the
@@ -1168,7 +1192,7 @@ HDR state.
 | M3 | `mediaperch-cli` and the IPC | **done.** `mediaperchd` is the engine and has no toolkit in it; `mediaperch-cli` drives it over a named pipe with a versioned binary framing. `mp::Player` is in the core, so the whole engine is tested with no COM and no hardware, and `IEngineHost` is the four things it asks an operating system for. The row is done when killing the shell mid-track is inaudible, and that is a test: three shells attached, subscribed, and cut off, with the underrun count still zero. What is left of it is the tray menu §10 asks for, and one INI file for §11 |
 | M4 | Path B: f64 bus, DSP chain, resampler, dither. Gapless, seek | **done**, and the passthrough path still contains no float. Gapless is `mp::Queue`, a source whose `read` does not stop at a track boundary; seek and pause are on both graphs; every DSP stage can be told to forget where it was. A device that is taken away (`AUDCLNT_E_DEVICE_INVALIDATED`) is a rebuild rather than an ending, and so is switching *paths*: both resume on the frame the device stopped on, which is the only thing a rebuild point can honestly promise and is checked byte for byte |
 | M5 | `decode_mf` and `decode_ffmpeg`, and the resolution table | **done.** `ctest -R format_matrix` builds one file per format, shows it to every decoder, and rewrites the matrix in the README -- and fails when the README stops matching. `mediaperch-probe claims` shows every decoder's probe score for a file, so a cell can say whether a decoder *claimed* the file or was forced to try. The lossless corpus comes from the reference encoders rather than FFmpeg, whose FLAC encoder writes 24 bits when asked for 32. Generating it found two claims in [formats.md](formats.md) that had gone stale and one real gap: nothing but Media Foundation claimed WMA |
-| M4.5 | ABI v2: the container decides (§12) | **steps 1-4 of 7.** The header, the host's two-stage resolution, `demux_mp4` + `codec_alac` + `codec_aac`, and `demux_ogg` + `codec_vorbis` + `codec_opus` are in and prove the shape: every file that crossed decodes to the hash it had under v1. Modules are laid out and installed by kind -- `modules/<kind>/<name>` in the tree, `bin/<config>/modules/<kind>/` out of it. The row is done when `grep MP_KIND_DECODER` finds nothing |
+| M4.5 | ABI v2: the container decides (§12) | **steps 1-6 of 7.** Every format this tree reads now resolves container-first: seven demuxers and seven codecs, and each one decodes to the hash its v1 decoder produced. Two formats gained a first-class reader on the way -- MPEG layer II, which had gone to FFmpeg, and OggFLAC, which `demux_ogg` had been naming since step 4 with nothing to hand it to. Seeking became the host's, once, rather than each decoder's separately: a seek to an arbitrary sample lands byte-identically in WAV, native FLAC, OggFLAC and ALAC-in-MP4, which are four unrelated framings. Modules are laid out and installed by kind -- `modules/<kind>/<name>` in the tree, `bin/<config>/modules/<kind>/` out of it. The row is done when `grep MP_KIND_DECODER` finds nothing |
 | M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse |
 | M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled |
 | M8 | WinUI 3 shell | killing it mid-track changes nothing audible |

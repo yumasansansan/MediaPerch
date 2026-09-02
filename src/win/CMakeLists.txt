@@ -48,18 +48,29 @@ set_target_properties(mediaperch_probe PROPERTIES
 # The probe is useless without modules beside it -- and the decode-quality test
 # drives it against every codec in the tree, so every module it could choose has
 # to be there before that test runs.
-add_dependencies(mediaperch_probe
-    mp_sink_wasapi mp_decode_native mp_decode_mf mp_decode_ffmpeg
-    mp_decode_alac mp_decode_aac mp_decode_mp3)
+# Named one by one rather than globbed, because a module that quietly stopped
+# building would otherwise show up as a format that quietly stopped playing.
+set(mediaperch_modules
+    mp_sink_wasapi
+    mp_demux_wav mp_demux_flac mp_demux_mpeg mp_demux_adts mp_demux_mp4 mp_demux_ogg
+    mp_demux_mf mp_demux_ffmpeg
+    mp_codec_pcm mp_codec_flac mp_codec_mp3 mp_codec_alac mp_codec_aac
+    mp_codec_opus mp_codec_vorbis
+    mp_decode_native mp_decode_alac mp_decode_aac mp_decode_mp3)
+foreach(module IN LISTS mediaperch_modules)
+    if(NOT TARGET ${module})
+        list(REMOVE_ITEM mediaperch_modules ${module})
+    endif()
+endforeach()
+
+add_dependencies(mediaperch_probe ${mediaperch_modules})
 
 # The engine. This is the product: no window, no toolkit, and nothing in the
 # process that a shell could take down with it.
 add_executable(mediaperchd mediaperchd/main.cpp)
 target_link_libraries(mediaperchd PRIVATE MediaPerch::win mediaperch_flags)
 set_target_properties(mediaperchd PROPERTIES OUTPUT_NAME "mediaperchd" FOLDER "win")
-add_dependencies(mediaperchd
-    mp_sink_wasapi mp_decode_native mp_decode_mf mp_decode_ffmpeg
-    mp_decode_alac mp_decode_aac mp_decode_mp3)
+add_dependencies(mediaperchd ${mediaperch_modules})
 
 # The shell that is always there. It links the client half of the IPC and the
 # protocol, and nothing else: no graph, no modules, no device.

@@ -21,6 +21,19 @@
 // Bit-exactness is unaffected and is checked the same way as everywhere else:
 // the raw format asked for is the decoder's own native one, and the bytes are
 // hashed against a reference. See docs/formats.md.
+//
+// **It is a demuxer that decodes for itself, and the flag says so.** FFmpeg is
+// not a container reader that happens to decode; it is a pipeline with a file at
+// one end and PCM at the other, and there is no seam in it that this tree could
+// take hold of. MP_STREAM_SELF_DECODES is that stated rather than disguised: one
+// structure with one declared exception, instead of a module pretending to be
+// two things it cannot be separated into.
+//
+// What the v2 shape did buy here is real, though, and it is streams. `ffprobe`
+// enumerates every audio stream in a file and this module used to ask for `a:0`
+// and throw the rest away -- so a film with a commentary track had one track as
+// far as MediaPerch was concerned. Now each one is described and `select` picks
+// between them.
 
 #include <mediaperch/module.h>
 
@@ -257,6 +270,29 @@ std::string field(const std::string& text, const char* key)
     return {};
 }
 
+/// ffprobe's per-stream blocks, split apart so `field` can be asked about one
+/// stream at a time. With several audio tracks the keys repeat, and a reader
+/// that searched the whole output would answer every question with track zero.
+std::vector<std::string> stream_blocks(const std::string& text)
+{
+    std::vector<std::string> blocks;
+    std::size_t at = 0;
+    for (;;) {
+        const std::size_t begin = text.find("[STREAM]", at);
+        if (begin == std::string::npos) {
+            break;
+        }
+        const std::size_t end = text.find("[/STREAM]", begin);
+        blocks.push_back(text.substr(begin, end == std::string::npos ? std::string::npos
+                                                                    : end - begin));
+        if (end == std::string::npos) {
+            break;
+        }
+        at = end + 1;
+    }
+    return blocks;
+}
+
 bool magic(const std::uint8_t* head, std::size_t bytes, const char* what,
            std::size_t offset = 0)
 {
@@ -266,42 +302,58 @@ bool magic(const std::uint8_t* head, std::size_t bytes, const char* what,
 
 } // namespace
 
-struct MpDecoder {
-    std::wstring path;
+/// One audio stream, as ffprobe described it.
+struct Stream {
     MpFormat format{};
     std::uint32_t frame_bytes = 0;
     std::uint64_t total_frames = 0;
     /// The raw muxer FFmpeg is asked for: exactly the decoder's own sample
     /// format, so that nothing in the chain converts.
     std::wstring raw_format;
+};
+
+struct MpDemux {
+    std::wstring path;
+    std::vector<Stream> streams;
+    std::size_t selected = 0;
 
     Child child;
     std::uint64_t position = 0;
     bool ended = false;
+    bool started = false;
+
+    [[nodiscard]] const Stream& current() const { return streams[selected]; }
 };
 
 namespace {
 
-bool start_at(MpDecoder* d, std::uint64_t frame)
+bool start_at(MpDemux* d, std::uint64_t frame)
 {
+    const Stream& stream = d->current();
     // -ss after -i is the sample-accurate form. The other one, before -i, seeks
     // by container index and lands on a packet boundary, which is faster and
     // wrong for a player that reports positions in frames.
     std::wstring command = quoted(g_ffmpeg) + L" -v error -nostdin -i " + quoted(d->path);
     if (frame != 0) {
-        const double seconds = static_cast<double>(frame) / d->format.sample_rate;
+        const double seconds = static_cast<double>(frame) / stream.format.sample_rate;
         wchar_t at[64]{};
         std::swprintf(at, std::size(at), L" -ss %.9f", seconds);
         command += at;
     }
-    command += L" -map 0:a:0 -f " + d->raw_format + L" -";
+    // The stream that was selected, rather than "the first audio track" -- which
+    // is the whole of what enumerating them was for.
+    wchar_t map[32]{};
+    std::swprintf(map, std::size(map), L" -map 0:a:%u ", static_cast<unsigned>(d->selected));
+    command += map;
+    command += L"-f " + stream.raw_format + L" -";
 
     d->position = frame;
     d->ended = false;
+    d->started = true;
     return d->child.start(command);
 }
 
-MpResult MP_CALL decoder_probe(const char* path, const std::uint8_t* head, std::size_t bytes,
+MpResult MP_CALL demux_probe(const char* path, const std::uint8_t* head, std::size_t bytes,
                                std::uint32_t* out_score) noexcept
 {
     if (out_score == nullptr) {
@@ -400,51 +452,27 @@ MpResult MP_CALL decoder_probe(const char* path, const std::uint8_t* head, std::
     return MP_OK;
 }
 
-MpResult MP_CALL decoder_open(const char* path, MpDecoder** out) noexcept
-try {
-    if (path == nullptr || out == nullptr) {
-        return MP_ERR_INVALID;
-    }
-    *out = nullptr;
-    if (g_ffprobe.empty() || g_ffmpeg.empty()) {
-        return MP_ERR_UNSUPPORTED;
-    }
-
-    const std::wstring wide_path = widen(path);
-    if (wide_path.empty()) {
-        return MP_ERR_INVALID;
-    }
-
-    const std::wstring probe =
-        quoted(g_ffprobe) +
-        L" -v error -select_streams a:0"
-        L" -show_entries stream=sample_rate,channels,sample_fmt,bits_per_raw_sample,duration"
-        L" -of default=noprint_wrappers=1 " +
-        quoted(wide_path);
-    const std::string description = capture(probe);
-    if (description.empty()) {
-        return MP_ERR_UNSUPPORTED;
-    }
-
-    const std::string rate_text = field(description, "sample_rate");
-    const std::string channels_text = field(description, "channels");
-    const std::string sample_fmt = field(description, "sample_fmt");
-    const std::string raw_bits_text = field(description, "bits_per_raw_sample");
-    const std::string duration_text = field(description, "duration");
+/// Describes one audio stream from its ffprobe block, or refuses it.
+bool describe(const std::string& block, const char* path, Stream& out)
+{
+    const std::string rate_text = field(block, "sample_rate");
+    const std::string channels_text = field(block, "channels");
+    const std::string sample_fmt = field(block, "sample_fmt");
+    const std::string raw_bits_text = field(block, "bits_per_raw_sample");
+    const std::string duration_text = field(block, "duration");
 
     const auto rate = static_cast<std::uint32_t>(std::strtoul(rate_text.c_str(), nullptr, 10));
     const auto channels =
         static_cast<std::uint32_t>(std::strtoul(channels_text.c_str(), nullptr, 10));
     if (rate == 0 || channels == 0 || sample_fmt.empty()) {
-        return MP_ERR_UNSUPPORTED;
+        return false;
     }
 
-    auto decoder = new MpDecoder{};
-    decoder->path = wide_path;
-    decoder->format.sample_rate = rate;
-    decoder->format.channels = channels;
-    decoder->format.channel_mask = 0;
-    decoder->format.encoding = MP_ENCODING_PCM;
+    out = Stream{};
+    out.format.sample_rate = rate;
+    out.format.channels = channels;
+    out.format.channel_mask = 0;
+    out.format.encoding = MP_ENCODING_PCM;
 
     // Ask for exactly what the decoder produces. Anything else would put a
     // converter in the chain, which is the one thing a decoder here must not do.
@@ -470,112 +498,211 @@ try {
                     "not the file's own samples",
                     path);
         }
-        decoder->format.sample_type = MP_SAMPLE_F32;
-        decoder->format.valid_bits = 0;
-        decoder->frame_bytes = 4 * channels;
-        decoder->raw_format = L"f32le";
+        out.format.sample_type = MP_SAMPLE_F32;
+        out.format.valid_bits = 0;
+        out.frame_bytes = 4 * channels;
+        out.raw_format = L"f32le";
     } else if (sample_fmt == "s16" || sample_fmt == "s16p") {
-        decoder->format.sample_type = MP_SAMPLE_S16;
-        decoder->format.valid_bits = 16;
-        decoder->frame_bytes = 2 * channels;
-        decoder->raw_format = L"s16le";
+        out.format.sample_type = MP_SAMPLE_S16;
+        out.format.valid_bits = 16;
+        out.frame_bytes = 2 * channels;
+        out.raw_format = L"s16le";
     } else if (sample_fmt == "s32" || sample_fmt == "s32p") {
         if (raw_bits == 24) {
-            decoder->format.sample_type = MP_SAMPLE_S24_PACKED;
-            decoder->format.valid_bits = 24;
-            decoder->frame_bytes = 3 * channels;
-            decoder->raw_format = L"s24le";
+            out.format.sample_type = MP_SAMPLE_S24_PACKED;
+            out.format.valid_bits = 24;
+            out.frame_bytes = 3 * channels;
+            out.raw_format = L"s24le";
         } else {
-            decoder->format.sample_type = MP_SAMPLE_S32;
-            decoder->format.valid_bits = 32;
-            decoder->frame_bytes = 4 * channels;
-            decoder->raw_format = L"s32le";
+            out.format.sample_type = MP_SAMPLE_S32;
+            out.format.valid_bits = 32;
+            out.frame_bytes = 4 * channels;
+            out.raw_format = L"s32le";
         }
     } else {
-        log_fmt(MP_LOG_WARN, "no raw format matches FFmpeg's %s; refusing rather than "
-                             "letting it convert",
+        log_fmt(MP_LOG_WARN,
+                "no raw format matches FFmpeg's %s; refusing rather than letting it "
+                "convert",
                 sample_fmt.c_str());
-        delete decoder;
-        return MP_ERR_UNSUPPORTED;
+        return false;
     }
 
     const double seconds = std::strtod(duration_text.c_str(), nullptr);
-    decoder->total_frames =
-        seconds > 0.0 ? static_cast<std::uint64_t>(seconds * rate) : 0;
+    out.total_frames = seconds > 0.0 ? static_cast<std::uint64_t>(seconds * rate) : 0;
+    return true;
+}
 
-    if (!start_at(decoder, 0)) {
-        delete decoder;
-        return MP_ERR_IO;
+MpResult MP_CALL demux_open(const char* path, MpDemux** out) noexcept
+try {
+    if (path == nullptr || out == nullptr) {
+        return MP_ERR_INVALID;
+    }
+    *out = nullptr;
+    if (g_ffprobe.empty() || g_ffmpeg.empty()) {
+        return MP_ERR_UNSUPPORTED;
     }
 
-    *out = decoder;
+    const std::wstring wide_path = widen(path);
+    if (wide_path.empty()) {
+        return MP_ERR_INVALID;
+    }
+
+    // **Every audio stream, not the first one.** `-select_streams a` without an
+    // index is the whole of the change, and it is what a container reader owed
+    // the rest of the program: a file with a commentary track has two, and until
+    // now one of them did not exist as far as MediaPerch was concerned.
+    const std::wstring probe =
+        quoted(g_ffprobe) +
+        L" -v error -select_streams a"
+        L" -show_entries stream=sample_rate,channels,sample_fmt,bits_per_raw_sample,duration"
+        L" -of default=noprint_wrappers=0 " +
+        quoted(wide_path);
+    const std::string description = capture(probe);
+    if (description.empty()) {
+        return MP_ERR_UNSUPPORTED;
+    }
+
+    auto* d = new (std::nothrow) MpDemux();
+    if (d == nullptr) {
+        return MP_ERR_NO_MEMORY;
+    }
+    d->path = wide_path;
+    for (const std::string& block : stream_blocks(description)) {
+        Stream stream;
+        if (describe(block, path, stream)) {
+            d->streams.push_back(std::move(stream));
+        }
+    }
+    if (d->streams.empty()) {
+        delete d;
+        return MP_ERR_UNSUPPORTED;
+    }
+
+    // The child is not started here. `select` is where a host says which stream
+    // it wants, and starting FFmpeg before being told would mean starting it
+    // twice for every file with more than one track.
+    *out = d;
     return MP_OK;
 } catch (...) {
     return MP_ERR_NO_MEMORY;
 }
 
-MpResult MP_CALL decoder_get_format(MpDecoder* d, MpFormat* out) noexcept
+MpResult MP_CALL demux_stream_count(MpDemux* d, std::uint32_t* out_count) noexcept
 {
+    if (d == nullptr || out_count == nullptr) {
+        return MP_ERR_INVALID;
+    }
+    *out_count = static_cast<std::uint32_t>(d->streams.size());
+    return MP_OK;
+}
+
+MpResult MP_CALL demux_stream_info(MpDemux* d, std::uint32_t index, MpStreamInfo* out) noexcept
+{
+    if (d == nullptr || out == nullptr || index >= d->streams.size()) {
+        return MP_ERR_INVALID;
+    }
+    const std::uint32_t size = out->size;
+    std::memset(out, 0, size);
+    out->size = size;
+    out->index = index;
+    out->kind = MP_STREAM_AUDIO;
+    // **A declaration, not a disguise.** There is no seam inside FFmpeg that
+    // this tree could take hold of: it is a file at one end and PCM at the
+    // other. Saying MP_CODEC_INTERNAL is more honest than naming a codec and
+    // then refusing to let anybody else decode it.
+    out->codec = MP_CODEC_INTERNAL;
+    out->flags = MP_STREAM_SELF_DECODES | (index == 0 ? MP_STREAM_DEFAULT : 0u);
+    out->config_bytes = 0;
+    out->format = d->streams[index].format;
+    // From the container's duration, so it is close rather than exact. Nothing
+    // depends on it being exact; the stream ending is what ends playback.
+    out->total_frames = d->streams[index].total_frames;
+    return MP_OK;
+}
+
+MpResult MP_CALL demux_stream_config(MpDemux* d, std::uint32_t index, std::uint8_t* out,
+                                     std::uint32_t out_bytes,
+                                     std::uint32_t* out_needed) noexcept
+{
+    (void)out;
+    (void)out_bytes;
+    if (d == nullptr || index >= d->streams.size() || out_needed == nullptr) {
+        return MP_ERR_INVALID;
+    }
+    *out_needed = 0; // nothing to configure: no codec module is looked up
+    return MP_OK;
+}
+
+MpResult MP_CALL demux_select(MpDemux* d, std::uint32_t index) noexcept
+{
+    if (d == nullptr || index >= d->streams.size()) {
+        return MP_ERR_INVALID;
+    }
+    d->selected = index;
+    return start_at(d, 0) ? MP_OK : MP_ERR_IO;
+}
+
+MpResult MP_CALL demux_read_packet(MpDemux* d, void* dst, std::size_t dst_bytes,
+                                   MpPacket* out) noexcept
+{
+    (void)dst;
+    (void)dst_bytes;
     if (d == nullptr || out == nullptr) {
         return MP_ERR_INVALID;
     }
-    *out = d->format;
-    return MP_OK;
+    // Every stream here is MP_STREAM_SELF_DECODES, so there are no packets to
+    // hand over. A host that asks anyway has misread the flag.
+    out->bytes = 0;
+    return MP_ERR_UNSUPPORTED;
 }
 
-MpResult MP_CALL decoder_get_length(MpDecoder* d, std::uint64_t* out_frames) noexcept
-{
-    if (d == nullptr || out_frames == nullptr) {
-        return MP_ERR_INVALID;
-    }
-    // From the container's duration, so it is close rather than exact. Nothing
-    // depends on it being exact; the stream ending is what ends playback.
-    *out_frames = d->total_frames;
-    return MP_OK;
-}
-
-MpResult MP_CALL decoder_read(MpDecoder* d, void* dst, std::size_t dst_bytes,
-                              std::size_t* out_bytes) noexcept
+MpResult MP_CALL demux_read_frames(MpDemux* d, void* dst, std::size_t dst_bytes,
+                                   std::size_t* out_bytes) noexcept
 try {
     if (d == nullptr || dst == nullptr || out_bytes == nullptr) {
         return MP_ERR_INVALID;
     }
     *out_bytes = 0;
+    if (!d->started && !start_at(d, 0)) {
+        return MP_ERR_IO;
+    }
     if (!d->child.running() || d->ended) {
         return MP_END;
     }
 
-    const std::size_t want = (dst_bytes / d->frame_bytes) * d->frame_bytes;
+    const std::uint32_t frame_bytes = d->current().frame_bytes;
+    const std::size_t want = (dst_bytes / frame_bytes) * frame_bytes;
     if (want == 0) {
         return MP_OK;
     }
 
     std::size_t got = d->child.read(dst, want);
-    got -= got % d->frame_bytes; // never hand back a partial frame
+    got -= got % frame_bytes; // never hand back a partial frame
     if (got == 0) {
         d->ended = true;
         return MP_END;
     }
 
-    d->position += got / d->frame_bytes;
+    d->position += got / frame_bytes;
     *out_bytes = got;
     return MP_OK;
 } catch (...) {
     return MP_ERR_IO;
 }
 
-MpResult MP_CALL decoder_seek(MpDecoder* d, std::uint64_t frame) noexcept
+MpResult MP_CALL demux_seek(MpDemux* d, std::uint64_t frame) noexcept
 {
     if (d == nullptr) {
         return MP_ERR_INVALID;
     }
     // Seeking restarts the child. That is what going through the executables
     // costs, and it is a few tens of milliseconds rather than a correctness
-    // problem -- the restart uses output-side -ss, which is sample-accurate.
+    // problem -- the restart uses output-side -ss, which is sample-accurate, so
+    // the host has nothing to discard afterwards and no MP_PACKET_TIMED to read.
     return start_at(d, frame) ? MP_OK : MP_ERR_IO;
 }
 
-void MP_CALL decoder_close(MpDecoder* d) noexcept
+void MP_CALL demux_close(MpDemux* d) noexcept
 {
     delete d;
 }
@@ -605,30 +732,41 @@ void MP_CALL module_shutdown() noexcept
     g_ffprobe.clear();
 }
 
-const MpDecoderVtbl g_decoder_vtbl = {
-    /* size       */ sizeof(MpDecoderVtbl),
-    /* reserved   */ 0,
-    /* probe      */ &decoder_probe,
-    /* open       */ &decoder_open,
-    /* get_format */ &decoder_get_format,
-    /* get_length */ &decoder_get_length,
-    /* read       */ &decoder_read,
-    /* seek       */ &decoder_seek,
-    /* close      */ &decoder_close,
+const MpDemuxVtbl g_vtbl = {
+    /* size          */ sizeof(MpDemuxVtbl),
+    /* reserved      */ 0,
+    /* probe         */ &demux_probe,
+    /* open          */ &demux_open,
+    /* stream_count  */ &demux_stream_count,
+    /* stream_info   */ &demux_stream_info,
+    /* stream_config */ &demux_stream_config,
+    /* select        */ &demux_select,
+    /* read_packet   */ &demux_read_packet,
+    /* seek          */ &demux_seek,
+    /* read_frames   */ &demux_read_frames,
+    /* close         */ &demux_close,
 };
+
+/// **The one this module will not claim to be a codec for.** Every stream it
+/// produces is MP_STREAM_SELF_DECODES, so no codec is ever looked up for it and
+/// naming any here would be a promise it does not keep.
+const MpCodec g_codecs[] = {MP_CODEC_INTERNAL};
 
 const MpModuleDesc g_desc = {
     /* size        */ sizeof(MpModuleDesc),
     /* abi_version */ MP_ABI_VERSION,
     /* flags       */ 0,
     /* version     */ MP_MAKE_VERSION(0, 1, 0),
-    /* kind        */ MP_KIND_DECODER,
-    /* priority    */ 60, // the fallback everywhere except MP4 -- see decoder_probe
-    /* id          */ "decode_ffmpeg",
+    /* kind        */ MP_KIND_DEMUX,
+    /* priority    */ 60, // the fallback everywhere except MP4 -- see demux_probe
+    /* id          */ "demux_ffmpeg",
     /* name        */ "FFmpeg (found at run time, not shipped)",
     /* init        */ &module_init,
     /* shutdown    */ &module_shutdown,
-    /* vtbl        */ &g_decoder_vtbl,
+    /* vtbl        */ &g_vtbl,
+    /* codecs      */ g_codecs,
+    /* codec_count */ 1,
+    /* reserved    */ 0,
 };
 
 } // namespace

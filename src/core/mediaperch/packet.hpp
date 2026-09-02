@@ -175,6 +175,16 @@ private:
     std::vector<std::uint8_t> pcm_;
     std::size_t pcm_at_ = 0;
 
+    /// Where a seek asked to land, in the stream's own frames, and whether the
+    /// next packet is the first one after it.
+    ///
+    /// **A demuxer seeks to a packet, not to a frame**, and it may deliberately
+    /// seek further back still so the codec has its pre-roll. Both leave audio
+    /// in front of the target, and discarding it is the host's -- once, here,
+    /// rather than once per module and differently each time.
+    std::uint64_t seek_target_ = 0;
+    bool after_seek_ = false;
+
     /// Frames of the gapless edit still to discard, and still to emit.
     std::uint64_t skip_ = 0;
     std::uint64_t remaining_ = 0;

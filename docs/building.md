@@ -79,7 +79,7 @@ and skip themselves, and the rest of the tree builds. Catch2 is fetched at confi
 because it is test scaffolding rather than something that ships. Nothing else is
 downloaded.
 
-**FFmpeg is not a build dependency at all.** `decode_ffmpeg` looks for `ffmpeg` and
+**FFmpeg is not a build dependency at all.** `demux_ffmpeg` looks for `ffmpeg` and
 `ffprobe` beside itself and then on `PATH`, at run time, and declines every file when
 neither is there. Installing one is optional and is the user's choice — including the
 choice between an LGPL and a GPL build.
@@ -303,7 +303,7 @@ All three run as part of `ctest`, so they cannot be skipped by not remembering t
   one it skips itself and says so, which is right on a machine that has no FFmpeg and wrong in
   CI -- so CI configures with `-D MEDIAPERCH_REQUIRE_FFMPEG=ON` and a missing FFmpeg fails the
   job instead. FFmpeg is a *test tool* here and nothing else: nothing in the product links it,
-  and `decode_ffmpeg` looks for it at run time.
+  and `demux_ffmpeg` looks for it at run time.
 
   It takes a couple of minutes, so it carries a label:
 

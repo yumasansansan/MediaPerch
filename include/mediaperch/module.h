@@ -375,7 +375,20 @@ enum {
     /* This packet begins a point the stream can be seeked to and decoded from
      * with no earlier packet. Every audio packet of most codecs is one; AAC and
      * MP3 are not, which is why seeking needs pre-roll. */
-    MP_PACKET_SYNC = 1u << 0
+    MP_PACKET_SYNC = 1u << 0,
+
+    /* `frame` is this packet's real position, and not a demuxer declining to
+     * say. **Zero is a legitimate position**, so a host cannot tell "the start
+     * of the stream" from "I do not timestamp" by looking at the number, and
+     * after a seek the difference is the whole of whether the audio starts
+     * where it was asked for: the host discards frames from `frame` up to the
+     * target, and doing that on a number nobody vouched for would be worse than
+     * not doing it at all.
+     *
+     * A demuxer that seeks to the packet containing a frame, or that seeks
+     * further back to give a codec its pre-roll, has to set this -- both leave
+     * audio in front of the target that only the host can discard. */
+    MP_PACKET_TIMED = 1u << 1
 };
 
 typedef struct MpDemux MpDemux; /* opaque, module-owned */

@@ -82,11 +82,15 @@ endfunction()
 # The decoders, in the order §7 of the plan lists them. A fixed list rather than
 # whatever loaded, because a decoder that is *missing* is a column of dashes and
 # that is information too.
-# The v2 demuxers first, because they are what the resolution rules reach
-# before anything else, and then the v1 decoders that are still being moved
-# across. A column per module is the point: this table is where the migration is
-# visible from outside.
-set(decoders demux_mp4 demux_ogg native flac ogg mp3 aac alac mf ffmpeg)
+# **The demuxers, which is now every module that reads a file.** The v1
+# decoders are still loadable and can still be forced by name, but each of them
+# has a v2 pair producing the same bytes -- proved file by file in
+# docs/formats.md -- so a column for each would widen the table by six and add
+# no coverage. They go with MP_KIND_DECODER.
+#
+# The heading drops the `demux_` that every one of them shares.
+set(decoders demux_wav demux_flac demux_mpeg demux_adts demux_mp4 demux_ogg
+             demux_ffmpeg demux_mf)
 
 set(rows "")      # "label|file|reference-file-or-NONE"
 set(row_notes "")
@@ -161,9 +165,8 @@ add_row("ALAC, 16-bit 5.1 at 48 kHz" "${W}/d_alac.m4a" "${SOURCE}" -c:a alac)
 # copes rather than crashes -- but it is not coverage, and a table that could not
 # tell the two apart would overstate every row.
 #
-# `claims` reports both halves of v2 resolution, so both are read: a demuxer
-# claims a container and keeps its full name, a v1 decoder claims a file and is
-# known by its suffix. The column headings say which is which.
+# `claims` reports the demuxers first and then the v1 decoders still being
+# retired. Only the first half is read, because only the first half has columns.
 function(who_claims out file)
     execute_process(
         COMMAND "${MEDIAPERCH_PROBE}" claims --file "${file}"
@@ -173,8 +176,6 @@ function(who_claims out file)
         string(REPLACE "\n" ";" lines "${said}")
         foreach(line IN LISTS lines)
             if(line MATCHES "^ *(demux_[a-z0-9_]+) +[0-9]")
-                list(APPEND claimed "${CMAKE_MATCH_1}")
-            elseif(line MATCHES "^ *decode_([a-z0-9_]+) +[0-9]")
                 list(APPEND claimed "${CMAKE_MATCH_1}")
             endif()
         endforeach()
@@ -233,7 +234,8 @@ endforeach()
 set(header "| Format |")
 set(rule "|---|")
 foreach(decoder IN LISTS decoders)
-    string(APPEND header " `${decoder}` |")
+    string(REGEX REPLACE "^demux_" "" heading "${decoder}")
+    string(APPEND header " `${heading}` |")
     string(APPEND rule "---|")
 endforeach()
 
@@ -257,9 +259,6 @@ foreach(row IN LISTS rows)
     if(status EQUAL 0)
         string(REGEX MATCH "decoder +([a-z0-9_]+)" _ "${said}")
         set(chosen "${CMAKE_MATCH_1}")
-        # A v1 decoder answers `decode_alac` and the column is called `alac`; a
-        # v2 demuxer answers `demux_mp4` and the column is called that.
-        string(REGEX REPLACE "^decode_" "" chosen "${chosen}")
     endif()
 
     who_claims(claimed "${file}")
@@ -290,9 +289,12 @@ endforeach()
 
 list(LENGTH rows how_many)
 string(APPEND table "\n")
+string(APPEND table "Every column is a demuxer -- `wav` is `demux_wav` -- and the codec each one\n")
+string(APPEND table "hands its packets to is looked up rather than tried: `mediaperch-probe claims`\n")
+string(APPEND table "prints the pair for any file.\n\n")
 string(APPEND table "`exact` is PCM identical to the audio that went into the encoder; a\n")
-string(APPEND table "sample type is a decoder that read the file and produced that instead; `—` is one\n")
-string(APPEND table "that declined. **Bold** is the decoder the resolution rules pick when nobody says;\n")
+string(APPEND table "sample type is a module that read the file and produced that instead; `—` is one\n")
+string(APPEND table "that declined. **Bold** is the module the resolution rules pick when nobody says;\n")
 string(APPEND table "`(brackets)` is one that did not claim the file and was forced to try anyway, which\n")
 string(APPEND table "measures that it copes rather than that it covers. Lossy rows have no `exact` to\n")
 string(APPEND table "reach: the encoder threw those bytes away.\n")

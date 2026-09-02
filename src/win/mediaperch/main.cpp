@@ -10,7 +10,6 @@
 #include "mediaperch/platform.hpp"
 
 #include "mediaperch/compare.hpp"
-#include "mediaperch/decoder.hpp"
 #include "mediaperch/dsp.hpp"
 #include "mediaperch/engine_host.hpp"
 #include "mediaperch/log.hpp"
@@ -93,7 +92,7 @@ struct Options {
     std::vector<std::string> dsp;
     bool float_source = false;
     std::string source;          // `compare`: the audio that was encoded
-    std::string rival_id = "decode_ffmpeg"; // and a second decoder to sit beside
+    std::string rival_id = "demux_ffmpeg"; // and a second decoder to sit beside
     double min_snr_db = 0.0;
     double band_tol_db = 0.0;
     double min_lag_margin_db = 6.0;
@@ -455,7 +454,12 @@ bool parse(int argc, char** argv, Options& out)
         } else if (arg == "--rival") {
             if (i + 1 < argc) {
                 out.rival_id = argv[++i];
-                if (out.rival_id != "none" && out.rival_id.rfind("decode_", 0) != 0) {
+                // The same rule as `--decoder`: a short name means a v1 decoder,
+                // a v2 module is named in full because its kind is half of what
+                // it is.
+                if (out.rival_id != "none" && out.rival_id.rfind("decode_", 0) != 0 &&
+                    out.rival_id.rfind("demux_", 0) != 0 &&
+                    out.rival_id.rfind("codec_", 0) != 0) {
                     out.rival_id = "decode_" + out.rival_id;
                 }
             }
@@ -993,18 +997,9 @@ RunOutcome run_graph(Graph& graph, mp::win::RenderThreadHooks& hooks, const mp::
 ///
 /// It is the same meter the stage runs, which is the point of it being a
 /// library: a number this prints and a number the stage reports cannot disagree.
-int loudness(const MpDecoderVtbl& vtbl, const Options& options)
+int loudness(mp::ISource& input, const Options& options)
 {
-    mp::Decoder decoder;
-    const MpResult opened = decoder.open(vtbl, options.file.c_str());
-    if (opened != MP_OK) {
-        std::fprintf(stderr, "could not open %s: %s%s%s\n", options.file.c_str(),
-                     result_name(opened), decoder.why().empty() ? "" : " -- ",
-                     decoder.why().c_str());
-        return 1;
-    }
-
-    const mp::Format source = decoder.format();
+    const mp::Format source = input.format();
     const mp::Format bus = mp::dsp_bus_format(source);
     mp::Converter to_bus{source, bus, mp::ConvertConfig{}};
     if (!to_bus.possible()) {
@@ -1029,7 +1024,7 @@ int loudness(const MpDecoderVtbl& vtbl, const Options& options)
 
     std::uint64_t frames_read = 0;
     for (;;) {
-        const std::size_t got = decoder.read(raw.data(), raw.size());
+        const std::size_t got = input.read(raw.data(), raw.size());
         const std::size_t frames = got / mp::frame_bytes(source);
         if (frames == 0) {
             break;
@@ -1073,28 +1068,36 @@ int loudness(const MpDecoderVtbl& vtbl, const Options& options)
 }
 #endif
 
-/// The best-ranked decoder that can actually open the file.
-///
-/// Probing is cheap and reads four kilobytes; opening is the real test, and
-/// mp::Decoder makes it a real test by requiring one frame of audio to come out.
-/// A decoder can score highest and still refuse -- decode_mf declines
-/// multichannel ALAC, decode_native cannot read a 32-bit FLAC -- and the right
-/// answer to that is the next candidate.
-///
-/// Falls back to the first entry when nothing opens, so the error the user sees
-/// comes from the decoder that claimed the file most confidently rather than
-/// from whichever one happened to be last.
-mp::win::ModuleRegistry::DecoderChoice first_that_opens(
-    const std::vector<mp::win::ModuleRegistry::DecoderChoice>& ranked,
-    const std::string& path)
+/// A module id with its kind trimmed off, for a column heading. `decode_ffmpeg`
+/// and `demux_ffmpeg` are both "ffmpeg" to somebody reading a table.
+const char* rival_label(const std::string& id)
 {
-    for (const auto& candidate : ranked) {
-        mp::Decoder probe;
-        if (probe.open(*candidate.vtbl, path.c_str()) == MP_OK) {
-            return candidate;
-        }
+    return id.size() > 7 && (id.rfind("decode_", 0) == 0 || id.rfind("demux_", 0) == 0 ||
+                             id.rfind("codec_", 0) == 0)
+               ? id.c_str() + id.find('_') + 1
+               : id.c_str();
+}
+
+/// Opens a file the way the engine does: the container first, then the v1
+/// decoders that are still being moved across.
+///
+/// **Every command that reads a file goes through this**, and that is the point
+/// rather than a convenience. `decode` prints a hash, `compare` measures against
+/// the source, `verify` sends the bytes to a device and reads them back, and
+/// `loudness` meters them -- four answers about one file that would be worth
+/// nothing if they were answers about four different ways of opening it.
+std::unique_ptr<mp::ISource> open_file(mp::win::EngineHost& host, const std::string& path,
+                                       std::string_view prefer, const char* what)
+{
+    std::string opened_by;
+    std::string why;
+    auto source = host.open_source(path, prefer, opened_by, why);
+    if (!source) {
+        std::fprintf(stderr, "cannot %s %s: %s\n", what, path.c_str(),
+                     why.empty() ? "nothing here reads it" : why.c_str());
+        return nullptr;
     }
-    return ranked.empty() ? mp::win::ModuleRegistry::DecoderChoice{} : ranked.front();
+    return source;
 }
 
 /// The two numbers that decide how much slack the decode thread has.
@@ -1201,8 +1204,8 @@ int list_dsp_modules(const mp::win::ModuleRegistry& registry)
 /// here, in the host, and not in the core.
 class FilePlaylist final : public mp::IPlaylist {
 public:
-    FilePlaylist(const mp::win::ModuleRegistry& registry, const Options& options)
-        : registry_(&registry), options_(&options)
+    FilePlaylist(mp::win::EngineHost& host, const Options& options)
+        : host_(&host), options_(&options)
     {
     }
 
@@ -1211,28 +1214,25 @@ public:
         if (index >= options_->files.size()) {
             return nullptr;
         }
-        while (opened_.size() <= index) {
-            opened_.push_back(std::make_unique<mp::Decoder>());
-        }
-        mp::Decoder& decoder = *opened_[index];
-        if (decoder) {
-            return &decoder;
+        opened_.resize(std::max(opened_.size(), index + 1));
+        if (opened_[index]) {
+            return opened_[index].get();
         }
         const std::string& path = options_->files[index];
-        const auto ranked = registry_->decoders_for(path, options_->decoder_id);
-        const auto choice = first_that_opens(ranked, path);
-        if (choice.vtbl == nullptr || decoder.open(*choice.vtbl, path.c_str()) != MP_OK) {
+        std::string opened_by;
+        std::string why;
+        auto source = host_->open_source(path, options_->decoder_id, opened_by, why);
+        if (!source) {
             // Recorded rather than fatal: a playlist that silently plays four of
             // its five entries is worse than one that says which it skipped.
             std::fprintf(stderr, "skipping %s: %s\n", path.c_str(),
-                         choice.vtbl == nullptr ? "no decoder recognised it"
-                                                : decoder.why().c_str());
-            decoder.close();
+                         why.empty() ? "no module recognised it" : why.c_str());
             return nullptr;
         }
         names_.resize(std::max(names_.size(), index + 1));
-        names_[index] = choice.desc->id;
-        return &decoder;
+        names_[index] = opened_by;
+        opened_[index] = std::move(source);
+        return opened_[index].get();
     }
 
     [[nodiscard]] const std::string& decoder_name(std::size_t index) const
@@ -1242,9 +1242,9 @@ public:
     }
 
 private:
-    const mp::win::ModuleRegistry* registry_;
+    mp::win::EngineHost* host_;
     const Options* options_;
-    std::vector<std::unique_ptr<mp::Decoder>> opened_;
+    std::vector<std::unique_ptr<mp::ISource>> opened_;
     std::vector<std::string> names_;
 };
 
@@ -1407,7 +1407,18 @@ int play(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
         return run.rc;
     }
 
-    FilePlaylist playlist{registry, options};
+    // The playlist opens files the way the engine does. `play` here is the
+    // probe's own device path, and it and `mediaperchd` disagreeing about which
+    // module reads a file would make every measurement taken with one of them a
+    // measurement about the other.
+    mp::LogRing log;
+    (void)log.listen([&options](const std::string& line) {
+        if (options.verbose) {
+            std::fprintf(stderr, "%s\n", line.c_str());
+        }
+    });
+    mp::win::EngineHost host{registry, log};
+    FilePlaylist playlist{host, options};
     std::size_t start = 0;
     for (;;) {
         mp::Queue queue{playlist, start};
@@ -1749,14 +1760,9 @@ int decode(mp::ISource& source, const Options& options)
 /// therefore the only division that makes a comparison with the source mean
 /// anything. It is a conversion, and it belongs here in a measuring tool rather
 /// than in any decoder.
-bool read_as_float(const MpDecoderVtbl& vtbl, const std::string& path, mp::Format& format,
-                   std::vector<float>& out)
+bool read_as_float(mp::ISource& input, mp::Format& format, std::vector<float>& out)
 {
-    mp::Decoder decoder;
-    if (decoder.open(vtbl, path.c_str()) != MP_OK) {
-        return false;
-    }
-    format = decoder.format();
+    format = input.format();
     const std::size_t stride = mp::frame_bytes(format);
     if (stride == 0) {
         return false;
@@ -1764,7 +1770,7 @@ bool read_as_float(const MpDecoderVtbl& vtbl, const std::string& path, mp::Forma
     std::vector<std::uint8_t> chunk(64 * 1024 / stride * stride);
     std::vector<std::uint8_t> raw;
     for (;;) {
-        const std::size_t got = decoder.read(chunk.data(), chunk.size());
+        const std::size_t got = input.read(chunk.data(), chunk.size());
         if (got == 0) {
             break;
         }
@@ -1832,29 +1838,29 @@ void report(const char* who, const mp::Comparison& m)
     std::printf(" (%.1f dB clear)\n", m.channel_margin_db);
 }
 
-int compare_command(mp::win::ModuleRegistry& registry, const MpDecoderVtbl& vtbl,
-                    const Options& options)
+int compare_command(mp::win::EngineHost& host, const Options& options)
 {
-    // The source goes through the decoder chain like anything else, so this
+    // The source goes through the resolution rules like anything else, so this
     // works for a WAV, a FLAC or anything else lossless -- and the module that
     // reads it is measured elsewhere, which is what makes it usable as truth.
-    const auto source_ranked = registry.decoders_for(options.source, "");
-    const auto source_choice = first_that_opens(source_ranked, options.source);
-    if (source_choice.vtbl == nullptr) {
-        std::fprintf(stderr, "no decoder recognised the source %s\n", options.source.c_str());
+    auto source_input = open_file(host, options.source, {}, "read the source");
+    if (!source_input) {
         return 1;
     }
-
     mp::Format source_format;
     std::vector<float> source;
-    if (!read_as_float(*source_choice.vtbl, options.source, source_format, source)) {
+    if (!read_as_float(*source_input, source_format, source)) {
         std::fprintf(stderr, "cannot read the source %s\n", options.source.c_str());
         return 1;
     }
 
+    auto subject_input = open_file(host, options.file, options.decoder_id, "decode");
+    if (!subject_input) {
+        return 1;
+    }
     mp::Format subject_format;
     std::vector<float> subject;
-    if (!read_as_float(vtbl, options.file, subject_format, subject)) {
+    if (!read_as_float(*subject_input, subject_format, subject)) {
         std::fprintf(stderr, "cannot decode %s\n", options.file.c_str());
         return 1;
     }
@@ -1886,22 +1892,25 @@ int compare_command(mp::win::ModuleRegistry& registry, const MpDecoderVtbl& vtbl
     // anything away that the other one kept.
     bool rival_ok = true;
     if (options.rival_id != "none") {
-        const auto rival = registry.decoders_for(options.file, options.rival_id);
-        if (!rival.empty()) {
+        std::string rival_id;
+        std::string rival_why;
+        auto rival_input =
+            host.open_source(options.file, options.rival_id, rival_id, rival_why);
+        if (rival_input) {
             mp::Format rival_format;
             std::vector<float> other;
-            if (read_as_float(*rival.front().vtbl, options.file, rival_format, other) &&
+            if (read_as_float(*rival_input, rival_format, other) &&
                 rival_format.channels == channels) {
                 const mp::Comparison theirs = mp::compare(
                     source.data(), source_frames, other.data(), other.size() / channels, channels,
                     source_format.sample_rate, options.band_limit_hz, options.lag_window);
-                report(rival.front().desc->id + 7, theirs);
+                report(rival_label(rival_id), theirs);
                 // Equal to within a part in ten thousand, which for these two is
                 // eleven orders of magnitude of headroom: the point is to catch a
                 // decoder that lost something, not to declare a winner.
                 if (mine.rms_error > theirs.rms_error * 1.0001) {
                     std::printf("FAIL  further from the source than %s: %.6e against %.6e\n",
-                                rival.front().desc->id, mine.rms_error, theirs.rms_error);
+                                rival_id.c_str(), mine.rms_error, theirs.rms_error);
                     rival_ok = false;
                 }
                 // And the two held against each other rather than against the
@@ -1915,11 +1924,11 @@ int compare_command(mp::win::ModuleRegistry& registry, const MpDecoderVtbl& vtbl
                     mp::compare(other.data(), other.size() / channels, subject.data(),
                                 subject_frames, channels, source_format.sample_rate, 0,
                                 options.lag_window);
-                std::printf("against  %s directly: %.2f dB\n", rival.front().desc->id + 7,
+                std::printf("against  %s directly: %.2f dB\n", rival_label(rival_id),
                             between.snr_db);
                 if (between.snr_db < options.vs_rival_db) {
                     std::printf("FAIL  %.2f dB from %s, and %.2f was required\n", between.snr_db,
-                                rival.front().desc->id, options.vs_rival_db);
+                                rival_id.c_str(), options.vs_rival_db);
                     rival_ok = false;
                 }
             }
@@ -2134,24 +2143,11 @@ std::vector<std::uint8_t> sync_block(std::size_t frame_bytes)
     return out;
 }
 
-int verify(const MpSinkVtbl& sink_vtbl, const MpDecoderVtbl& decoder_vtbl,
-           const Options& options)
+int verify(const MpSinkVtbl& sink_vtbl, mp::ISource& input, const Options& options)
 {
-    if (options.file.empty()) {
-        std::fprintf(stderr, "verify needs --file\n");
-        return 1;
-    }
 
     // ---- decode ----------------------------------------------------------
-    mp::Decoder decoder;
-    const MpResult opened = decoder.open(decoder_vtbl, options.file.c_str());
-    if (opened != MP_OK) {
-        std::fprintf(stderr, "cannot decode %s: %s\n", options.file.c_str(),
-                     decoder.why().empty() ? result_name(opened) : decoder.why().c_str());
-        return 1;
-    }
-
-    const mp::Format source_format = decoder.format();
+    const mp::Format source_format = input.format();
     const std::size_t source_stride = mp::frame_bytes(source_format);
     const std::uint64_t cap_frames =
         static_cast<std::uint64_t>(options.seconds) * source_format.sample_rate;
@@ -2161,7 +2157,7 @@ int verify(const MpSinkVtbl& sink_vtbl, const MpDecoderVtbl& decoder_vtbl,
     {
         std::vector<std::uint8_t> chunk(64 * 1024 / source_stride * source_stride);
         while (source_bytes.size() < cap_frames * source_stride) {
-            const std::size_t got = decoder.read(chunk.data(), chunk.size());
+            const std::size_t got = input.read(chunk.data(), chunk.size());
             if (got == 0) {
                 break;
             }
@@ -2568,51 +2564,49 @@ int main(int argc, char** argv)
             std::fprintf(stderr, "%s needs --file\n", options.command.c_str());
             return 1;
         }
-        // **`decode` resolves the way the engine does**: containers first, then
-        // the v1 decoders that are still being moved across. Two ways of
-        // opening a file that were not the same way would be worse than
-        // either, and this is the command whose whole job is to say what came
-        // out -- so it has to be looking at what plays.
-        //
-        // `compare`, `verify` and `loudness` are still on the v1 path below.
-        // They go across with the modules they measure.
-        if (options.command == "decode") {
-            mp::LogRing log;
-            (void)log.listen([&options](const std::string& line) {
-                if (options.verbose) {
-                    std::fprintf(stderr, "%s\n", line.c_str());
-                }
-            });
-            mp::win::EngineHost host{registry, log};
-            std::string opened_by;
-            std::string why;
-            auto source = host.open_source(options.file, options.decoder_id, opened_by, why);
-            if (!source) {
-                std::fprintf(stderr, "cannot decode %s: %s\n", options.file.c_str(),
-                             why.empty() ? "nothing here reads it" : why.c_str());
+        // **All four resolve the way the engine does**: the container first,
+        // then the v1 decoders still being moved across. Two ways of opening a
+        // file that were not the same way would be worse than either -- these
+        // are the commands whose whole job is to say what came out, so they
+        // have to be looking at what plays.
+        mp::LogRing log;
+        (void)log.listen([&options](const std::string& line) {
+            if (options.verbose) {
+                std::fprintf(stderr, "%s\n", line.c_str());
+            }
+        });
+        mp::win::EngineHost host{registry, log};
+
+#if MEDIAPERCH_DIAGNOSTICS
+        // `compare` opens two files and names them itself, so it is the one
+        // command that does its own resolving.
+        if (options.command == "compare") {
+            if (options.source.empty()) {
+                std::fprintf(stderr, "compare needs --source\n");
                 return 1;
             }
-            std::printf("decoder    %s%s\n", opened_by.c_str(),
-                        options.decoder_id.empty() ? "" : "  [forced]");
-            return decode(*source, options);
+            return compare_command(host, options);
         }
+#endif
 
-        const auto ranked = registry.decoders_for(options.file, options.decoder_id);
-        const auto choice = first_that_opens(ranked, options.file);
-        if (choice.vtbl == nullptr) {
-            if (options.decoder_id.empty()) {
-                std::fprintf(stderr, "no decoder recognised %s\n", options.file.c_str());
-            } else {
-                std::fprintf(stderr, "no decoder called %s is loaded\n",
-                             options.decoder_id.c_str());
-            }
+        std::string opened_by;
+        std::string why;
+        auto source = host.open_source(options.file, options.decoder_id, opened_by, why);
+        if (!source) {
+            std::fprintf(stderr, "cannot %s %s: %s\n", options.command.c_str(),
+                         options.file.c_str(),
+                         why.empty() ? "nothing here reads it" : why.c_str());
             return 1;
         }
-        std::printf("decoder    %s (%s)%s\n", choice.desc->id, choice.desc->name,
+        std::printf("decoder    %s%s\n", opened_by.c_str(),
                     options.decoder_id.empty() ? "" : "  [forced]");
+
+        if (options.command == "decode") {
+            return decode(*source, options);
+        }
 #if MEDIAPERCH_HAS_LOUDNESS
         if (options.command == "loudness") {
-            return loudness(*choice.vtbl, options);
+            return loudness(*source, options);
         }
 #else
         if (options.command == "loudness") {
@@ -2621,14 +2615,7 @@ int main(int argc, char** argv)
         }
 #endif
 #if MEDIAPERCH_DIAGNOSTICS
-        if (options.command == "compare") {
-            if (options.source.empty()) {
-                std::fprintf(stderr, "compare needs --source\n");
-                return 1;
-            }
-            return compare_command(registry, *choice.vtbl, options);
-        }
-        return verify(sink, *choice.vtbl, options);
+        return verify(sink, *source, options);
 #else
         return no_diagnostics(options.command.c_str());
 #endif

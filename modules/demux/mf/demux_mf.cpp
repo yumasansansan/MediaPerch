@@ -17,7 +17,24 @@
 //     the chain and the output is not the file's own samples any more.
 //
 // Whether it is bit-exact for a given format is then a measurement rather than a
-// claim -- `mediaperch-probe decode --decoder mf` prints the hash.
+// claim -- `mediaperch-probe decode --decoder demux_mf` prints the hash.
+//
+// **A pipeline, and the flag says so.** Under ABI v2 this is MP_KIND_DEMUX with
+// every stream flagged MP_STREAM_SELF_DECODES: a file goes in one end and PCM
+// comes out the other, and there is no packet boundary inside the source reader
+// for this tree to take hold of. That is a declaration rather than a disguise --
+// pretending to be a container reader that could be paired with somebody else's
+// codec would be a promise this cannot keep.
+//
+// **One stream, and that is a scope decision rather than a limit of the API.**
+// A source reader can enumerate streams, and `demux_ffmpeg` next door now does.
+// This module is the floor: [formats.md](../../../docs/formats.md) records that
+// Media Foundation starts every gapless-tagged track tens of milliseconds late,
+// clips float WAV to integer, scrambles multichannel ALAC and refuses 8 kHz and
+// 7.1 AAC outright, so it is reached only where nothing else will read a file at
+// all. Building track selection on top of that would be work spent making the
+// least trustworthy path more capable, which is the wrong direction. It stays
+// because it needs nothing installed.
 
 #include <mediaperch/module.h>
 
@@ -110,11 +127,11 @@ bool has(const std::uint8_t* head, std::size_t bytes, const char* magic, std::si
 
 } // namespace
 
-struct MpDecoder {
+struct MpDemux {
     ComPtr<IMFSourceReader> reader;
     MpFormat format{};
     std::uint32_t frame_bytes = 0;
-    /// What ReadSample handed over and `read` has not returned yet.
+    /// What ReadSample handed over and `read_frames` has not returned yet.
     std::vector<std::uint8_t> pending;
     std::size_t pending_offset = 0;
     bool ended = false;
@@ -122,7 +139,7 @@ struct MpDecoder {
 
 namespace {
 
-MpResult MP_CALL decoder_probe(const char* path, const std::uint8_t* head, std::size_t bytes,
+MpResult MP_CALL demux_probe(const char* path, const std::uint8_t* head, std::size_t bytes,
                                std::uint32_t* out_score) noexcept
 {
     if (out_score == nullptr) {
@@ -207,7 +224,7 @@ bool is_alac(const GUID& subtype) noexcept
     return subtype == mf_runtime_alac || subtype == MFAudioFormat_ALAC;
 }
 
-MpResult MP_CALL decoder_open(const char* path, MpDecoder** out) noexcept
+MpResult MP_CALL demux_open(const char* path, MpDemux** out) noexcept
 try {
     if (path == nullptr || out == nullptr) {
         return MP_ERR_INVALID;
@@ -343,7 +360,7 @@ try {
              rate, channels, got_rate, got_channels);
     }
 
-    auto decoder = new MpDecoder{};
+    auto decoder = new MpDemux{};
     decoder->reader = reader;
     decoder->format.sample_rate = got_rate;
     decoder->format.channels = got_channels;
@@ -364,21 +381,29 @@ try {
     return MP_ERR_NO_MEMORY;
 }
 
-MpResult MP_CALL decoder_get_format(MpDecoder* d, MpFormat* out) noexcept
+MpResult MP_CALL demux_stream_count(MpDemux* d, std::uint32_t* out_count) noexcept
 {
-    if (d == nullptr || out == nullptr) {
+    if (d == nullptr || out_count == nullptr) {
         return MP_ERR_INVALID;
     }
-    *out = d->format;
+    *out_count = 1;
     return MP_OK;
 }
 
-MpResult MP_CALL decoder_get_length(MpDecoder* d, std::uint64_t* out_frames) noexcept
+MpResult MP_CALL demux_stream_info(MpDemux* d, std::uint32_t index, MpStreamInfo* out) noexcept
 {
-    if (d == nullptr || out_frames == nullptr) {
+    if (d == nullptr || out == nullptr || index != 0) {
         return MP_ERR_INVALID;
     }
-    *out_frames = 0;
+    const std::uint32_t size = out->size;
+    std::memset(out, 0, size);
+    out->size = size;
+    out->index = 0;
+    out->kind = MP_STREAM_AUDIO;
+    out->codec = MP_CODEC_INTERNAL;
+    out->flags = MP_STREAM_SELF_DECODES | MP_STREAM_DEFAULT;
+    out->config_bytes = 0;
+    out->format = d->format;
 
     PROPVARIANT duration;
     ::PropVariantInit(&duration);
@@ -386,14 +411,56 @@ MpResult MP_CALL decoder_get_length(MpDecoder* d, std::uint64_t* out_frames) noe
             media_source, MF_PD_DURATION, &duration)) &&
         duration.vt == VT_UI8) {
         // 100-nanosecond units.
-        *out_frames = duration.uhVal.QuadPart * d->format.sample_rate / 10'000'000ULL;
+        out->total_frames =
+            duration.uhVal.QuadPart * d->format.sample_rate / 10'000'000ULL;
     }
     ::PropVariantClear(&duration);
+
+    // **No gapless edit, and that is a measurement rather than an omission.**
+    // Media Foundation reports the encoder delay for no codec at all, which is
+    // the reason decode_mp3 and the MP4 pair exist -- see formats.md. Leaving
+    // these zero says "the container stated none", which is the truth about what
+    // this module can see.
     return MP_OK;
 }
 
+MpResult MP_CALL demux_stream_config(MpDemux* d, std::uint32_t index, std::uint8_t* out,
+                                     std::uint32_t out_bytes,
+                                     std::uint32_t* out_needed) noexcept
+{
+    (void)out;
+    (void)out_bytes;
+    if (d == nullptr || index != 0 || out_needed == nullptr) {
+        return MP_ERR_INVALID;
+    }
+    *out_needed = 0; // nothing to configure: no codec module is looked up
+    return MP_OK;
+}
+
+MpResult MP_CALL demux_select(MpDemux* d, std::uint32_t index) noexcept
+{
+    if (d == nullptr) {
+        return MP_ERR_INVALID;
+    }
+    return index == 0 ? MP_OK : MP_ERR_INVALID;
+}
+
+MpResult MP_CALL demux_read_packet(MpDemux* d, void* dst, std::size_t dst_bytes,
+                                   MpPacket* out) noexcept
+{
+    (void)dst;
+    (void)dst_bytes;
+    if (d == nullptr || out == nullptr) {
+        return MP_ERR_INVALID;
+    }
+    // The stream is MP_STREAM_SELF_DECODES, so there are no packets to hand
+    // over. A host that asks anyway has misread the flag.
+    out->bytes = 0;
+    return MP_ERR_UNSUPPORTED;
+}
+
 /// Pulls one sample from the reader into `pending`. Returns false at the end.
-bool refill(MpDecoder* d) noexcept
+bool refill(MpDemux* d) noexcept
 {
     if (d->ended) {
         return false;
@@ -447,8 +514,8 @@ bool refill(MpDecoder* d) noexcept
     }
 }
 
-MpResult MP_CALL decoder_read(MpDecoder* d, void* dst, std::size_t dst_bytes,
-                              std::size_t* out_bytes) noexcept
+MpResult MP_CALL demux_read_frames(MpDemux* d, void* dst, std::size_t dst_bytes,
+                                   std::size_t* out_bytes) noexcept
 try {
     if (d == nullptr || dst == nullptr || out_bytes == nullptr) {
         return MP_ERR_INVALID;
@@ -485,7 +552,7 @@ try {
     return MP_ERR_NO_MEMORY;
 }
 
-MpResult MP_CALL decoder_seek(MpDecoder* d, std::uint64_t frame) noexcept
+MpResult MP_CALL demux_seek(MpDemux* d, std::uint64_t frame) noexcept
 {
     if (d == nullptr) {
         return MP_ERR_INVALID;
@@ -504,7 +571,7 @@ MpResult MP_CALL decoder_seek(MpDecoder* d, std::uint64_t frame) noexcept
     return SUCCEEDED(hr) ? MP_OK : MP_ERR_IO;
 }
 
-void MP_CALL decoder_close(MpDecoder* d) noexcept
+void MP_CALL demux_close(MpDemux* d) noexcept
 {
     delete d;
 }
@@ -530,30 +597,39 @@ void MP_CALL module_shutdown() noexcept
     g_host = nullptr;
 }
 
-const MpDecoderVtbl g_decoder_vtbl = {
-    /* size       */ sizeof(MpDecoderVtbl),
-    /* reserved   */ 0,
-    /* probe      */ &decoder_probe,
-    /* open       */ &decoder_open,
-    /* get_format */ &decoder_get_format,
-    /* get_length */ &decoder_get_length,
-    /* read       */ &decoder_read,
-    /* seek       */ &decoder_seek,
-    /* close      */ &decoder_close,
+const MpDemuxVtbl g_vtbl = {
+    /* size          */ sizeof(MpDemuxVtbl),
+    /* reserved      */ 0,
+    /* probe         */ &demux_probe,
+    /* open          */ &demux_open,
+    /* stream_count  */ &demux_stream_count,
+    /* stream_info   */ &demux_stream_info,
+    /* stream_config */ &demux_stream_config,
+    /* select        */ &demux_select,
+    /* read_packet   */ &demux_read_packet,
+    /* seek          */ &demux_seek,
+    /* read_frames   */ &demux_read_frames,
+    /* close         */ &demux_close,
 };
+
+/// It decodes for itself and names no codec it could be paired on.
+const MpCodec g_codecs[] = {MP_CODEC_INTERNAL};
 
 const MpModuleDesc g_desc = {
     /* size        */ sizeof(MpModuleDesc),
     /* abi_version */ MP_ABI_VERSION,
     /* flags       */ MP_MODULE_NO_UNLOAD, // Media Foundation starts threads of its own
     /* version     */ MP_MAKE_VERSION(0, 1, 0),
-    /* kind        */ MP_KIND_DECODER,
-    /* priority    */ 50, // below decode_native: that one needs no converter
-    /* id          */ "decode_mf",
-    /* name        */ "Media Foundation (the OS decoder)",
+    /* kind        */ MP_KIND_DEMUX,
+    /* priority    */ 50, // below everything: this is the floor, not a competitor
+    /* id          */ "demux_mf",
+    /* name        */ "Media Foundation (the OS pipeline)",
     /* init        */ &module_init,
     /* shutdown    */ &module_shutdown,
-    /* vtbl        */ &g_decoder_vtbl,
+    /* vtbl        */ &g_vtbl,
+    /* codecs      */ g_codecs,
+    /* codec_count */ 1,
+    /* reserved    */ 0,
 };
 
 } // namespace

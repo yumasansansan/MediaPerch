@@ -51,6 +51,7 @@ function(mediaperch_add_fuzzer name source corpus)
         "${CMAKE_SOURCE_DIR}/src/core"
         "${CMAKE_SOURCE_DIR}/modules/decode/alac"
         "${CMAKE_SOURCE_DIR}/modules/shared/mp4"
+        "${CMAKE_SOURCE_DIR}/modules/shared/flacframe"
         "${CMAKE_SOURCE_DIR}/modules/decode/aac")
 
     # MSVC's STL annotates container bounds for ASan, and the annotations only
@@ -78,13 +79,17 @@ function(mediaperch_add_fuzzer name source corpus)
     # A short run on the seed corpus, so CI notices a parser that has stopped
     # working even when nobody is running a long campaign.
     #
-    # The scratch directory comes first on purpose: libFuzzer merges everything it
-    # finds into its *first* corpus argument, so naming the tracked seed corpus
-    # there turns a thirty-second CI run into three hundred new files in the
-    # working tree. The seeds are read-only inputs; anything the run discovers
-    # belongs in the build directory until somebody decides it is a regression.
+    # **The seeds are copied into a scratch directory rather than handed to the
+    # fuzzer as one.** Naming scratch first was the earlier arrangement, on the
+    # basis that libFuzzer merges into its first corpus argument -- and that is
+    # true until a run reduces an input, which puts the smaller version back
+    # where the original came from. The result is new files appearing inside
+    # `fuzz/corpus/` that nobody chose to keep. Copying makes the seeds
+    # unreachable for writing, which is what read-only inputs should be.
+    #
     # An absolute corpus is one that lives somewhere else -- a submodule's,
-    # where reusing it is the point rather than copying it.
+    # where reusing it is the point rather than copying it. It is copied all the
+    # same, for the same reason.
     if(IS_ABSOLUTE "${corpus}")
         set(seeds "${corpus}")
         get_filename_component(corpus_name "${corpus}" NAME)
@@ -92,11 +97,14 @@ function(mediaperch_add_fuzzer name source corpus)
         set(seeds "${CMAKE_CURRENT_LIST_DIR}/corpus/${corpus}")
         set(corpus_name "${corpus}")
     endif()
-    set(scratch "${CMAKE_CURRENT_BINARY_DIR}/${corpus_name}_scratch")
-    file(MAKE_DIRECTORY "${scratch}")
+    set(scratch "${CMAKE_CURRENT_BINARY_DIR}/${name}_scratch")
     add_test(NAME fuzz_${name}
-             COMMAND ${name} "${scratch}" "${seeds}"
-                     -runs=20000 -max_total_time=30 -print_final_stats=1)
+             COMMAND ${CMAKE_COMMAND}
+                     -D "FUZZER=$<TARGET_FILE:${name}>"
+                     -D "SEEDS=${seeds}"
+                     -D "SCRATCH=${scratch}"
+                     -D "ARGS=-runs=20000|-max_total_time=30|-print_final_stats=1"
+                     -P "${CMAKE_CURRENT_LIST_DIR}/RunFuzzer.cmake")
 endfunction()
 
 mediaperch_add_fuzzer(wav_fuzzer wav_fuzzer.cpp wav)
@@ -108,6 +116,13 @@ mediaperch_add_fuzzer(aac_fuzzer aac_fuzzer.cpp aac
 mediaperch_add_fuzzer(alac_fuzzer alac_fuzzer.cpp alac
                       "${CMAKE_SOURCE_DIR}/modules/decode/alac/alac.cpp"
                       "${CMAKE_SOURCE_DIR}/modules/shared/mp4/mp4.cpp")
+
+# FLAC's framing, which `demux_flac` uses to decide where a frame ends. It is a
+# scan over bytes somebody else wrote, and it is ours -- the two properties that
+# together say "fuzz this". The corpus is the FLAC one: a real file is a valid
+# STREAMINFO followed by real frames, which is the shape the scan is about.
+mediaperch_add_fuzzer(flacframe_fuzzer flacframe_fuzzer.cpp flac
+                      "${CMAKE_SOURCE_DIR}/modules/shared/flacframe/flacframe.cpp")
 
 # The settings file, on DragonPerch's INI corpus rather than a second one of
 # ours. The parser is shared as a submodule for the same reason: two INI parsers

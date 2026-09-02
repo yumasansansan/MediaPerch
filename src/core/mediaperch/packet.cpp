@@ -322,6 +322,9 @@ bool PacketSource::pump()
     pcm_at_ = 0;
 
     if (self_decodes_) {
+        // No packets, so nothing to discard against: such a demuxer seeks its
+        // own way and the pipeline inside it lands where it was asked to.
+        after_seek_ = false;
         std::size_t got = 0;
         const MpResult r = demux_.read_frames(pcm_.data(), pcm_.size(), got);
         pcm_.resize(got);
@@ -356,6 +359,26 @@ bool PacketSource::pump()
             return false;
         }
         if (got != 0) {
+            // **The first packet after a seek that produced anything says how
+            // much of it precedes the target.** A demuxer seeks to the packet
+            // containing a frame, or to one before it so a codec that needs
+            // pre-roll gets some, and either way what comes back starts too
+            // early.
+            //
+            // It has to be the first packet that *decoded*, not the first that
+            // arrived: a codec fed a cold packet may hand back nothing at all --
+            // dr_mp3 does exactly that for the frame it has no bit reservoir
+            // for -- and counting from a packet whose samples never existed puts
+            // the discard a whole frame out.
+            //
+            // `MP_PACKET_TIMED` is the demuxer vouching for the number. Without
+            // it the packet has no position and there is nothing to compute.
+            if (after_seek_) {
+                after_seek_ = false;
+                if ((packet.flags & MP_PACKET_TIMED) != 0u && packet.frame < seek_target_) {
+                    skip_ = seek_target_ - packet.frame;
+                }
+            }
             pcm_.resize(got);
             return true;
         }
@@ -445,6 +468,8 @@ bool PacketSource::seek(std::uint64_t frame)
     }
     warm_up(frame);
     skip_ = 0;
+    seek_target_ = absolute;
+    after_seek_ = true;
     if (bounded_) {
         remaining_ = stream_.play_frames > frame ? stream_.play_frames - frame : 0;
     }
