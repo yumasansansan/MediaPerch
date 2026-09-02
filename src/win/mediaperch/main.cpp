@@ -200,6 +200,8 @@ void usage()
   play        play a test tone.
               TAKES THE ENDPOINT for the whole duration.
   modules     list what loaded, and what each one claims to be
+  claims      show every decoder's probe score for one file, best first, which is
+              how the resolution rules pick. Opens nothing but the first 4 KB
   decode      decode a file and print SHA-256 of the PCM it produced. Touches no
               device. Compare it with a reference decoder to check this one.
   compare     decode a file and hold the result against the audio that was
@@ -356,7 +358,7 @@ bool parse(int argc, char** argv, Options& out)
             std::exit(0);
         } else if (arg == "devices" || arg == "negotiate" || arg == "play" ||
                    arg == "verify" || arg == "decode" || arg == "modules" ||
-                   arg == "compare" || arg == "loudness") {
+                   arg == "compare" || arg == "loudness" || arg == "claims") {
             out.command = arg;
         } else if (arg == "--file") {
             if (i + 1 < argc) {
@@ -2464,6 +2466,21 @@ int main(int argc, char** argv)
         return 1;
     }
     const MpSinkVtbl& sink = *sink_vtbl;
+
+    if (options.command == "claims") {
+        if (options.file.empty()) {
+            std::fprintf(stderr, "claims needs --file\n");
+            return 1;
+        }
+        // Every decoder's opinion, not just the winner's. "Several read it" and
+        // "this is the one you get" are different facts, and a table of
+        // coverage that cannot tell them apart is a table that overstates.
+        for (const auto& candidate : registry.decoders_for(options.file, {})) {
+            std::printf("%-16s %3u  %s\n", candidate.desc->id, candidate.score,
+                        candidate.desc->name);
+        }
+        return 0;
+    }
 
     if (options.command == "devices") {
         return list_devices(sink);

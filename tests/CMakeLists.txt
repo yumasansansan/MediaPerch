@@ -124,4 +124,23 @@ if(TARGET mediaperch_probe)
     # which is a couple of minutes -- so it carries a label, and `ctest -LE
     # quality` is the way to leave it out of a quick local run.
     set_tests_properties(decode_quality PROPERTIES TIMEOUT 900 LABELS quality)
+
+    # The coverage matrix in the README, regenerated and compared. A table
+    # nobody generates is a table that is wrong, so this one fails when the
+    # README stops matching what the decoders here actually do.
+    #
+    # It stops at 24 bits, because that is where FFmpeg stops being trustworthy
+    # as an encoder: docs/formats.md records that its FLAC encoder writes 24 bits
+    # when asked for 32. The 32-bit rows are measured with reference encoders and
+    # written down in that document instead -- a generated table that depended on
+    # which tools a machine happened to have would mean something different on
+    # every machine.
+    add_test(NAME format_matrix
+        COMMAND "${CMAKE_COMMAND}"
+                -D "MEDIAPERCH_PROBE=$<TARGET_FILE:mediaperch_probe>"
+                -D "MEDIAPERCH_WORK=${CMAKE_CURRENT_BINARY_DIR}/formats"
+                -D "MEDIAPERCH_README=${CMAKE_SOURCE_DIR}/README.md"
+                -D "MEDIAPERCH_REQUIRE_FFMPEG=${MEDIAPERCH_REQUIRE_FFMPEG}"
+                -P "${CMAKE_SOURCE_DIR}/cmake/FormatMatrix.cmake")
+    set_tests_properties(format_matrix PROPERTIES TIMEOUT 600 LABELS quality)
 endif()

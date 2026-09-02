@@ -360,8 +360,17 @@ MpResult MP_CALL decoder_probe(const char* path, const std::uint8_t* head, std::
         *out_score = 100;
         return MP_OK;
     }
+    // ASF, which is WMA's container. At the fallback score rather than 100:
+    // `decode_mf` claims it at 100 and should keep it on Windows, where the OS
+    // decoder is the one that was written for the format. What this buys is a
+    // machine with no Media Foundation -- the Linux head, one day -- where a
+    // WMA would otherwise be a file nothing claims at all. The format matrix
+    // is what noticed: FFmpeg read the file when it was forced to and scored
+    // zero on it, which is a gap rather than a policy.
+    static const char asf[] = "\x30\x26\xB2\x75\x8E\x66\xCF\x11";
     if (magic(head, bytes, "ID3") ||
         magic(head, bytes, "fLaC") || magic(head, bytes, "RIFF") ||
+        magic(head, bytes, asf) ||
         (bytes >= 2 && head[0] == 0xFF && (head[1] & 0xE0) == 0xE0)) {
         *out_score = 30;
     }

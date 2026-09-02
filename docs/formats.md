@@ -10,6 +10,20 @@ The method matters more than the table. A decoder that quietly converts is
 indistinguishable from one that does not, unless you hash the output and compare
 it with something that had no reason to make the same mistake.
 
+**The summary is in the [README](../README.md), and it is generated.**
+`ctest -R format_matrix` builds one file per format, shows it to every decoder in
+the tree, and fails if what it measures is not what the README says. Its lossless
+corpus comes from the reference encoders -- `flac` and `refalac` -- rather than
+from FFmpeg, for the reason recorded under *Limits found by testing the edges*
+below. This file is the detail behind that table: how each number was reached and
+what it cost to find out.
+
+Generating it immediately earned its keep. Two rows below had quietly stopped
+being true -- MP3 went to `decode_mf` until `decode_mp3` was written, and the
+*Still untested* list still said multichannel was untested three sections after a
+7.1 measurement. Both are corrected here, and neither would have been noticed by
+reading.
+
 ```
 mediaperch-probe decode --file X.flac --decoder native
 ffmpeg -i X.flac -f s16le out.raw     # then hash out.raw
@@ -80,7 +94,7 @@ through 8. §7 of [the plan](plan.md) has the full argument.
 | OggFLAC | `decode_ffmpeg` | `44100 Hz / 1 ch / S16` | `decode_ogg` scores it **0**, not something low: it is an Ogg stream this module cannot read at all, and saying so lets the fallback have it |
 | WavPack | `decode_ffmpeg` | `44100 Hz / 2 ch / S32` | hash identical to the 32-bit WAV of the same signal |
 | ALAC in M4A | `decode_alac` | up to `384000 Hz / 8 ch / S32` | ours, and the only decoder here with no dependency at all. See below |
-| MP3 | `decode_mf` | `44100 Hz / 2 ch / S16` | Media Foundation outranks FFmpeg here, 100 to 30 |
+| MP3 | `decode_mp3` | `44100 Hz / 2 ch / F32` | `dr_mp3`, at 105. It outranks Media Foundation because MF implements no gapless metadata and starts every MP3 36 ms late -- see *MP3, and the 36 milliseconds* below. Before `decode_mp3` existed this row said `decode_mf` and `S16`, which is what a hand-written table does |
 
 ## Vorbis and Opus: float, and what that costs
 
@@ -859,6 +873,71 @@ FFmpeg also decodes them correctly, so `decode_ffmpeg` would have worked too —
 libFLAC is the smaller answer, builds with CMake, and brings the MD5 check with
 it.
 
+## 32 bits, measured by hand
+
+The generated matrix in the README stops at 24 bits, and the reason is the
+encoder rather than the decoders: FFmpeg's FLAC encoder writes 24 bits when asked
+for 32, and integer lossless at 32 bits is where its encoders are least dependable
+generally. A generated table whose corpus is wrong measures the corpus.
+
+So these rows are made with reference encoders that are **not** part of this
+build and not referred to anywhere in it -- `flac` 1.5.0 from Xiph, and
+`refalac` 1.89 for ALAC -- and written down here instead. The source is two
+seconds of pink noise at 48 kHz, stereo, quantised to 32-bit integer; the
+reference hash is that WAV's own PCM, `fbb0cb63d6490fea…`.
+
+### 32-bit FLAC
+
+| Decoder | Probe score | Read it | Reported | Bit-exact |
+|---|---|---|---|---|
+| `decode_flac` | 100 | yes | `48000 Hz / 2 ch / S32` | **yes** |
+| `decode_native` | 60 | **no** | — | — |
+| `decode_mf` | 40 | **no** | — | — |
+| `decode_ffmpeg` | 30 | yes | `48000 Hz / 2 ch / S32` | **yes** |
+
+`decode_native` is the known one: `dr_flac` opens a 32-bit FLAC, reports 32 bits
+from STREAMINFO, and decodes nothing — the section above records that at length.
+
+**`decode_mf` is the new one.** Media Foundation refuses a 32-bit FLAC outright,
+at 48 kHz, where its documented FLAC limit is a *rate* of about 655 kHz. So the
+depth is a second, separate ceiling in the same decoder, and at 32 bits the
+reference decoder and FFmpeg are the only two readers in this tree. That is the
+strongest case the module architecture has produced: three of the four FLAC
+readers here decline the same legal file, each for its own reason.
+
+### 32-bit ALAC
+
+| Decoder | Probe score | Read it | Reported | Bit-exact |
+|---|---|---|---|---|
+| `decode_alac` | 100 | yes | `48000 Hz / 2 ch / S32` | **yes** |
+| `decode_mf` | 100 | yes | `48000 Hz / 2 ch / S32` | **yes** |
+| `decode_ffmpeg` | 100 | yes | `48000 Hz / 2 ch / S32` | **yes** |
+| `decode_aac` | 100 | no | — | — |
+
+All three ALAC readers are bit-exact to the ceiling of the format, which is what
+the ALAC sections above claim for `decode_alac` and is now measured for the other
+two as well. `decode_aac` scores 100 because it recognises the M4A container and
+then declines the file when it opens it and finds no AAC in it, which is the
+resolution rule working: the score is about the container and the refusal is
+about the contents.
+
+Note that `decode_mf` reads 32-bit ALAC *in stereo* perfectly. It is multichannel
+ALAC it gets wrong, and it declines that rather than getting it wrong now — see
+*What Media Foundation does with multichannel ALAC* above.
+
+### Reproducing them
+
+```
+flac --totally-silent -f -o c.flac src_s32_48000_2.wav
+refalac -s -o c_alac.m4a src_s32_48000_2.wav
+mediaperch-probe claims --file c.flac
+mediaperch-probe decode --file c.flac --decoder flac
+```
+
+`claims` prints every decoder's probe score for one file, which is how the
+"probe score" column above was filled and how the refusals were told apart from
+the declines.
+
 ## Limits found by testing the edges
 
 - **`dr_wav` refuses anything above 384 kHz** — `DRWAV_MAX_SAMPLE_RATE`, its own
@@ -872,6 +951,16 @@ it.
   the framework. The two decoders cover each other exactly here, which is the
   clearest argument the module architecture has produced so far: neither one alone
   reads everything in this table.
+- **Nothing claimed WMA except Media Foundation.** The generated matrix asks every
+  decoder about every file, and `decode_ffmpeg` read the WMA when it was forced
+  and scored **0** on it when it was asked -- so on a machine with no Media
+  Foundation, a WMA was a file nothing would open even with FFmpeg installed.
+  ASF's GUID is now in the fallback list at 30, which leaves `decode_mf` winning
+  it on Windows at 100 and gives the Linux head an answer. A gap, not a policy,
+  and a table nobody generated would not have shown it.
+- **Media Foundation refuses 32-bit FLAC**, at a rate it handles happily at 24
+  bits. Its documented FLAC limit was a rate; this is a second ceiling, on depth,
+  in the same decoder. Measured in *32 bits, measured by hand* above.
 - **FFmpeg's FLAC *encoder* writes 24 bits even when given `-sample_fmt s32`**, so
   a genuine 32-bit FLAC needs the reference encoder. `dr_flac` *looked* ready for
   one — it rejects only `subframeBitsPerSample > 32` — which is exactly why
@@ -899,5 +988,8 @@ is that the machinery works, which is the part that rots.
 
 - 8-bit WAV, which is unsigned and would need a conversion to reach any of our
   sample types; `decode_native` refuses it deliberately rather than converting.
-- Anything above two channels, at any depth.
+- ~~Anything above two channels, at any depth.~~ Stale: 5.1 and 7.1 are
+  measured above, channel by channel, and the generated matrix carries 5.1 rows
+  for WAV, FLAC and ALAC. Left visible rather than deleted because the reason it
+  went stale is the point of generating the table.
 - DSD in any form: DoP is designed for and not implemented.
