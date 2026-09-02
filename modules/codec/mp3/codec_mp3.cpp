@@ -2,12 +2,12 @@
 //
 // MPEG audio layers I, II and III, as a codec and nothing else.
 //
-// dr_mp3 has two APIs and `decode_mp3` used the wrong one for v2: `drmp3` opens
-// a file, finds frames, reads the LAME tag and decodes, which is a pipeline.
+// dr_mp3 has two APIs. `drmp3` opens a file, finds frames, reads the LAME tag
+// and decodes, which is a pipeline and is what the module this replaced used.
 // Underneath it is `drmp3dec_decode_frame`, which takes one frame's bytes and
-// gives back its samples and knows nothing else -- exactly the shape MpCodecVtbl
-// asks for. So this module is thin, and being thin is the evidence that the
-// split fell where the seam already was.
+// gives back its samples and knows nothing else -- exactly the shape
+// MpCodecVtbl asks for. So this module is thin, and being thin is the evidence
+// that the split fell where the seam already was.
 //
 // The output is float, and deliberately. MPEG's synthesis filterbank produces
 // real numbers; dr_mp3 will happily hand back int16 instead, and that would be a

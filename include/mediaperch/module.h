@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /*
- * MediaPerch module ABI, version 1.
+ * MediaPerch module ABI, version 2.
  *
  * The only file a third-party module has to read, and the only place where two
  * languages meet. Everything here is deliberately restricted to the C11 common
@@ -63,8 +63,9 @@ extern "C" {
 #endif
 
 /* 2: containers and codecs are separate kinds. v1 had one MP_KIND_DECODER that
- * was both, and asked every one of them whether it could read a file. See
- * docs/plan.md §4, *ABI v2: the container decides*. */
+ * was both, and asked every one of them whether it could read a file; it is
+ * gone, and so is every module that used it. See docs/plan.md §4, *ABI v2: the
+ * container decides*. */
 #define MP_ABI_VERSION 2u
 
 /* ------------------------------------------------------------------ */
@@ -174,39 +175,6 @@ typedef struct MpHost {
     void *(MP_CALL *alloc)(void *ctx, size_t bytes);
     void(MP_CALL *release)(void *ctx, void *p);
 } MpHost;
-
-/* ------------------------------------------------------------------ */
-/* Decoders                                                            */
-/* ------------------------------------------------------------------ */
-
-/* **Being removed.** A v1 decoder is a container reader and a codec in one
- * object, which is why the host had to try them in order. Every module in this
- * tree is being split into MP_KIND_DEMUX and MP_KIND_CODEC below; this
- * interface survives only so that the tree builds and plays music at every step
- * of that, and it goes when the last module has moved. Do not write a new one.
- */
-typedef struct MpDecoder MpDecoder; /* opaque, module-owned */
-
-typedef struct MpDecoderVtbl {
-    uint32_t size;
-    uint32_t reserved;
-
-    /* MP_IO. Score 0 = cannot open, 100 = certain. `head` is the first
-     * `head_bytes` of the file and may be shorter than asked for. */
-    MpResult(MP_CALL *probe)(const char *path, const uint8_t *head, size_t head_bytes,
-                             uint32_t *out_score);
-    /* MP_IO */
-    MpResult(MP_CALL *open)(const char *path, MpDecoder **out);
-    MpResult(MP_CALL *get_format)(MpDecoder *d, MpFormat *out);
-    MpResult(MP_CALL *get_length)(MpDecoder *d, uint64_t *out_frames);
-    /* MP_IO. Fills at most `dst_bytes`, always a whole number of frames, in the
-     * format `get_format` reported. Returns MP_END with *out_bytes == 0 at the
-     * end of the stream. Never converts: conversion is the graph's job. */
-    MpResult(MP_CALL *read)(MpDecoder *d, void *dst, size_t dst_bytes, size_t *out_bytes);
-    MpResult(MP_CALL *seek)(MpDecoder *d, uint64_t frame);
-    void(MP_CALL *close)(MpDecoder *d);
-} MpDecoderVtbl;
-
 
 /* ------------------------------------------------------------------ */
 /* Containers and codecs                                               */
@@ -436,7 +404,7 @@ typedef struct MpDemuxVtbl {
     MpResult(MP_CALL *seek)(MpDemux *d, uint64_t frame);
 
     /* MP_IO. Only for a stream flagged MP_STREAM_SELF_DECODES: PCM in the format
-     * `stream_info` reported, exactly as MpDecoderVtbl::read did. Null on a
+     * `stream_info` reported. Null on a
      * demuxer that splits properly, which is most of them. */
     MpResult(MP_CALL *read_frames)(MpDemux *d, void *dst, size_t dst_bytes,
                                    size_t *out_bytes);
@@ -711,7 +679,10 @@ typedef struct MpDspVtbl {
 
 typedef uint32_t MpKind;
 enum {
-    MP_KIND_DECODER = 1u,
+    /* 1 was MP_KIND_DECODER: a container reader and a codec in one object, and
+     * the reason the host used to try modules in order. It is not reused. An id
+     * that meant something else once is an id a host can get wrong, and the
+     * cost of leaving a hole is a hole. */
     MP_KIND_SINK = 2u,
     MP_KIND_DSP = 3u,   /* MpDspVtbl */
     MP_KIND_VIDEO = 4u, /* reserved */
@@ -749,7 +720,7 @@ typedef struct MpModuleDesc {
     void(MP_CALL *shutdown)(void);
 
 
-    /* MpDecoderVtbl*, MpSinkVtbl*, MpDemuxVtbl* or MpCodecVtbl*, per `kind`.
+    /* MpDemuxVtbl*, MpCodecVtbl*, MpSinkVtbl* or MpDspVtbl*, per `kind`.
      * Owned by the module and valid until shutdown returns. */
     const void *vtbl;
 
@@ -813,13 +784,11 @@ MP_STATIC_ASSERT(sizeof(MpDeviceInfo) == 520, "MpDeviceInfo layout is ABI");
 /* Every vtable and descriptor opens with a u32 size, so a host reading an older
  * module clamps at `size` and a newer field simply is not there. */
 MP_STATIC_ASSERT(offsetof(MpHost, size) == 0, "size must lead");
-MP_STATIC_ASSERT(offsetof(MpDecoderVtbl, size) == 0, "size must lead");
-MP_STATIC_ASSERT(offsetof(MpSinkVtbl, size) == 0, "size must lead");
-MP_STATIC_ASSERT(offsetof(MpModuleDesc, size) == 0, "size must lead");
-
-/* v2's two vtables. Both open with a size, both are only ever appended to. */
 MP_STATIC_ASSERT(offsetof(MpDemuxVtbl, size) == 0, "size must lead");
 MP_STATIC_ASSERT(offsetof(MpCodecVtbl, size) == 0, "size must lead");
+MP_STATIC_ASSERT(offsetof(MpSinkVtbl, size) == 0, "size must lead");
+MP_STATIC_ASSERT(offsetof(MpDspVtbl, size) == 0, "size must lead");
+MP_STATIC_ASSERT(offsetof(MpModuleDesc, size) == 0, "size must lead");
 MP_STATIC_ASSERT(sizeof(MpStreamKind) == 4, "MpStreamKind is a u32 field");
 MP_STATIC_ASSERT(sizeof(MpCodec) == 4, "MpCodec is a u32 field");
 MP_STATIC_ASSERT(offsetof(MpStreamInfo, size) == 0, "size must lead");

@@ -2,8 +2,8 @@
 //
 // The ALAC container parser and codec, given arbitrary bytes.
 //
-// This is the fuzzer that had to exist before decode_alac could be defended.
-// The argument for writing our own ALAC decoder is that Apple's is unmaintained
+// This is the fuzzer that had to exist before an ALAC decoder written here could
+// be defended. The argument for writing our own is that Apple's is unmaintained
 // and that ALHACK is what unmaintained decoders eventually produce -- an
 // argument that would be worth nothing if ours were merely newer rather than
 // actually exercised. Every bounds check in alac.cpp and mp4.cpp is here to be

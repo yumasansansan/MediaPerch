@@ -30,9 +30,8 @@ public:
     std::unique_ptr<ISource> open_source(const std::string& path, std::string& decoder,
                                          std::string& why) override;
 
-    /// The same resolution with a module named. `prefer` may be a demuxer's id
-    /// or a v1 decoder's, because "use that one" is a question about a module
-    /// and not about which half of the ABI it belongs to.
+    /// The same resolution with one demuxer named, which then gets no fallback:
+    /// "use that one" answered with a different one is not an answer.
     ///
     /// The probe and the engine share this on purpose: two ways of opening a
     /// file that were not the same way would be worse than either.
@@ -49,10 +48,12 @@ public:
     [[nodiscard]] bool resolve(const std::string& want, std::string& id, std::string& name,
                                std::string& why) const;
 
-    /// Decoders to try before the scores decide, in this order. How somebody
-    /// says "use libFLAC for FLAC" without arguing with a probe that is right
-    /// about everything else.
-    void prefer(std::vector<std::string> decoders) { prefer_ = std::move(decoders); }
+    /// Container readers to move to the front of the ranked list, in this
+    /// order. How somebody says "read MP4s with FFmpeg" without arguing with a
+    /// probe that is right about everything else -- and a reordering rather
+    /// than a veto, so a module named here that does not recognise a file
+    /// leaves the file to whoever does.
+    void prefer(std::vector<std::string> modules) { prefer_ = std::move(modules); }
 
 private:
     const ModuleRegistry* registry_;

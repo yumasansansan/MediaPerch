@@ -82,13 +82,10 @@ endfunction()
 # The decoders, in the order §7 of the plan lists them. A fixed list rather than
 # whatever loaded, because a decoder that is *missing* is a column of dashes and
 # that is information too.
-# **The demuxers, which is now every module that reads a file.** The v1
-# decoders are still loadable and can still be forced by name, but each of them
-# has a v2 pair producing the same bytes -- proved file by file in
-# docs/formats.md -- so a column for each would widen the table by six and add
-# no coverage. They go with MP_KIND_DECODER.
+# **Every module that reads a file**, which is now every demuxer and only them:
+# MP_KIND_DECODER is gone and so are the eight modules that used it.
 #
-# The heading drops the `demux_` that every one of them shares.
+# The heading drops the `demux_` that all of them share.
 set(decoders demux_wav demux_flac demux_mpeg demux_adts demux_mp4 demux_ogg
              demux_ffmpeg demux_mf)
 
@@ -165,8 +162,8 @@ add_row("ALAC, 16-bit 5.1 at 48 kHz" "${W}/d_alac.m4a" "${SOURCE}" -c:a alac)
 # copes rather than crashes -- but it is not coverage, and a table that could not
 # tell the two apart would overstate every row.
 #
-# `claims` reports the demuxers first and then the v1 decoders still being
-# retired. Only the first half is read, because only the first half has columns.
+# `claims` lists the demuxers that scored, one per line, with the streams each
+# one found indented beneath it. Only the module lines are read here.
 function(who_claims out file)
     execute_process(
         COMMAND "${MEDIAPERCH_PROBE}" claims --file "${file}"
@@ -175,7 +172,7 @@ function(who_claims out file)
     if(status EQUAL 0)
         string(REPLACE "\n" ";" lines "${said}")
         foreach(line IN LISTS lines)
-            if(line MATCHES "^ *(demux_[a-z0-9_]+) +[0-9]")
+            if(line MATCHES "^(demux_[a-z0-9_]+) +[0-9]")
                 list(APPEND claimed "${CMAKE_MATCH_1}")
             endif()
         endforeach()

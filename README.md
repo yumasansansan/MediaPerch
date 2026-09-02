@@ -31,13 +31,13 @@ turns out not to be one.
 
 Working: **eight container readers and seven codecs**, resolved container-first — a file is
 identified, opened, and asked what is in it, and the codec for each stream is looked up
-rather than tried. Four of the containers are read by code in this tree; the rest are
-libogg, dr_wav, and Media Foundation and FFmpeg as whole pipelines. All hash-identical to
-each other and to the reference on everything they read, up to 32-bit at 1,048,575 Hz.
-Format negotiation against real drivers; the passthrough graph on two threads; WASAPI
-exclusive down to a 2 ms period; 768 kHz / 32-bit on a USB DAC; a headless engine with a
-shell that can be killed mid-track without the audio noticing. 253 tests plus libFuzzer
-targets, on MSVC.
+rather than tried. Nothing is tried. Four of the containers are read by code in this tree;
+the rest are libogg, dr_wav, and Media Foundation and FFmpeg as whole pipelines. All
+hash-identical to each other and to the reference on everything they read, up to 32-bit at
+1,048,575 Hz. Format negotiation against real drivers; the passthrough graph on two threads;
+WASAPI exclusive down to a 2 ms period; 768 kHz / 32-bit on a USB DAC; a headless engine
+with a shell that can be killed mid-track without the audio noticing. 254 tests plus
+libFuzzer targets, on MSVC.
 
 ## What reads what
 

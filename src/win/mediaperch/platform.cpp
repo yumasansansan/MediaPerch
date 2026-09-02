@@ -330,11 +330,19 @@ const MpSinkVtbl* ModuleRegistry::sink(std::string_view id) const
     return id.empty() ? best : nullptr;
 }
 
-ModuleRegistry::DecoderChoice ModuleRegistry::decoder_for(const std::string& path,
-                                                          std::string_view prefer) const
+bool ModuleRegistry::readable(const std::string& path)
 {
-    const auto ranked = decoders_for(path, prefer);
-    return ranked.empty() ? DecoderChoice{} : ranked.front();
+    std::FILE* file = open_utf8(path, L"rb");
+    if (file == nullptr) {
+        return false;
+    }
+    // Zero bytes counts as unreadable here: an empty file is not a container
+    // anybody could have meant, and reporting it as "no module recognised it"
+    // sends somebody looking for a decoder they do not need.
+    std::uint8_t one = 0;
+    const bool any = std::fread(&one, 1, 1, file) == 1;
+    std::fclose(file);
+    return any;
 }
 
 std::vector<ModuleRegistry::DemuxChoice> ModuleRegistry::demuxers_for(
@@ -424,64 +432,6 @@ const MpCodecVtbl* ModuleRegistry::codec_for(MpCodec codec, const std::uint8_t* 
         }
     }
     return best;
-}
-
-std::vector<ModuleRegistry::DecoderChoice> ModuleRegistry::decoders_for(
-    const std::string& path, std::string_view prefer) const
-{
-    // The first few kilobytes, which is all a probe is allowed to look at. A
-    // probe that opens the file has already done the expensive thing twice.
-    std::array<std::uint8_t, 4096> head{};
-    std::size_t head_bytes = 0;
-    if (std::FILE* file = open_utf8(path, L"rb")) {
-        head_bytes = std::fread(head.data(), 1, head.size(), file);
-        std::fclose(file);
-    }
-
-    std::vector<DecoderChoice> ranked;
-
-    for (const auto& module : modules_) {
-        const MpModuleDesc& desc = module->desc();
-        if (desc.kind != MP_KIND_DECODER) {
-            continue;
-        }
-        const auto* vtbl = static_cast<const MpDecoderVtbl*>(desc.vtbl);
-        if (vtbl == nullptr || vtbl->size < sizeof(MpDecoderVtbl)) {
-            continue;
-        }
-
-        if (!prefer.empty()) {
-            // An explicit choice is a choice, not a preference: it does not get
-            // a fallback, because "use that one" answered with a different one
-            // is not an answer.
-            if (prefer == desc.id) {
-                return {DecoderChoice{vtbl, &desc, 0}};
-            }
-            continue;
-        }
-
-        std::uint32_t score = 0;
-        if (vtbl->probe != nullptr) {
-            vtbl->probe(path.c_str(), head.data(), head_bytes, &score);
-        }
-        if (score == 0) {
-            continue;
-        }
-        ranked.push_back(DecoderChoice{vtbl, &desc, score});
-    }
-
-    // Score first, priority to break ties -- the same rule as before, now
-    // applied to the whole list rather than just its maximum. stable_sort so
-    // that two modules agreeing on both keep the order the registry loaded them
-    // in, which is at least deterministic.
-    std::stable_sort(ranked.begin(), ranked.end(),
-                     [](const DecoderChoice& a, const DecoderChoice& b) {
-                         if (a.score != b.score) {
-                             return a.score > b.score;
-                         }
-                         return a.desc->priority > b.desc->priority;
-                     });
-    return ranked;
 }
 
 std::FILE* open_utf8(const std::string& path, const wchar_t* mode) noexcept

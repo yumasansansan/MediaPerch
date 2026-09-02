@@ -24,16 +24,24 @@ or, in a clone that already exists:
 git submodule update --init
 ```
 
-| Submodule | What for |
-|---|---|
-| `external/dr_libs` | `dr_wav` and `dr_flac` behind `decode_native`, `dr_mp3` behind `decode_mp3` |
-| `external/flac` | libFLAC, behind `decode_flac` |
-| `external/ogg` | libogg, the container under the two below |
-| `external/vorbis` | libvorbis and vorbisfile, behind `decode_ogg` |
-| `external/opus` | libopus, behind `decode_ogg` |
-| `external/opusfile` | opusfile: Ogg demuxing, seeking and header gain for Opus |
+| Submodule | What for | Which module brings it in |
+|---|---|---|
+| `external/dr_libs` | `dr_wav`, and `dr_mp3` | `demux_wav`, `codec_mp3` |
+| `external/flac` | libFLAC | `codec_flac` |
+| `external/ogg` | libogg | `demux_ogg` |
+| `external/vorbis` | libvorbis | `codec_vorbis` |
+| `external/opus` | libopus | `codec_opus` |
 
-### Four small CMake overrides, and why they are in `cmake/`
+**Each submodule sits with the one module that needs it**, which is a property of the
+container/codec split rather than a tidying. One module used to bring in four of the Xiph
+libraries at once, because it was the container and both codecs together. libFLAC is now a
+*codec* dependency and nothing else -- `demux_flac` reads the FLAC container with no library
+at all -- and libogg belongs to the container reader.
+
+The one ordering that survives: libvorbis asks `find_package(Ogg REQUIRED)`, so
+`modules/demux/ogg` is added before `modules/codec/vorbis`.
+
+### Three small CMake overrides, and why they are in `cmake/`
 
 The Xiph libraries are built in-tree, which their own CMake does not quite expect. Four
 files in `cmake/` fix that, all by the same mechanism: every one of those projects reaches
@@ -42,40 +50,45 @@ already on that path from the top-level `CMakeLists.txt`, so ours is found first
 
 | File | What it replaces |
 |---|---|
-| `FindOgg.cmake` | libvorbis and opusfile calling `find_package(Ogg REQUIRED)` for an *installed* libogg. Ours answers with the in-tree `Ogg::ogg` target |
-| `FindOpus.cmake` | the same, for opusfile's `find_package(Opus REQUIRED)` |
+| `FindOgg.cmake` | libvorbis calling `find_package(Ogg REQUIRED)` for an *installed* libogg. Ours answers with the in-tree `Ogg::ogg` target, which `modules/demux/ogg` creates first |
 | `OpusPackageVersion.cmake` | opus asking `git describe --tags` for its version number |
-| `OpusFilePackageVersion.cmake` | opusfile doing the same |
 
-The last two matter more than they look. Upstream has **no working fallback** when git cannot
+The second matters more than it looks. Upstream has **no working fallback** when git cannot
 answer: `configure.ac` carries the literal placeholder `CURRENT_VERSION` that their release
 script fills in, and no `package_version` file is committed. In a checkout without tags --
 a CI runner fetching submodules at depth 1, a source archive, a `git clone --depth 1` --
-the describe fails, the version becomes `0`, and opusfile's
+the describe fails and the version becomes `0`. While `opusfile` was in the tree that was a
+hard configure error rather than a cosmetic one: its
 
 ```cmake
 list(GET PROJECT_VERSION_LIST 1 PROJECT_VERSION_MINOR)
 ```
 
-fails the whole configure with `list index: 1 out of range`. That is exactly what CI hit,
-and it did not reproduce locally only because a full clone has the tags. The versions are
-now pinned beside the `add_subdirectory` calls in `modules/decode/ogg/CMakeLists.txt`, so
-the number and the gitlink move together, and `cmake -D CMAKE_DISABLE_FIND_PACKAGE_Git=ON`
-configures cleanly.
+failed with `list index: 1 out of range`. That is exactly what CI hit, and it did not
+reproduce locally only because a full clone has the tags. The version is now pinned beside
+the `add_subdirectory` call in `modules/codec/opus/CMakeLists.txt`, so the number and the
+gitlink move together, and `cmake -D CMAKE_DISABLE_FIND_PACKAGE_Git=ON` configures cleanly.
 
-`external/vorbis` and `external/opusfile` are pinned to upstream `master` rather than to a
-release tag, and both for the same kind of reason: opusfile has no `CMakeLists.txt` at all
-in v0.12, and vorbis v1.3.7 declares `cmake_minimum_required(VERSION 2.8.12)`, which CMake 4
-refuses outright. Upstream has fixed both on `master`. A submodule pins an exact commit
-either way, so the checkout is still reproducible; what is given up is a version number, not
-determinism.
+**`opusfile` is no longer here at all.** It is the Ogg container and the Opus codec in one
+object, which is what `decode_ogg` used; `demux_ogg` reads the container and `codec_opus`
+drives libopus directly, so nothing was left calling it. Two of the shims above went with
+it, and so did `OP_DISABLE_HTTP` -- opusfile can fetch a stream over the network, which a
+local file player has no use for and which was a setting somebody had to remember rather
+than a thing that was absent.
 
-`decode_alac` and `decode_aac` are on none of these lists on purpose: the ALAC and AAC-LC
-codecs, the ADTS parsing and the MP4 parsing are all in this tree, so those two modules
+`external/vorbis` is pinned to upstream `master` rather than to a release tag: v1.3.7
+declares `cmake_minimum_required(VERSION 2.8.12)`, which CMake 4 refuses outright, and
+upstream has fixed it on `master`. A submodule pins an exact commit either way, so the
+checkout is still reproducible; what is given up is a version number, not determinism.
+
+`codec_alac` and `codec_aac` are on none of these lists on purpose: the ALAC and AAC-LC
+codecs are in this tree, as are the MP4 and ADTS container readers, so those four modules
 build from a checkout with no submodules at all.
 
-A missing submodule is not a build failure: `decode_flac` and `decode_ogg` print a warning
-and skip themselves, and the rest of the tree builds. Catch2 is fetched at configure time instead,
+A missing submodule is not a build failure: the module that wanted it prints a warning and
+skips itself, and the rest of the tree builds. What that costs is per-codec now rather than
+per-format -- without `external/flac` there is no `codec_flac`, but `demux_flac` still reads
+the container and says which codec it could not find. Catch2 is fetched at configure time instead,
 because it is test scaffolding rather than something that ships. Nothing else is
 downloaded.
 
@@ -235,7 +248,7 @@ every binary — and it charges every byte of a linked image to the object that
 brought it:
 
 ```bash
-python tools/mapsize.py --symbols build/vs/bin/Release/mp_decode_ogg.map
+python tools/mapsize.py --symbols build/vs/bin/Release/mp_codec_vorbis.map
 ```
 
 **What that found.** The largest single object in the largest module is

@@ -156,11 +156,11 @@ TEST_CASE("init restarts the noise generator, so a file decodes the same way twi
 {
     // Noise-substituted bands are filled from a generator carried in the
     // decoder. If init() leaves it where the last decode stopped, the second
-    // decode of a file differs from the first -- and mp::Decoder::open reads a
-    // frame to prove the decoder works and then seeks back, so *every* file
-    // whose length is known was decoded from a generator two frames out of
-    // step. The bands were the right size and the right energy and held the
-    // wrong noise.
+    // decode of a file differs from the first. That is not hypothetical: the
+    // host used to read a frame to prove a decoder worked and then seek back,
+    // so *every* file whose length was known was decoded from a generator two
+    // frames out of step. The bands were the right size and the right energy
+    // and held the wrong noise.
     //
     // The frame below is the first of a 48 kHz mono stream at 64 kbit/s, which
     // substitutes noise in eight of its bands. Without PNS this test would pass

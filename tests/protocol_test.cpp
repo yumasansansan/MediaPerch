@@ -39,7 +39,7 @@ TEST_CASE("a status survives the round trip", "[ipc][protocol]")
     sent.position = 1234567;
     sent.length = 9876543;
     sent.track = "C:/music/\xe3\x83\x96\xe3\x83\xab\xe3\x83\xbc.flac"; // UTF-8, on purpose
-    sent.decoder = "decode_native";
+    sent.decoder = "demux_wav";
     sent.device = "\xe3\x83\x98\xe3\x83\x83\xe3\x83\x89\xe3\x83\x9b\xe3\x83\xb3 (FiiO KA5)";
     sent.source = cd_audio();
     sent.wire = cd_audio();

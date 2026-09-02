@@ -55,8 +55,7 @@ set(mediaperch_modules
     mp_demux_wav mp_demux_flac mp_demux_mpeg mp_demux_adts mp_demux_mp4 mp_demux_ogg
     mp_demux_mf mp_demux_ffmpeg
     mp_codec_pcm mp_codec_flac mp_codec_mp3 mp_codec_alac mp_codec_aac
-    mp_codec_opus mp_codec_vorbis
-    mp_decode_native mp_decode_alac mp_decode_aac mp_decode_mp3)
+    mp_codec_opus mp_codec_vorbis)
 foreach(module IN LISTS mediaperch_modules)
     if(NOT TARGET ${module})
         list(REMOVE_ITEM mediaperch_modules ${module})

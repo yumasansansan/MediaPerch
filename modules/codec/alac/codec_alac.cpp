@@ -4,9 +4,9 @@
 //
 // It never sees a file. It is handed the `ALACSpecificConfig` the container
 // found and then packets, one at a time, and it produces the file's own
-// integers -- which is the shape the codec in `alac.cpp` always had. `decode_alac`
-// was that codec plus half an MP4 parser plus a file handle, and the half and
-// the handle are `demux_mp4`'s now.
+// integers -- which is the shape the codec in `alac.cpp` always had. The module
+// this replaced was that codec plus half an MP4 parser plus a file handle, and
+// the half and the handle are `demux_mp4`'s now.
 //
 // Two things stay here because they are properties of ALAC rather than of MP4:
 // the channel order, which is Apple's and not WAVE's, and the depth, which the
@@ -16,6 +16,8 @@
 
 #include <mediaperch/module.h>
 
+#include <cstdarg>
+#include <cstdio>
 #include <cstring>
 #include <new>
 #include <vector>
@@ -23,6 +25,19 @@
 namespace {
 
 const MpHost* g_host = nullptr;
+
+void log_fmt(MpLogLevel level, const char* format, ...) noexcept
+{
+    if (g_host == nullptr || g_host->log == nullptr) {
+        return;
+    }
+    char buffer[256];
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+    g_host->log(g_host->ctx, level, buffer);
+}
 
 std::uint32_t container_for(unsigned bits) noexcept
 {
@@ -88,6 +103,9 @@ MpResult MP_CALL codec_open(MpCodec codec, const std::uint8_t* config,
     }
     mp::alac::Config cfg;
     if (config == nullptr || !mp::alac::parse_config(config, config_bytes, cfg)) {
+        log_fmt(MP_LOG_DEBUG,
+                "the container's ALACSpecificConfig is %u bytes and does not parse",
+                config_bytes);
         return MP_ERR_FORMAT;
     }
 
@@ -96,6 +114,9 @@ MpResult MP_CALL codec_open(MpCodec codec, const std::uint8_t* config,
         return MP_ERR_NO_MEMORY;
     }
     if (!c->codec.init(cfg)) {
+        log_fmt(MP_LOG_WARN, "ALAC at %u Hz, %u channels, %u bits: the decoder refused it",
+                cfg.sample_rate, static_cast<unsigned>(cfg.channels),
+                static_cast<unsigned>(cfg.bit_depth));
         delete c;
         return MP_ERR_FORMAT;
     }

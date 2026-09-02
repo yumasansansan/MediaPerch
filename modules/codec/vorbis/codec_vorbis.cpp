@@ -3,10 +3,10 @@
 // Vorbis, as a codec and nothing else.
 //
 // libvorbis is the reference decoder and `vorbisfile` is the convenience layer
-// that reads Ogg for you; `decode_ogg` uses the second and therefore cannot read
-// a Vorbis stream out of any other container. This uses the first, so the same
-// codec works for Vorbis in Matroska or in WebM the day a demuxer for those
-// exists.
+// that reads Ogg for you. The module this replaced used the second and therefore
+// could not read a Vorbis stream out of any other container. This uses the
+// first, so the same codec works for Vorbis in Matroska or in WebM the day a
+// demuxer for those exists.
 //
 // **Vorbis is the codec whose configuration does not fit in one blob.** It has
 // three header packets -- identification, comment and setup -- and the setup

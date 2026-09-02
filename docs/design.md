@@ -811,8 +811,9 @@ next       …96000 Hz / 2 ch / S24_PACKED…, which this device cannot take wit
            being reopened. That is the gap, and it is not ours.
 ```
 
-It also does not remove the encoder's padding. That is the decoder's job, and `decode_mp3`
-reads the LAME tag for exactly this reason.
+It also does not remove the encoder's padding. That is the *container's*, and `demux_mpeg`
+reads the LAME tag for exactly this reason -- the edit is a fact about the file, which is
+why `MpStreamInfo` carries it and a codec never sees it.
 
 #### Pause stops the clock
 
@@ -1026,7 +1027,7 @@ src/linux/           Linux head. Not started. The core is shaped so that it can 
 include/mediaperch/  the module ABI. Pure C, one header, versioned. The only file a
                      third-party module has to read.
 modules/             everything that can be loaded and unloaded at runtime, sorted by
-                     kind -- demux/, codec/, decode/, dsp/, sink/, and shared/ for the
+                     kind -- demux/, codec/, dsp/, sink/, and shared/ for the
                      libraries that are not modules at all. The build output is sorted
                      the same way, into bin/<config>/modules/<kind>/, because an
                      install should be a directory somebody can look at and see what
@@ -1077,47 +1078,16 @@ modules/             everything that can be loaded and unloaded at runtime, sort
                      forty-two synthesised bytes and then fed packets.
   codec/mp3/         dr_mp3's low-level entry point, which takes a frame and gives
                      back its samples. Layers I, II and III.
-  codec/alac/        ALAC, written here. The codec half of decode/alac/: a config
-                     blob and packets in, the file's own samples out.
+  codec/alac/        ALAC, written here: a config blob and packets in, the file's
+                     own samples out, and no dependency of any kind. alac.cpp is
+                     a library beside it so alac_fuzzer can link it directly.
   codec/aac/         AAC-LC, written here, the same way.
-  codec/opus/        libopus driven directly rather than through opusfile, so the
-                     container is somebody else's job. Decodes at 48 kHz whatever
-                     the encoder was given, because that is what Opus is.
+  codec/opus/        libopus driven directly. opusfile -- the container and the
+                     codec in one -- is not in the tree at all: nothing was left
+                     calling it, and it could open a socket. Decodes at 48 kHz
+                     whatever the encoder was given, because that is what Opus is.
   codec/vorbis/      libvorbis, likewise, rather than vorbisfile.
 
-  decode/            **the eight v1 decoders, being retired.** Each was a container
-                     reader and a codec in one object; each now has a demux/ and
-                     codec/ pair above producing the same bytes, proved file by
-                     file in docs/formats.md. They go with MP_KIND_DECODER, and so
-                     does this block.
-  decode/native/     FLAC and WAV from two single headers. No build system at all: an
-                     install with nothing else on disk still plays music.
-  decode/flac/       libFLAC, the Xiph reference, as a submodule. Outranks the above
-                     wherever it is installed, and checks the file's own MD5.
-  decode/mp3/        MP3 through dr_mp3, which is already in external/dr_libs. It
-                     exists because Media Foundation does not implement gapless
-                     metadata and starts every MP3 36 ms late; dr_mp3 reads the
-                     LAME tag and costs no new dependency.
-
-  decode/alac/       ALAC, written here: the codec and the slice of MP4 that finds
-                     its packets. No submodule, no runtime library, no OS codec --
-                     the reference implementation is the specification and has
-                     been unmaintained since 2011, so it was read, not linked.
-
-  decode/aac/        AAC-LC, written here as well: the codec, the ADTS framing and the
-                     same slice of MP4. Not an unmaintained reference this time --
-                     four maintained libraries were measured and each produced the
-                     wrong thing rather than a wrong sound. SBR and PS are refused
-                     and go to demux_ffmpeg.
-
-  decode/ogg/        libvorbis and libopus, the Xiph reference decoders, as submodules.
-                     Reports F32 because that is what they produce, which puts
-                     every file it reads on Path B. Permutes Ogg channel order
-                     into WAVE order and changes nothing else.
-
-                     (decode/mf/ and decode/ffmpeg/ are not in this block: those
-                     two were converted in place rather than duplicated, so they
-                     are demux/mf/ and demux/ffmpeg/ above.)
   sink/wasapi/       exclusive and shared, event-driven, both.
   sink/asio/         someday. Not for accuracy -- exclusive mode is already exact --
                      but for native DSD above what DoP can carry. Practical since

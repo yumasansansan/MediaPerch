@@ -7,15 +7,17 @@
 // and what every lossy decoder here reports, so a file it reads goes to Path B
 // and the reason is written down rather than inferred.
 //
-// What is *not* here is what `decode_aac` also carried: half an MP4 parser, an
-// ADTS framer, and a file handle. The first is `demux_mp4`'s; the second is a
-// demuxer nobody has written yet, which is exactly the shape of the remaining
-// work rather than a gap in this.
+// What is *not* here is what the module this replaced also carried: half an MP4
+// parser, an ADTS framer, and a file handle. The first is `demux_mp4`'s and the
+// second is `demux_adts`'s, and this file cannot tell which of them called it,
+// which is the whole point.
 
 #include "aac.hpp"
 
 #include <mediaperch/module.h>
 
+#include <cstdarg>
+#include <cstdio>
 #include <cstring>
 #include <new>
 #include <vector>
@@ -23,6 +25,19 @@
 namespace {
 
 const MpHost* g_host = nullptr;
+
+void log_fmt(MpLogLevel level, const char* format, ...) noexcept
+{
+    if (g_host == nullptr || g_host->log == nullptr) {
+        return;
+    }
+    char buffer[256];
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+    g_host->log(g_host->ctx, level, buffer);
+}
 
 } // namespace
 
@@ -50,7 +65,7 @@ MpResult MP_CALL codec_probe(MpCodec codec, const std::uint8_t* config,
     if (config != nullptr && mp::aac::parse_asc(config, config_bytes, cfg)) {
         // Object type 2 and nothing else. SBR and PS are a different codec
         // wearing the same name, and saying so here is what lets the host reach
-        // `decode_ffmpeg` instead of finding out three packets in.
+        // `demux_ffmpeg` instead of finding out three packets in.
         *out_score = cfg.object_type == 2 ? 100u : 0u;
     }
     return MP_OK;
@@ -68,7 +83,22 @@ MpResult MP_CALL codec_open(MpCodec codec, const std::uint8_t* config,
     }
     mp::aac::Config cfg;
     if (config == nullptr || !mp::aac::parse_asc(config, config_bytes, cfg)) {
+        log_fmt(MP_LOG_DEBUG,
+                "the container's AudioSpecificConfig is %u bytes and does not parse",
+                config_bytes);
         return MP_ERR_FORMAT;
+    }
+    if (cfg.object_type != 2) {
+        // **SBR and PS are a different codec wearing the same name**, and a
+        // stream that reaches here with one is a stream the probe already
+        // declined -- so this only happens when somebody forced the module.
+        // Saying which object type it was is what turns "it did not play" into
+        // something a person can act on.
+        log_fmt(MP_LOG_WARN,
+                "AAC object type %u is not LC; this module decodes LC only, and "
+                "demux_ffmpeg reads the rest",
+                cfg.object_type);
+        return MP_ERR_UNSUPPORTED;
     }
 
     auto* c = new (std::nothrow) MpCodecInstance();
@@ -76,6 +106,8 @@ MpResult MP_CALL codec_open(MpCodec codec, const std::uint8_t* config,
         return MP_ERR_NO_MEMORY;
     }
     if (!c->codec.init(cfg)) {
+        log_fmt(MP_LOG_WARN, "AAC-LC at %u Hz, %u channels: the decoder refused it",
+                cfg.sample_rate, cfg.channel_config);
         delete c;
         return MP_ERR_FORMAT;
     }
@@ -188,7 +220,7 @@ MpResult MP_CALL codec_reset(MpCodecInstance* c) noexcept
     // so a frame decoded with no predecessor is half a frame of silence
     // overlapped onto real audio. The host feeds the packet before the target
     // and discards it, which is what `MpCodecVtbl::reset` exists to make
-    // possible -- and what v1 hid inside this decoder, where the host could not
+    // possible -- and what the one-object shape hid in here, where the host could not
     // see it and a second codec had to reimplement it.
     mp::aac::Config cfg;
     (void)cfg;

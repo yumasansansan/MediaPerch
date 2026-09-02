@@ -11,7 +11,9 @@
 // defensible.
 //
 // It started inside decode_alac and moved out when decode_aac needed the same
-// four answers. The parts that differ between the two codecs are exactly two
+// four answers. Both of those are gone; `demux_mp4` is what asks now, and the
+// answers did not change, which is the clearest evidence available that the
+// v2 split fell where the seam already was. The parts that differ between the two codecs are exactly two
 // boxes: `alac` carries its cookie in a child box of the same name, `mp4a`
 // carries an AudioSpecificConfig inside an `esds` descriptor chain.
 //

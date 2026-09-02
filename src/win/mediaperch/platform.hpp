@@ -222,8 +222,26 @@ public:
     /// bytes are for and all a container needs. What is inside it is not asked
     /// here and is not visible from four kilobytes anyway -- that is what
     /// opening the container is for.
+    ///
+    /// **Best first, not best only.** A demuxer can claim a container and then
+    /// decline what is inside it: `demux_mp4` refuses a QuickTime sample entry
+    /// it does not implement, and `demux_ogg` reads an Ogg whose codec nobody
+    /// here has. When that happens the answer is the next candidate, so this
+    /// returns the whole list rather than its maximum.
+    ///
+    /// An explicit `prefer` wins outright and gets no fallback: "use that one"
+    /// answered with a different one is not an answer.
     [[nodiscard]] std::vector<DemuxChoice> demuxers_for(const std::string& path,
                                                         std::string_view prefer = {}) const;
+
+    /// Whether the file can be opened and holds anything at all.
+    ///
+    /// **"Nothing here reads it" and "there is no such file" are different
+    /// sentences**, and a resolver cannot tell them apart: every probe is shown
+    /// zero bytes either way and every probe declines. Asking separately is the
+    /// only way the second one gets said, and it is worth saying -- a typo in a
+    /// path should not read as a missing codec.
+    [[nodiscard]] static bool readable(const std::string& path);
 
     /// Which module decodes `codec`. **Looked up, not tried.**
     ///
@@ -233,31 +251,6 @@ public:
     /// best score wins with priority breaking ties, as everywhere else.
     [[nodiscard]] const MpCodecVtbl* codec_for(MpCodec codec, const std::uint8_t* config,
                                                std::uint32_t config_bytes) const;
-
-    struct DecoderChoice {
-        const MpDecoderVtbl* vtbl = nullptr;
-        const MpModuleDesc* desc = nullptr;
-        std::uint32_t score = 0;
-    };
-
-    /// An explicit `prefer` wins outright, even over a decoder that would score
-    /// higher -- being able to say "use that one" is the point of having more
-    /// than one. Otherwise every decoder is shown the file's first bytes and the
-    /// best score wins, ties broken by the module's declared priority.
-    [[nodiscard]] DecoderChoice decoder_for(const std::string& path,
-                                            std::string_view prefer) const;
-
-    /// Every decoder that claims the file, best first.
-    ///
-    /// A probe sees four kilobytes; opening sees the whole header and, through
-    /// mp::Decoder, one frame of real audio. A decoder can therefore score
-    /// highest and still refuse -- decode_mf declines multichannel ALAC because
-    /// Media Foundation returns it in the wrong channel order, decode_native
-    /// decodes a 32-bit FLAC to nothing -- and when that happens the answer is
-    /// the next candidate, not failure. Ranking without a fallback turns every
-    /// such refusal into an unplayable file.
-    [[nodiscard]] std::vector<DecoderChoice> decoders_for(const std::string& path,
-                                                          std::string_view prefer) const;
 
 private:
     std::vector<std::unique_ptr<LoadedModule>> modules_;

@@ -40,19 +40,20 @@ else()
 endif()
 
 function(mediaperch_add_fuzzer name source corpus)
-    # Extra translation units after the corpus name: decode_alac's parsers are
-    # ours, so they are compiled into the fuzzer directly and get instrumented
-    # with it. The dr_libs ones need no extra sources -- they are headers.
+    # Extra translation units after the corpus name: the ALAC, AAC and FLAC
+    # parsers are ours, so they are compiled into the fuzzer directly and get
+    # instrumented with it. The dr_libs ones need no extra sources -- they are
+    # headers.
     add_executable(${name} ${source} ${ARGN})
     target_include_directories(${name} PRIVATE
         "${CMAKE_SOURCE_DIR}/external/dr_libs"
         "${CMAKE_SOURCE_DIR}/external/dragonperch/src/core"
         "${CMAKE_SOURCE_DIR}/include"
         "${CMAKE_SOURCE_DIR}/src/core"
-        "${CMAKE_SOURCE_DIR}/modules/decode/alac"
+        "${CMAKE_SOURCE_DIR}/modules/codec/alac"
         "${CMAKE_SOURCE_DIR}/modules/shared/mp4"
         "${CMAKE_SOURCE_DIR}/modules/shared/flacframe"
-        "${CMAKE_SOURCE_DIR}/modules/decode/aac")
+        "${CMAKE_SOURCE_DIR}/modules/codec/aac")
 
     # MSVC's STL annotates container bounds for ASan, and the annotations only
     # agree when every translation unit that touches a container was built the
@@ -111,10 +112,10 @@ mediaperch_add_fuzzer(wav_fuzzer wav_fuzzer.cpp wav)
 mediaperch_add_fuzzer(flac_fuzzer flac_fuzzer.cpp flac)
 mediaperch_add_fuzzer(mp3_fuzzer mp3_fuzzer.cpp mp3)
 mediaperch_add_fuzzer(aac_fuzzer aac_fuzzer.cpp aac
-                      "${CMAKE_SOURCE_DIR}/modules/decode/aac/aac.cpp"
-                      "${CMAKE_SOURCE_DIR}/modules/decode/aac/aac_tables.cpp")
+                      "${CMAKE_SOURCE_DIR}/modules/codec/aac/aac.cpp"
+                      "${CMAKE_SOURCE_DIR}/modules/codec/aac/aac_tables.cpp")
 mediaperch_add_fuzzer(alac_fuzzer alac_fuzzer.cpp alac
-                      "${CMAKE_SOURCE_DIR}/modules/decode/alac/alac.cpp"
+                      "${CMAKE_SOURCE_DIR}/modules/codec/alac/alac.cpp"
                       "${CMAKE_SOURCE_DIR}/modules/shared/mp4/mp4.cpp")
 
 # FLAC's framing, which `demux_flac` uses to decide where a frame ends. It is a

@@ -82,6 +82,17 @@ constexpr std::size_t k_window = 1u << 16;
 /// `demux_mpeg`'s, for the same reason.
 constexpr std::uint64_t k_index_stride = 32;
 
+/// A position in the stream: which sample, and where its frame begins.
+///
+/// **The list of these is not evenly spaced and must not be treated as if it
+/// were.** Some come from the file's own SEEKTABLE, whose points sit wherever
+/// the encoder chose; the rest are recorded on the way past, one in
+/// `k_index_stride`. Indexing it arithmetically -- entry *i* is frame *i* times
+/// the stride -- is true of the second kind and false of the first, and mixing
+/// the two was a bug: after a seek in a file with a seek table, the counter that
+/// decides where the next point goes was wrong by however far the encoder's
+/// points were from evenly spaced. Each point carries its own sample instead.
+
 struct Point {
     std::uint64_t sample = 0;
     std::uint64_t at = 0; ///< byte offset in the file
@@ -105,8 +116,12 @@ struct MpDemux {
     std::size_t window_used = 0;
 
     std::uint64_t position = 0; ///< the next packet's first sample
-    std::uint64_t frames_read = 0;
+
+    /// Sorted by sample: the SEEKTABLE's points, then whatever was recorded
+    /// while reading. Never empty -- the start of the audio is always in it.
     std::vector<Point> index;
+    /// Frames read since the last point was recorded.
+    std::uint64_t since_point = 0;
 };
 
 namespace {
@@ -187,13 +202,19 @@ const std::uint8_t* peek_frame(MpDemux* d, std::size_t& out_length)
     }
 }
 
+/// Records where a frame begins, one in `k_index_stride`.
+///
+/// Appended only when it is past everything already known, which is what keeps
+/// the list sorted whatever the SEEKTABLE contained and however playback
+/// jumped around.
 void remember(MpDemux* d, std::uint64_t sample, std::uint64_t at)
 {
-    if (d->frames_read % k_index_stride != 0) {
+    if (d->since_point < k_index_stride) {
+        ++d->since_point;
         return;
     }
-    const auto bucket = static_cast<std::size_t>(d->frames_read / k_index_stride);
-    if (d->index.size() == bucket) {
+    d->since_point = 0;
+    if (sample > d->index.back().sample) {
         d->index.push_back(Point{sample, at});
     }
 }
@@ -419,7 +440,6 @@ try {
     remember(d, sample, d->window_at + d->window_used);
     std::memcpy(dst, frame, length);
     d->window_used += length;
-    ++d->frames_read;
     d->position = sample + header.block_size;
 
     out->bytes = static_cast<std::uint32_t>(length);
@@ -439,18 +459,17 @@ try {
         return MP_ERR_INVALID;
     }
     // The nearest remembered point at or before the target: a seek table point
-    // the encoder wrote, or one this module recorded on the way past.
+    // the encoder wrote, or one this module recorded on the way past. The list
+    // is sorted, so the last one that qualifies is the nearest.
     Point best = d->index.front();
-    std::uint64_t best_frames = 0;
-    for (std::size_t i = 0; i < d->index.size(); ++i) {
-        if (d->index[i].sample <= frame) {
-            best = d->index[i];
-            best_frames = static_cast<std::uint64_t>(i) * k_index_stride;
+    for (const Point& point : d->index) {
+        if (point.sample <= frame && point.sample >= best.sample) {
+            best = point;
         }
     }
     rewind_to(d, best.at);
     d->position = best.sample;
-    d->frames_read = best_frames;
+    d->since_point = 0;
 
     // Then forward, a frame at a time, until the one holding the target. The
     // header says where each frame starts, so this reads headers and skips
@@ -473,7 +492,6 @@ try {
         }
         remember(d, sample, d->window_at + d->window_used);
         d->window_used += length;
-        ++d->frames_read;
     }
 } catch (...) {
     return MP_ERR_NO_MEMORY;

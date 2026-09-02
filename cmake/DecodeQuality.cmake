@@ -192,7 +192,8 @@ check("ALAC, 5.1 at 48 kHz" "${W}/q6_alac.m4a" "${W}/src_6_48000.wav"
       --min-lag-margin 8 --min-channel-margin 3)
 
 # ----------------------------------------------------------------------- MP3
-# Lossy, and the reason decode_mp3 exists is the gapless tag -- so the length
+# Lossy, and the reason demux_mpeg reads the LAME tag is the gapless edit -- so
+# the length
 # and the start are the point of this row.
 encode("${W}/src_2_44100.wav" "${W}/q.mp3" -c:a libmp3lame -b:a 256k)
 check("MP3, stereo 44.1 kHz 256k" "${W}/q.mp3" "${W}/src_2_44100.wav"

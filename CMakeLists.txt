@@ -71,32 +71,30 @@ add_subdirectory(src/core)
 
 # Portable modules build wherever the core does.
 if(MEDIAPERCH_BUILD_PLATFORM)
-    add_subdirectory(modules/decode/native)
-    add_subdirectory(modules/decode/flac)
-    add_subdirectory(modules/decode/ogg)
-    # After decode/ogg, which is where the Xiph submodules are brought in. That
-    # ordering goes away with decode_ogg itself.
-    add_subdirectory(modules/demux/ogg)
-    add_subdirectory(modules/codec/opus)
-    add_subdirectory(modules/codec/vorbis)
+    # **Containers, then codecs, then everything else.** One ordering
+    # constraint is real and the rest is readability: libvorbis asks
+    # `find_package(Ogg REQUIRED)`, and cmake/FindOgg.cmake answers with the
+    # target modules/demux/ogg creates -- so the Ogg container comes before the
+    # Vorbis codec. Each submodule now sits with the one module that needs it,
+    # which is what made that the only ordering left.
+    add_subdirectory(modules/shared/flacframe)
     add_subdirectory(modules/shared/mp4)
-    add_subdirectory(modules/demux/mp4)
-    # The codec modules come after the decoders that still own their codec
-    # libraries. That order goes away with MP_KIND_DECODER: `alac.cpp` and
-    # `aac.cpp` move to modules/codec/ when the decoder wrapping them does.
-    add_subdirectory(modules/decode/alac)
-    add_subdirectory(modules/decode/aac)
-    add_subdirectory(modules/codec/alac)
-    add_subdirectory(modules/codec/aac)
-    add_subdirectory(modules/decode/mp3)
+
     add_subdirectory(modules/demux/wav)
-    add_subdirectory(modules/codec/pcm)
+    add_subdirectory(modules/demux/flac)
     add_subdirectory(modules/demux/mpeg)
     add_subdirectory(modules/demux/adts)
-    add_subdirectory(modules/codec/mp3)
-    add_subdirectory(modules/shared/flacframe)
-    add_subdirectory(modules/demux/flac)
+    add_subdirectory(modules/demux/mp4)
+    add_subdirectory(modules/demux/ogg)
+
+    add_subdirectory(modules/codec/pcm)
     add_subdirectory(modules/codec/flac)
+    add_subdirectory(modules/codec/mp3)
+    add_subdirectory(modules/codec/aac)
+    add_subdirectory(modules/codec/alac)
+    add_subdirectory(modules/codec/opus)
+    add_subdirectory(modules/codec/vorbis)
+
     add_subdirectory(modules/dsp/gain)
     add_subdirectory(modules/dsp/resample)
     add_subdirectory(modules/shared/transform)
@@ -112,6 +110,10 @@ if(MEDIAPERCH_BUILD_PLATFORM)
 endif()
 
 if(MEDIAPERCH_BUILD_PLATFORM AND WIN32)
+    # The two pipelines: a file at one end and PCM at the other, with no seam
+    # inside for this tree to take hold of. Both are MP_KIND_DEMUX with every
+    # stream flagged MP_STREAM_SELF_DECODES, which is that stated rather than
+    # disguised.
     add_subdirectory(modules/demux/ffmpeg)
     add_subdirectory(modules/demux/mf)
     add_subdirectory(modules/sink/wasapi)

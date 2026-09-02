@@ -4,7 +4,7 @@
 # different sample rate.
 #
 # The filter is a library as well as a module so the tests can measure its
-# response without loading anything -- the same arrangement as decode_aac, and
+# response without loading anything -- the same arrangement as codec_aac, and
 # for the same reason: a filter that is only ever tested through a device is a
 # filter nobody can put a number on.
 

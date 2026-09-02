@@ -34,7 +34,7 @@ add_executable(mediaperch_tests
     transport_test.cpp
 )
 
-# decode_alac's parsers are ours, so they get unit tests like the rest of the
+# The ALAC and AAC parsers are ours, so they get unit tests like the rest of the
 # tree. They live in a module rather than in the core because they are not
 # portable-by-policy code -- but the test suite does not care where a thing
 # lives, only whether it is ours.
@@ -109,6 +109,17 @@ add_test(NAME core_purity
     COMMAND "${CMAKE_COMMAND}"
             -D "MEDIAPERCH_CORE_DIR=${CMAKE_SOURCE_DIR}/src/core"
             -P "${CMAKE_SOURCE_DIR}/cmake/CorePurity.cmake")
+
+# Also not a unit test: a second compiler front end over the portable sources.
+# Both Clang presets in this tree turn the modules off, so most of the code has
+# only ever been read by MSVC -- and that hid a constant that was quietly -1, a
+# host pointer three modules kept and never read, and two loops that mixed
+# signedness in a build that treats -Wconversion as a rule. Syntax-only, so it
+# links nothing and takes about a second. See cmake/ClangSyntax.cmake.
+add_test(NAME clang_syntax
+    COMMAND "${CMAKE_COMMAND}"
+            -D "MEDIAPERCH_ROOT=${CMAKE_SOURCE_DIR}"
+            -P "${CMAKE_SOURCE_DIR}/cmake/ClangSyntax.cmake")
 
 # Also not a unit test: the decoders held against the audio that was encoded,
 # which needs FFmpeg to build the corpus and so cannot be a Catch2 case. It

@@ -157,7 +157,7 @@ jobs:
 
       # FFmpeg is a test tool here and nothing else: it builds the corpus and it
       # is the second opinion. Nothing in the product links it, and
-      # decode_ffmpeg looks for it at run time rather than being built against
+      # demux_ffmpeg looks for it at run time rather than being built against
       # it -- so this installs a tool, not a dependency. It goes before the
       # developer environment because that step captures PATH into GITHUB_ENV,
       # and a PATH captured before an install is a PATH without it.

@@ -41,8 +41,8 @@ TEST_CASE("a settings file says what it says", "[settings]")
 [engine]
 pipe = \\.\pipe\somewhere
 modules = C:\modules
-allow = mp_sink_wasapi, decode_native
-decoders = decode_flac, decode_native
+allow = mp_sink_wasapi, mp_demux_wav
+decoders = demux_flac, demux_wav
 
 [player]
 device = KA5
@@ -53,8 +53,8 @@ gain = 0.5
     CHECK(file.complaints.empty());
     CHECK(file.settings.pipe == "\\\\.\\pipe\\somewhere");
     CHECK(file.settings.modules == "C:\\modules");
-    CHECK(file.settings.allow == std::vector<std::string>{"mp_sink_wasapi", "decode_native"});
-    CHECK(file.settings.decoders == std::vector<std::string>{"decode_flac", "decode_native"});
+    CHECK(file.settings.allow == std::vector<std::string>{"mp_sink_wasapi", "mp_demux_wav"});
+    CHECK(file.settings.decoders == std::vector<std::string>{"demux_flac", "demux_wav"});
 
     REQUIRE(file.settings.player.size() == 3);
     const mp::PlayerSetting* device = find(file.settings, "device");
@@ -154,8 +154,8 @@ TEST_CASE("a settings file this program wrote is one it can read", "[settings]")
     mp::Settings settings;
     settings.pipe = "\\\\.\\pipe\\mediaperch";
     settings.modules = "C:\\Program Files\\MediaPerch";
-    settings.allow = {"mp_sink_wasapi", "mp_decode_native"};
-    settings.decoders = {"decode_flac"};
+    settings.allow = {"mp_sink_wasapi", "mp_demux_wav"};
+    settings.decoders = {"demux_flac"};
     settings.player = {{"device", "FiiO KA5", 0},
                        {"path", "bitexact", 0},
                        {"dsp", "resample:rate=96000,eq", 0},

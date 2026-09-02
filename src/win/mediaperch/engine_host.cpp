@@ -2,7 +2,6 @@
 
 #include "mediaperch/engine_host.hpp"
 
-#include "mediaperch/decoder.hpp"
 #include "mediaperch/packet.hpp"
 #include "mediaperch/result.hpp"
 
@@ -35,39 +34,29 @@ std::unique_ptr<ISource> EngineHost::open_source(const std::string& path,
                                                  std::string_view prefer,
                                                  std::string& decoder, std::string& why)
 {
-    // **The container first.** A demuxer identifies the file, says what is in
-    // it, and the codec is looked up by name. Nothing is tried.
+    // **The container decides, and nothing is tried.** A demuxer identifies the
+    // file from its first bytes, is opened, and says what is in it; each stream
+    // names its codec and the codec is looked up. There is no second list to
+    // fall back to any more -- MP_KIND_DECODER and the eight modules that used
+    // it are gone.
     //
-    // The v1 path below is what runs while the modules are still being moved
-    // across, and it goes with the last of them -- see docs/plan.md §4, *ABI
-    // v2: the container decides*.
-    for (const auto& candidate : registry_->demuxers_for(path, prefer)) {
-        auto source = std::make_unique<PacketSource>();
-        std::string trouble;
-        const auto find = [this](MpCodec codec, const std::uint8_t* config,
-                                 std::uint32_t config_bytes) {
-            return registry_->codec_for(codec, config, config_bytes);
-        };
-        if (source->open(*candidate.vtbl, path.c_str(), find, trouble)) {
-            decoder = candidate.desc->id;
-            return source;
-        }
-        // A container that opened and a codec nobody has are different
-        // failures, and the message says which. Keep it in case nothing else
-        // does better.
-        why = trouble;
-    }
-
-    auto ranked = registry_->decoders_for(path, prefer);
-    if (ranked.empty()) {
-        if (why.empty()) {
-            why = prefer.empty() ? "no decoder recognised it"
-                                 : "no module called `" + std::string{prefer} + "` is loaded";
-        }
+    // What remains is a *ranked* list of demuxers rather than one, because
+    // claiming a container and reading what is inside it are different
+    // questions: `demux_mp4` refuses a QuickTime sample entry it does not
+    // implement, `demux_ogg` reads an Ogg carrying Speex. Those fall through to
+    // the next candidate, which is FFmpeg, and that is a container reader
+    // declining a codec rather than a probe having guessed wrong.
+    if (!ModuleRegistry::readable(path)) {
+        why = "no such file, or it is empty";
         return nullptr;
     }
-    // A preference is a reordering, not a veto: a decoder somebody named that
-    // does not recognise this file is not a reason to refuse the file.
+
+    auto ranked = registry_->demuxers_for(path, prefer);
+
+    // A preference is a reordering, not a veto: a module somebody named that
+    // does not recognise this file is not a reason to refuse the file. (An
+    // explicit `prefer` argument is different and does veto -- that is one
+    // caller saying "use that one", and `demuxers_for` returns it alone.)
     for (auto wanted = prefer_.rbegin(); wanted != prefer_.rend(); ++wanted) {
         const auto found = std::find_if(ranked.begin(), ranked.end(), [&](const auto& c) {
             return *wanted == c.desc->id;
@@ -76,19 +65,27 @@ std::unique_ptr<ISource> EngineHost::open_source(const std::string& path,
             std::rotate(ranked.begin(), found, found + 1);
         }
     }
-    // Highest score first, but a decoder may still refuse what it recognised --
-    // decode_mf declines multichannel ALAC, decode_native decodes a 32-bit FLAC
-    // to nothing -- so the answer is the first that actually opens.
+
+    const auto find = [this](MpCodec codec, const std::uint8_t* config,
+                             std::uint32_t config_bytes) {
+        return registry_->codec_for(codec, config, config_bytes);
+    };
     for (const auto& candidate : ranked) {
-        auto opened = std::make_unique<Decoder>();
-        if (opened->open(*candidate.vtbl, path.c_str()) == MP_OK) {
+        auto source = std::make_unique<PacketSource>();
+        std::string trouble;
+        if (source->open(*candidate.vtbl, path.c_str(), find, trouble)) {
             decoder = candidate.desc->id;
-            return opened;
+            return source;
         }
-        why = opened->why();
+        // A container that would not open and a codec nobody has are different
+        // failures, and the message says which. Keep the last one in case
+        // nothing else does better.
+        why = trouble;
     }
+
     if (why.empty()) {
-        why = "every decoder that recognised it refused to open it";
+        why = prefer.empty() ? "no module recognised it"
+                             : "no module called `" + std::string{prefer} + "` is loaded";
     }
     return nullptr;
 }

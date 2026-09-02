@@ -203,8 +203,8 @@ void usage()
               TAKES THE ENDPOINT for the whole duration.
   modules     list what loaded, and what each one claims to be
   claims      who claims one file, and what is inside it: every demuxer's probe
-              score, the streams each one finds, the codec module that takes
-              each stream, and then the v1 decoders still being retired
+              score, the streams each one finds, and the codec module that takes
+              each stream
   decode      decode a file and print SHA-256 of the PCM it produced. Touches no
               device. Compare it with a reference decoder to check this one.
   compare     decode a file and hold the result against the audio that was
@@ -220,9 +220,9 @@ Options
   --file PATH       the file to decode. WAV and FLAC
   --raw PATH        `decode` writes the decoded PCM here. `verify` writes what it
                     sent to PATH.sent and what it recorded to PATH.recorded
-  --decoder ID      force a module: native, mf, ... for a v1 decoder, or a v2
-                    module by its full name -- demux_ogg, codec_opus. Default is
-                    whichever probes highest, ties broken by declared priority
+  --decoder ID      force a container reader: a short name is a demuxer, so
+                    `wav` is demux_wav and `mf` is demux_mf. Default is whichever
+                    probes highest, ties broken by declared priority
   --device N        index from `devices`; default is the system default endpoint
   --capture N       capture endpoint index; default is one named "CABLE Output"
   --rate R          default 44100
@@ -378,15 +378,14 @@ bool parse(int argc, char** argv, Options& out)
         } else if (arg == "--decoder") {
             if (i + 1 < argc) {
                 out.decoder_id = argv[++i];
-                // "native" and "mf" are what a person types; the modules call
-                // themselves decode_native and decode_mf. A v2 module is named
-                // in full -- `demux_mp4`, `codec_opus` -- because the kind is
-                // half of what it is, and abbreviating that away would make
-                // `--decoder ogg` ambiguous between three modules.
-                if (out.decoder_id.rfind("decode_", 0) != 0 &&
-                    out.decoder_id.rfind("demux_", 0) != 0 &&
+                // **A short name means a demuxer**, because a demuxer is what
+                // opening a file starts with: `--decoder ogg` is `demux_ogg`.
+                // The kind is half of a module's name and abbreviating it away
+                // would make `ogg` ambiguous between the container and the two
+                // codecs, so anything else is spelled in full.
+                if (out.decoder_id.rfind("demux_", 0) != 0 &&
                     out.decoder_id.rfind("codec_", 0) != 0) {
-                    out.decoder_id = "decode_" + out.decoder_id;
+                    out.decoder_id = "demux_" + out.decoder_id;
                 }
             }
         } else if (arg == "--target") {
@@ -454,13 +453,10 @@ bool parse(int argc, char** argv, Options& out)
         } else if (arg == "--rival") {
             if (i + 1 < argc) {
                 out.rival_id = argv[++i];
-                // The same rule as `--decoder`: a short name means a v1 decoder,
-                // a v2 module is named in full because its kind is half of what
-                // it is.
-                if (out.rival_id != "none" && out.rival_id.rfind("decode_", 0) != 0 &&
-                    out.rival_id.rfind("demux_", 0) != 0 &&
+                // The same rule as `--decoder`: a short name is a demuxer.
+                if (out.rival_id != "none" && out.rival_id.rfind("demux_", 0) != 0 &&
                     out.rival_id.rfind("codec_", 0) != 0) {
-                    out.rival_id = "decode_" + out.rival_id;
+                    out.rival_id = "demux_" + out.rival_id;
                 }
             }
         } else if (arg == "--min-snr") {
@@ -1068,14 +1064,14 @@ int loudness(mp::ISource& input, const Options& options)
 }
 #endif
 
-/// A module id with its kind trimmed off, for a column heading. `decode_ffmpeg`
-/// and `demux_ffmpeg` are both "ffmpeg" to somebody reading a table.
+/// A module id with its kind trimmed off, for a column heading: `demux_ffmpeg`
+/// is "ffmpeg" to somebody reading a table.
 const char* rival_label(const std::string& id)
 {
-    return id.size() > 7 && (id.rfind("decode_", 0) == 0 || id.rfind("demux_", 0) == 0 ||
-                             id.rfind("codec_", 0) == 0)
-               ? id.c_str() + id.find('_') + 1
-               : id.c_str();
+    if (id.rfind("demux_", 0) == 0 || id.rfind("codec_", 0) == 0) {
+        return id.c_str() + id.find('_') + 1;
+    }
+    return id.c_str();
 }
 
 /// Opens a file the way the engine does: the container first, then the v1
@@ -2479,22 +2475,25 @@ int main(int argc, char** argv)
             std::fprintf(stderr, "claims needs --file\n");
             return 1;
         }
-        // **Both halves, because resolution has two.** A container is claimed
-        // on its first bytes; a codec is looked up on what the container then
-        // says is inside. Printing only the first would show the question being
-        // asked and not the answer; printing only the second would show a table
-        // that no longer decides anything.
+        // **Resolution has two questions and this prints both answers.** A
+        // container is claimed on its first bytes; a codec is looked up on what
+        // the container then says is inside. The first without the second would
+        // show the question being asked and not the answer.
         //
         // Every claimant's opinion, not just the winner's: "several read it"
         // and "this is the one you get" are different facts, and a table of
         // coverage that cannot tell them apart is a table that overstates.
+        if (!mp::win::ModuleRegistry::readable(options.file)) {
+            std::fprintf(stderr, "no such file, or it is empty: %s\n",
+                         options.file.c_str());
+            return 1;
+        }
         const auto demuxers = registry.demuxers_for(options.file, {});
-        std::printf("container\n");
         if (demuxers.empty()) {
-            std::printf("  (nobody)\n");
+            std::printf("nothing here reads this container\n");
         }
         for (const auto& candidate : demuxers) {
-            std::printf("  %-16s %3u  %s\n", candidate.desc->id, candidate.score,
+            std::printf("%-16s %3u  %s\n", candidate.desc->id, candidate.score,
                         candidate.desc->name);
             // Claiming a container and reading it are different, so this opens
             // it. That is allowed here for the reason it is allowed in `open`
@@ -2503,7 +2502,7 @@ int main(int argc, char** argv)
             mp::Demux demux;
             const MpResult opened = demux.open(*candidate.vtbl, options.file.c_str());
             if (opened != MP_OK) {
-                std::printf("    opens: %s\n", mp::result_name(opened));
+                std::printf("  opens: %s\n", mp::result_name(opened));
                 continue;
             }
             for (std::uint32_t i = 0; i < demux.stream_count(); ++i) {
@@ -2528,24 +2527,12 @@ int main(int argc, char** argv)
                         }
                     }
                 }
-                std::printf("    stream %u  %-8s %-8s -> %s\n", i,
+                std::printf("  stream %u  %-8s %-8s -> %s\n", i,
                             mp::stream_kind_name(info.kind), mp::codec_name(info.codec),
                             takes);
             }
         }
 
-        // The v1 half, and it says so. This block goes when MP_KIND_DECODER
-        // does, and until then a reader deserves to know which of the two
-        // structures they are looking at.
-        std::printf("decoder  (v1, being retired)\n");
-        const auto ranked = registry.decoders_for(options.file, {});
-        if (ranked.empty()) {
-            std::printf("  (nobody)\n");
-        }
-        for (const auto& candidate : ranked) {
-            std::printf("  %-16s %3u  %s\n", candidate.desc->id, candidate.score,
-                        candidate.desc->name);
-        }
         return 0;
     }
 
@@ -2564,8 +2551,7 @@ int main(int argc, char** argv)
             std::fprintf(stderr, "%s needs --file\n", options.command.c_str());
             return 1;
         }
-        // **All four resolve the way the engine does**: the container first,
-        // then the v1 decoders still being moved across. Two ways of opening a
+        // **All four resolve the way the engine does.** Two ways of opening a
         // file that were not the same way would be worse than either -- these
         // are the commands whose whole job is to say what came out, so they
         // have to be looking at what plays.

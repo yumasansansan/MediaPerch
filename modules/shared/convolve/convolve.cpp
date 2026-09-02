@@ -69,9 +69,12 @@ bool Convolver::configure(const std::vector<std::vector<double>>& impulses,
                 piece[i] = {impulse[from + i], 0.0};
             }
             mp::transform::fft(piece, false);
-            std::copy(piece.begin(), piece.end(),
-                      spectra_.begin() +
-                          (static_cast<std::size_t>(c) * partitions_ + p) * transform_);
+            // The cast to the iterator's own difference type is not decoration:
+            // `spectra_.begin() + <size_t>` mixes signedness, which this tree
+            // compiles as a warning and which a second front end is what found.
+            const auto at = static_cast<std::ptrdiff_t>(
+                (static_cast<std::size_t>(c) * partitions_ + p) * transform_);
+            std::copy(piece.begin(), piece.end(), spectra_.begin() + at);
         }
     }
 

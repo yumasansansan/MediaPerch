@@ -5,7 +5,7 @@
 // **This is what replaces "try the decoders in order".** A demuxer identifies
 // the file and says what is in it; the stream names its codec; the codec is
 // looked up rather than guessed at. What comes out the far end is an `ISource`,
-// exactly as `mp::Decoder` is, so nothing below this changes -- the graph, the
+// so nothing below this changes -- the graph, the
 // ring and the sink never learn that anything moved.
 //
 // Three things live here that used to live in every decoder separately, and

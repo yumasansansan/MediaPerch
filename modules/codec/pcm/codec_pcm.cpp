@@ -5,20 +5,19 @@
 // **This module is short on purpose and is not a joke.** Uncompressed audio has
 // a codec in exactly the sense every other stream does -- a container says
 // MP_CODEC_PCM and something has to turn its packets into the samples the graph
-// reads -- and under v1 that something was hidden inside whichever decoder
-// happened to read the container. Writing it down has three consequences worth
-// the file:
+// reads -- and while a decoder was a container reader and a codec in one object,
+// that something was hidden inside whichever module happened to read the
+// container. Writing it down has three consequences worth the file:
 //
 //  * **Every container that carries PCM gets a decoder for free.** WAV, AIFF and
 //    W64 today; MP4 (`sowt`, `twos`, `lpcm`), Matroska and CAF the day their
-//    demuxers name the codec. Under v1 each of those would have needed its own
-//    copy of "and if it is uncompressed, hand the bytes over".
+//    demuxers name the codec. In the one-object shape each of those would have
+//    needed its own copy of "and if it is uncompressed, hand the bytes over".
 //  * **It has no dependency of any kind** -- not dr_libs, not the C++ standard
-//    library beyond <cstring>. So the tree's oldest promise, that an install
-//    with nothing else on disk still plays music, now rests on two small modules
-//    rather than on one large one.
+//    library beyond <cstring>. Uncompressed audio therefore plays on this and
+//    `demux_wav`, which is a header, and on nothing else that has to be built.
 //  * **It cannot convert, because there is nothing here that could.** Path A's
-//    bit-exactness used to be a property of `decode_native` behaving itself.
+//    bit-exactness used to be a property of one module behaving itself.
 //    Here it is a property of the code: a memcpy has no other behaviour.
 //
 // The format is the container's. PCM's configuration blob is empty -- there is
@@ -30,12 +29,6 @@
 
 #include <cstring>
 #include <new>
-
-namespace {
-
-const MpHost* g_host = nullptr;
-
-} // namespace
 
 struct MpCodecInstance {
     // Nothing. There is no state in copying bytes, which is also why `reset`
@@ -134,14 +127,14 @@ void MP_CALL codec_close(MpCodecInstance* c) noexcept
 
 MpResult MP_CALL module_init(const MpHost* host) noexcept
 {
-    g_host = host;
+    // **The host vtable is accepted and dropped.** Every other module keeps it
+    // for its logger; there is nothing here a log line could say that the
+    // return code does not. A memcpy either had room or did not.
+    (void)host;
     return MP_OK;
 }
 
-void MP_CALL module_shutdown() noexcept
-{
-    g_host = nullptr;
-}
+void MP_CALL module_shutdown() noexcept {}
 
 const MpCodecVtbl g_vtbl = {
     /* size       */ sizeof(MpCodecVtbl),

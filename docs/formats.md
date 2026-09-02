@@ -25,78 +25,31 @@ being true -- MP3 went to `decode_mf` until `decode_mp3` was written, and the
 reading.
 
 ```
-mediaperch-probe decode --file X.flac --decoder native
+mediaperch-probe decode --file X.flac --decoder flac
 ffmpeg -i X.flac -f s16le out.raw     # then hash out.raw
 ```
 
-## The six decoders that are left, and are being retired
+## The eight decoders that used to be here
 
-**Every one of these has been replaced.** The table is kept because the
-measurements in the rest of this document were taken through them and because
-the modules are still on disk until `MP_KIND_DECODER` goes; what reads a file
-now is in the next section. There were eight: `decode_mf` and `decode_ffmpeg`
-are not here because those two were converted in place rather than duplicated,
-and are `demux_mf` and `demux_ffmpeg`.
+Every measurement below this line was first taken through a module that was a
+container reader and a codec in one object -- `decode_flac`, `decode_alac`,
+`decode_ogg`, `decode_aac`, `decode_mp3`, `decode_native`, `decode_ffmpeg` and
+`decode_mf`. All eight are gone, and each was replaced by a demuxer and a codec
+that decode to the same bytes, checked file by file in the table after next.
 
-| Module | Behind it | Covers | Priority | Comes from |
-|---|---|---|---|---|
-| `decode_flac` | libFLAC | FLAC, every depth and rate | 120 | `external/flac` |
-| `decode_alac` | **nothing** | ALAC in M4A | 115 | **this tree** |
-| `decode_ogg` | libvorbis, libopus | Vorbis and Opus in Ogg | 110 | four Xiph submodules |
-| `decode_aac` | **nothing** | AAC-LC in M4A and raw ADTS | 108 | **this tree** |
-| `decode_mp3` | `dr_mp3` | MP3, every MPEG version | 105 | `external/dr_libs` |
-| `decode_native` | `dr_wav`, `dr_flac` | WAV and its four containers, FLAC to 24 bits | 100 | `external/dr_libs` |
+The two that could not be split are still here under different names:
+`decode_ffmpeg` and `decode_mf` became `demux_ffmpeg` and `demux_mf`, with every
+stream flagged `MP_STREAM_SELF_DECODES`. That is a declaration rather than a
+disguise -- neither is a container reader that happens to decode; each is a
+pipeline with a file at one end and PCM at the other.
 
-Score is the registry's primary key and priority only breaks ties, so the score
-is where a statement about *one format* belongs — and FLAC was the case that
-needed it, when three modules read it and one of them was a reimplementation
-that decodes a 32-bit file to silence:
+## The eight demuxers and seven codecs that replaced them
 
-| Probe score for FLAC | `decode_flac` | `decode_native` | `demux_ffmpeg` | `demux_mf` |
-|---|---|---|---|---|
-| | 100 | **60** | 30 | 20 |
-
-**That argument settled itself in the v2 split.** FLAC's container reader is now
-`demux_flac`, which needs no library at all, so the "an install with no
-submodules should still play music" case is answered by the container rather
-than by keeping a second decoder for the codec. The dr_flac codec was written
-and then deleted: it would have added a known 32-bit hole and nothing else. FLAC
-without libFLAC now falls to FFmpeg, like any other codec nobody here
-implements.
-
-`dr_wav`'s side of `decode_native` had no such caveat and became `demux_wav` at
-100: there is no reference implementation to defer to, and it is measured
-bit-exact to 32 bits and 768 kHz.
-
-`demux_ffmpeg` sits second from last on purpose. It reads more than anything
-else here and knows each format less well than the module that specialises in
-it, so it takes what is left: WavPack, Monkey's Audio, Matroska, DSF, DFF,
-Speex, and every AAC profile this tree does not implement. OggFLAC used to be on
-that list and is not any more -- `demux_ogg` reads the container and `codec_flac`
-takes the stream, which is what having both halves as modules buys. It also does not ship.
-It looks for `ffmpeg` and `ffprobe` beside itself and then on `PATH`, and
-declines every file when neither is there — which is exactly what an uninstalled
-module does.
-
-`demux_mf` is below it, and that is a change. Media Foundation started as the
-answer for MP3 and AAC and is now the last resort for both, because measuring it
-turned up four defects rather than one: it starts every gapless-tagged track tens
-of milliseconds late, it clips float WAV to integer, it scrambles multichannel
-ALAC, and it refuses 8 kHz and 7.1 AAC outright. It stays because it is on every
-Windows machine and needs nothing installed, which is worth something when
-nothing else in the list can read a file.
-
-Going through the executables rather than linking libavcodec is deliberate:
-FFmpeg's public structs change layout between major versions, so binding the DLLs
-would tie this module to one of them. One build of it works against FFmpeg 4
-through 8. §7 of [the plan](plan.md) has the full argument.
-
-## The seven demuxers and seven codecs that replaced them
-
-[ABI v2](plan.md#abi-v2-the-container-decides) splits a decoder into a container
-reader and a packet decoder. Six steps of seven are done: **every format this
-tree reads now resolves container-first**, and the eight decoders above are the
-half waiting to be deleted.
+[ABI v2](plan.md#abi-v2-the-container-decides) split a decoder into a container
+reader and a packet decoder, and the migration is finished: **every format this
+tree reads resolves container-first**. A file is identified, opened, and asked
+what is in it; each stream names its codec and the codec is looked up. Nothing
+is tried.
 
 | Container | Behind it | Codec it names | Behind that |
 |---|---|---|---|
@@ -113,6 +66,11 @@ Four of the eight containers are read by code in this tree with no library
 behind them, which is not a boast: a container reader is a parser over bytes
 somebody else wrote, and the ones written here are the ones that had to be
 [fuzzed](../fuzz).
+
+The `codec_flac` row is the one worth reading twice. It is the codec half of the
+native FLAC reader *and* what `demux_ogg` hands an OggFLAC to, and neither
+container knows the other exists. That is the whole argument for the split in one
+line of a table.
 
 **Nothing about the audio changed, and that is the measurement that matters.** A
 split that cost a sample would not be worth making, so every file that crossed
@@ -294,28 +252,27 @@ is looked up rather than tried. The MP4 ordering problem above is therefore not
 solved, it is *absent* — the question that produced it is no longer asked. What
 `claims` prints is now both halves:
 
+When `demux_ogg` was written there was no FLAC codec, and what it printed was:
+
 ```
 $ mediaperch-probe claims --file x.oga
-container
-  demux_ogg        100  Ogg (libogg, the reference container)
-    stream 0  audio    FLAC     -> nothing here decodes it
-decoder  (v1, being retired)
-  decode_ffmpeg    100  FFmpeg (found at run time, not shipped)
+demux_ogg        100  Ogg (libogg, the reference container)
+  stream 0  audio    FLAC     -> nothing here decodes it
+demux_ffmpeg     100  FFmpeg (found at run time, not shipped)
+  stream 0  audio    internal -> this module, itself
 ```
 
-That last line is the difference the split was for. Under `decode_ogg` an OggFLAC
-was "an Ogg this module cannot read", which is a fact about the module; under
-`demux_ogg` it is a container that was read, a stream that was identified, and a
-codec nobody here implements — which is a fact about the file, and names exactly
-what would have to be written to fix it.
+That last arrow is the difference the split was for. Under `decode_ogg` an
+OggFLAC was "an Ogg this module cannot read", which is a fact about the module;
+here it is a container that was read, a stream that was identified, and a codec
+nobody had written -- a fact about the file, naming exactly what was missing.
 
 **It was then written**, one step later, for a different container entirely:
-`codec_flac` exists because `demux_flac` needed it, and an OggFLAC now decodes
-through libFLAC to the same bytes as the FLAC and the WAV of the same audio.
-Nothing about `demux_ogg` changed. That is what naming the gap instead of
-refusing the file is worth. Speex still says `Speex` in the same place and still
-plays through `demux_ffmpeg`, and if a Speex codec is ever written it will
-arrive the same way.
+`codec_flac` exists because `demux_flac` needed it. Nothing about `demux_ogg`
+changed and the same command now says `-> codec_flac`. That is what naming the
+gap instead of refusing the file is worth. Speex still says `Speex` in the same
+place and still plays through `demux_ffmpeg`, and if a Speex codec is ever
+written it will arrive the same way.
 
 So the rule is not "MP4 is special": it is that a probe claims on what the first
 four kilobytes actually prove, and different containers prove different amounts.
@@ -362,7 +319,7 @@ nothing there; `demux_mpeg` keeps its 60 because a tagged MP3 is most MP3s.
 Measured with an ID3v2 tag of eight kilobytes stitched in front of the corpus's
 MP3: one claimant now, and the same hash out.
 
-**`decode_ffmpeg`'s magic table was simply short.** AC-3, E-AC-3 and MPEG-TS had
+**FFmpeg's magic table here was simply short.** AC-3, E-AC-3 and MPEG-TS had
 no claimant at all — files it reads perfectly, refused by the whole tree because
 its probe is a table of magic bytes and these were not in it. The alternative is
 running `ffprobe` on every candidate, which is a process per file per probe; the
@@ -374,7 +331,7 @@ Six formats went from *refused by everything* to playing: AC-3, E-AC-3, MPEG-TS,
 DTS, AMR and FLV. Shorten, TAK and OptimFROG are added on their documented magic
 and **not measured** — nothing here can encode them.
 
-One capability turned up that nobody had written down: **`decode_native` reads
+One capability turned up that nobody had written down: **dr_wav reads
 Sony Wave64**, because `dr_wav` does and its magic begins with the same four
 bytes the probe already looked for.
 
@@ -398,11 +355,11 @@ measurement went the same way — they are all in this document:
 
 There is no format here where it is the best answer and several where it is
 measurably the worst. So it now scores **20** on everything it recognises — one
-below `decode_ffmpeg`'s own fallback score of 30 — and the recognition list is
+below `demux_ffmpeg`'s own fallback score of 30 — and the recognition list is
 unchanged.
 
 What that buys is the thing this module is actually for. On a machine with
-nothing installed, `decode_ffmpeg` scores 0 and 20 beats nothing at all, so
+nothing installed, `demux_ffmpeg` scores 0 and 20 beats nothing at all, so
 Media Foundation still plays WMA, still plays MPEG layer II, and is still the
 last resort for MP4. **It is the floor, not a competitor.**
 
@@ -414,16 +371,16 @@ installed. WMA gains float instead of a silent quantisation to 16 bits.
 
 | File | Chosen decoder | Reported | Note |
 |---|---|---|---|
-| Vorbis in Ogg | `decode_ogg` | `44100 Hz / 1 ch / F32` | libvorbis itself |
-| Opus in Ogg | `decode_ogg` | `48000 Hz / 1 ch / F32` | libopus through opusfile. Opus decodes at 48 kHz whatever the source rate was; that is the codec, not a resample |
+| Vorbis in Ogg | `demux_ogg` + `codec_vorbis` | `44100 Hz / 1 ch / F32` | libvorbis itself, driven directly rather than through vorbisfile |
+| Opus in Ogg | `demux_ogg` + `codec_opus` | `48000 Hz / 1 ch / F32` | libopus, likewise. Opus decodes at 48 kHz whatever the source rate was; that is the codec, not a resample |
 | OggFLAC | `demux_ogg` + `codec_flac` | `44100 Hz / 2 ch / S16` | it used to be FFmpeg's, because `decode_ogg` scored it **0** -- not something low, but "this is an Ogg I cannot read at all". `demux_ogg` reads the container and names the codec; `codec_flac` takes it. Byte-identical to the FLAC and the WAV of the same audio |
-| WavPack | `decode_ffmpeg` | `44100 Hz / 2 ch / S32` | hash identical to the 32-bit WAV of the same signal |
-| ALAC in M4A | `decode_alac` | up to `384000 Hz / 8 ch / S32` | ours, and the only decoder here with no dependency at all. See below |
-| MP3 | `decode_mp3` | `44100 Hz / 2 ch / F32` | `dr_mp3`, at 105. It outranks Media Foundation because MF implements no gapless metadata and starts every MP3 36 ms late -- see *MP3, and the 36 milliseconds* below. Before `decode_mp3` existed this row said `decode_mf` and `S16`, which is what a hand-written table does |
+| WavPack | `demux_ffmpeg` | `44100 Hz / 2 ch / S32` | hash identical to the 32-bit WAV of the same signal |
+| ALAC in M4A | `demux_mp4` + `codec_alac` | up to `384000 Hz / 8 ch / S32` | both halves ours, and between them no dependency at all. See below |
+| MP3 | `demux_mpeg` + `codec_mp3` | `44100 Hz / 2 ch / F32` | `dr_mp3`, at 105. It outranks Media Foundation because MF implements no gapless metadata and starts every MP3 36 ms late -- see *MP3, and the 36 milliseconds* below. This row once said `mf` and `S16`, which is what a hand-written table does |
 
 ## Vorbis and Opus: float, and what that costs
 
-`decode_ogg` reports `F32`, because libvorbis and libopus produce float and a
+`codec_vorbis` and `codec_opus` report `F32`, because libvorbis and libopus produce float and a
 decoder here never converts. So no Vorbis or Opus file takes Path A — and no
 implementation of these codecs could, because a lossy codec's output is defined
 as a signal within a tolerance, not as a byte pattern. There is nothing for it to
@@ -450,7 +407,7 @@ same under two compilers is float arithmetic nobody reordered.
 
 Ogg channel layouts are Vorbis's, and Opus mapping family 1 is defined to be the
 same. Windows wants WAVE order, and past stereo the two disagree — Vorbis 5.1 is
-L,C,R,BL,BR,LFE where WAVE 5.1 is L,R,C,LFE,BL,BR. `decode_ogg` permutes, which
+L,C,R,BL,BR,LFE where WAVE 5.1 is L,R,C,LFE,BL,BR. The two codecs permute, which
 moves samples between slots and never changes a value.
 
 Tested with a 5.1 file carrying a different tone in every channel, checked twice:
@@ -515,7 +472,7 @@ Matroska file with the same `CodecDelay`, produces exactly the right length.
 The Vorbis length rows are the same failure in a milder form: 128 to 832 extra
 samples depending on the file, where FFmpeg reading that file is exact.
 
-One thing this measurement did improve. `decode_mf` used to ask for 16 bits when
+One thing this measurement did improve. Media Foundation used to be asked for 16 bits when
 a stream declares no depth of its own, which every compressed stream does. Every
 lossy codec here decodes to float, so that was a quantisation performed inside
 our own decoder, silently. It asks for 32 now: Opus in MP4 went from `S16` to
@@ -532,9 +489,9 @@ will not produce more, which is the fall-back working rather than a regression.
 | Opus, 7.1, mapping family 1 | `mask 0x63f` | decoded | **refused** |
 | Opus, 12 and 16 channels, mapping family 255 | **refused** | decoded | refused |
 
-Opus allows up to 255 channels through mapping family 255. `decode_ogg` stops at
+Opus allows up to 255 channels through mapping family 255. `codec_opus` stops at
 eight, because eight is where WAVE channel masks stop and a decoder here does not
-report a layout it cannot name. Refusing hands the file to `decode_ffmpeg`, which
+report a layout it cannot name. Refusing hands the file to `demux_ffmpeg`, which
 decodes it — the fallback chain doing exactly what it is for, and the reason
 refusing is an acceptable answer rather than a dead end.
 
@@ -572,12 +529,12 @@ the two codecs settle it differently:
 Preferring the reference is therefore a decision about *provenance* rather than
 about output quality: a bug in libvorbis is a bug in the definition and gets
 fixed there, while a divergence in a reimplementation has to be found first.
-`decode_ffmpeg` remains one command away for anyone who disagrees, which is the
+`demux_ffmpeg` remains one command away for anyone who disagrees, which is the
 point of the module boundary.
 
 ## ALAC, decoded here
 
-`decode_alac` is the only decoder in this tree with no dependency of any kind:
+ALAC is the one format this tree reads end to end with no dependency of any kind:
 no submodule, no runtime library, no OS codec. Both the ALAC bitstream and the
 slice of MP4 needed to find its packets are in `modules/decode/alac`. [The
 plan](plan.md) §7 has the argument; the short version is that Apple's reference
@@ -675,12 +632,14 @@ unmaintained one if somebody is actually looking.
 
 ## When the best decoder says no
 
-Probing reads four kilobytes. Opening reads the whole header and, because
-`mp::Decoder` requires one frame of real audio before it calls an open a
-success, a frame of audio too. So a decoder can score highest and still refuse,
-and there are now three that do it for good reasons — `decode_mf` on
-multichannel ALAC, `decode_native` on 32-bit FLAC, `decode_aac` on every AAC
-profile past LC.
+Probing reads four kilobytes. Opening reads the whole header, and under v2 it
+also reads what is inside: a demuxer says which codec each stream carries, and
+the codec is asked whether it takes that stream. So a module can score highest
+and still refuse, and several do it for good reasons — `demux_mp4` on a
+QuickTime sample entry it does not implement, `demux_ogg` on an Ogg carrying
+Speex, `codec_aac` on every AAC profile past LC. The refusal names the codec
+rather than the module, which is the difference the split made to this
+paragraph.
 
 The registry therefore ranks every decoder that claims the file and the host
 walks the list, so a refusal costs the next candidate rather than the file:
@@ -1180,23 +1139,27 @@ outright, which is at least honest.
 
 For a player whose entire claim is bit-exactness, a decoder that produces silence
 of length zero is the worst failure mode available: `read` returns 0, the graph
-calls that the end of the stream, and the track is skipped without a word. So
-`mp::Decoder::open` now decodes one frame and rewinds before declaring success,
-and a decoder that produces nothing is refused with a sentence rather than
-accepted with an empty file:
+calls that the end of the stream, and the track is skipped without a word. The
+answer at the time was for the host to decode one frame and rewind before
+declaring an open a success, so a decoder that produced nothing was refused with
+a sentence rather than accepted with an empty file:
 
 ```
 f32_44k.flac    cannot decode: the decoder opened the file and produced no audio at all
 ```
 
-That check costs one frame at open and guards every decoder, including ones not
-written yet.
+**The gap was closed by using libFLAC itself**, and it stayed closed through the
+v2 split: all three files decode to hashes identical to the reference decoder's,
+including at 1,048,575 Hz, through `demux_flac` and `codec_flac`. FFmpeg also
+decodes them correctly, so `demux_ffmpeg` would have worked too -- libFLAC is the
+smaller answer, builds with CMake, and is the specification for a lossless codec
+rather than an implementation of it.
 
-**The gap is closed by `decode_flac`**, which uses libFLAC itself: all three files
-decode to hashes identical to the reference decoder's, including at 1,048,575 Hz.
-FFmpeg also decodes them correctly, so `decode_ffmpeg` would have worked too —
-libFLAC is the smaller answer, builds with CMake, and brings the MD5 check with
-it.
+The one-frame check itself is gone with the interface it lived in. What replaced
+it is stronger and cheaper: a demuxer names the codec of each stream and the
+codec says whether it takes it, so a stream nothing can decode is refused by
+name before a byte of audio is asked for. `dr_flac` would decline a 32-bit
+STREAMINFO in `probe` today rather than decoding it to nothing.
 
 ## 32 bits, measured by hand
 

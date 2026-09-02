@@ -9,13 +9,11 @@ std::uint8_t crc8_byte(std::uint8_t crc, std::uint8_t byte) noexcept
 {
     // x^8 + x^2 + x + 1. Eight steps rather than a table: this runs once per
     // frame header and a 256-byte table is not worth the cache line.
-    crc = static_cast<std::uint8_t>(crc ^ byte);
+    unsigned value = static_cast<unsigned>(crc ^ byte);
     for (int i = 0; i < 8; ++i) {
-        crc = static_cast<std::uint8_t>((crc & 0x80u) != 0
-                                            ? ((crc << 1) ^ 0x07u)
-                                            : (crc << 1));
+        value = (value & 0x80u) != 0 ? ((value << 1) ^ 0x07u) : (value << 1);
     }
-    return crc;
+    return static_cast<std::uint8_t>(value & 0xFFu);
 }
 
 std::uint8_t crc8(const std::uint8_t* p, std::size_t bytes) noexcept
@@ -76,13 +74,11 @@ std::uint32_t bits_of(unsigned code) noexcept
 std::uint16_t crc16_byte(std::uint16_t crc, std::uint8_t byte) noexcept
 {
     // x^16 + x^15 + x^2 + 1.
-    crc = static_cast<std::uint16_t>(crc ^ (static_cast<std::uint16_t>(byte) << 8));
+    unsigned value = static_cast<unsigned>(crc) ^ (static_cast<unsigned>(byte) << 8);
     for (int i = 0; i < 8; ++i) {
-        crc = static_cast<std::uint16_t>((crc & 0x8000u) != 0
-                                             ? ((crc << 1) ^ 0x8005u)
-                                             : (crc << 1));
+        value = (value & 0x8000u) != 0 ? ((value << 1) ^ 0x8005u) : (value << 1);
     }
-    return crc;
+    return static_cast<std::uint16_t>(value & 0xFFFFu);
 }
 
 std::uint16_t crc16(std::uint16_t crc, const std::uint8_t* p, std::size_t bytes) noexcept

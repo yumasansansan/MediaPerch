@@ -25,9 +25,8 @@
 // applies to FLAC in MP4 and in Matroska the day those demuxers name it. One
 // codec module, and every container that carries FLAC has a decoder.
 //
-// The output is the file's own samples in the file's own width, as
-// `decode_flac` produced them and for the same reason: for a lossless codec,
-// correct is an identity rather than a tolerance.
+// The output is the file's own samples in the file's own width, because for a
+// lossless codec correct is an identity rather than a tolerance.
 
 #include <mediaperch/module.h>
 
@@ -269,10 +268,15 @@ try {
         delete c;
         return MP_ERR_NO_MEMORY;
     }
-    // The MD5 check is a whole-stream property and there is no whole stream
-    // here: a codec sees the packets a container chose to give it, in whatever
-    // order playback asked for. `decode_flac` still runs it, which is where that
-    // proof lives.
+    // **The MD5 check is off, and that is a real loss worth naming.** A FLAC
+    // file carries an MD5 of its own unencoded audio, and libFLAC will check
+    // what it produced against it -- a bit-exactness proof from inside the
+    // file, and the only one in this tree that does not depend on a second
+    // decoder agreeing. It cannot survive the split: the sum is over the whole
+    // stream in order, and a codec sees the packets a container chose to give
+    // it, in whatever order playback asked for. Verifying it would have to
+    // become the host's, over a decode that ran start to finish, which is a
+    // thing `mediaperch-probe decode` could do and does not yet.
     FLAC__stream_decoder_set_md5_checking(c->decoder, false);
 
     if (FLAC__stream_decoder_init_stream(c->decoder, &read_callback, nullptr, nullptr,

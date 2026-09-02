@@ -72,9 +72,6 @@ const char* stream_kind_name(MpStreamKind kind) noexcept
 const char* module_kind_name(MpKind kind) noexcept
 {
     switch (kind) {
-    // Named "decoder" rather than "decode", because it is the v1 kind and the
-    // word is the one the header retires.
-    case MP_KIND_DECODER: return "decoder";
     case MP_KIND_SINK: return "sink";
     case MP_KIND_DSP: return "dsp";
     case MP_KIND_VIDEO: return "video";

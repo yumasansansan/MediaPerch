@@ -372,7 +372,11 @@ Each step leaves the tree building and playing music.
    commentary track had one track as far as this program was concerned.
    `mediaperch-probe`'s `compare`, `verify` and `loudness` went across with
    them, because the module they measured against was one of the two.
-7. `MP_KIND_DECODER` is deleted, and with it the last of "try them in order".
+7. **Done.** `MP_KIND_DECODER` is deleted, and with it the last of "try them in
+   order". `grep MP_KIND_DECODER` finds two comments saying it is gone and
+   nothing else: no vtable, no kind, no `mp::Decoder`, no `decoders_for`, and no
+   `modules/decode/`. The kind's number is left as a hole rather than reused --
+   an id that meant something else once is an id a host can get wrong.
 
 **Every demuxer is a parser that reads a file somebody else wrote, so every
 demuxer wants a fuzzer.** Where the parsing is somebody else's it is fuzzed
@@ -393,11 +397,46 @@ Still not fuzzed and worth saying so: `demux_mpeg`'s LAME-tag reader and
 `demux_adts`'s header parser, both of which are ours and both of which read
 attacker-controlled bytes. They want the same treatment.
 
-**Step 7 is not optional and is not "later".** A migration that leaves both structures in
+What they have instead, for now, is a sweep: every file in the corpus truncated
+at seven fractions and bit-flipped three ways, put through `decode` and `claims`
+against a build with AddressSanitizer on. 360 invocations, no crash and no
+report. That is weaker than fuzzing -- it explores what a real file looks like
+when it is damaged rather than what an attacker would write -- and it is what
+was run.
+
+**And a second compiler front end, which was the hole the deletion exposed.**
+Both Clang presets in this tree set `MEDIAPERCH_BUILD_PLATFORM=OFF`, because the
+Windows head does not build with a GNU-driver Clang -- so the modules, which are
+most of the code, had only ever been parsed by MSVC. That is not a small gap:
+MSVC types an unscoped enum as `int` regardless of its values, so
+`MP_CODEC_INTERNAL = 0xFFFFFFFF` was quietly -1 and nothing said so until a file
+using it happened to be compiled into a fuzzer. `ctest -R clang_syntax` now runs
+`clang++ -fsyntax-only` with the project's warning set over every portable
+source; it takes about a second, links nothing, and found three modules keeping a
+host pointer they never read and two loops mixing signed and unsigned in a tree
+that compiles with `-Wconversion` on purpose. See `cmake/ClangSyntax.cmake`.
+
+**Step 7 was not optional and was not "later".** A migration that leaves both structures in
 the tree has not replaced anything: it has added a second way to do the same thing, and the
-first one goes on working, so nothing forces the last module across. The interface is marked
-*being removed* in the header from the day step 1 lands, and the milestone is not done until
-`grep MP_KIND_DECODER` finds nothing.
+first one goes on working, so nothing forces the last module across. The interface was marked
+*being removed* in the header from the day step 1 landed, and the milestone was not done
+until `grep MP_KIND_DECODER` found nothing.
+
+Three things came out of the deletion that were not the deletion, and each of them is what
+a second structure had been hiding:
+
+- **A submodule left the tree.** `opusfile` is the container and the codec in one object,
+  which is what `decode_ogg` used; `codec_opus` drives libopus directly. With `decode_ogg`
+  gone there was no caller, so `external/opusfile` went too, along with the two CMake shims
+  that existed only to make its version discovery work and the `OP_DISABLE_HTTP` setting
+  somebody had to remember. A decoder that can open a socket is a decoder with an attack
+  surface it did not need, and the surest way not to have one is not to build it.
+- **Each remaining submodule sits with the one module that needs it.** libFLAC is a *codec*
+  dependency and nothing else, because `demux_flac` reads the container with no library at
+  all; libogg belongs to `demux_ogg` and libvorbis and libopus to their codecs. One module
+  used to bring in four of them, which is what "the container and both codecs at once"
+  looks like in a build file.
+- **A file only one compiler had ever read is now read by two.** See below.
 
 Two things fall out of the order that are worth stating now, because they are what the
 result has to look like:
@@ -769,7 +808,7 @@ Two mechanisms, and which one a dependency gets is decided by whether **we** bui
 
 | | Examples | Why |
 |---|---|---|
-| **Git submodule, built from source** | `external/dr_libs`, `external/flac`, `external/ogg`, `external/vorbis`, `external/opus`, `external/opusfile` | Pinned to a commit by the gitlink, so a checkout is reproducible and an upgrade is a reviewable diff. All of them have (or need) no build system of consequence: dr_libs is headers, the Xiph libraries are CMake-native. The tree builds them; CI builds them; nothing is downloaded at configure time except Catch2 |
+| **Git submodule, built from source** | `external/dr_libs`, `external/flac`, `external/ogg`, `external/vorbis`, `external/opus` | Pinned to a commit by the gitlink, so a checkout is reproducible and an upgrade is a reviewable diff. All of them have (or need) no build system of consequence: dr_libs is headers, the Xiph libraries are CMake-native. The tree builds them; CI builds them; nothing is downloaded at configure time except Catch2 |
 | **Found at run time, never vendored** | FFmpeg | Its configure is a shell script needing MSYS2 and nasm on Windows, its build is tens of minutes, its output is tens of megabytes, and **its licence is a choice the user should make** — LGPL-2.1+ by default, GPL with `--enable-gpl`, and non-free options past that. Vendoring one configuration decides all of that for them |
 
 The rule generalises: **vendor what you compile, resolve what you don't.** A module that
@@ -802,7 +841,7 @@ rather than an identity, so the argument is weaker — though not absent, since 
 still defines the tolerance. WAV fails this test in the other direction: there is no
 reference implementation to prefer, because there is no reference implementation.
 
-**Is the licence compatible?** libogg, libvorbis, libopus and opusfile are all
+**Is the licence compatible?** libogg, libvorbis and libopus are all
 three-clause BSD, which is GPL-compatible, so they can be linked into a GPL-3.0 program and
 the combination stays distributable. Apple's ALAC reference is Apache-2.0, which is
 compatible with GPL-3.0 but *not* with GPL-2.0 — worth knowing before anyone relicenses.
@@ -825,7 +864,6 @@ looking for these bugs and that somebody is expected to fix them. Checked direct
 | `flac` | yes |
 | `vorbis` | yes |
 | `opus` | yes |
-| `opusfile` | yes |
 | `faad2` | yes |
 | `ffmpeg` | yes |
 | `libxaac` | yes |
@@ -1192,7 +1230,7 @@ HDR state.
 | M3 | `mediaperch-cli` and the IPC | **done.** `mediaperchd` is the engine and has no toolkit in it; `mediaperch-cli` drives it over a named pipe with a versioned binary framing. `mp::Player` is in the core, so the whole engine is tested with no COM and no hardware, and `IEngineHost` is the four things it asks an operating system for. The row is done when killing the shell mid-track is inaudible, and that is a test: three shells attached, subscribed, and cut off, with the underrun count still zero. What is left of it is the tray menu §10 asks for, and one INI file for §11 |
 | M4 | Path B: f64 bus, DSP chain, resampler, dither. Gapless, seek | **done**, and the passthrough path still contains no float. Gapless is `mp::Queue`, a source whose `read` does not stop at a track boundary; seek and pause are on both graphs; every DSP stage can be told to forget where it was. A device that is taken away (`AUDCLNT_E_DEVICE_INVALIDATED`) is a rebuild rather than an ending, and so is switching *paths*: both resume on the frame the device stopped on, which is the only thing a rebuild point can honestly promise and is checked byte for byte |
 | M5 | `decode_mf` and `decode_ffmpeg`, and the resolution table | **done.** `ctest -R format_matrix` builds one file per format, shows it to every decoder, and rewrites the matrix in the README -- and fails when the README stops matching. `mediaperch-probe claims` shows every decoder's probe score for a file, so a cell can say whether a decoder *claimed* the file or was forced to try. The lossless corpus comes from the reference encoders rather than FFmpeg, whose FLAC encoder writes 24 bits when asked for 32. Generating it found two claims in [formats.md](formats.md) that had gone stale and one real gap: nothing but Media Foundation claimed WMA |
-| M4.5 | ABI v2: the container decides (§12) | **steps 1-6 of 7.** Every format this tree reads now resolves container-first: seven demuxers and seven codecs, and each one decodes to the hash its v1 decoder produced. Two formats gained a first-class reader on the way -- MPEG layer II, which had gone to FFmpeg, and OggFLAC, which `demux_ogg` had been naming since step 4 with nothing to hand it to. Seeking became the host's, once, rather than each decoder's separately: a seek to an arbitrary sample lands byte-identically in WAV, native FLAC, OggFLAC and ALAC-in-MP4, which are four unrelated framings. Modules are laid out and installed by kind -- `modules/<kind>/<name>` in the tree, `bin/<config>/modules/<kind>/` out of it. The row is done when `grep MP_KIND_DECODER` finds nothing |
+| M4.5 | ABI v2: the container decides (§12) | **done.** Every format this tree reads resolves container-first: eight demuxers and seven codecs, and each one decodes to the hash its v1 decoder produced. Two formats gained a first-class reader on the way -- MPEG layer II, which had gone to FFmpeg, and OggFLAC, which `demux_ogg` had been naming since step 4 with nothing to hand it to. Seeking became the host's, once, rather than each decoder's separately: a seek to an arbitrary sample lands byte-identically in WAV, native FLAC, OggFLAC and ALAC-in-MP4, which are four unrelated framings. Modules are laid out and installed by kind -- `modules/<kind>/<name>` in the tree, `bin/<config>/modules/<kind>/` out of it. Step 7 deleted `MP_KIND_DECODER`, the eight modules that used it, `mp::Decoder`, the registry's second resolution path, and one submodule that had no caller left |
 | M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse |
 | M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled |
 | M8 | WinUI 3 shell | killing it mid-track changes nothing audible |
@@ -1334,7 +1372,7 @@ real time.
   performed inside our own decoder, invisibly, on a signal that had more in it. Asking for
   32 gets 32 wherever the decoder can produce it.
 - **A dependency that asks git for its own version number is a dependency that fails on
-  somebody else's machine.** opus and opusfile derive their version from `git describe`
+  somebody else's machine.** opus derives its version from `git describe`
   and commit no fallback, so a CI runner fetching submodules at depth 1 gets version `0`
   and opusfile turns that into a hard configure error. It passed locally for the least
   interesting reason available: a full clone has tags. **A build that reads the repository

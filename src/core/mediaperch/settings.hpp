@@ -49,8 +49,10 @@ struct Settings {
     /// Module ids that may be loaded. Empty means all of them -- an allow-list
     /// that is empty by default is a list nobody has decided to have.
     std::vector<std::string> allow;
-    /// Decoders to try before the ranked list, in this order. How somebody says
-    /// "use libFLAC for FLAC" without arguing with the scores.
+    /// Container readers to prefer, in this order, ahead of the ranked list.
+    /// How somebody says "read MP4s with FFmpeg" without arguing with the
+    /// scores. **A reordering, not a veto**: a module named here that does not
+    /// recognise a file is not a reason to refuse the file.
     std::vector<std::string> decoders;
     /// Everything else, in the order the file gave it, for `Player::set`.
     std::vector<PlayerSetting> player;

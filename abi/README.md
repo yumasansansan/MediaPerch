@@ -63,7 +63,7 @@ treated it as what it is — a stage that returned an error — stopped the grap
 and exited normally. No crash, no corruption, and the device was released properly.
 
 **So the boundary is pleasant as well as possible**, which is one of the three conditions
-§2 names for revisiting the language decision. It does not on its own make `decode_native`
+§2 names for revisiting the language decision. It does not on its own make `demux_flac`
 a Rust module: the argument in §2 was that Rust would protect the small parsing surface we
 write and not the large one we link, and that is still true. What has changed is that the
 option is now known to be open rather than assumed to be.

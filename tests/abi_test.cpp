@@ -29,8 +29,10 @@ TEST_CASE("every vtable and descriptor opens with a size field", "[abi]")
     // Rule 2 of the ABI: new fields append, and a host reading an older module
     // clamps at `size`. That only works if `size` is at offset zero everywhere.
     STATIC_REQUIRE(offsetof(MpHost, size) == 0);
-    STATIC_REQUIRE(offsetof(MpDecoderVtbl, size) == 0);
+    STATIC_REQUIRE(offsetof(MpDemuxVtbl, size) == 0);
+    STATIC_REQUIRE(offsetof(MpCodecVtbl, size) == 0);
     STATIC_REQUIRE(offsetof(MpSinkVtbl, size) == 0);
+    STATIC_REQUIRE(offsetof(MpDspVtbl, size) == 0);
     STATIC_REQUIRE(offsetof(MpModuleDesc, size) == 0);
     STATIC_REQUIRE(offsetof(MpDeviceInfo, size) == 0);
 }

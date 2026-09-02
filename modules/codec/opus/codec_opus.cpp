@@ -2,12 +2,13 @@
 //
 // Opus, as a codec and nothing else.
 //
-// `decode_ogg` reaches Opus through `opusfile`, which is the container and the
-// codec in one object -- convenient, and the reason an OggFLAC was "an Ogg that
-// module cannot read". This drives libopus itself, from the `OpusHead` the
-// container handed over, and knows nothing about Ogg at all. The same codec now
-// works for Opus in Matroska, in MP4, or in anything else that carries it, the
-// day a demuxer for one of those exists.
+// The module this replaced reached Opus through `opusfile`, which is the
+// container and the codec in one object -- convenient, and the reason an
+// OggFLAC was "an Ogg that module cannot read". `opusfile` is not in the tree
+// any more. This drives libopus itself, from the `OpusHead` the container
+// handed over, and knows nothing about Ogg at all, so the same codec works for
+// Opus in Matroska, in MP4, or in anything else that carries it, the day a
+// demuxer for one of those exists.
 //
 // **Two things about Opus that are the codec's and not the container's.** It
 // always decodes at 48 kHz, whatever rate the encoder was given -- that is the
