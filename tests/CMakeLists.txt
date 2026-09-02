@@ -28,6 +28,7 @@ add_executable(mediaperch_tests
     protocol_test.cpp
     repack_test.cpp
     ring_test.cpp
+    settings_test.cpp
     sine_test.cpp
     transport_test.cpp
 )

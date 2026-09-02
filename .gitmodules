@@ -16,3 +16,6 @@
 [submodule "external/opusfile"]
 	path = external/opusfile
 	url = https://github.com/xiph/opusfile.git
+[submodule "external/dragonperch"]
+	path = external/dragonperch
+	url = https://github.com/yumasansansan/DragonPerch.git

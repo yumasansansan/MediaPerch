@@ -36,6 +36,12 @@ add_library(mediaperch_core STATIC
     mediaperch/queue.hpp
     mediaperch/result.cpp
     mediaperch/result.hpp
+    mediaperch/settings.cpp
+    mediaperch/settings.hpp
+    # DragonPerch's INI parser, as a submodule rather than a second copy. The
+    # settings file is read by more than one program in this house and a key
+    # that meant different things in each would be worse than sharing a file.
+    "${CMAKE_SOURCE_DIR}/external/dragonperch/src/core/dragonperch/ini.cpp"
     mediaperch/processed.cpp
     mediaperch/processed.hpp
     mediaperch/repack.cpp
@@ -49,7 +55,9 @@ add_library(mediaperch_core STATIC
 )
 add_library(MediaPerch::core ALIAS mediaperch_core)
 
-target_include_directories(mediaperch_core PUBLIC "${CMAKE_CURRENT_LIST_DIR}")
+target_include_directories(mediaperch_core
+    PUBLIC "${CMAKE_CURRENT_LIST_DIR}"
+    PRIVATE "${CMAKE_SOURCE_DIR}/external/dragonperch/src/core")
 target_link_libraries(mediaperch_core PUBLIC MediaPerch::abi PRIVATE mediaperch_flags)
 
 find_package(Threads REQUIRED)

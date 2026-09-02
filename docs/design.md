@@ -913,6 +913,46 @@ can see. `use_processed` is that distinction and `classify` is the other one.
 a real `IAudioClient::Initialize`, and in exclusive mode each one takes the device away
 from whatever else is using it.
 
+### One file, and no second schema
+
+§11 asked for an INI file validated against a schema in the core. The schema turned out to
+be somewhere better than a schema: `[player]` in the settings file is a list of arguments to
+`Player::set`, which is already the one place that decides what a setting means. So
+`mediaperch-cli set dither none` and `dither = none` in the file cannot drift apart, because
+there is nothing to keep in step -- the file has no opinion about what a value means and
+never gets one.
+
+`[engine]` is the small remainder: where to listen, where modules are, which of them may
+load, and which decoder to prefer. Those are needed before there is a player at all, which
+is exactly why they are not player settings.
+
+**A line the file gets wrong costs that line.** DragonPerch's parser is here as a submodule
+rather than copied, and its `OnBadLine::skip` is the behaviour: for a file people edit by
+hand, losing every setting to one typo is worse than losing the setting the typo is in. The
+complaint names the file and the line number, and goes in the log where
+`mediaperch-cli log` will find it. Sharing the parser also means sharing its fuzz corpus,
+which is the other half of why there is not a second one.
+
+The one thing writing a settings file demands is that the program can read what it wrote.
+That is why `shaping` reports what was *typed* rather than what it resolved to: `shibata`
+and `shibata:5` are different filters and both describe themselves as "shibata: <curve>", so
+the resolved form cannot be fed back in. The resolution goes in the description instead,
+where it is just as visible and cannot be mistaken for an input.
+
+### The engine keeps an icon, because an install may have nothing else
+
+The shell is a separate process and may not be installed at all, and an engine that was
+headless in that case would be a program somebody has to open a terminal to pause. So it
+keeps a notification icon of its own: play and pause, next and previous, stop, and a way
+out. **"Settings" is greyed out when there is no shell to open**, which §10 asked for and is
+the honest behaviour -- a menu item that silently does nothing looks like a fault in the
+engine, and one that says what is missing tells you what to install.
+
+It costs the process a hidden window and a message loop on the thread that would otherwise
+be asleep. Nothing it does touches the audio path: it talks to `mp::Player` through the same
+commands a shell uses, and `--no-tray` turns it off for a service that has no desktop to put
+one on.
+
 ### The engine is a process, and a shell is a guest
 
 The player is `mediaperchd`: no window, no toolkit, no user interface at all. It loads the

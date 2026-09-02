@@ -23,6 +23,7 @@
 #include "mediaperch/protocol.hpp"
 
 #include <atomic>
+#include <functional>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -43,6 +44,11 @@ public:
     IpcServer& operator=(const IpcServer&) = delete;
     IpcServer(IpcServer&&) = delete;
     IpcServer& operator=(IpcServer&&) = delete;
+
+    /// What to do when a shell asks for the settings to be written. Left
+    /// unset, `save` is refused -- an engine started without a settings file
+    /// has nowhere to write one, and inventing a path would be worse.
+    void on_save(std::function<bool(std::string&)> saver) { saver_ = std::move(saver); }
 
     /// Starts listening. False and a reason when the pipe cannot be created --
     /// almost always because another engine already has it.
@@ -75,6 +81,7 @@ private:
 
     Player* player_;
     LogRing* log_;
+    std::function<bool(std::string&)> saver_;
     std::string name_;
 
     /// The instance `start` opened, handed to the listener for its first turn.

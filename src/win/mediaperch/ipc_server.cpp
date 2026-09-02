@@ -576,6 +576,19 @@ bool IpcServer::handle(const std::shared_ptr<Client>& client, const ipc::Header&
         }
         return client->send(ipc::frame(ipc::Kind::ok, id));
     }
+    case ipc::Kind::save: {
+        if (!r.complete()) {
+            return malformed();
+        }
+        if (!saver_) {
+            return fail("this engine was not given a settings file to write");
+        }
+        std::string trouble;
+        if (!saver_(trouble)) {
+            return fail(trouble);
+        }
+        return ok();
+    }
     case ipc::Kind::quit:
         log_->add("a shell asked the engine to quit");
         quit_.store(true, std::memory_order_release);

@@ -67,6 +67,8 @@ const char* kind_name(Kind k) noexcept
         return "subscribe";
     case Kind::quit:
         return "quit";
+    case Kind::save:
+        return "save";
     case Kind::ok:
         return "ok";
     case Kind::error:

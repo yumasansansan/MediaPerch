@@ -8,6 +8,11 @@
 // crashes; there is no shell at all. None of that reaches the audio, because
 // none of it is in the same process.
 //
+// The one concession to a person with nothing installed is a notification icon
+// of its own -- play, pause, next, stop, and a Settings item that says so when
+// there is no shell to open. That is a fallback, not a user interface, and it
+// lives on the thread that would otherwise be asleep.
+//
 // It prints its log to the console as well as keeping it, because a process
 // launched from a terminal that says nothing is a process nobody can debug --
 // but nothing it prints is load-bearing, and `mediaperch-cli log` is the real
@@ -19,14 +24,21 @@
 #include "mediaperch/log.hpp"
 #include "mediaperch/platform.hpp"
 #include "mediaperch/player.hpp"
+#include "mediaperch/settings.hpp"
+#include "mediaperch/tray.hpp"
 #include "mediaperch/win_headers.hpp"
+
+#include <shlobj.h>
 
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -50,6 +62,53 @@ BOOL WINAPI on_console_signal(DWORD type)
     }
 }
 
+/// `%APPDATA%\MediaPerch\settings.ini`, which is where a Windows program's
+/// settings go and where a settings program would look for them.
+std::filesystem::path default_config()
+{
+    wchar_t* roaming = nullptr;
+    std::filesystem::path base;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &roaming)) &&
+        roaming != nullptr) {
+        base = roaming;
+    }
+    CoTaskMemFree(roaming);
+    if (base.empty()) {
+        return {};
+    }
+    return base / "MediaPerch" / "settings.ini";
+}
+
+bool read_file(const std::filesystem::path& path, std::string& out)
+{
+    std::ifstream file{path, std::ios::binary};
+    if (!file) {
+        return false;
+    }
+    std::ostringstream text;
+    text << file.rdbuf();
+    out = text.str();
+    return true;
+}
+
+bool write_file(const std::filesystem::path& path, const std::string& text,
+                std::string& why)
+{
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    std::ofstream file{path, std::ios::binary | std::ios::trunc};
+    if (!file) {
+        why = "could not open " + path.string() + " to write";
+        return false;
+    }
+    file << text;
+    if (!file) {
+        why = "could not write " + path.string();
+        return false;
+    }
+    return true;
+}
+
 void usage()
 {
     std::printf(R"(mediaperchd -- the MediaPerch engine
@@ -59,14 +118,23 @@ void usage()
 
 usage: mediaperchd [options] [FILE...]
 
+  --config PATH     the settings file. Default is
+                    %%APPDATA%%\MediaPerch\settings.ini, read if it is there.
+                    A line it cannot read is complained about in the log rather
+                    than refused. `mediaperch-cli save` writes it back
+  --no-config       do not read one, and refuse to write one
   --pipe NAME       listen somewhere other than \\.\pipe\mediaperch. For a
                     second engine, and for the tests
   --device NAME     part of an endpoint's name. Refuses when it matches two
   --shared          shared mode instead of exclusive
   --path P          bitexact, exactonly, auto or processed
   --dsp SPEC        a stage, repeatable: `name` or `name:key=value,key=value`
+  --no-tray         no notification icon. What a service wants
   --quiet           keep the log but do not print it
   --help
+
+  Options are applied after the settings file, so a flag beats the file for this
+  run without changing it.
 
   Any FILE arguments are played at once, so that an engine started from a
   shortcut is not an engine waiting to be told something obvious.
@@ -93,10 +161,12 @@ int main(int argc, char** argv)
         argv = utf8_argv.data();
     }
 
-    std::string pipe = mp::win::default_pipe_name();
+    std::string pipe;
+    std::filesystem::path config = default_config();
     std::vector<std::string> files;
-    std::vector<std::pair<std::string, std::string>> settings;
+    std::vector<std::pair<std::string, std::string>> overrides;
     bool quiet = false;
+    bool tray = true;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -111,7 +181,15 @@ int main(int argc, char** argv)
             usage();
             return 0;
         }
-        if (arg == "--pipe") {
+        if (arg == "--config") {
+            const char* v = value("--config");
+            if (v == nullptr) {
+                return 1;
+            }
+            config = v;
+        } else if (arg == "--no-config") {
+            config.clear();
+        } else if (arg == "--pipe") {
             const char* v = value("--pipe");
             if (v == nullptr) {
                 return 1;
@@ -122,15 +200,15 @@ int main(int argc, char** argv)
             if (v == nullptr) {
                 return 1;
             }
-            settings.emplace_back("device", v);
+            overrides.emplace_back("device", v);
         } else if (arg == "--shared") {
-            settings.emplace_back("share", "shared");
+            overrides.emplace_back("share", "shared");
         } else if (arg == "--path") {
             const char* v = value("--path");
             if (v == nullptr) {
                 return 1;
             }
-            settings.emplace_back("path", v);
+            overrides.emplace_back("path", v);
         } else if (arg == "--dsp") {
             const char* v = value("--dsp");
             if (v == nullptr) {
@@ -138,11 +216,13 @@ int main(int argc, char** argv)
             }
             // Repeatable, and the order is the order they run in, so they are
             // joined rather than replaced.
-            if (!settings.empty() && settings.back().first == "dsp") {
-                settings.back().second += std::string{","} + v;
+            if (!overrides.empty() && overrides.back().first == "dsp") {
+                overrides.back().second += std::string{","} + v;
             } else {
-                settings.emplace_back("dsp", v);
+                overrides.emplace_back("dsp", v);
             }
+        } else if (arg == "--no-tray") {
+            tray = false;
         } else if (arg == "--quiet") {
             quiet = true;
         } else if (!arg.empty() && arg[0] == '-') {
@@ -170,17 +250,56 @@ int main(int argc, char** argv)
         });
     }
 
+    // The settings file first, so that a flag on the command line beats it.
+    mp::Settings settings;
+    if (!config.empty()) {
+        std::string text;
+        if (read_file(config, text)) {
+            auto file = mp::read_settings(text, config.filename().string());
+            settings = std::move(file.settings);
+            for (const std::string& complaint : file.complaints) {
+                log.add(complaint);
+            }
+            log.add("settings from " + config.string());
+        } else {
+            log.add("no settings file at " + config.string() + ", so the defaults it is");
+        }
+    }
+    if (!pipe.empty()) {
+        settings.pipe = pipe;
+    }
+    if (settings.pipe.empty()) {
+        settings.pipe = mp::win::default_pipe_name();
+    }
+
     mp::win::ModuleRegistry registry;
-    registry.scan(mp::win::module_directory());
+    const std::filesystem::path modules = settings.modules.empty()
+                                              ? mp::win::module_directory()
+                                              : std::filesystem::path{settings.modules};
+    registry.scan(modules, settings.allow);
     if (registry.sink() == nullptr) {
-        std::fprintf(stderr, "no sink module beside the executable\n");
+        std::fprintf(stderr, "no sink module in %s\n", modules.string().c_str());
         return 1;
     }
-    log.add("modules loaded from " + mp::win::module_directory().string());
+    log.add("modules loaded from " + modules.string());
+    if (!settings.allow.empty()) {
+        log.add("an allow-list is in force, so only what it names was loaded");
+    }
 
     mp::win::EngineHost host{registry, log};
+    host.prefer(settings.decoders);
     mp::Player player{host};
-    for (const auto& [key, value] : settings) {
+
+    // The file, then the flags. A setting neither names keeps its default, and
+    // a setting the file got wrong is named with the line it was on.
+    for (const mp::PlayerSetting& setting : settings.player) {
+        std::string why;
+        if (!player.set(setting.key, setting.value, why)) {
+            log.add(config.filename().string() + ":" + std::to_string(setting.line) + ": " +
+                    why);
+        }
+    }
+    for (const auto& [key, value] : overrides) {
         std::string why;
         if (!player.set(key, value, why)) {
             std::fprintf(stderr, "%s\n", why.c_str());
@@ -189,24 +308,60 @@ int main(int argc, char** argv)
     }
     player.start();
 
-    mp::win::IpcServer server{player, log, pipe};
+    mp::win::IpcServer server{player, log, settings.pipe};
+    if (!config.empty()) {
+        // What `mediaperch-cli save` does. The engine rows are what this run was
+        // told; the player rows come from the player, which is the only thing
+        // that knows what they are now.
+        server.on_save([&](std::string& trouble) {
+            mp::Settings out = settings;
+            out.player.clear();
+            for (const mp::ipc::Setting& row : player.settings()) {
+                out.player.push_back(mp::PlayerSetting{row.key, row.value, 0});
+            }
+            if (!write_file(config, mp::write_settings(out), trouble)) {
+                return false;
+            }
+            log.add("settings written to " + config.string());
+            return true;
+        });
+    }
     std::string why;
     if (!server.start(why)) {
         std::fprintf(stderr, "%s\n", why.c_str());
         return 1;
     }
-    log.add("listening on " + pipe);
+    log.add("listening on " + settings.pipe);
 
     SetConsoleCtrlHandler(&on_console_signal, TRUE);
     if (!files.empty()) {
         player.play(files);
     }
 
-    while (!g_interrupted.load(std::memory_order_acquire) && !server.quit_requested()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    const auto keep_going = [&] {
+        return !g_interrupted.load(std::memory_order_acquire) && !server.quit_requested();
+    };
+
+    mp::win::Tray icon{player, log};
+    bool have_tray = false;
+    if (tray) {
+        std::string trouble;
+        have_tray = icon.show(trouble);
+        if (!have_tray) {
+            // Not an error. An engine does not need a desktop and never did.
+            log.add(trouble);
+        }
+    }
+    if (have_tray) {
+        icon.run(keep_going);
+    } else {
+        while (keep_going()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{100});
+        }
     }
 
     log.add("stopping");
+    icon.hide();
     // In this order: the door first, so nothing new arrives while the engine is
     // being taken apart, and the player second, because it is what a shell was
     // asking about.

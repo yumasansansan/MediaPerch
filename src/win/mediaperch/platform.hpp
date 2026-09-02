@@ -189,7 +189,14 @@ public:
     /// Loads every `mp_*.dll` beside the executable that this host can read.
     /// A module that refuses the ABI version, or returns a descriptor from the
     /// future, is skipped with a line in the log rather than a failure.
-    void scan(const std::filesystem::path& directory);
+    ///
+    /// `allow`, when it is not empty, is the module ids that may be loaded --
+    /// and it is checked *after* loading, because a module's id is inside it.
+    /// A module that is not on the list is unloaded again immediately, which is
+    /// the most an allow-list can promise when the name on disk is not the
+    /// name in the descriptor.
+    void scan(const std::filesystem::path& directory,
+              const std::vector<std::string>& allow = {});
 
     [[nodiscard]] std::vector<const MpModuleDesc*> all() const;
 

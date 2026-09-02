@@ -16,6 +16,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace mp::win {
 
@@ -39,9 +40,15 @@ public:
     [[nodiscard]] bool resolve(const std::string& want, std::string& id, std::string& name,
                                std::string& why) const;
 
+    /// Decoders to try before the scores decide, in this order. How somebody
+    /// says "use libFLAC for FLAC" without arguing with a probe that is right
+    /// about everything else.
+    void prefer(std::vector<std::string> decoders) { prefer_ = std::move(decoders); }
+
 private:
     const ModuleRegistry* registry_;
     LogRing* log_;
+    std::vector<std::string> prefer_;
 };
 
 } // namespace mp::win

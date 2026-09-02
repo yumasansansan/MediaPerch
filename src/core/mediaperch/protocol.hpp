@@ -87,6 +87,10 @@ enum class Kind : std::uint16_t {
     /// is what a one-shot `mediaperch-cli status` wants.
     subscribe = 16,
     quit = 17,
+    /// Write the settings file. Adding a kind does not need a version bump: an
+    /// engine that does not know one answers `error`, which is exactly what a
+    /// shell from the future should be told.
+    save = 18,
 
     // --- replies, engine to shell ---
     ok = 128,

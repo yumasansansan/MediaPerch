@@ -50,7 +50,14 @@ mediaperch-cli set path processed
                              # changes it while something plays: the device stops and
                              # starts, and the audio carries on from the frame it left
 mediaperch-cli watch         # a transport bar with no pixels
+mediaperch-cli save          # write %APPDATA%\MediaPerch\settings.ini back
 ```
+
+The engine also keeps a notification icon of its own, so an install with no shell on disk is
+usable rather than headless, and reads one INI file whose `[player]` keys are exactly the
+`set` keys above. [abi/README.md](abi/README.md) is the other half of the module ABI's
+claim: the same DSP stage written in C and in Rust, both playing through the same vtable
+with identical frame counts, and a Rust panic contained at the boundary.
 
 The probe is milestone 1's user interface and is still the way to measure things.
 

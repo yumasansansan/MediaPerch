@@ -46,6 +46,9 @@ function(mediaperch_add_fuzzer name source corpus)
     add_executable(${name} ${source} ${ARGN})
     target_include_directories(${name} PRIVATE
         "${CMAKE_SOURCE_DIR}/external/dr_libs"
+        "${CMAKE_SOURCE_DIR}/external/dragonperch/src/core"
+        "${CMAKE_SOURCE_DIR}/include"
+        "${CMAKE_SOURCE_DIR}/src/core"
         "${CMAKE_SOURCE_DIR}/modules/decode_alac"
         "${CMAKE_SOURCE_DIR}/modules/mp4"
         "${CMAKE_SOURCE_DIR}/modules/decode_aac")
@@ -80,10 +83,19 @@ function(mediaperch_add_fuzzer name source corpus)
     # there turns a thirty-second CI run into three hundred new files in the
     # working tree. The seeds are read-only inputs; anything the run discovers
     # belongs in the build directory until somebody decides it is a regression.
-    set(scratch "${CMAKE_CURRENT_BINARY_DIR}/${corpus}_scratch")
+    # An absolute corpus is one that lives somewhere else -- a submodule's,
+    # where reusing it is the point rather than copying it.
+    if(IS_ABSOLUTE "${corpus}")
+        set(seeds "${corpus}")
+        get_filename_component(corpus_name "${corpus}" NAME)
+    else()
+        set(seeds "${CMAKE_CURRENT_LIST_DIR}/corpus/${corpus}")
+        set(corpus_name "${corpus}")
+    endif()
+    set(scratch "${CMAKE_CURRENT_BINARY_DIR}/${corpus_name}_scratch")
     file(MAKE_DIRECTORY "${scratch}")
     add_test(NAME fuzz_${name}
-             COMMAND ${name} "${scratch}" "${CMAKE_CURRENT_LIST_DIR}/corpus/${corpus}"
+             COMMAND ${name} "${scratch}" "${seeds}"
                      -runs=20000 -max_total_time=30 -print_final_stats=1)
 endfunction()
 
@@ -96,3 +108,11 @@ mediaperch_add_fuzzer(aac_fuzzer aac_fuzzer.cpp aac
 mediaperch_add_fuzzer(alac_fuzzer alac_fuzzer.cpp alac
                       "${CMAKE_SOURCE_DIR}/modules/decode_alac/alac.cpp"
                       "${CMAKE_SOURCE_DIR}/modules/mp4/mp4.cpp")
+
+# The settings file, on DragonPerch's INI corpus rather than a second one of
+# ours. The parser is shared as a submodule for the same reason: two INI parsers
+# in one house would have two sets of edge cases and only one would be fuzzed.
+mediaperch_add_fuzzer(settings_fuzzer settings_fuzzer.cpp
+                      "${CMAKE_SOURCE_DIR}/external/dragonperch/fuzz/corpus/ini"
+                      "${CMAKE_SOURCE_DIR}/src/core/mediaperch/settings.cpp"
+                      "${CMAKE_SOURCE_DIR}/external/dragonperch/src/core/dragonperch/ini.cpp")

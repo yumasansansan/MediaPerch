@@ -43,6 +43,8 @@ usage: mediaperch-cli [--pipe NAME] COMMAND [arguments]
   set KEY VALUE     change one. `set path processed` switches paths where it
                     stands: the device stops and starts, and the audio carries
                     on from the frame it stopped on
+  save              write the settings file, so what you have set survives a
+                    restart. Every key under [player] in it is a `set` key
   log [N]           the last N lines the engine wrote. All of them by default
   watch             follow the engine until Ctrl-C
   quit              ask the engine to stop
@@ -209,6 +211,9 @@ int main(int argc, char** argv)
     }
     if (command == "quit") {
         return simple(mp::ipc::Kind::quit);
+    }
+    if (command == "save") {
+        return simple(mp::ipc::Kind::save);
     }
     if (command == "seek") {
         if (rest.empty()) {

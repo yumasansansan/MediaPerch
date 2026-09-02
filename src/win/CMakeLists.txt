@@ -13,6 +13,8 @@ add_library(mediaperch_win STATIC
     mediaperch/ipc_server.hpp
     mediaperch/platform.cpp
     mediaperch/platform.hpp
+    mediaperch/tray.cpp
+    mediaperch/tray.hpp
     mediaperch/verify.cpp
     mediaperch/verify.hpp
     mediaperch/win_headers.hpp

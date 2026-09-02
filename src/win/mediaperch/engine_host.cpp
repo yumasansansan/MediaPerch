@@ -27,10 +27,20 @@ std::string lowered(std::string_view s)
 std::unique_ptr<ISource> EngineHost::open_source(const std::string& path,
                                                  std::string& decoder, std::string& why)
 {
-    const auto ranked = registry_->decoders_for(path, {});
+    auto ranked = registry_->decoders_for(path, {});
     if (ranked.empty()) {
         why = "no decoder recognised it";
         return nullptr;
+    }
+    // A preference is a reordering, not a veto: a decoder somebody named that
+    // does not recognise this file is not a reason to refuse the file.
+    for (auto wanted = prefer_.rbegin(); wanted != prefer_.rend(); ++wanted) {
+        const auto found = std::find_if(ranked.begin(), ranked.end(), [&](const auto& c) {
+            return *wanted == c.desc->id;
+        });
+        if (found != ranked.end()) {
+            std::rotate(ranked.begin(), found, found + 1);
+        }
     }
     // Highest score first, but a decoder may still refuse what it recognised --
     // decode_mf declines multichannel ALAC, decode_native decodes a 32-bit FLAC

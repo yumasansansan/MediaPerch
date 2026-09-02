@@ -27,3 +27,7 @@ compile_commands.json
 crash-*
 leak-*
 timeout-*
+
+# Cargo, for the throwaway Rust ABI probe. The crate has no dependencies, so
+# Cargo.lock is kept and this is only build output.
+abi/probe_rust/target/

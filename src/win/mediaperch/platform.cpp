@@ -220,7 +220,8 @@ const MpSinkVtbl* LoadedModule::sink_vtbl() const noexcept
     return vtbl;
 }
 
-void ModuleRegistry::scan(const std::filesystem::path& directory)
+void ModuleRegistry::scan(const std::filesystem::path& directory,
+                          const std::vector<std::string>& allow)
 {
     std::error_code error;
     std::vector<std::filesystem::path> candidates;
@@ -239,9 +240,16 @@ void ModuleRegistry::scan(const std::filesystem::path& directory)
     std::sort(candidates.begin(), candidates.end());
 
     for (const auto& path : candidates) {
-        if (auto module = LoadedModule::load(path)) {
-            modules_.push_back(std::move(module));
+        auto module = LoadedModule::load(path);
+        if (!module) {
+            continue;
         }
+        if (!allow.empty() &&
+            std::find(allow.begin(), allow.end(), std::string{module->desc().id}) ==
+                allow.end()) {
+            continue; // not on the list, so it goes back where it came from
+        }
+        modules_.push_back(std::move(module));
     }
 }
 

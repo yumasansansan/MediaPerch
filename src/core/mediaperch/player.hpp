@@ -89,6 +89,13 @@ struct PlayerConfig {
     bool shared = false;
     PathPolicy path = PathPolicy::bit_exact;
     ConvertConfig conversion;
+    /// What was typed for the shaper, kept beside what it resolved to.
+    ///
+    /// `shibata` and `shibata:5` are different filters and both describe
+    /// themselves as "shibata: <curve>", so the resolved form cannot be fed
+    /// back in. A settings file this program writes has to be one it can read,
+    /// so the words are kept as well as the filter.
+    std::string shaping_spec = "0";
     PassthroughConfig buffering;
     /// `name` or `name:key=value,...`, in the order they run in.
     std::vector<std::string> dsp;

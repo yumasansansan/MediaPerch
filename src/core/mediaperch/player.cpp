@@ -346,8 +346,8 @@ std::vector<ipc::Setting> Player::settings() const
 {
     const std::lock_guard lock{mutex_};
     std::vector<ipc::Setting> out;
-    const auto row = [&out](const char* key, std::string value, const char* what) {
-        out.push_back(ipc::Setting{key, std::move(value), what});
+    const auto row = [&out](const char* key, std::string value, std::string what) {
+        out.push_back(ipc::Setting{key, std::move(value), std::move(what)});
     };
     row("device", config_.device,
         "part of an endpoint's name, or empty for the default one");
@@ -361,13 +361,14 @@ std::vector<ipc::Setting> Player::settings() const
         "linear, not decibels. Only on the processed path");
     row("dither", dither_kind_name(config_.conversion.dither),
         "none, rectangular, triangular or gaussian, when a container shrinks");
-    // What it resolved to rather than what was typed: `shibata` alone and
-    // `shibata:5` are different filters and a settings list that showed both as
-    // "shibata" would be hiding the difference.
-    row("shaping",
-        noise_shaping_describe(config_.conversion.shaping,
-                               wire_.sample_rate != 0 ? wire_.sample_rate : 44100),
-        "0-9 for a binomial order, `shibata[:N]`, or a named curve");
+    // The value is what was typed, because this list is also what gets written
+    // to the settings file and a file this program cannot read back is not a
+    // settings file. What it resolved to goes in the description, where it is
+    // just as visible and cannot be mistaken for an input.
+    row("shaping", config_.shaping_spec,
+        "0-9 for a binomial order, `shibata[:N]`, or a named curve -- currently " +
+            noise_shaping_describe(config_.conversion.shaping,
+                                   wire_.sample_rate != 0 ? wire_.sample_rate : 44100));
     row("dither_seed", std::to_string(config_.conversion.seed),
         "so two runs of one file produce the same bytes");
     row("ring_periods", std::to_string(config_.buffering.ring_periods),
@@ -424,9 +425,10 @@ bool Player::set(const std::string& key, const std::string& value, std::string& 
             rebuild = true;
         } else if (key == "shaping") {
             if (!noise_shaping_from_name(value, config_.conversion.shaping)) {
-                why = "shaping is an order, or a named curve";
+                why = "shaping is 0-9, `shibata[:N]`, or a named curve";
                 return false;
             }
+            config_.shaping_spec = value;
             rebuild = true;
         } else if (key == "dither_seed") {
             if (!as_number(value, 0.0, 4294967295.0, number)) {

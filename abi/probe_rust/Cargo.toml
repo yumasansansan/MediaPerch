@@ -1,0 +1,16 @@
+[package]
+name = "mp_probe_rust"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+description = "A MediaPerch module in Rust, to find out whether the ABI is pleasant as well as possible"
+
+[lib]
+name = "mp_probe_rust"
+crate-type = ["cdylib"]
+
+[profile.release]
+# The module boundary is a .dll on disk, so there is nothing to link against and
+# nothing to match. This is the whole build system the probe needs.
+panic = "unwind"

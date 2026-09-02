@@ -33,6 +33,10 @@ endif()
 option(MEDIAPERCH_BUILD_TESTS "Build the test suite" ON)
 option(MEDIAPERCH_BUILD_FUZZERS "Build the libFuzzer targets (Clang only)" OFF)
 option(MEDIAPERCH_BUILD_PLATFORM "Build the platform head and the modules" ON)
+# The ABI probes from plan.md §2: a module in C, and one in Rust that cargo
+# builds separately. Off because they are evidence rather than product -- see
+# abi/README.md for what they measured.
+option(MEDIAPERCH_BUILD_ABI_PROBES "Build the throwaway ABI probe modules" OFF)
 
 # There is no /std:c++23 in MSVC and no /std:c23 either; both are spelled
 # "latest". CMake knows this, so CXX_STANDARD 23 is the portable way to ask.
@@ -82,6 +86,9 @@ if(MEDIAPERCH_BUILD_PLATFORM)
     add_subdirectory(modules/dsp_eq)
     add_subdirectory(modules/dsp_replaygain)
     add_subdirectory(modules/dsp_convolve)
+    if(MEDIAPERCH_BUILD_ABI_PROBES)
+        add_subdirectory(abi/probe_c)
+    endif()
 endif()
 
 if(MEDIAPERCH_BUILD_PLATFORM AND WIN32)
