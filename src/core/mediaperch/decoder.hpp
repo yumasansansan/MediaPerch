@@ -35,10 +35,17 @@ public:
     /// Returns 0 at the end of the stream, as `ISource` requires.
     std::size_t read(void* dst, std::size_t bytes) override;
 
-    MpResult seek(std::uint64_t frame) noexcept;
+    /// `ISource`'s seek. The module's own answer is kept in `seek_result` for
+    /// a caller that wants to know *why* rather than only *whether*.
+    bool seek(std::uint64_t frame) override;
+    [[nodiscard]] MpResult seek_result() const noexcept { return seek_result_; }
 
+    [[nodiscard]] bool seekable() const noexcept override
+    {
+        return vtbl_ != nullptr && handle_ != nullptr;
+    }
     /// Total frames, or 0 when the decoder does not know.
-    [[nodiscard]] std::uint64_t length_frames() const noexcept { return length_; }
+    [[nodiscard]] std::uint64_t length_frames() const noexcept override { return length_; }
 
     /// Why `open` refused, in words, or empty. Set only for the failures a
     /// caller could not work out from the result code.
@@ -53,6 +60,7 @@ private:
     MpDecoder* handle_ = nullptr;
     Format format_{};
     std::uint64_t length_ = 0;
+    MpResult seek_result_ = MP_OK;
     std::string why_;
 };
 

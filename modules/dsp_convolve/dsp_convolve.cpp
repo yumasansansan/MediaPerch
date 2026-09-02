@@ -345,6 +345,16 @@ MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
     }
 }
 
+MpResult MP_CALL dsp_reset(MpDsp* d) noexcept
+{
+    if (d == nullptr) {
+        return MP_ERR_INVALID;
+    }
+    d->convolver.reset();
+    d->peak = 0.0;
+    return MP_OK;
+}
+
 const MpDspVtbl g_vtbl = {
     /* size      */ sizeof(MpDspVtbl),
     /* reserved  */ 0,
@@ -355,6 +365,7 @@ const MpDspVtbl g_vtbl = {
     /* flush     */ &dsp_flush,
     /* set       */ &dsp_set,
     /* describe  */ &dsp_describe,
+    /* reset     */ &dsp_reset,
 };
 
 MpResult MP_CALL module_init(const MpHost* host) noexcept

@@ -12,6 +12,7 @@
 #include "mediaperch/compare.hpp"
 #include "mediaperch/decoder.hpp"
 #include "mediaperch/dsp.hpp"
+#include "mediaperch/queue.hpp"
 #if MEDIAPERCH_HAS_LOUDNESS
 #    include <loudness.hpp>
 #endif
@@ -25,6 +26,7 @@
 #include "mediaperch/verify.hpp"
 
 #include <chrono>
+#include <conio.h>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -40,6 +42,11 @@ namespace {
 struct Options {
     std::string command = "devices";
     std::string file;
+    /// `--file` repeated. One is a track; more than one is a playlist, and the
+    /// queue is what makes the join between them silent.
+    std::vector<std::string> files;
+    /// Keys during playback, for the transport that now exists.
+    bool interactive = false;
     std::string raw;
     std::string decoder_id; // empty = let the probe decide
     std::string capture; // capture endpoint id; empty = find one by name
@@ -307,6 +314,10 @@ Options
                     real-time, and a busy machine may want more
   --wait-timeout MS how long the render thread waits for a device that has
                     stopped signalling before calling it gone. Default 2000
+  --interactive     `play`: take keys while it plays. Space pauses and resumes,
+                    [ and ] seek ten seconds, n starts the next track, q stops.
+                    Pausing stops the device rather than feeding it silence, so
+                    resuming lands on the sample it left
   --shared          shared mode instead of exclusive
   --loopback        `verify` also records from a capture endpoint and reports
                     whether the loopback returned the bytes unchanged. Read
@@ -338,7 +349,10 @@ bool parse(int argc, char** argv, Options& out)
         } else if (arg == "--file") {
             if (i + 1 < argc) {
                 out.file = argv[++i];
+                out.files.emplace_back(out.file);
             }
+        } else if (arg == "--interactive") {
+            out.interactive = true;
         } else if (arg == "--raw") {
             if (i + 1 < argc) {
                 out.raw = argv[++i];
@@ -770,9 +784,64 @@ int negotiate(const MpSinkVtbl& vtbl, const Options& options)
 /// with a branch -- which is §2's rule and is about the render thread, not about
 /// this. From out here they are the same object: start it, watch it, stop it,
 /// ask it how it went.
+/// The keyboard, while something is playing.
+///
+/// Not a user interface -- this is a diagnostic tool and the shell is somebody
+/// else's job -- but transport that cannot be exercised is transport nobody has
+/// checked, and a person is a better test of "did the device notice" than any
+/// assertion.
+template <typename Graph>
+bool handle_keys(Graph& graph, mp::Queue* queue, const mp::Format& source)
+{
+    while (_kbhit() != 0) {
+        const int key = _getch();
+        switch (key) {
+        case ' ':
+            if (graph.paused()) {
+                graph.resume();
+                std::printf("  resumed\n");
+            } else {
+                graph.pause();
+                std::printf("  paused at %.2f s\n",
+                            static_cast<double>(graph.position_frames()) /
+                                source.sample_rate);
+            }
+            std::fflush(stdout);
+            break;
+        case '[':
+        case ']': {
+            const std::int64_t step =
+                static_cast<std::int64_t>(source.sample_rate) * (key == ']' ? 10 : -10);
+            const auto now = static_cast<std::int64_t>(graph.position_frames());
+            const auto target = static_cast<std::uint64_t>(std::max<std::int64_t>(0, now + step));
+            if (graph.seek(target)) {
+                std::printf("  %.2f s\n", static_cast<double>(target) / source.sample_rate);
+            } else {
+                std::printf("  this source cannot seek\n");
+            }
+            std::fflush(stdout);
+            break;
+        }
+        case 'n':
+            if (queue != nullptr) {
+                queue->skip();
+                std::printf("  next\n");
+                std::fflush(stdout);
+            }
+            break;
+        case 'q':
+            return false;
+        default:
+            break;
+        }
+    }
+    return true;
+}
+
 template <typename Graph>
 int run_graph(Graph& graph, mp::win::RenderThreadHooks& hooks, const mp::Format& wire,
-              unsigned limit_seconds)
+              unsigned limit_seconds, const Options* options = nullptr,
+              mp::Queue* queue = nullptr, const mp::Format* source = nullptr)
 {
 
     const MpResult started = graph.start();
@@ -802,7 +871,14 @@ int run_graph(Graph& graph, mp::win::RenderThreadHooks& hooks, const mp::Format&
     auto next_report = began + std::chrono::seconds{5};
 
     while ((!timed || std::chrono::steady_clock::now() < until) && graph.running()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds{100});
+        if (options != nullptr && options->interactive &&
+            !handle_keys(graph, queue, source != nullptr ? *source : wire)) {
+            break;
+        }
+        // Short enough that a keypress does not sit waiting, long enough that
+        // this is not a spin.
+        std::this_thread::sleep_for(std::chrono::milliseconds{
+            options != nullptr && options->interactive ? 20 : 100});
         const auto now = std::chrono::steady_clock::now();
         if (now >= next_report) {
             const auto stats = graph.stats();
@@ -1054,41 +1130,75 @@ int list_dsp_modules(const mp::win::ModuleRegistry& registry)
     return 0;
 }
 
+/// The files on the command line, opened one at a time.
+///
+/// Lazy on purpose: a playlist of five hundred entries is five hundred open
+/// decoders if the queue is handed a list, and none of them are needed until
+/// the one before finishes. `IPlaylist` exists so that this decision lives
+/// here, in the host, and not in the core.
+class FilePlaylist final : public mp::IPlaylist {
+public:
+    FilePlaylist(const mp::win::ModuleRegistry& registry, const Options& options)
+        : registry_(&registry), options_(&options)
+    {
+    }
+
+    mp::ISource* at(std::size_t index) override
+    {
+        if (index >= options_->files.size()) {
+            return nullptr;
+        }
+        while (opened_.size() <= index) {
+            opened_.push_back(std::make_unique<mp::Decoder>());
+        }
+        mp::Decoder& decoder = *opened_[index];
+        if (decoder) {
+            return &decoder;
+        }
+        const std::string& path = options_->files[index];
+        const auto ranked = registry_->decoders_for(path, options_->decoder_id);
+        const auto choice = first_that_opens(ranked, path);
+        if (choice.vtbl == nullptr || decoder.open(*choice.vtbl, path.c_str()) != MP_OK) {
+            // Recorded rather than fatal: a playlist that silently plays four of
+            // its five entries is worse than one that says which it skipped.
+            std::fprintf(stderr, "skipping %s: %s\n", path.c_str(),
+                         choice.vtbl == nullptr ? "no decoder recognised it"
+                                                : decoder.why().c_str());
+            decoder.close();
+            return nullptr;
+        }
+        names_.resize(std::max(names_.size(), index + 1));
+        names_[index] = choice.desc->id;
+        return &decoder;
+    }
+
+    [[nodiscard]] const std::string& decoder_name(std::size_t index) const
+    {
+        static const std::string none;
+        return index < names_.size() ? names_[index] : none;
+    }
+
+private:
+    const mp::win::ModuleRegistry* registry_;
+    const Options* options_;
+    std::vector<std::unique_ptr<mp::Decoder>> opened_;
+    std::vector<std::string> names_;
+};
+
+/// One run: everything from the source to the device, played once.
+///
+/// A run ends when the audio does -- or when the next track is in a different
+/// format, which needs the device reopened and is therefore a new run with an
+/// audible gap between them. `play` is the loop over runs.
+int play_run(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
+             const Options& options, mp::ISource& queued, mp::Queue* queue,
+             const std::string& label);
+
 int play(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
          const Options& options)
 {
-    // Either a file or the tone generator. Both are an ISource and the graph
-    // cannot tell them apart, which is the reason `Decoder` is one.
-    mp::Decoder decoder;
-    std::optional<mp::SineSource> tone;
-    mp::ISource* source = nullptr;
-    std::string decoder_name;
-
-    if (!options.file.empty()) {
-        const auto ranked = registry.decoders_for(options.file, options.decoder_id);
-        const auto choice = first_that_opens(ranked, options.file);
-        if (choice.vtbl == nullptr) {
-            std::fprintf(stderr, "no decoder %s %s\n",
-                         options.decoder_id.empty() ? "recognised" : "called",
-                         options.decoder_id.empty() ? options.file.c_str()
-                                                    : options.decoder_id.c_str());
-            return 1;
-        }
-        const MpResult opened = decoder.open(*choice.vtbl, options.file.c_str());
-        if (opened != MP_OK) {
-            std::fprintf(stderr, "%s could not open %s: %s%s%s\n", choice.desc->id,
-                         options.file.c_str(), result_name(opened),
-                         decoder.why().empty() ? "" : " -- ", decoder.why().c_str());
-            return 1;
-        }
-        if (options.seek != 0 && decoder.seek(options.seek) != MP_OK) {
-            std::fprintf(stderr, "could not seek to frame %llu\n",
-                         static_cast<unsigned long long>(options.seek));
-            return 1;
-        }
-        decoder_name = choice.desc->id;
-        source = &decoder;
-    } else {
+    if (options.files.empty()) {
+        // The tone generator: no playlist, no queue, nothing to join.
         if (options.float_source) {
             std::fprintf(stderr,
                          "--float is for `negotiate`: the tone generator writes integers.\n");
@@ -1100,9 +1210,47 @@ int play(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
                          mp::describe(wanted).c_str());
             return 1;
         }
-        tone.emplace(wanted, options.hz, options.amplitude);
-        source = &*tone;
+        mp::SineSource tone{wanted, options.hz, options.amplitude};
+        return play_run(vtbl, registry, options, tone, nullptr, "");
     }
+
+    FilePlaylist playlist{registry, options};
+    std::size_t start = 0;
+    int rc = 0;
+    for (;;) {
+        mp::Queue queue{playlist, start};
+        std::string why;
+        if (!queue.open(why)) {
+            std::fprintf(stderr, "%s\n", why.c_str());
+            return 1;
+        }
+        if (options.seek != 0 && start == 0 && !queue.seek(options.seek)) {
+            std::fprintf(stderr, "could not seek to frame %llu\n",
+                         static_cast<unsigned long long>(options.seek));
+            return 1;
+        }
+        rc = play_run(vtbl, registry, options, queue, &queue,
+                      playlist.decoder_name(queue.index()));
+        if (rc != 0 || queue.stopped() != mp::QueueStop::format_change) {
+            return rc;
+        }
+        // The one join a queue will not make. Saying so is the point: this is
+        // the gap, it is the device's and not the player's, and it is where it
+        // is because exclusive mode cannot change format without stopping.
+        start = queue.index() + 1;
+        std::printf("\nnext       %s is %s, which this device cannot take without\n"
+                    "           being reopened. That is the gap, and it is not ours.\n\n",
+                    options.files[start].c_str(),
+                    mp::describe(queue.next_format()).c_str());
+    }
+}
+
+int play_run(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
+             const Options& options, mp::ISource& queued, mp::Queue* queue,
+             const std::string& label)
+{
+    mp::ISource* source = &queued;
+    const std::string& decoder_name = label;
 
     const mp::Format source_format = source->format();
 
@@ -1203,9 +1351,11 @@ int play(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
                 1000.0 * period / negotiated.accepted.sample_rate);
 
     unsigned limit = options.seconds;
-    if (source == &decoder) {
-        const std::uint64_t length = decoder.length_frames();
-        std::printf("file       %s\n", options.file.c_str());
+    if (queue != nullptr) {
+        const std::uint64_t length = source->length_frames();
+        std::printf("file       %s%s\n", options.files[queue->index()].c_str(),
+                    options.files.size() > 1 ? "  (and the ones after it, gaplessly)"
+                                             : "");
         std::printf("decoder    %s%s\n", decoder_name.c_str(),
                     options.decoder_id.empty() ? "" : "  [forced]");
         std::printf("source     %s", mp::describe(source_format).c_str());
@@ -1246,7 +1396,9 @@ int play(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
                                  conversion,       &hooks,
                                  buffering(options),
                                  chain.empty() ? nullptr : &chain};
-        const int rc = run_graph(graph, hooks, negotiated.accepted, limit);
+        const int rc =
+            run_graph(graph, hooks, negotiated.accepted, limit, &options, queue,
+                      &source_format);
         // What each stage made of it, in the stage's own words. `dsp_gain`
         // reports the loudest sample it saw, which is the cheapest evidence
         // that the chain was in the path at all.
@@ -1263,7 +1415,8 @@ int play(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
     mp::PassthroughGraph graph{*source,   sink,
                                negotiated.accepted, period,
                                negotiated.fidelity, &hooks, buffering(options)};
-    return run_graph(graph, hooks, negotiated.accepted, limit);
+    return run_graph(graph, hooks, negotiated.accepted, limit, &options, queue,
+                     &source_format);
 }
 
 
@@ -1284,7 +1437,8 @@ int decode(const MpDecoderVtbl& vtbl, const Options& options)
     }
 
     if (options.seek != 0) {
-        const MpResult sought = decoder.seek(options.seek);
+        decoder.seek(options.seek);
+        const MpResult sought = decoder.seek_result();
         if (sought != MP_OK) {
             std::fprintf(stderr, "cannot seek %s to frame %llu: %s\n", options.file.c_str(),
                          static_cast<unsigned long long>(options.seek), result_name(sought));

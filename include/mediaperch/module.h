@@ -379,6 +379,22 @@ typedef struct MpDspVtbl {
      * either of them knowing what the stage is.
      */
     MpResult(MP_CALL *describe)(MpDsp *d, uint32_t index, char *out, uint32_t out_bytes);
+
+    /*
+     * Forget everything about where the stream was, keeping the settings.
+     *
+     * What a seek needs. A resampler holds the samples either side of where it
+     * is, a convolver holds a whole impulse response's worth, an equaliser
+     * holds two numbers per section -- and after a seek every one of those
+     * belongs to audio that is no longer adjacent to what comes next. Playing
+     * them out is a click at best.
+     *
+     * Distinct from `configure`, which would also clear the state and would
+     * additionally redesign the filter -- seconds of work for a convolver, to
+     * throw away a few hundred samples. May be NULL for a stage that has no
+     * memory, which is what `size` is for.
+     */
+    MpResult(MP_CALL *reset)(MpDsp *d);
 } MpDspVtbl;
 
 /* ------------------------------------------------------------------ */
@@ -450,6 +466,12 @@ MP_STATIC_ASSERT(sizeof(MpEncoding) == 4, "MpEncoding is a u32 field");
 MP_STATIC_ASSERT(sizeof(MpKind) == 4, "MpKind is a u32 field");
 MP_STATIC_ASSERT(offsetof(MpDspVtbl, size) == 0, "MpDspVtbl::size leads");
 MP_STATIC_ASSERT(offsetof(MpDspVtbl, open) == 8, "MpDspVtbl::open follows the header");
+/* `reset` was added after the first six modules were written. It is at the end
+ * because that is the only place a vtable may grow: a host checks `size` and
+ * reads no further than what it says, so a module built against the older
+ * header keeps working and simply has no reset. */
+MP_STATIC_ASSERT(offsetof(MpDspVtbl, describe) < offsetof(MpDspVtbl, reset),
+                 "MpDspVtbl only ever grows at the end");
 
 MP_STATIC_ASSERT(sizeof(MpFormat) == 32, "MpFormat layout is ABI");
 MP_STATIC_ASSERT(offsetof(MpFormat, sample_rate) == 0, "MpFormat layout is ABI");

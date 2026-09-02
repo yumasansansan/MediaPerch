@@ -67,6 +67,10 @@ public:
     [[nodiscard]] MpResult process(const double* const* in, std::uint32_t in_frames,
                                    std::uint32_t& out_frames) noexcept;
     [[nodiscard]] MpResult flush(std::uint32_t& out_frames) noexcept;
+    /// Drops what the stage remembers of where the stream was, keeping its
+    /// settings. A stage too old to have `reset` says so, and the caller then
+    /// knows the seek is not clean.
+    [[nodiscard]] MpResult reset() noexcept;
 
     [[nodiscard]] const std::string& name() const noexcept { return name_; }
     [[nodiscard]] const Format& output_format() const noexcept { return output_; }
@@ -122,6 +126,11 @@ public:
     /// never sees.
     [[nodiscard]] bool run(const double* interleaved, std::uint32_t frames,
                            std::vector<double>& out, std::uint32_t& out_frames);
+
+    /// Drops every stage's memory of where the stream was: what a seek needs.
+    /// Returns false when a stage could not, which means the audio after the
+    /// seek carries a few hundred samples of the audio before it.
+    [[nodiscard]] bool reset();
 
     /// Drains the chain at the end of the stream, one round per call, until
     /// `flush_done()`.

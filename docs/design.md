@@ -774,6 +774,77 @@ signs so the day somebody "fixes" it is the day a test goes red.
 than an FIR, so its numbers are not taps and carrying them across would build a filter that
 is not what the name means.
 
+### Keeping it flowing
+
+Three operations, and every one of them is about the same thing: **the device's clock must
+not learn that anything happened.**
+
+#### Gapless is the absence of a stop
+
+`mp::Queue` is an `ISource` whose `read` does not return zero at the end of a track — it
+opens the next one and keeps filling the same buffer. The ring never runs dry, the render
+thread never learns that anything happened, and **nothing in the graph knows the queue
+exists**. That is what gapless is: not a feature bolted to the transport, but the absence of
+a stop.
+
+The alternative — ending one graph and starting another — cannot be gapless in exclusive
+mode at all. `Stop` and a fresh `Initialize` take milliseconds and the device silences the
+moment the first one lets go. So the seam has to be somewhere the device cannot see, and the
+only such place is upstream of the ring.
+
+Two tracks of 288,655 and 762,407 frames, played on the real endpoint:
+
+```
+played     1051116 frames (23.83 s)     underruns 0
+```
+
+1,051,062 frames of audio and 54 of final-period padding. Not a gap, not a repeat, and the
+same number on every run.
+
+**The queue will not join two formats.** 44.1 kHz followed by 96 kHz needs the device
+renegotiated, which is a new graph and an audible gap, so the queue stops and says which
+format the next track wants rather than resampling something nobody asked it to. The host
+then rebuilds — and the report puts the blame where it belongs:
+
+```
+next       …96000 Hz / 2 ch / S24_PACKED…, which this device cannot take without
+           being reopened. That is the gap, and it is not ours.
+```
+
+It also does not remove the encoder's padding. That is the decoder's job, and `decode_mp3`
+reads the LAME tag for exactly this reason.
+
+#### Pause stops the clock
+
+Not silence into a running device — `IAudioClient::Stop`. In exclusive mode the device is
+ours either way, and a clock that is not running is what makes resuming land on the sample
+it left rather than near it.
+
+#### Seek hands the ring over
+
+The decode thread cannot reset a ring the render thread is reading from; that is how a seek
+becomes a burst of whatever was in memory. So there is a handshake: the decode thread raises
+`seeking_`, the render thread answers by parking and writing silence — **keeping the clock
+running**, because a device that stops for ten milliseconds is a device that has to be
+restarted — and a whole render iteration under the flag is what tells the decode thread that
+nothing is inside `ring_.read` any more. Then it resets the ring, moves the source, resets
+the chain, and refills.
+
+`position_frames()` is the frame the *device* is playing, not the one the decoder has
+reached — those are a ring apart, and only one of them is what somebody can hear.
+
+#### Every stage had to learn to forget
+
+A seek leaves a resampler holding the samples either side of where it was, a convolver
+holding a whole impulse response, an equaliser holding two numbers per section. All of it
+belongs to audio that is no longer adjacent to what comes next, and playing it out is a click
+at best. So `MpDspVtbl` grew a `reset` — at the end, which is the only place a vtable may
+grow: a host reads no further than `size` says, so a module built against the older header
+keeps working and simply has no reset to be told about.
+
+`reset` is not `configure`. Configuring would also clear the state, and would additionally
+redesign the filter — seconds of work for a convolver, to throw away a few hundred samples.
+
 ### Choosing the path
 
 Which graph a stream may take is a setting, not only an inference. `--path` on the probe

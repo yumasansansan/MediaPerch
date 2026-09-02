@@ -66,6 +66,35 @@ public:
     MpResult start();
     void stop() noexcept;
 
+    // --- transport ---------------------------------------------------------
+    //
+    // Three operations, and each of them is about one thing: the device's clock
+    // must never learn that anything happened. Pausing stops it deliberately;
+    // seeking keeps it running on silence for the few milliseconds the decode
+    // thread needs; and a track boundary is not here at all, because it belongs
+    // to `Queue` and the graph never sees one.
+
+    /// Stops the device rather than feeding it silence. In exclusive mode the
+    /// device is ours either way, and a stopped clock is what makes resuming
+    /// land on the sample it left.
+    void pause() noexcept;
+    void resume() noexcept;
+    [[nodiscard]] bool paused() const noexcept
+    {
+        return paused_.load(std::memory_order_acquire);
+    }
+
+    /// Moves the source to `frame` and refills from there. Returns false when
+    /// the source cannot seek at all; otherwise it returns once the audio has
+    /// actually moved, because a seek a caller cannot observe the end of is a
+    /// seek a caller has to guess about.
+    [[nodiscard]] bool seek(std::uint64_t frame);
+
+    /// Which source frame the device is playing now -- not which one the
+    /// decoder has reached, which is a ring's worth ahead of what anybody can
+    /// hear.
+    [[nodiscard]] std::uint64_t position_frames() const noexcept;
+
     [[nodiscard]] bool running() const noexcept { return running_.load(std::memory_order_acquire); }
     [[nodiscard]] MpResult error() const noexcept
     {
@@ -118,6 +147,28 @@ private:
     /// which for anything that upsamples is more. Both loops keep this much
     /// room free, so a write never has to be split or dropped.
     std::uint32_t pump_bytes_;
+
+    /// Takes the ring from the render thread, moves the source, and refills.
+    void perform_seek(std::uint64_t frame);
+
+    /// No seek is pending. Not zero, because zero is the top of the file.
+    static constexpr std::uint64_t k_no_seek = ~std::uint64_t{0};
+
+    std::atomic<bool> paused_{false};
+    /// Set by the decode thread while it owns the ring. The render thread
+    /// answers by parking, and the tick is how the decode thread knows it did:
+    /// a whole render iteration under the flag means nothing is inside
+    /// `ring_.read` any more.
+    std::atomic<bool> seeking_{false};
+    std::atomic<bool> parked_{false};
+    std::atomic<std::uint64_t> render_tick_{0};
+    std::atomic<std::uint64_t> seek_request_{k_no_seek};
+    /// Where the position is counted from, reset at every seek.
+    std::atomic<std::uint64_t> played_base_{0};
+    std::atomic<std::uint64_t> rendered_base_{0};
+    /// Whether the device is started. Only the render thread touches it, and
+    /// only while `stop()` is not running -- which joins first.
+    bool device_running_ = false;
 
     ByteRing ring_;
     std::vector<std::uint8_t> source_chunk_;

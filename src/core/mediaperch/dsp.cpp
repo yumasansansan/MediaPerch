@@ -3,6 +3,7 @@
 #include "mediaperch/dsp.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 
 namespace mp {
@@ -55,7 +56,11 @@ bool DspStage::open() noexcept
     if (handle_ != nullptr) {
         return true;
     }
-    if (vtbl_ == nullptr || vtbl_->size < sizeof(MpDspVtbl) || vtbl_->open == nullptr ||
+    // Big enough for the calls this host actually makes, rather than for the
+    // header it happened to be compiled against: a vtable grows at the end, and
+    // demanding the newest size would refuse every module built before it.
+    constexpr std::uint32_t k_needed = offsetof(MpDspVtbl, describe) + sizeof(void*);
+    if (vtbl_ == nullptr || vtbl_->size < k_needed || vtbl_->open == nullptr ||
         vtbl_->configure == nullptr || vtbl_->process == nullptr) {
         return false;
     }
@@ -135,6 +140,20 @@ MpResult DspStage::flush(std::uint32_t& out_frames) noexcept
 }
 
 // --------------------------------------------------------------------------
+
+MpResult DspStage::reset() noexcept
+{
+    if (handle_ == nullptr) {
+        return MP_ERR_INVALID;
+    }
+    // A vtable that stops before `reset` belongs to a module built against the
+    // older header. Nothing is wrong with it; it simply cannot be told.
+    if (vtbl_->size < offsetof(MpDspVtbl, reset) + sizeof(void*) ||
+        vtbl_->reset == nullptr) {
+        return MP_ERR_UNSUPPORTED;
+    }
+    return vtbl_->reset(handle_);
+}
 
 void DspChain::add(const MpDspVtbl& vtbl, std::string name)
 {
@@ -232,6 +251,20 @@ bool DspChain::run(const double* interleaved, std::uint32_t frames, std::vector<
         }
     }
     return push(0, scratch_planes_.data(), frames, out, out_frames);
+}
+
+bool DspChain::reset()
+{
+    bool clean = true;
+    for (auto& stage : stages_) {
+        const MpResult r = stage->reset();
+        // A stage with no memory has nothing to drop, and saying so is not a
+        // failure.
+        clean = clean && (r == MP_OK || r == MP_ERR_UNSUPPORTED);
+    }
+    flush_stage_ = 0;
+    flush_done_ = stages_.empty();
+    return clean;
 }
 
 bool DspChain::flush(std::vector<double>& out, std::uint32_t& out_frames)

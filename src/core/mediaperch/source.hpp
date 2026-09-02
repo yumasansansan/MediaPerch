@@ -4,6 +4,7 @@
 #include "mediaperch/format.hpp"
 
 #include <cstddef>
+#include <cstdint>
 
 namespace mp {
 
@@ -28,6 +29,38 @@ public:
     ///
     /// Called from the decode thread, so it may block and allocate.
     virtual std::size_t read(void* dst, std::size_t bytes) = 0;
+
+    /// Whether `seek` will do anything. A tone generator has no position to go
+    /// to; a file does.
+    [[nodiscard]] virtual bool seekable() const noexcept { return false; }
+
+    /// Moves to `frame`, counted from the start in this source's own frames.
+    /// Returns false when it could not, which a caller must not treat as
+    /// "probably worked": the position afterwards is then unknown.
+    virtual bool seek(std::uint64_t frame) { return false; }
+
+    /// Total frames, or 0 where the source does not know -- a stream, or a tone
+    /// that goes on until somebody stops it.
+    [[nodiscard]] virtual std::uint64_t length_frames() const noexcept { return 0; }
+};
+
+/// Where a queue gets its next source.
+///
+/// A callback rather than a list, because *when a file is opened* is the host's
+/// business and not the queue's: opening five hundred decoders because a
+/// playlist has five hundred entries is a decision somebody else should make.
+class IPlaylist {
+public:
+    IPlaylist() = default;
+    IPlaylist(const IPlaylist&) = delete;
+    IPlaylist& operator=(const IPlaylist&) = delete;
+    IPlaylist(IPlaylist&&) = delete;
+    IPlaylist& operator=(IPlaylist&&) = delete;
+    virtual ~IPlaylist() = default;
+
+    /// The source at `index`, or nullptr past the end. Called from the decode
+    /// thread, at the moment the previous one runs out, so it may open a file.
+    [[nodiscard]] virtual ISource* at(std::size_t index) = 0;
 };
 
 /// What the render thread needs from the platform and the core cannot provide.

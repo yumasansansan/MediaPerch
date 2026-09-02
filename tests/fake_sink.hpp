@@ -15,7 +15,9 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <chrono>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 namespace mp::test {
@@ -28,6 +30,14 @@ struct FakeSinkRules {
     std::uint32_t period_frames = 64;
     /// Answer `wait` with this many times before returning MP_OK for ever.
     std::uint32_t timeouts_before_ok = 0;
+    /// Microseconds `wait` sleeps before saying the device is ready.
+    ///
+    /// Zero -- the default -- is a device with no clock at all, which is what
+    /// most tests want: they check what bytes came out, not when. A test about
+    /// *transport* cannot use that, because gapless and seek are claims about a
+    /// stream that keeps up, and a render thread with nothing to wait for
+    /// outruns the decode thread by a factor of thousands.
+    std::uint32_t pace_us = 0;
     /// Hand back a format that is not the one asked for. Models the driver that
     /// says yes and means something else.
     std::function<Format(const Format&)> distort = nullptr;
@@ -114,6 +124,9 @@ private:
         FakeSink& me = self(s);
         if (me.waits_++ < me.rules_.timeouts_before_ok) {
             return MP_TIMEOUT;
+        }
+        if (me.rules_.pace_us != 0) {
+            std::this_thread::sleep_for(std::chrono::microseconds{me.rules_.pace_us});
         }
         return MP_OK;
     }

@@ -191,6 +191,7 @@ MpResult ProcessedGraph::start()
     frames_rendered_.fetch_add(frames, std::memory_order_relaxed);
 
     running_.store(true, std::memory_order_release);
+    device_running_ = true;
 
     r = sink_->start();
     if (r != MP_OK) {
@@ -224,6 +225,11 @@ void ProcessedGraph::decode_loop()
                                              std::max(wire_.sample_rate, 1u) / 4)};
 
     while (running_.load(std::memory_order_acquire)) {
+        const std::uint64_t target = seek_request_.load(std::memory_order_acquire);
+        if (target != k_no_seek) {
+            perform_seek(target);
+            continue;
+        }
         if (drained_.load(std::memory_order_acquire) || ring_.writable() < pump_bytes_) {
             std::this_thread::sleep_for(nap);
             continue;
@@ -244,6 +250,29 @@ void ProcessedGraph::render_loop() noexcept
     }
 
     while (running_.load(std::memory_order_acquire)) {
+        render_tick_.fetch_add(1, std::memory_order_release);
+
+        // Paused: the device is stopped rather than fed silence. It is ours
+        // either way in exclusive mode, and a clock that is not running is what
+        // makes resuming land on the sample it left.
+        if (paused_.load(std::memory_order_acquire)) {
+            if (device_running_) {
+                sink_->stop();
+                device_running_ = false;
+            }
+            parked_.store(true, std::memory_order_release);
+            std::this_thread::sleep_for(std::chrono::milliseconds{2});
+            continue;
+        }
+        if (!device_running_) {
+            const MpResult restarted = sink_->start();
+            if (restarted != MP_OK) {
+                fail(restarted);
+                break;
+            }
+            device_running_ = true;
+        }
+
         const MpResult waited = sink_->wait(config_.wait_timeout_ms);
         if (waited == MP_TIMEOUT) {
             wait_timeouts_.fetch_add(1, std::memory_order_relaxed);
@@ -264,7 +293,12 @@ void ProcessedGraph::render_loop() noexcept
         }
 
         const std::size_t want = static_cast<std::size_t>(frames) * wire_frame_bytes_;
-        const std::size_t got = ring_.read(buffer, want);
+        // A seek is in progress: the ring belongs to the decode thread for the
+        // moment, so this writes silence and keeps the clock running. Ten
+        // milliseconds of it, and the device never learns anything happened.
+        const bool seeking = seeking_.load(std::memory_order_acquire);
+        parked_.store(seeking, std::memory_order_release);
+        const std::size_t got = seeking ? 0 : ring_.read(buffer, want);
         if (got < want) {
             std::memset(static_cast<std::uint8_t*>(buffer) + got, 0, want - got);
         }
@@ -276,10 +310,11 @@ void ProcessedGraph::render_loop() noexcept
         }
         frames_rendered_.fetch_add(frames, std::memory_order_relaxed);
 
-        // Nothing left to play and nothing coming.
-        const bool finishing =
-            drained_.load(std::memory_order_acquire) && ring_.readable() < wire_frame_bytes_;
-        if (got < want) {
+        // Nothing left to play and nothing coming. Never while seeking: the
+        // ring is empty because somebody emptied it, not because the file ended.
+        const bool finishing = !seeking && drained_.load(std::memory_order_acquire) &&
+                               ring_.readable() < wire_frame_bytes_;
+        if (got < want && !seeking) {
             // **A file's last period is not an underrun.** The device is owed a
             // whole period and the file ended in the middle of one, so the rest
             // is padded -- which is the end of the stream, not starvation, and
@@ -314,6 +349,101 @@ ProcessedGraph::Stats ProcessedGraph::stats() const noexcept
     out.wait_timeouts = wait_timeouts_.load(std::memory_order_relaxed);
     out.frames_decoded = frames_decoded_.load(std::memory_order_relaxed);
     return out;
+}
+
+
+void ProcessedGraph::pause() noexcept
+{
+    paused_.store(true, std::memory_order_release);
+}
+
+void ProcessedGraph::resume() noexcept
+{
+    paused_.store(false, std::memory_order_release);
+}
+
+std::uint64_t ProcessedGraph::position_frames() const noexcept
+{
+    const std::uint64_t rendered = frames_rendered_.load(std::memory_order_relaxed);
+    const std::uint64_t base = rendered_base_.load(std::memory_order_relaxed);
+    const std::uint64_t since = rendered > base ? rendered - base : 0;
+    // The device counts in wire frames and the file counts in its own. They are
+    // the same number unless something in the chain changed the rate, and then
+    // they are not, so the ratio is applied rather than assumed away.
+    const std::uint64_t source_rate = source_format_.sample_rate;
+    const std::uint64_t wire_rate = wire_.sample_rate;
+    const std::uint64_t scaled =
+        wire_rate == 0 ? since : since * source_rate / wire_rate;
+    return played_base_.load(std::memory_order_relaxed) + scaled;
+}
+
+bool ProcessedGraph::seek(std::uint64_t frame)
+{
+    if (!source_->seekable()) {
+        return false;
+    }
+    if (!running_.load(std::memory_order_acquire)) {
+        // Nothing is playing, so there is nobody to hand the ring to.
+        perform_seek(frame);
+        return true;
+    }
+    seek_request_.store(frame, std::memory_order_release);
+    // Wait for the decode thread to have done it. A seek whose end a caller
+    // cannot observe is one a caller has to guess about.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (seek_request_.load(std::memory_order_acquire) != k_no_seek &&
+           running_.load(std::memory_order_acquire)) {
+        if (std::chrono::steady_clock::now() > deadline) {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    return true;
+}
+
+void ProcessedGraph::perform_seek(std::uint64_t frame)
+{
+    // Take the ring. The render thread answers by parking; a whole iteration
+    // under the flag is what says it is no longer inside `ring_.read`, and
+    // resetting a ring underneath a reader is how a seek becomes a burst of
+    // whatever was in memory.
+    seeking_.store(true, std::memory_order_release);
+    const std::uint64_t from = render_tick_.load(std::memory_order_acquire);
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds{500};
+    while (running_.load(std::memory_order_acquire)) {
+        if (parked_.load(std::memory_order_acquire) &&
+            render_tick_.load(std::memory_order_acquire) >= from + 2) {
+            break;
+        }
+        if (std::chrono::steady_clock::now() > deadline) {
+            break; // the render thread is gone; the seek is still the right thing
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+
+    ring_.reset();
+    const bool moved = source_->seek(frame);
+    if (chain_ != nullptr) {
+        // Every filter in the chain is holding samples from where the stream
+        // used to be, and those are no longer adjacent to what comes next.
+        (void)chain_->reset();
+    }
+    flushed_ = false;
+    drained_.store(false, std::memory_order_release);
+    if (moved) {
+        played_base_.store(frame, std::memory_order_relaxed);
+        rendered_base_.store(frames_rendered_.load(std::memory_order_relaxed),
+                             std::memory_order_relaxed);
+    }
+    while (ring_.writable() >= pump_bytes_) {
+        if (!pump_once()) {
+            drained_.store(true, std::memory_order_release);
+            break;
+        }
+    }
+    seek_request_.store(k_no_seek, std::memory_order_release);
+    seeking_.store(false, std::memory_order_release);
 }
 
 } // namespace mp

@@ -107,12 +107,14 @@ std::size_t Decoder::read(void* dst, std::size_t bytes)
     return got;
 }
 
-MpResult Decoder::seek(std::uint64_t frame) noexcept
+bool Decoder::seek(std::uint64_t frame)
 {
     if (!*this || vtbl_->seek == nullptr) {
-        return MP_ERR_UNSUPPORTED;
+        seek_result_ = MP_ERR_UNSUPPORTED;
+        return false;
     }
-    return vtbl_->seek(handle_, frame);
+    seek_result_ = vtbl_->seek(handle_, frame);
+    return seek_result_ == MP_OK;
 }
 
 } // namespace mp

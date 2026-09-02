@@ -263,7 +263,11 @@ const MpDspVtbl* ModuleRegistry::dsp(std::string_view id) const
             continue;
         }
         const auto* vtbl = static_cast<const MpDspVtbl*>(desc.vtbl);
-        return (vtbl != nullptr && vtbl->size >= sizeof(MpDspVtbl)) ? vtbl : nullptr;
+        // Enough for the calls this host makes. See DspStage::open.
+        return (vtbl != nullptr &&
+                vtbl->size >= offsetof(MpDspVtbl, describe) + sizeof(void*))
+                   ? vtbl
+                   : nullptr;
     }
     return nullptr;
 }

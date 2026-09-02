@@ -27,6 +27,7 @@ add_executable(mediaperch_tests
     repack_test.cpp
     ring_test.cpp
     sine_test.cpp
+    transport_test.cpp
 )
 
 # decode_alac's parsers are ours, so they get unit tests like the rest of the
