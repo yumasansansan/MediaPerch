@@ -46,9 +46,9 @@ Score is the registry's primary key and priority only breaks ties, so the score
 is where a statement about *one format* belongs. FLAC is the case with four
 readers:
 
-| Probe score for FLAC | `decode_flac` | `decode_native` | `decode_mf` | `decode_ffmpeg` |
+| Probe score for FLAC | `decode_flac` | `decode_native` | `decode_ffmpeg` | `decode_mf` |
 |---|---|---|---|---|
-| | 100 | **60** | 40 | 30 |
+| | 100 | **60** | 30 | 20 |
 
 `decode_native` scores FLAC at 60, below every other FLAC reader here, because
 `dr_flac` is a reimplementation that cannot read 32-bit FLAC at all — and above
@@ -60,9 +60,9 @@ implementation to defer to, and `dr_wav` is measured bit-exact to 32 bits and
 Three modules read FLAC on purpose. `decode_flac` outranks the others whenever it
 is installed, because for a lossless codec the reference implementation *is* the
 specification. `decode_native` stays because an install that wants no submodules
-at all should still play music. `decode_mf` scores itself lowest on FLAC and WAV
-not because it is worse — the hashes below say it is not — but because it reaches
-them through a pipeline that *could* insert a converter, and the others cannot.
+at all should still play music. `decode_mf` is last, on FLAC and on everything
+else — see *Where each format goes* below for the measurements that put it
+there.
 
 `decode_ffmpeg` sits second from last on purpose. It reads more than anything
 else here and knows each format less well than the module that specialises in
@@ -84,6 +84,75 @@ Going through the executables rather than linking libavcodec is deliberate:
 FFmpeg's public structs change layout between major versions, so binding the DLLs
 would tie this module to one of them. One build of it works against FFmpeg 4
 through 8. §7 of [the plan](plan.md) has the full argument.
+
+## Where each format goes, and why Media Foundation is last
+
+Audited with `mediaperch-probe claims`, which prints every decoder's probe score
+for one file. Score decides; priority only breaks a tie; the first candidate that
+actually opens the file wins. `decode_ffmpeg` scores **0** on everything when
+`ffmpeg` and `ffprobe` are not installed, which is what makes the last column
+meaningful.
+
+| Container / codec | Who claims it, best first | Chosen | With no FFmpeg |
+|---|---|---|---|
+| WAV — RIFF/WAVE | `native` 100, `ffmpeg` 30, `mf` 20 | `native` | `native` |
+| RIFX, RF64, AIFF, AIFC | `native` 100 | `native` | `native` |
+| FLAC | `flac` 100, `native` 60, `ffmpeg` 30, `mf` 20 | `flac` | `flac` |
+| Ogg — Vorbis or Opus | `ogg` 100 (priority 110), `ffmpeg` 100 (60) | `ogg` | `ogg` |
+| Ogg — FLAC, Speex | `ffmpeg` 100 | `ffmpeg` | *nothing* |
+| MP3, frame header in reach | `mp3` 100, `ffmpeg` 30, `mf` 20 | `mp3` | `mp3` |
+| MP3, tag past the 4 KB window | `mp3` 60, `ffmpeg` 30, `mf` 20 | `mp3` | `mp3` |
+| MPEG-1/2 layer I or II | `ffmpeg` 30, `mf` 20 | `ffmpeg` | `mf` |
+| AAC in ADTS | `aac` 100, `ffmpeg` 30, `mf` 20 | `aac` | `aac` |
+| MP4, M4A | `alac` 100 (115), `aac` 100 (108), `ffmpeg` 100 (60), `mf` 20 | `alac`, then `aac`, then `ffmpeg` | `alac`, `aac`, then `mf` |
+| ASF, WMA | `ffmpeg` 30, `mf` 20 | `ffmpeg` | `mf` |
+| Matroska, WebM | `ffmpeg` 100 | `ffmpeg` | *nothing* |
+| WavPack, Monkey's Audio, DSF, DFF, TTA, Musepack, CAF | `ffmpeg` 100 | `ffmpeg` | *nothing* |
+
+### Media Foundation takes one score, and it is the lowest
+
+It used to claim 100 on MP4, on any MPEG frame header and on ASF, and win two of
+those outright. Every one of its formats has since been measured, and every
+measurement went the same way — they are all in this document:
+
+- float WAV comes back **clipped** to 32-bit integer, 73.8% of the samples pinned;
+- a 32-bit FLAC is **refused**, at a rate it reads happily at 24 bits, and so is
+  FLAC above about 655 kHz;
+- multichannel ALAC comes back with every sample perfect and **the channels in the
+  wrong speakers**;
+- gapless metadata is implemented in **no codec at all**: every MP3 starts 36 ms
+  late, every AAC 1024 frames late with the encoder padding left on;
+- 8 kHz and 7.1 AAC are refused;
+- a stream that declares no depth is decoded to **16 bits**, which for a lossy
+  codec is a quantisation nobody asked for. The generated matrix shows it: WMA
+  comes out `S16` from Media Foundation and `F32` from everything else.
+
+There is no format here where it is the best answer and several where it is
+measurably the worst. So it now scores **20** on everything it recognises — one
+below `decode_ffmpeg`'s own fallback score of 30 — and the recognition list is
+unchanged.
+
+What that buys is the thing this module is actually for. On a machine with
+nothing installed, `decode_ffmpeg` scores 0 and 20 beats nothing at all, so
+Media Foundation still plays WMA, still plays MPEG layer II, and is still the
+last resort for MP4. **It is the floor, not a competitor.**
+
+Two rows changed hands: WMA and MPEG layer I/II now go to FFmpeg wherever it is
+installed. WMA gains float instead of a silent quantisation to 16 bits.
+
+### And one probe was claiming what it could not read
+
+The same audit found `decode_mp3` scoring **100** on an M4A and on a raw ADTS
+stream. Its probe walks eight kilobytes looking for an MPEG frame header, and
+eight kilobytes of somebody else's compressed audio contains one by chance. Sat
+at 100 it was tried ahead of `decode_ffmpeg` on both.
+
+Nothing decoded wrongly — `open` refused and the host moved on, which is the
+third resolution rule doing its job. But a probe that claims at full strength
+what it cannot read reorders everything behind it, so it now stops before the
+scan when the first bytes are another container's: `ftyp`, `OggS`, `fLaC`,
+`RIFF`, `FORM`, Matroska, ASF, or an ADTS sync. A file that opens with one of
+those is not an MP3 with junk in front of it.
 
 ### The long tail, measured
 

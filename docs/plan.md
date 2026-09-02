@@ -492,7 +492,7 @@ Three outcomes, and the user picks the default once in settings:
 | `decode_ogg` | libvorbis and libopus, the Xiph reference decoders, as submodules | Vorbis and Opus in Ogg | the same argument as `decode_flac`, arriving at a different place: these are the reference decoders, so they define what the codec means -- but the codecs are *lossy*, so what they define is a signal, not a byte pattern. This module reports MP_SAMPLE_F32 because that is what they produce, which puts every file it reads on Path B. See *Lossy codecs and Path A* below |
 | `decode_mp3` | `dr_mp3`, from the submodule `decode_native` already uses | MP3, every MPEG version and rate | not a better decoder -- it agrees with FFmpeg to 124 dB, which is float rounding for a codec whose conformance is defined as an RMS bound. It exists because Media Foundation does not implement gapless metadata and starts every MP3 36 ms late, and because dr_mp3 does and costs no new dependency |
 | `decode_aac` | nothing at all: the codec, the ADTS parsing and the MP4 parsing are all in this tree | AAC-LC in M4A and raw ADTS, every rate and every layout to 7.1 | the same argument as `decode_alac` reaching a different place: not an unmaintained reference, but *four* candidate libraries each producing the wrong thing rather than a wrong sound. See *AAC-LC, which is also written rather than vendored* below |
-| `decode_mf` | Media Foundation `IMFSourceReader` | WMA, and whatever nothing above it read — and WAV and FLAC, **also bit-exact** | ships with Windows and needs nothing installed, which is what it is now for. It began as the answer for MP3 and AAC and is now the last resort for both: it implements gapless metadata in no codec, clips float WAV to integer, scrambles multichannel ALAC, and refuses 8 kHz and 7.1 AAC |
+| `decode_mf` | Media Foundation `IMFSourceReader` | whatever nothing above it read — and WAV and FLAC, **also bit-exact** | ships with Windows and needs nothing installed, which is what it is now for. It began as the answer for MP3 and AAC and is now the last resort for both: it implements gapless metadata in no codec, clips float WAV to integer, scrambles multichannel ALAC, and refuses 8 kHz and 7.1 AAC |
 | `decode_alac` | nothing at all: the codec and the MP4 parsing are both in this tree | ALAC in M4A, every depth to 32 bits and every layout to 7.1 | the reference is the specification *and* is unmaintained, so it was read rather than linked. See *ALAC, which is here and is written rather than vendored* below |
 | `decode_ffmpeg` | `ffmpeg` and `ffprobe`, **found at run time, never shipped** | WavPack, Monkey's Audio, Matroska, DSF/DFF, OggFLAC, HE-AAC, and whatever else is installed | the fallback, at priority 60: every other module knows its own formats better, and it sits above `decode_mf` because measurement put it there. Not vendored, for the reasons in *Where dependencies come from* below |
 
@@ -515,9 +515,16 @@ design:
    worse than a clean error.
 
 Implemented in `ModuleRegistry`, which loads every `mp_*.dll` beside the executable rather
-than naming the one it wants. Measured: FLAC and WAV go to `decode_native` (100 against
-Media Foundation's 40), MP3 and M4A go to `decode_mf` (100 against nothing), and forcing
-`--decoder native` on an MP3 produces a clean refusal rather than a guess.
+than naming the one it wants. `mediaperch-probe claims --file X` prints every decoder's score
+for one file, and [formats.md](formats.md) carries the audit of all of them.
+
+**Media Foundation is last everywhere, and that is a conclusion rather than a preference.**
+It scores 20 on everything it recognises, one below `decode_ffmpeg`'s fallback 30, because
+every format it reads has been measured and every measurement went the same way: float WAV
+clipped, 32-bit FLAC refused, multichannel ALAC in the wrong speakers, gapless metadata in no
+codec at all, and a 16-bit default on lossy streams that declare no depth. On a machine with
+nothing else installed it is still the answer, because then `decode_ffmpeg` scores 0 and 20
+beats nothing — which is the whole of what this module is for.
 
 The choice is per-track and visible: the UI and the log both name the module that opened
 the file.

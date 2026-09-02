@@ -57,7 +57,7 @@ table nobody generates is a coverage table that is wrong.
 | AAC-LC raw ADTS, 44.1 kHz stereo | — | — | — | — | **F32** | — | S32 | F32 |
 | Vorbis in Ogg, 44.1 kHz stereo | — | — | **F32** | — | — | — | — | F32 |
 | Opus in Ogg, 48 kHz stereo | — | — | **F32** | — | — | — | — | F32 |
-| WMA v2, 44.1 kHz stereo | — | — | — | — | — | — | **S16** | F32 |
+| WMA v2, 44.1 kHz stereo | — | — | — | — | — | — | S16 | **F32** |
 | WavPack, 16-bit 44.1 kHz stereo | — | — | — | — | — | — | — | **exact** |
 | FLAC in Matroska, 16-bit stereo | — | (exact) | — | — | — | — | (exact) | **exact** |
 | FLAC, 24-bit 96 kHz stereo | exact | **exact** | — | — | — | — | exact | exact |

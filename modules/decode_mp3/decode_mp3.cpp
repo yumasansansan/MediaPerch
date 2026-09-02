@@ -120,6 +120,34 @@ MpResult MP_CALL decoder_probe(const char* path, const std::uint8_t* head, std::
         return MP_OK;
     }
 
+    // **Another container's payload will contain a byte pair that looks like a
+    // frame header.** The scan below walks eight kilobytes looking for one, and
+    // eight kilobytes of compressed audio is more than enough to produce a
+    // false one by chance -- measured with `mediaperch-probe claims`, which
+    // found this module claiming an M4A and a raw ADTS stream at 100, ahead of
+    // `decode_ffmpeg` and behind only the two modules that actually read them.
+    //
+    // Nothing was decoded wrongly, because `open` refuses and the host tries
+    // the next candidate. But a probe that claims at full strength what it
+    // cannot read is a probe that reorders everything behind it, and the fix is
+    // to stop before the scan when the first bytes say the file is something
+    // else. A file that opens with one of these is not an MP3 with junk in
+    // front of it.
+    if ((bytes >= 8 && std::memcmp(head + 4, "ftyp", 4) == 0) ||   // MP4, M4A
+        std::memcmp(head, "OggS", 4) == 0 ||                       // Ogg
+        std::memcmp(head, "fLaC", 4) == 0 ||                       // FLAC
+        std::memcmp(head, "RIFF", 4) == 0 ||                       // WAV
+        std::memcmp(head, "FORM", 4) == 0 ||                       // AIFF
+        std::memcmp(head, "\x1A\x45\xDF\xA3", 4) == 0 ||         // Matroska
+        std::memcmp(head, "\x30\x26\xB2\x75", 4) == 0 ||         // ASF
+        // ADTS: the same eleven sync bits as an MPEG frame, with the layer
+        // field set to the value MPEG reserved. A layer III header can never
+        // have it, so this is a positive identification of the other format
+        // rather than a guess about this one.
+        (bytes >= 2 && head[0] == 0xFFu && (head[1] & 0xF6u) == 0xF0u)) {
+        return MP_OK;
+    }
+
     std::size_t at = 0;
 
     // An ID3v2 tag sits in front of the audio and carries its own length as

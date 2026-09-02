@@ -134,27 +134,55 @@ MpResult MP_CALL decoder_probe(const char* path, const std::uint8_t* head, std::
         return MP_OK;
     }
 
-    // Media Foundation opens far more than this, but a probe that guesses is a
-    // probe that steals files from a decoder that would have done better. These
-    // are the ones nothing else in the tree handles.
+    // **One score, and it is the lowest in the tree.**
+    //
+    // This module used to claim 100 on MP4, on an MPEG frame header and on ASF,
+    // and win those on the priority tiebreak or on another module's refusal.
+    // Every one of those has since been measured, and every measurement went the
+    // same way -- docs/formats.md has them all:
+    //
+    //   * float WAV comes back clipped to 32-bit integer, 73.8% of the samples
+    //     in the test file pinned at full scale;
+    //   * a 32-bit FLAC is refused outright, at a rate it reads happily at 24
+    //     bits, and so is FLAC above about 655 kHz;
+    //   * multichannel ALAC comes back with every sample perfect and the
+    //     channels in the wrong speakers;
+    //   * gapless metadata is implemented in no codec at all, so every MP3
+    //     starts 36 ms late and every AAC 1024 frames late with the encoder
+    //     padding left on;
+    //   * 8 kHz and 7.1 AAC are refused;
+    //   * a stream that declares no depth is decoded to 16 bits, which for a
+    //     lossy codec means a quantisation nobody asked for.
+    //
+    // There is no format here where it is the best answer and several where it
+    // is measurably the worst, so it takes one score below every other module's
+    // lowest -- `decode_ffmpeg` claims its own fallback formats at 30. What that
+    // buys is the thing this module is actually for: on a machine with nothing
+    // installed, it is still the answer, because then nothing else claims
+    // anything and 20 beats 0. It is the floor, not a competitor.
+    //
+    // The recognition list is unchanged: a probe that guesses is a probe that
+    // steals files from a decoder that would have done better, and a probe that
+    // recognises nothing is a floor with a hole in it.
+    constexpr std::uint32_t last_resort = 20;
     if (has(head, bytes, "ftyp", 4)) {
-        *out_score = 100; // MP4, M4A
+        *out_score = last_resort; // MP4, M4A
     } else if (bytes >= 2 && head[0] == 0xFF && (head[1] & 0xE0) == 0xE0) {
-        *out_score = 100; // MP3: an actual frame header, at the front
+        // Any MPEG audio sync, which is layers I and II as well as III. The
+        // first two are the one place this module was the *only* claimant:
+        // decode_mp3 reads layer III alone. It still is, wherever FFmpeg is
+        // absent.
+        *out_score = last_resort;
     } else if (has(head, bytes, "ID3", 0)) {
-        // **An ID3v2 tag identifies nothing.** FLAC and WAV files carry them
-        // too, and a tag with cover art in it is easily larger than the four
-        // kilobytes a probe is given -- which is exactly the case where
-        // decode_mp3 has to claim weakly because the frame header is out of
-        // reach. Claiming 100 here took every ordinary tagged MP3 away from the
-        // decoder that does gapless, and this decoder does not.
-        *out_score = 60;
+        // An ID3v2 tag identifies nothing -- FLAC and WAV carry them too -- so
+        // this was never a strong claim even when the others were.
+        *out_score = last_resort;
     } else if (has(head, bytes, "\x30\x26\xB2\x75", 0)) {
-        *out_score = 100; // ASF, WMA
+        *out_score = last_resort; // ASF, WMA
     } else if (has(head, bytes, "RIFF", 0) && has(head, bytes, "WAVE", 8)) {
-        *out_score = 40; // it can, but decode_native does it without a converter
+        *out_score = last_resort;
     } else if (has(head, bytes, "fLaC", 0)) {
-        *out_score = 40;
+        *out_score = last_resort;
     }
     return MP_OK;
 }
