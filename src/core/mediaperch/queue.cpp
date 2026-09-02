@@ -24,6 +24,7 @@ bool Queue::open(std::string& why)
         return false;
     }
     position_ = 0;
+    marks_.assign(1, Mark{0, index_, 0});
     stopped_ = QueueStop::end;
     done_ = false;
     return true;
@@ -48,7 +49,12 @@ bool Queue::advance()
     }
     ++index_;
     current_ = next;
-    position_ = 0;
+    // The boundary, now that it is behind us. Anything recorded at or after
+    // this point was recorded on a pass that a seek has since undone.
+    while (!marks_.empty() && marks_.back().run_base >= position_) {
+        marks_.pop_back();
+    }
+    marks_.push_back(Mark{position_, index_, 0});
     return true;
 }
 
@@ -99,13 +105,43 @@ bool Queue::seekable() const noexcept
     return current_ != nullptr && current_->seekable();
 }
 
+std::size_t Queue::mark_for(std::uint64_t run) const noexcept
+{
+    std::size_t m = marks_.size();
+    while (m > 1 && marks_[m - 1].run_base > run) {
+        --m;
+    }
+    return m == 0 ? 0 : m - 1;
+}
+
+std::uint64_t Queue::item_position() const noexcept
+{
+    if (marks_.empty()) {
+        return position_;
+    }
+    const Mark& mark = marks_[mark_for(position_)];
+    return mark.item_base + (position_ - mark.run_base);
+}
+
 bool Queue::seek(std::uint64_t frame)
 {
-    if (current_ == nullptr || !current_->seek(frame)) {
+    if (marks_.empty()) {
         return false;
     }
+    // Which track that queue frame is in, and where in it. A seek backwards
+    // over a boundary reopens the track that was playing then -- the playlist
+    // still has it, because a playlist that forgot what it had already handed
+    // out could not be asked twice.
+    const Mark mark = marks_[mark_for(frame)];
+    ISource* item = playlist_->at(mark.index);
+    if (item == nullptr || !item->seek(mark.item_base + (frame - mark.run_base))) {
+        return false;
+    }
+    index_ = mark.index;
+    current_ = item;
     position_ = frame;
     done_ = false;
+    skip_ = false;
     stopped_ = QueueStop::end;
     return true;
 }

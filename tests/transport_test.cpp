@@ -12,6 +12,7 @@
 #include "fake_sink.hpp"
 
 #include "mediaperch/passthrough.hpp"
+#include "mediaperch/processed.hpp"
 #include "mediaperch/queue.hpp"
 #include "mediaperch/sink.hpp"
 
@@ -391,3 +392,286 @@ TEST_CASE("a source that cannot seek says so rather than pretending", "[transpor
     CHECK_FALSE(graph.seek(1000));
     CHECK(graph.position_frames() == 0);
 }
+
+// --------------------------------------------------------------------------
+// The device going away
+// --------------------------------------------------------------------------
+
+TEST_CASE("a queue seeks in its own frames, across a boundary", "[transport][queue]")
+{
+    // The coordinate the queue and the graph share. A graph counts what the
+    // device played and has never heard of a track boundary -- not seeing one
+    // is what gapless *is* -- so the number it reports has to mean something to
+    // the queue, and this is what it means.
+    const auto first = pattern(2048, 6);
+    const auto second = pattern(4096, 7);
+    Tape a{cd_audio(), first};
+    Tape b{cd_audio(), second};
+    Fixed playlist{{&a, &b}};
+
+    mp::Queue queue{playlist};
+    std::string why;
+    REQUIRE(queue.open(why));
+
+    const std::size_t stride = mp::frame_bytes(cd_audio());
+    std::vector<std::uint8_t> got(first.size() + 1024);
+    REQUIRE(queue.read(got.data(), got.size()) == got.size());
+    // Well past the join, so the queue is on the second track now.
+    CHECK(queue.index() == 1);
+    CHECK(queue.position() == got.size() / stride);
+    CHECK(queue.item_position() == 1024 / stride);
+
+    SECTION("back into the first track")
+    {
+        const std::uint64_t target = 300;
+        REQUIRE(queue.seek(target));
+        CHECK(queue.index() == 0);
+        CHECK(queue.item_position() == target);
+        std::vector<std::uint8_t> after(512);
+        REQUIRE(queue.read(after.data(), after.size()) == after.size());
+        for (std::size_t i = 0; i < after.size(); ++i) {
+            INFO("byte " << i);
+            REQUIRE(after[i] == first[static_cast<std::size_t>(target) * stride + i]);
+        }
+    }
+
+    SECTION("and forward into the second again")
+    {
+        const std::uint64_t boundary = first.size() / stride;
+        const std::uint64_t target = boundary + 100;
+        REQUIRE(queue.seek(target));
+        CHECK(queue.index() == 1);
+        CHECK(queue.item_position() == 100);
+        std::vector<std::uint8_t> after(512);
+        REQUIRE(queue.read(after.data(), after.size()) == after.size());
+        for (std::size_t i = 0; i < after.size(); ++i) {
+            INFO("byte " << i);
+            REQUIRE(after[i] == second[100 * stride + i]);
+        }
+    }
+}
+
+TEST_CASE("a device that is pulled out is reported as one", "[transport][device]")
+{
+    // Somebody unplugged the DAC. WASAPI answers `AUDCLNT_E_DEVICE_INVALIDATED`,
+    // the sink maps it to `MP_ERR_DEVICE_LOST`, and the graph has to say *that*
+    // rather than merely stopping: a host cannot rebuild what it was not told
+    // about.
+    const auto audio = pattern(64 * 4 * 400, 8);
+    Tape tape{cd_audio(), audio};
+
+    mp::test::FakeSinkRules rules;
+    rules.period_frames = 64;
+    rules.pace_us = 300;
+    rules.waits_before_loss = 20;
+    mp::test::FakeSink device{rules};
+    mp::Sink sink = device.handle();
+    const auto negotiated = mp::negotiate_best(sink, cd_audio(), mp::PathPolicy::bit_exact);
+    REQUIRE(negotiated.ok);
+
+    mp::PassthroughGraph graph{tape, sink, negotiated.accepted, 64, negotiated.fidelity};
+    REQUIRE(graph.start() == MP_OK);
+    REQUIRE(wait_until_stopped(graph));
+    graph.stop();
+
+    CHECK(graph.error() == MP_ERR_DEVICE_LOST);
+
+    const std::size_t stride = mp::frame_bytes(cd_audio());
+    const std::uint64_t position = graph.position_frames();
+    // The position is what the *device* was given, not how far the decoder had
+    // read. The difference is the ring, and the ring's contents were never
+    // played -- so resuming from the decoder would skip them in silence.
+    CHECK(position == device.captured().size() / stride);
+    CHECK(position > 0);
+    CHECK(position < audio.size() / stride);
+}
+
+TEST_CASE("a run resumes where the device stopped, byte for byte", "[transport][device]")
+{
+    // The whole claim of device-loss recovery in one comparison: what the two
+    // devices received, laid end to end, is what one device would have received
+    // if nobody had touched the cable. Nothing repeated, nothing skipped.
+    const auto first = pattern(2048, 9);
+    const auto second = pattern(8192, 10);
+    const std::size_t stride = mp::frame_bytes(cd_audio());
+
+    std::vector<std::uint8_t> reference;
+    {
+        Tape a{cd_audio(), first};
+        Tape b{cd_audio(), second};
+        Fixed playlist{{&a, &b}};
+        mp::Queue queue{playlist};
+        std::string why;
+        REQUIRE(queue.open(why));
+
+        mp::test::FakeSinkRules rules;
+        rules.period_frames = 64;
+        rules.pace_us = 200;
+        mp::test::FakeSink device{rules};
+        mp::Sink sink = device.handle();
+        const auto negotiated =
+            mp::negotiate_best(sink, cd_audio(), mp::PathPolicy::bit_exact);
+        REQUIRE(negotiated.ok);
+        mp::PassthroughGraph graph{queue, sink, negotiated.accepted, 64, negotiated.fidelity};
+        REQUIRE(graph.start() == MP_OK);
+        REQUIRE(wait_until_stopped(graph));
+        graph.stop();
+        reference = device.captured();
+    }
+    REQUIRE(reference.size() >= first.size() + second.size());
+
+    Tape a{cd_audio(), first};
+    Tape b{cd_audio(), second};
+    Fixed playlist{{&a, &b}};
+    mp::Queue queue{playlist};
+    std::string why;
+    REQUIRE(queue.open(why));
+
+    // The device that gets pulled out, well after the track boundary so that
+    // the resume has to be converted back into a track and an offset.
+    std::vector<std::uint8_t> before;
+    std::uint64_t resume = 0;
+    {
+        mp::test::FakeSinkRules rules;
+        rules.period_frames = 64;
+        rules.pace_us = 200;
+        rules.waits_before_loss = 20;
+        mp::test::FakeSink device{rules};
+        mp::Sink sink = device.handle();
+        const auto negotiated =
+            mp::negotiate_best(sink, cd_audio(), mp::PathPolicy::bit_exact);
+        REQUIRE(negotiated.ok);
+        mp::PassthroughGraph graph{queue, sink, negotiated.accepted, 64, negotiated.fidelity};
+        graph.set_position(queue.position());
+        REQUIRE(graph.start() == MP_OK);
+        REQUIRE(wait_until_stopped(graph));
+        graph.stop();
+        REQUIRE(graph.error() == MP_ERR_DEVICE_LOST);
+        before = device.captured();
+        resume = graph.position_frames();
+    }
+    REQUIRE(resume * stride == before.size());
+    REQUIRE(resume > first.size() / stride); // it really did cross the boundary
+
+    // What the host does: wait for an endpoint, move the source back to where
+    // the device had got to, and build the whole path again.
+    REQUIRE(queue.seek(resume));
+    CHECK(queue.index() == 1);
+
+    std::vector<std::uint8_t> after;
+    {
+        mp::test::FakeSinkRules rules;
+        rules.period_frames = 64;
+        rules.pace_us = 200;
+        mp::test::FakeSink device{rules};
+        mp::Sink sink = device.handle();
+        const auto negotiated =
+            mp::negotiate_best(sink, cd_audio(), mp::PathPolicy::bit_exact);
+        REQUIRE(negotiated.ok);
+        mp::PassthroughGraph graph{queue, sink, negotiated.accepted, 64, negotiated.fidelity};
+        graph.set_position(queue.position());
+        REQUIRE(graph.start() == MP_OK);
+        REQUIRE(wait_until_stopped(graph));
+        graph.stop();
+        CHECK(graph.error() == MP_OK);
+        // And the clock carried on from where it was rather than from zero.
+        CHECK(graph.position_frames() > resume);
+        after = device.captured();
+    }
+
+    std::vector<std::uint8_t> joined = before;
+    joined.insert(joined.end(), after.begin(), after.end());
+    REQUIRE(joined.size() >= reference.size());
+    for (std::size_t i = 0; i < reference.size(); ++i) {
+        INFO("byte " << i << " of " << reference.size() << ", resume at "
+                     << resume * stride);
+        REQUIRE(joined[i] == reference[i]);
+    }
+}
+
+TEST_CASE("the processed path resumes on the same sample too", "[transport][device]")
+{
+    // Path B has more to put back than Path A: the f64 bus, the converter's
+    // dither, and whatever a chain was holding. The claim is the same either
+    // way -- what plays after the rebuild is what would have played if there
+    // had been no rebuild -- and here it is checked against a run that started
+    // at the resume point and was never interrupted.
+    // 24 bits going out as 16: a conversion nothing can repack its way around,
+    // so the graph really is Path B and the dither really does run.
+    mp::Format source_format = cd_audio();
+    source_format.sample_type = mp::SampleType::s24_in_32;
+    source_format.valid_bits = 24;
+    const mp::Format wire = cd_audio();
+    // Forty periods, because a paced fake device is paced by the operating
+    // system's timer and that is coarser than the period it is imitating.
+    const auto audio = pattern(64 * 8 * 40, 11);
+    const std::size_t stride = mp::frame_bytes(source_format);
+
+    mp::ConvertConfig conversion;
+    conversion.dither = mp::DitherKind::triangular;
+    conversion.seed = 12345; // so two runs from one position agree exactly
+
+    const auto accepts = [wire](const mp::Format& f) { return f == wire; };
+
+    std::vector<std::uint8_t> before;
+    std::uint64_t resume = 0;
+    {
+        Tape tape{source_format, audio};
+        mp::test::FakeSinkRules rules;
+        rules.accepts = accepts;
+        rules.period_frames = 64;
+        rules.pace_us = 200;
+        rules.waits_before_loss = 10;
+        mp::test::FakeSink device{rules};
+        mp::Sink sink = device.handle();
+        const auto negotiated =
+            mp::negotiate_best(sink, source_format, mp::PathPolicy::automatic);
+        REQUIRE(negotiated.ok);
+        mp::ProcessedGraph graph{tape, sink, negotiated.accepted, 64, conversion};
+        REQUIRE(graph.start() == MP_OK);
+        REQUIRE(wait_until_stopped(graph));
+        graph.stop();
+        REQUIRE(graph.error() == MP_ERR_DEVICE_LOST);
+        before = device.captured();
+        resume = graph.position_frames();
+    }
+    REQUIRE(resume > 0);
+    REQUIRE(resume < audio.size() / stride);
+
+    const auto tail = [&](std::uint64_t from) {
+        Tape tape{source_format, audio};
+        REQUIRE(tape.seek(from));
+        mp::test::FakeSinkRules rules;
+        rules.accepts = accepts;
+        rules.period_frames = 64;
+        rules.pace_us = 200;
+        mp::test::FakeSink device{rules};
+        mp::Sink sink = device.handle();
+        const auto negotiated =
+            mp::negotiate_best(sink, source_format, mp::PathPolicy::automatic);
+        REQUIRE(negotiated.ok);
+        mp::ProcessedGraph graph{tape, sink, negotiated.accepted, 64, conversion};
+        graph.set_position(from);
+        REQUIRE(graph.start() == MP_OK);
+        REQUIRE(wait_until_stopped(graph, 30));
+        graph.stop();
+        CHECK(graph.error() == MP_OK);
+        CHECK(graph.position_frames() > from);
+        return device.captured();
+    };
+
+    const auto resumed = tail(resume);
+    const auto uninterrupted = tail(resume);
+    REQUIRE(resumed.size() == uninterrupted.size());
+    for (std::size_t i = 0; i < resumed.size(); ++i) {
+        INFO("byte " << i);
+        REQUIRE(resumed[i] == uninterrupted[i]);
+    }
+
+    // And the two halves together are the whole file: the device was given
+    // every frame once, in order, across a rebuild it never knew about.
+    const std::size_t wire_stride = mp::frame_bytes(wire);
+    CHECK(before.size() == resume * wire_stride);
+    CHECK(before.size() + resumed.size() == audio.size() / stride * wire_stride);
+}
+

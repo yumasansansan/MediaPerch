@@ -40,7 +40,9 @@ targets, on MSVC.
 mediaperch-probe devices     # opens nothing, disturbs nothing
 mediaperch-probe decode      # decode a file and hash it. No device involved
 mediaperch-probe negotiate   # offer every candidate format to a real device
-mediaperch-probe play        # files, gaplessly, or a test tone. Takes the endpoint
+mediaperch-probe play        # files, gaplessly, or a test tone. Takes the endpoint.
+                             # --interactive to pause, seek, skip and switch paths;
+                             # a device that is unplugged is rebuilt onto, not given up on
 mediaperch-probe compare     # a decode against the audio that was encoded
 mediaperch-probe loudness    # BS.1770 over a whole file, and the ReplayGain
 mediaperch-probe verify      # a file, hashed at the device boundary

@@ -28,6 +28,7 @@
 #include "mediaperch/source.hpp"
 
 #include <cstdint>
+#include <vector>
 
 namespace mp {
 
@@ -66,6 +67,17 @@ public:
 
     /// Which item is playing, and how far into it, in that item's own frames.
     [[nodiscard]] std::size_t index() const noexcept { return index_; }
+    [[nodiscard]] std::uint64_t item_position() const noexcept;
+
+    /// How far into the *queue*: frames handed out since it was built, counted
+    /// straight through every boundary.
+    ///
+    /// This is the coordinate `seek` speaks, and it is this one rather than the
+    /// track's because of who the other party is. A graph counts what the
+    /// device played; it has never heard of a track boundary and never will,
+    /// since not seeing one is what gapless *is*. So the queue and the graph
+    /// need a number they can both name, and only the queue can convert it back
+    /// into a track and an offset.
     [[nodiscard]] std::uint64_t position() const noexcept { return position_; }
     /// How many items have been played through to their end.
     [[nodiscard]] std::size_t completed() const noexcept { return completed_; }
@@ -82,6 +94,24 @@ public:
 private:
     /// Opens item `index_ + 1`, or reports why it will not.
     [[nodiscard]] bool advance();
+
+    /// A boundary the queue has crossed: at queue frame `run_base` item
+    /// `index` began, and it began at its own frame `item_base`.
+    ///
+    /// Recorded on the way past rather than computed from lengths, because the
+    /// length of a track nobody has played yet is the decoder's business and
+    /// frequently nobody's at all -- a stream has no length, and a VBR file's
+    /// is a guess until it ends. What has already been played is not a guess.
+    struct Mark {
+        std::uint64_t run_base;
+        std::size_t index;
+        std::uint64_t item_base;
+    };
+
+    /// The mark covering queue frame `run`. Never empty once `open` succeeded.
+    [[nodiscard]] std::size_t mark_for(std::uint64_t run) const noexcept;
+
+    std::vector<Mark> marks_;
 
     IPlaylist* playlist_;
     ISource* current_ = nullptr;

@@ -41,6 +41,17 @@ struct FakeSinkRules {
     /// Hand back a format that is not the one asked for. Models the driver that
     /// says yes and means something else.
     std::function<Format(const Format&)> distort = nullptr;
+    /// Take the device away after this many successful `wait` calls. Zero --
+    /// the default -- is a device that stays.
+    ///
+    /// Models the one failure a player cannot argue with: somebody pulled the
+    /// USB cable out. Everything above the sink is still perfectly alive, which
+    /// is exactly why this is worth modelling rather than treating as the end.
+    std::uint32_t waits_before_loss = 0;
+    /// What losing it looks like. `MP_ERR_DEVICE_LOST` is what the WASAPI sink
+    /// maps `AUDCLNT_E_DEVICE_INVALIDATED` and `AUDCLNT_E_RESOURCES_INVALIDATED`
+    /// to, and it is the only error a host is expected to recover from.
+    MpResult loss_result = MP_ERR_DEVICE_LOST;
 };
 
 class FakeSink {
@@ -124,6 +135,9 @@ private:
         FakeSink& me = self(s);
         if (me.waits_++ < me.rules_.timeouts_before_ok) {
             return MP_TIMEOUT;
+        }
+        if (me.rules_.waits_before_loss != 0 && me.waits_ > me.rules_.waits_before_loss) {
+            return me.rules_.loss_result;
         }
         if (me.rules_.pace_us != 0) {
             std::this_thread::sleep_for(std::chrono::microseconds{me.rules_.pace_us});

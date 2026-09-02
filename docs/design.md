@@ -845,6 +845,48 @@ keeps working and simply has no reset to be told about.
 `reset` is not `configure`. Configuring would also clear the state, and would additionally
 redesign the filter — seconds of work for a convolver, to throw away a few hundred samples.
 
+#### The device can be taken away
+
+`AUDCLNT_E_DEVICE_INVALIDATED` is not a fault, or not usually one. Somebody unplugged the
+DAC, a driver restarted, the default endpoint changed underneath us, somebody altered the
+sample rate in the control panel. WASAPI answers all of those the same way, there is nothing
+to argue with, and the stream is over.
+
+**What was lost is smaller than it looks.** The decoder is still open, the file has not
+moved, the chain rebuilds from the same arguments. What is gone is the device and the frames
+the ring was holding for it. So a lost device is a *rebuild*, not an ending: reopen an
+endpoint, renegotiate, build the graph again, and carry on.
+
+The whole difficulty is the resume point, and it is settled by asking who counted. The
+decoder is a ring ahead of the device; the ring's contents were never played and never will
+be; so resuming from the decoder skips a ring's worth of audio without mentioning it.
+`position_frames()` counts what the *device* was given, and that is the number to come back
+to. The test says it in the only terms that mean anything: what two devices received, laid
+end to end, is byte-for-byte what one uninterrupted device would have received.
+
+It is not quite exact, and the honest statement of the gap is that up to one device buffer
+had been handed over and not yet played when the device went. That much is not played twice.
+A few milliseconds early would be a repeat; this is a few milliseconds late, and neither can
+be avoided without a position the hardware no longer has.
+
+`mp::Queue` had to learn to count for this. A graph counts what the device played and has
+never heard of a track boundary — *not seeing one is what gapless is* — so the number it
+reports has to mean something to a queue that has crossed two of them. The queue therefore
+counts straight through, in its own frames, and records each boundary as it passes it. Not
+computed from track lengths: the length of a track nobody has played is a guess for a VBR
+file and does not exist at all for a stream, whereas where a boundary *was* is a fact.
+
+#### Switching paths is the same machinery
+
+Path A and Path B are decided when a graph is built, so the only place a stream can change
+paths is between one graph and the next. In exclusive mode that means the device stops, the
+ring refills, and the device starts: a real gap, and no amount of care removes it.
+
+What can be removed is the glitch. The next run begins on the frame the device stopped on, so
+no sample is played twice and none is skipped — which is the same promise, kept by the same
+code, as coming back from a device that was pulled out. `p` in `--interactive` is the switch,
+and it exists mostly so that the claim gets exercised by somebody rather than only asserted.
+
 ### Choosing the path
 
 Which graph a stream may take is a setting, not only an inference. `--path` on the probe

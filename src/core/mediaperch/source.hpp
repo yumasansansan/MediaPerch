@@ -37,7 +37,7 @@ public:
     /// Moves to `frame`, counted from the start in this source's own frames.
     /// Returns false when it could not, which a caller must not treat as
     /// "probably worked": the position afterwards is then unknown.
-    virtual bool seek(std::uint64_t frame) { return false; }
+    virtual bool seek(std::uint64_t /*frame*/) { return false; }
 
     /// Total frames, or 0 where the source does not know -- a stream, or a tone
     /// that goes on until somebody stops it.

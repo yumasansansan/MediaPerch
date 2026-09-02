@@ -80,6 +80,10 @@ struct Options {
     /// with a busier machine needed the first one bigger.
     std::uint32_t ring_periods = 8;
     std::uint32_t wait_timeout_ms = 2000;
+    /// Whether a device that goes away mid-run is the end of the run, and how
+    /// long to wait for one to come back before agreeing that it is.
+    bool recover = true;
+    unsigned recover_timeout = 30;
     /// `name` or `name:key=value,key=value`, in the order given, which is the
     /// order they run in.
     std::vector<std::string> dsp;
@@ -314,8 +318,15 @@ Options
                     real-time, and a busy machine may want more
   --wait-timeout MS how long the render thread waits for a device that has
                     stopped signalling before calling it gone. Default 2000
+  --no-recover      treat a device that disappears mid-run as the end of the
+                    run. Without this, `play` waits for an endpoint to answer
+                    again, rebuilds, and resumes from the frame the device had
+                    reached
+  --recover-timeout S
+                    how long to wait for that endpoint. Default 30
   --interactive     `play`: take keys while it plays. Space pauses and resumes,
-                    [ and ] seek ten seconds, n starts the next track, q stops.
+                    [ and ] seek ten seconds, n starts the next track, p switches
+                    between the bit-exact path and the processed one, q stops.
                     Pausing stops the device rather than feeding it silence, so
                     resuming lands on the sample it left
   --shared          shared mode instead of exclusive
@@ -383,6 +394,10 @@ bool parse(int argc, char** argv, Options& out)
             value(out.ring_periods);
         } else if (arg == "--wait-timeout") {
             value(out.wait_timeout_ms);
+        } else if (arg == "--no-recover") {
+            out.recover = false;
+        } else if (arg == "--recover-timeout") {
+            value(out.recover_timeout);
         } else if (arg == "--dsp") {
             if (i + 1 >= argc) {
                 std::fprintf(stderr, "--dsp takes a stage name, or `list`\n");
@@ -610,8 +625,17 @@ std::string lowered(std::string_view text)
 /// opening the wrong endpoint is not a small mistake -- it takes that device
 /// away from everything else on the machine -- so a name that matches two
 /// devices ends the command instead of picking one.
-bool device_id_for(const MpSinkVtbl& sink, const Options& options, std::string& out)
+bool device_id_for(const MpSinkVtbl& sink, const Options& options, std::string& out,
+                   bool quiet = false)
 {
+    // Quiet is for polling: after the device was lost this runs four times a
+    // second until one answers, and saying "no endpoint matches" a hundred
+    // times is not more informative than saying it once.
+    const auto complain = [quiet](const char* fmt, auto... rest) {
+        if (!quiet) {
+            std::fprintf(stderr, fmt, rest...);
+        }
+    };
     if (!options.device_name.empty()) {
         const std::string want = lowered(options.device_name);
         std::vector<std::pair<std::string, std::string>> hits; // name, id
@@ -623,7 +647,7 @@ bool device_id_for(const MpSinkVtbl& sink, const Options& options, std::string& 
                 break;
             }
             if (r != MP_OK) {
-                std::fprintf(stderr, "enumerate failed: %s\n", result_name(r));
+                complain("enumerate failed: %s\n", result_name(r));
                 return false;
             }
             if (lowered(info.name).find(want) != std::string::npos) {
@@ -631,14 +655,14 @@ bool device_id_for(const MpSinkVtbl& sink, const Options& options, std::string& 
             }
         }
         if (hits.empty()) {
-            std::fprintf(stderr, "no endpoint matches `%s`\n", options.device_name.c_str());
+            complain("no endpoint matches `%s`\n", options.device_name.c_str());
             return false;
         }
         if (hits.size() > 1) {
-            std::fprintf(stderr, "`%s` matches %zu endpoints:\n", options.device_name.c_str(),
-                         hits.size());
+            complain("`%s` matches %zu endpoints:\n", options.device_name.c_str(),
+                     hits.size());
             for (const auto& hit : hits) {
-                std::fprintf(stderr, "  %s\n", hit.first.c_str());
+                complain("  %s\n", hit.first.c_str());
             }
             return false;
         }
@@ -654,7 +678,7 @@ bool device_id_for(const MpSinkVtbl& sink, const Options& options, std::string& 
     info.size = sizeof(info);
     const MpResult r = sink.enumerate(static_cast<std::uint32_t>(options.device_index), &info);
     if (r != MP_OK) {
-        std::fprintf(stderr, "no device with index %d\n", options.device_index);
+        complain("no device with index %d\n", options.device_index);
         return false;
     }
     out = info.id;
@@ -790,8 +814,17 @@ int negotiate(const MpSinkVtbl& vtbl, const Options& options)
 /// else's job -- but transport that cannot be exercised is transport nobody has
 /// checked, and a person is a better test of "did the device notice" than any
 /// assertion.
+enum class KeyResult {
+    carry_on,
+    stop,
+    /// Somebody asked for the other path. The graph cannot change which one it
+    /// is -- that decision is made when it is built -- so this ends the run and
+    /// the host builds the next one differently.
+    switch_path,
+};
+
 template <typename Graph>
-bool handle_keys(Graph& graph, mp::Queue* queue, const mp::Format& source)
+KeyResult handle_keys(Graph& graph, mp::Queue* queue, const mp::Format& source)
 {
     while (_kbhit() != 0) {
         const int key = _getch();
@@ -829,25 +862,52 @@ bool handle_keys(Graph& graph, mp::Queue* queue, const mp::Format& source)
                 std::fflush(stdout);
             }
             break;
+        case 'p':
+            if (queue != nullptr) {
+                return KeyResult::switch_path;
+            }
+            std::printf("  a tone has no position, so there is nowhere to switch "
+                        "back to\n");
+            std::fflush(stdout);
+            break;
         case 'q':
-            return false;
+            return KeyResult::stop;
         default:
             break;
         }
     }
-    return true;
+    return KeyResult::carry_on;
 }
 
+/// What one run of the graph came to.
+///
+/// More than an exit code, because the caller has to decide whether to build
+/// the whole thing again. A file that ended and a device that was pulled out
+/// both stop the graph, and the difference between them is this struct.
+struct RunOutcome {
+    /// The exit code this run would have earned on its own.
+    int rc = 0;
+    /// Why the graph stopped, when it stopped by itself.
+    MpResult error = MP_OK;
+    /// Which source frame the device had been given when it stopped, and so
+    /// where a resumed run begins.
+    std::uint64_t position = 0;
+    /// The run ended because somebody asked for the other path.
+    bool switch_path = false;
+};
+
 template <typename Graph>
-int run_graph(Graph& graph, mp::win::RenderThreadHooks& hooks, const mp::Format& wire,
-              unsigned limit_seconds, const Options* options = nullptr,
-              mp::Queue* queue = nullptr, const mp::Format* source = nullptr)
+RunOutcome run_graph(Graph& graph, mp::win::RenderThreadHooks& hooks, const mp::Format& wire,
+                     unsigned limit_seconds, const Options* options = nullptr,
+                     mp::Queue* queue = nullptr, const mp::Format* source = nullptr)
 {
 
     const MpResult started = graph.start();
     if (started != MP_OK) {
         std::fprintf(stderr, "could not start: %s\n", result_name(started));
-        return 1;
+        // Not always fatal: a device can go between being negotiated with and
+        // being started, and that is the same event as losing it later.
+        return RunOutcome{1, started, graph.position_frames()};
     }
     // enter() runs on the render thread, which has not necessarily reached it
     // yet. Ask, rather than read a field that has not been written.
@@ -870,10 +930,15 @@ int run_graph(Graph& graph, mp::win::RenderThreadHooks& hooks, const mp::Format&
     const auto until = began + std::chrono::seconds{limit_seconds};
     auto next_report = began + std::chrono::seconds{5};
 
+    bool asked_to_switch = false;
     while ((!timed || std::chrono::steady_clock::now() < until) && graph.running()) {
-        if (options != nullptr && options->interactive &&
-            !handle_keys(graph, queue, source != nullptr ? *source : wire)) {
-            break;
+        if (options != nullptr && options->interactive) {
+            const KeyResult key =
+                handle_keys(graph, queue, source != nullptr ? *source : wire);
+            if (key != KeyResult::carry_on) {
+                asked_to_switch = key == KeyResult::switch_path;
+                break;
+            }
         }
         // Short enough that a keypress does not sit waiting, long enough that
         // this is not a spin.
@@ -912,12 +977,13 @@ int run_graph(Graph& graph, mp::win::RenderThreadHooks& hooks, const mp::Format&
                     static_cast<unsigned long long>(stats.tail_frames));
     }
 
+    const std::uint64_t position = graph.position_frames();
     const MpResult error = graph.error();
     if (error != MP_OK) {
         std::printf("stopped    %s\n", result_name(error));
-        return 1;
+        return RunOutcome{1, error, position, false};
     }
-    return stats.underruns == 0 ? 0 : 2;
+    return RunOutcome{stats.underruns == 0 ? 0 : 2, MP_OK, position, asked_to_switch};
 }
 
 #if MEDIAPERCH_HAS_LOUDNESS
@@ -1190,9 +1256,135 @@ private:
 /// A run ends when the audio does -- or when the next track is in a different
 /// format, which needs the device reopened and is therefore a new run with an
 /// audible gap between them. `play` is the loop over runs.
-int play_run(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
-             const Options& options, mp::ISource& queued, mp::Queue* queue,
-             const std::string& label);
+RunOutcome play_run(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
+                    const Options& options, mp::ISource& queued, mp::Queue* queue,
+                    const std::string& label);
+
+/// Whether there is an endpoint there that will open.
+///
+/// Opening it is the test rather than enumerating it: an endpoint can be listed
+/// while its driver is still coming back, and a device that will not open is
+/// not one to rebuild on.
+bool device_ready(const MpSinkVtbl& vtbl, const Options& options)
+{
+    std::string id;
+    if (!device_id_for(vtbl, options, id, /*quiet=*/true)) {
+        return false;
+    }
+    MpSink* handle = nullptr;
+    if (vtbl.open(id.empty() ? nullptr : id.c_str(),
+                  options.shared ? MP_SHARE_SHARED : MP_SHARE_EXCLUSIVE, &handle) != MP_OK) {
+        return false;
+    }
+    vtbl.close(handle);
+    return true;
+}
+
+/// The device went away in the middle of a run.
+///
+/// Not necessarily a fault, and usually not one: a USB DAC that was unplugged,
+/// a driver that restarted, a default endpoint that changed underneath us,
+/// somebody altering the sample rate in the control panel. WASAPI answers every
+/// one of those with `AUDCLNT_E_DEVICE_INVALIDATED`, there is no way to argue
+/// with it, and the only thing to be done is to build the whole path again on
+/// whatever endpoint is there now.
+///
+/// **What was lost is smaller than it looks.** The decoder is still open, the
+/// file has not moved, and the chain rebuilds from the same `--dsp` arguments,
+/// so the only casualties are the device and the frames the ring was holding
+/// for it. That is exactly why the resume point is what the *device* was given
+/// and not how far the decoder had read: the ring's contents were never played
+/// and never will be, and resuming from the decoder would skip a ring's worth
+/// of audio without mentioning it.
+bool recover_device(const MpSinkVtbl& vtbl, const Options& options,
+                    const RunOutcome& run, mp::Queue* queue)
+{
+    if (!options.recover) {
+        return false;
+    }
+    if (queue == nullptr) {
+        // A tone has no position to come back to, and playing another
+        // `--seconds` of it would be a different run wearing the same name.
+        std::printf("\ndevice     lost. There is nothing to resume: a tone has no "
+                    "position\n           and --file is what gives a run one.\n");
+        return false;
+    }
+    std::printf("\ndevice     lost -- unplugged, restarted, or reconfigured under us.\n");
+    if (!device_ready(vtbl, options)) {
+        std::printf("waiting    for an endpoint to answer (up to %u s)\n",
+                    options.recover_timeout);
+        std::fflush(stdout);
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::seconds{options.recover_timeout};
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{250});
+            if (device_ready(vtbl, options)) {
+                break;
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                std::fprintf(stderr, "no endpoint came back within %u s\n",
+                             options.recover_timeout);
+                return false;
+            }
+        }
+    }
+    if (!queue->seek(run.position)) {
+        std::fprintf(stderr, "the device came back but the source cannot seek, so "
+                             "there is\nnowhere to resume from\n");
+        return false;
+    }
+    const double seconds =
+        static_cast<double>(run.position) / queue->format().sample_rate;
+    std::printf("resuming   at frame %llu (%.2f s). Up to one device buffer had "
+                "been handed\n           over and not yet played, and that much is "
+                "not played twice.\n\n",
+                static_cast<unsigned long long>(run.position), seconds);
+    return true;
+}
+
+/// Somebody asked for the other path, in the middle of a track.
+///
+/// **The device has to stop.** Exclusive mode has no way to change what feeds a
+/// running stream, and a graph decides which path it is when it is built, so
+/// the only place a path can change is between one graph and the next. That
+/// gap is real: it is the device stopping, the ring refilling, and the device
+/// starting again.
+///
+/// What is *not* real is a glitch. The next run begins on the frame the device
+/// stopped on -- not on the one the decoder had reached, which is a ring ahead
+/// -- so no sample is played twice and none is skipped. Continuity of the audio
+/// across a rebuild is the thing a rebuild point can honestly promise, and it
+/// is the same promise, kept by the same code, as coming back from a device
+/// that was pulled out.
+bool switch_path(Options& current, const RunOutcome& run, mp::Queue& queue)
+{
+    // Whatever is decided below, the next run starts on the frame this one
+    // stopped on. That is true even when the answer is "no": a run that was
+    // interrupted and resumed on the same path must still resume, not restart a
+    // ring's worth ahead of where anybody had got to.
+    if (!queue.seek(run.position)) {
+        std::fprintf(stderr, "this source cannot seek, so it cannot resume on "
+                             "another path\n");
+        return false;
+    }
+    if (!current.dsp.empty()) {
+        std::printf("\npath       there is a --dsp chain in the path, and a chain "
+                    "exists in order to\n           change the samples. There is "
+                    "nothing for a policy to decide.\n\n");
+        return true; // carry on where we were, on the same path
+    }
+    const mp::PathPolicy next = current.path == mp::PathPolicy::processed
+                                    ? mp::PathPolicy::bit_exact
+                                    : mp::PathPolicy::processed;
+    current.path = next;
+    std::printf("\npath       switching to %s at frame %llu (%.2f s). The device "
+                "stops and\n           starts; the audio carries on from the sample "
+                "it stopped on.\n\n",
+                mp::path_policy_name(next),
+                static_cast<unsigned long long>(run.position),
+                static_cast<double>(run.position) / queue.format().sample_rate);
+    return true;
+}
 
 int play(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
          const Options& options)
@@ -1211,12 +1403,15 @@ int play(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
             return 1;
         }
         mp::SineSource tone{wanted, options.hz, options.amplitude};
-        return play_run(vtbl, registry, options, tone, nullptr, "");
+        const RunOutcome run = play_run(vtbl, registry, options, tone, nullptr, "");
+        if (run.error == MP_ERR_DEVICE_LOST) {
+            (void)recover_device(vtbl, options, run, nullptr);
+        }
+        return run.rc;
     }
 
     FilePlaylist playlist{registry, options};
     std::size_t start = 0;
-    int rc = 0;
     for (;;) {
         mp::Queue queue{playlist, start};
         std::string why;
@@ -1229,10 +1424,44 @@ int play(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
                          static_cast<unsigned long long>(options.seek));
             return 1;
         }
-        rc = play_run(vtbl, registry, options, queue, &queue,
-                      playlist.decoder_name(queue.index()));
-        if (rc != 0 || queue.stopped() != mp::QueueStop::format_change) {
-            return rc;
+        // One queue, as many devices as it takes. The inner loop is the whole
+        // of device-loss recovery: the source outlives the device, so losing
+        // one is a rebuild and not an ending.
+        RunOutcome run;
+        // The options a run is built from, which a path switch edits. Copied so
+        // that what the command line said stays what the command line said.
+        Options current = options;
+        bool just_switched = false;
+        for (;;) {
+            run = play_run(vtbl, registry, current, queue, &queue,
+                           playlist.decoder_name(queue.index()));
+            if (run.switch_path) {
+                if (!switch_path(current, run, queue)) {
+                    break;
+                }
+                just_switched = true;
+                continue;
+            }
+            if (just_switched && run.rc == 1 && run.error == MP_OK) {
+                // The other path was refused before anything played -- almost
+                // always bit-exact on a device that will not take the file's
+                // own format. Going back is better than ending a track over a
+                // key somebody pressed to see what it did. The queue is still
+                // where the switch left it, so there is nothing to seek.
+                current.path = options.path;
+                just_switched = false;
+                std::printf("path       refused, so this is still %s\n\n",
+                            mp::path_policy_name(current.path));
+                continue;
+            }
+            just_switched = false;
+            if (run.error != MP_ERR_DEVICE_LOST ||
+                !recover_device(vtbl, current, run, &queue)) {
+                break;
+            }
+        }
+        if (run.rc != 0 || queue.stopped() != mp::QueueStop::format_change) {
+            return run.rc;
         }
         // The one join a queue will not make. Saying so is the point: this is
         // the gap, it is the device's and not the player's, and it is where it
@@ -1245,9 +1474,9 @@ int play(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
     }
 }
 
-int play_run(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
-             const Options& options, mp::ISource& queued, mp::Queue* queue,
-             const std::string& label)
+RunOutcome play_run(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
+                    const Options& options, mp::ISource& queued, mp::Queue* queue,
+                    const std::string& label)
 {
     mp::ISource* source = &queued;
     const std::string& decoder_name = label;
@@ -1259,17 +1488,17 @@ int play_run(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
     for (const std::string& spec : options.dsp) {
         if (!add_dsp_stage(registry, spec, chain, why)) {
             std::fprintf(stderr, "%s\n", why.c_str());
-            return 1;
+            return RunOutcome{1};
         }
     }
 
     std::string device_id;
     if (!device_id_for(vtbl, options, device_id)) {
-        return 1;
+        return RunOutcome{1};
     }
     mp::Sink sink = open_sink(vtbl, device_id, options.shared);
     if (!sink) {
-        return 1;
+        return RunOutcome{1};
     }
 
     // What the device is asked for. A chain that resamples or remixes changes
@@ -1284,7 +1513,7 @@ int play_run(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
         // and all that is wanted here is the format that comes out the far end.
         if (!chain.configure(mp::dsp_bus_format(source_format), 4096, why)) {
             std::fprintf(stderr, "%s\n", why.c_str());
-            return 1;
+            return RunOutcome{1};
         }
         offered.sample_rate = chain.output_format().sample_rate;
         offered.channels = chain.output_format().channels;
@@ -1298,19 +1527,19 @@ int play_run(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
     const auto negotiated = mp::negotiate_best(sink, offered, policy);
     if (!negotiated.ok) {
         report_refusal(negotiated);
-        return 1;
+        return RunOutcome{1};
     }
 
     std::uint32_t period = 0;
     if (sink.period_frames(period) != MP_OK || period == 0) {
         std::fprintf(stderr, "the device did not report a buffer size\n");
-        return 1;
+        return RunOutcome{1};
     }
 
     if (!chain.empty() && !chain.configure(mp::dsp_bus_format(source_format), period, why)) {
         // Same chain, now sized for the block the graph will actually feed it.
         std::fprintf(stderr, "%s\n", why.c_str());
-        return 1;
+        return RunOutcome{1};
     }
 
     std::printf("device     %s\n", device_id.empty() ? "(default endpoint)" : device_id.c_str());
@@ -1396,7 +1625,8 @@ int play_run(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
                                  conversion,       &hooks,
                                  buffering(options),
                                  chain.empty() ? nullptr : &chain};
-        const int rc =
+        graph.set_position(queue != nullptr ? queue->position() : 0);
+        const RunOutcome rc =
             run_graph(graph, hooks, negotiated.accepted, limit, &options, queue,
                       &source_format);
         // What each stage made of it, in the stage's own words. `dsp_gain`
@@ -1415,6 +1645,7 @@ int play_run(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
     mp::PassthroughGraph graph{*source,   sink,
                                negotiated.accepted, period,
                                negotiated.fidelity, &hooks, buffering(options)};
+    graph.set_position(queue != nullptr ? queue->position() : 0);
     return run_graph(graph, hooks, negotiated.accepted, limit, &options, queue,
                      &source_format);
 }

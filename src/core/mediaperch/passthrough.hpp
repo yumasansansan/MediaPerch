@@ -104,6 +104,17 @@ public:
     /// hear.
     [[nodiscard]] std::uint64_t position_frames() const noexcept;
 
+    /// Where the source already is, before anything plays.
+    ///
+    /// A run does not always begin at frame zero: `--seek` starts one part way
+    /// in, and a run that resumes after the device was pulled out begins
+    /// wherever the last one stopped. A position that pretended otherwise would
+    /// be one nobody could seek back to. Call it before `start`.
+    void set_position(std::uint64_t frame) noexcept
+    {
+        played_base_.store(frame, std::memory_order_relaxed);
+    }
+
 
     [[nodiscard]] bool running() const noexcept { return running_.load(std::memory_order_acquire); }
 
