@@ -26,6 +26,8 @@ add_library(mediaperch_core STATIC
     mediaperch/negotiation.hpp
     mediaperch/log.cpp
     mediaperch/log.hpp
+    mediaperch/packet.cpp
+    mediaperch/packet.hpp
     mediaperch/passthrough.cpp
     mediaperch/passthrough.hpp
     mediaperch/player.cpp

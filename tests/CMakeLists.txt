@@ -23,6 +23,7 @@ add_executable(mediaperch_tests
     format_test.cpp
     graph_test.cpp
     negotiation_test.cpp
+    packet_test.cpp
     player_test.cpp
     property_test.cpp
     protocol_test.cpp

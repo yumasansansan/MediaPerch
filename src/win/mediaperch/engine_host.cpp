@@ -3,6 +3,7 @@
 #include "mediaperch/engine_host.hpp"
 
 #include "mediaperch/decoder.hpp"
+#include "mediaperch/packet.hpp"
 #include "mediaperch/result.hpp"
 
 #include <algorithm>
@@ -27,6 +28,28 @@ std::string lowered(std::string_view s)
 std::unique_ptr<ISource> EngineHost::open_source(const std::string& path,
                                                  std::string& decoder, std::string& why)
 {
+    // **The container first.** A demuxer identifies the file, says what is in
+    // it, and the codec is looked up by name. Nothing is tried.
+    //
+    // The v1 path below is what runs while the modules are still being moved
+    // across, and it goes with the last of them -- see docs/plan.md §4, *ABI
+    // v2: the container decides*.
+    for (const auto& candidate : registry_->demuxers_for(path, {})) {
+        auto source = std::make_unique<PacketSource>();
+        std::string trouble;
+        const auto find = [this](MpCodec codec) {
+            return registry_->codec_for(codec, nullptr, 0);
+        };
+        if (source->open(*candidate.vtbl, path.c_str(), find, trouble)) {
+            decoder = candidate.desc->id;
+            return source;
+        }
+        // A container that opened and a codec nobody has are different
+        // failures, and the message says which. Keep it in case nothing else
+        // does better.
+        why = trouble;
+    }
+
     auto ranked = registry_->decoders_for(path, {});
     if (ranked.empty()) {
         why = "no decoder recognised it";

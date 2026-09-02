@@ -210,6 +210,30 @@ public:
     /// Every loaded DSP module, for `--dsp list` and for a settings dialogue.
     [[nodiscard]] std::vector<const MpModuleDesc*> dsps() const;
 
+    struct DemuxChoice {
+        const MpDemuxVtbl* vtbl = nullptr;
+        const MpModuleDesc* desc = nullptr;
+        std::uint32_t score = 0;
+    };
+
+    /// Every demuxer that claims this file's *container*, best first.
+    ///
+    /// One probe per module on the first four kilobytes, which is what magic
+    /// bytes are for and all a container needs. What is inside it is not asked
+    /// here and is not visible from four kilobytes anyway -- that is what
+    /// opening the container is for.
+    [[nodiscard]] std::vector<DemuxChoice> demuxers_for(const std::string& path,
+                                                        std::string_view prefer = {}) const;
+
+    /// Which module decodes `codec`. **Looked up, not tried.**
+    ///
+    /// A module that declared its codecs in its descriptor is filtered on that
+    /// declaration first -- capability declaration is data, not code, and a
+    /// module that named its codecs has promised. The rest are asked, and the
+    /// best score wins with priority breaking ties, as everywhere else.
+    [[nodiscard]] const MpCodecVtbl* codec_for(MpCodec codec, const std::uint8_t* config,
+                                               std::uint32_t config_bytes) const;
+
     struct DecoderChoice {
         const MpDecoderVtbl* vtbl = nullptr;
         const MpModuleDesc* desc = nullptr;

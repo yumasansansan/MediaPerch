@@ -1,0 +1,449 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#include "mediaperch/packet.hpp"
+
+#include <algorithm>
+#include <cstring>
+
+namespace mp {
+namespace {
+
+/// What a packet buffer starts at. Big enough for an ordinary audio packet --
+/// an AAC frame is a couple of kilobytes, a FLAC frame a few -- and it grows on
+/// demand for anything larger, so the number is a starting point rather than a
+/// limit.
+constexpr std::size_t k_packet_start = 8192;
+
+/// How much decoded audio one packet may produce before something is wrong.
+/// A frame of any codec here is at most a few thousand samples; this is two
+/// orders of magnitude above that, so it bounds a module that lies without
+/// getting in the way of one that does not.
+constexpr std::size_t k_pcm_room = 1u << 20;
+
+bool has(const MpDemuxVtbl& v, std::size_t offset) noexcept
+{
+    return v.size >= offset + sizeof(void*);
+}
+
+} // namespace
+
+// --------------------------------------------------------------------------
+// Demux
+// --------------------------------------------------------------------------
+
+MpResult Demux::open(const MpDemuxVtbl& vtbl, const char* path)
+{
+    close();
+    if (vtbl.open == nullptr || vtbl.close == nullptr || path == nullptr) {
+        return MP_ERR_INVALID;
+    }
+    MpDemux* handle = nullptr;
+    const MpResult r = vtbl.open(path, &handle);
+    if (r != MP_OK || handle == nullptr) {
+        return r == MP_OK ? MP_ERR_INTERNAL : r;
+    }
+    vtbl_ = &vtbl;
+    handle_ = handle;
+    if (vtbl.stream_count != nullptr) {
+        vtbl.stream_count(handle_, &streams_);
+    }
+    return MP_OK;
+}
+
+void Demux::close() noexcept
+{
+    if (vtbl_ != nullptr && handle_ != nullptr && vtbl_->close != nullptr) {
+        vtbl_->close(handle_);
+    }
+    vtbl_ = nullptr;
+    handle_ = nullptr;
+    streams_ = 0;
+}
+
+bool Demux::stream_info(std::uint32_t index, MpStreamInfo& out) const
+{
+    if (!*this || vtbl_->stream_info == nullptr) {
+        return false;
+    }
+    out = MpStreamInfo{};
+    out.size = sizeof(MpStreamInfo);
+    return vtbl_->stream_info(handle_, index, &out) == MP_OK;
+}
+
+bool Demux::stream_config(std::uint32_t index, std::vector<std::uint8_t>& out) const
+{
+    out.clear();
+    if (!*this || vtbl_->stream_config == nullptr) {
+        return false;
+    }
+    // Asked with no buffer first, which the ABI says is legal and is how a
+    // caller learns a size it has no other way to know.
+    std::uint32_t needed = 0;
+    if (vtbl_->stream_config(handle_, index, nullptr, 0, &needed) != MP_OK) {
+        return false;
+    }
+    if (needed == 0) {
+        return true; // a codec whose configuration is the packets themselves
+    }
+    out.resize(needed);
+    std::uint32_t written = 0;
+    if (vtbl_->stream_config(handle_, index, out.data(), needed, &written) != MP_OK) {
+        out.clear();
+        return false;
+    }
+    out.resize(std::min<std::size_t>(written, out.size()));
+    return true;
+}
+
+bool Demux::best_audio_stream(std::uint32_t& out) const
+{
+    // **A file is not one stream**, so this is a decision and it is written
+    // down: what the container itself marks as default, and failing that the
+    // first audio stream it lists. Anything cleverer -- language, channel
+    // count, a person's preference -- belongs above this, where the person is.
+    bool found = false;
+    for (std::uint32_t i = 0; i < streams_; ++i) {
+        MpStreamInfo info{};
+        if (!stream_info(i, info) || info.kind != MP_STREAM_AUDIO) {
+            continue;
+        }
+        if ((info.flags & MP_STREAM_DEFAULT) != 0) {
+            out = i;
+            return true;
+        }
+        if (!found) {
+            out = i;
+            found = true;
+        }
+    }
+    return found;
+}
+
+MpResult Demux::select(std::uint32_t index)
+{
+    if (!*this || vtbl_->select == nullptr) {
+        return MP_ERR_UNSUPPORTED;
+    }
+    return vtbl_->select(handle_, index);
+}
+
+MpResult Demux::read_packet(std::vector<std::uint8_t>& buffer, MpPacket& out)
+{
+    if (!*this || vtbl_->read_packet == nullptr) {
+        return MP_ERR_UNSUPPORTED;
+    }
+    if (buffer.empty()) {
+        buffer.resize(k_packet_start);
+    }
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        out = MpPacket{};
+        out.size = sizeof(MpPacket);
+        const MpResult r = vtbl_->read_packet(handle_, buffer.data(), buffer.size(), &out);
+        if (r != MP_ERR_NO_MEMORY) {
+            return r;
+        }
+        // It did not fit and nothing was consumed, so the packet is still
+        // there: grow to what it asked for and ask again. Twice at most,
+        // because a module that asks for more than it then uses is a module
+        // that would loop.
+        if (out.bytes == 0 || out.bytes <= buffer.size()) {
+            return MP_ERR_INTERNAL;
+        }
+        buffer.resize(out.bytes);
+    }
+    return MP_ERR_NO_MEMORY;
+}
+
+MpResult Demux::seek(std::uint64_t frame)
+{
+    if (!*this || vtbl_->seek == nullptr) {
+        return MP_ERR_UNSUPPORTED;
+    }
+    return vtbl_->seek(handle_, frame);
+}
+
+MpResult Demux::read_frames(void* dst, std::size_t bytes, std::size_t& out_bytes)
+{
+    out_bytes = 0;
+    if (!*this || !has(*vtbl_, offsetof(MpDemuxVtbl, read_frames)) ||
+        vtbl_->read_frames == nullptr) {
+        return MP_ERR_UNSUPPORTED;
+    }
+    return vtbl_->read_frames(handle_, dst, bytes, &out_bytes);
+}
+
+// --------------------------------------------------------------------------
+// Codec
+// --------------------------------------------------------------------------
+
+MpResult Codec::open(const MpCodecVtbl& vtbl, MpCodec codec, const std::uint8_t* config,
+                     std::uint32_t config_bytes)
+{
+    close();
+    if (vtbl.open == nullptr || vtbl.close == nullptr) {
+        return MP_ERR_INVALID;
+    }
+    MpCodecInstance* handle = nullptr;
+    const MpResult r = vtbl.open(codec, config, config_bytes, &handle);
+    if (r != MP_OK || handle == nullptr) {
+        return r == MP_OK ? MP_ERR_INTERNAL : r;
+    }
+    vtbl_ = &vtbl;
+    handle_ = handle;
+    return MP_OK;
+}
+
+void Codec::close() noexcept
+{
+    if (vtbl_ != nullptr && handle_ != nullptr && vtbl_->close != nullptr) {
+        vtbl_->close(handle_);
+    }
+    vtbl_ = nullptr;
+    handle_ = nullptr;
+}
+
+bool Codec::format(Format& out) const
+{
+    if (!*this || vtbl_->get_format == nullptr) {
+        return false;
+    }
+    MpFormat raw{};
+    if (vtbl_->get_format(handle_, &raw) != MP_OK) {
+        return false;
+    }
+    out = from_abi(raw);
+    return is_valid(out);
+}
+
+MpResult Codec::decode(const void* packet, std::size_t packet_bytes, void* dst,
+                       std::size_t dst_bytes, std::size_t& out_bytes)
+{
+    out_bytes = 0;
+    if (!*this || vtbl_->decode == nullptr) {
+        return MP_ERR_UNSUPPORTED;
+    }
+    return vtbl_->decode(handle_, packet, packet_bytes, dst, dst_bytes, &out_bytes);
+}
+
+MpResult Codec::flush(void* dst, std::size_t dst_bytes, std::size_t& out_bytes)
+{
+    out_bytes = 0;
+    if (!*this || vtbl_->flush == nullptr) {
+        return MP_OK; // a codec that holds nothing has nothing to give back
+    }
+    return vtbl_->flush(handle_, dst, dst_bytes, &out_bytes);
+}
+
+MpResult Codec::reset()
+{
+    if (!*this || vtbl_->reset == nullptr) {
+        return MP_ERR_UNSUPPORTED;
+    }
+    return vtbl_->reset(handle_);
+}
+
+// --------------------------------------------------------------------------
+// PacketSource
+// --------------------------------------------------------------------------
+
+bool PacketSource::open(const MpDemuxVtbl& demux, const char* path,
+                        const FindCodec& find_codec, std::string& why)
+{
+    if (demux_.open(demux, path) != MP_OK) {
+        why = "the container would not open";
+        return false;
+    }
+    std::uint32_t index = 0;
+    if (!demux_.best_audio_stream(index)) {
+        why = "the container has no audio stream";
+        return false;
+    }
+    if (!demux_.stream_info(index, stream_)) {
+        why = "the container would not describe its audio stream";
+        return false;
+    }
+    if (demux_.select(index) != MP_OK) {
+        why = "the container would not select its audio stream";
+        return false;
+    }
+
+    self_decodes_ = (stream_.flags & MP_STREAM_SELF_DECODES) != 0;
+    if (!self_decodes_) {
+        // **Looked up, not tried.** A container that says `MP_CODEC_ALAC` and a
+        // build with no ALAC codec is a readable file nobody can play, and that
+        // is a different sentence from "unreadable file" -- so it is a
+        // different message.
+        const MpCodecVtbl* codec = find_codec ? find_codec(stream_.codec) : nullptr;
+        if (codec == nullptr) {
+            why = "nothing here decodes that codec";
+            return false;
+        }
+        std::vector<std::uint8_t> config;
+        (void)demux_.stream_config(index, config);
+        if (codec_.open(*codec, stream_.codec, config.empty() ? nullptr : config.data(),
+                        static_cast<std::uint32_t>(config.size())) != MP_OK) {
+            why = "the codec would not open this stream";
+            return false;
+        }
+    }
+
+    // What the container said, and what the codec says when the container did
+    // not. A container that states a format and a codec that contradicts it is
+    // the codec's word: it is the one producing the samples.
+    format_ = from_abi(stream_.format);
+    Format from_codec{};
+    if (!self_decodes_ && codec_.format(from_codec)) {
+        format_ = from_codec;
+    }
+    if (!is_valid(format_)) {
+        why = "neither the container nor the codec would say what the format is";
+        return false;
+    }
+
+    length_ = stream_.play_frames != 0 ? stream_.play_frames : stream_.total_frames;
+    skip_ = stream_.skip_frames;
+    remaining_ = stream_.play_frames;
+    bounded_ = stream_.play_frames != 0;
+    seekable_ = demux.seek != nullptr;
+    return true;
+}
+
+bool PacketSource::pump()
+{
+    if (drained_) {
+        return false;
+    }
+    pcm_.resize(k_pcm_room);
+    pcm_at_ = 0;
+
+    if (self_decodes_) {
+        std::size_t got = 0;
+        const MpResult r = demux_.read_frames(pcm_.data(), pcm_.size(), got);
+        pcm_.resize(got);
+        if (r != MP_OK || got == 0) {
+            drained_ = true;
+        }
+        return got != 0;
+    }
+
+    for (;;) {
+        MpPacket packet{};
+        const MpResult r = demux_.read_packet(packet_, packet);
+        if (r == MP_END || (r == MP_OK && packet.bytes == 0)) {
+            // The end of the packets is not the end of the audio: a codec may
+            // still be holding a frame.
+            std::size_t got = 0;
+            (void)codec_.flush(pcm_.data(), pcm_.size(), got);
+            pcm_.resize(got);
+            drained_ = true;
+            return got != 0;
+        }
+        if (r != MP_OK) {
+            pcm_.clear();
+            drained_ = true;
+            return false;
+        }
+        std::size_t got = 0;
+        if (codec_.decode(packet_.data(), packet.bytes, pcm_.data(), pcm_.size(), got) !=
+            MP_OK) {
+            pcm_.clear();
+            drained_ = true;
+            return false;
+        }
+        if (got != 0) {
+            pcm_.resize(got);
+            return true;
+        }
+        // A packet that decoded to nothing -- a priming frame. Ask for another
+        // rather than reporting an end that has not happened.
+    }
+}
+
+std::size_t PacketSource::read(void* dst, std::size_t bytes)
+{
+    const std::size_t stride = frame_bytes(format_);
+    if (stride == 0 || dst == nullptr) {
+        return 0;
+    }
+    auto* out = static_cast<std::uint8_t*>(dst);
+    std::size_t filled = 0;
+
+    while (filled + stride <= bytes) {
+        if (pcm_at_ >= pcm_.size()) {
+            if (!pump()) {
+                break;
+            }
+            continue;
+        }
+
+        // The gapless edit, applied here rather than in three decoders. The
+        // encoder's warm-up is discarded before anything is counted, and the
+        // file's own length is what stops it.
+        if (skip_ != 0) {
+            const std::size_t available = (pcm_.size() - pcm_at_) / stride;
+            const std::size_t drop = static_cast<std::size_t>(
+                std::min<std::uint64_t>(skip_, available));
+            pcm_at_ += drop * stride;
+            skip_ -= drop;
+            continue;
+        }
+        if (bounded_ && remaining_ == 0) {
+            break;
+        }
+
+        std::size_t room = bytes - filled;
+        room -= room % stride;
+        std::size_t take = std::min(room, pcm_.size() - pcm_at_);
+        take -= take % stride;
+        if (bounded_) {
+            const std::uint64_t allowed = remaining_ * stride;
+            take = static_cast<std::size_t>(std::min<std::uint64_t>(take, allowed));
+        }
+        if (take == 0) {
+            break;
+        }
+        std::memcpy(out + filled, pcm_.data() + pcm_at_, take);
+        pcm_at_ += take;
+        filled += take;
+        const std::uint64_t frames = take / stride;
+        position_ += frames;
+        if (bounded_) {
+            remaining_ -= frames;
+        }
+    }
+    return filled;
+}
+
+void PacketSource::warm_up(std::uint64_t target)
+{
+    // The codec forgets, and then is fed what precedes the target so its state
+    // is warm before anything is kept: AAC's priming frame, MP3's bit
+    // reservoir. v1 hid this inside each decoder, which is why each one had to
+    // be right about it separately.
+    (void)codec_.reset();
+    pcm_.clear();
+    pcm_at_ = 0;
+    drained_ = false;
+    position_ = target;
+}
+
+bool PacketSource::seek(std::uint64_t frame)
+{
+    if (!seekable_) {
+        return false;
+    }
+    // The edit is measured from the start of the *stream*, so a seek past it
+    // has nothing left to discard and a seek before it still does.
+    const std::uint64_t absolute = frame + stream_.skip_frames;
+    if (demux_.seek(absolute) != MP_OK) {
+        return false;
+    }
+    warm_up(frame);
+    skip_ = 0;
+    if (bounded_) {
+        remaining_ = stream_.play_frames > frame ? stream_.play_frames - frame : 0;
+    }
+    return true;
+}
+
+} // namespace mp

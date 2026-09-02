@@ -321,6 +321,95 @@ ModuleRegistry::DecoderChoice ModuleRegistry::decoder_for(const std::string& pat
     return ranked.empty() ? DecoderChoice{} : ranked.front();
 }
 
+std::vector<ModuleRegistry::DemuxChoice> ModuleRegistry::demuxers_for(
+    const std::string& path, std::string_view prefer) const
+{
+    std::array<std::uint8_t, 4096> head{};
+    std::size_t head_bytes = 0;
+    if (std::FILE* file = open_utf8(path, L"rb")) {
+        head_bytes = std::fread(head.data(), 1, head.size(), file);
+        std::fclose(file);
+    }
+
+    std::vector<DemuxChoice> ranked;
+    for (const auto& module : modules_) {
+        const MpModuleDesc& desc = module->desc();
+        if (desc.kind != MP_KIND_DEMUX) {
+            continue;
+        }
+        const auto* vtbl = static_cast<const MpDemuxVtbl*>(desc.vtbl);
+        if (vtbl == nullptr || vtbl->size < sizeof(MpDemuxVtbl)) {
+            continue;
+        }
+        if (!prefer.empty()) {
+            if (prefer == desc.id) {
+                return {DemuxChoice{vtbl, &desc, 0}};
+            }
+            continue;
+        }
+        std::uint32_t score = 0;
+        if (vtbl->probe != nullptr) {
+            vtbl->probe(path.c_str(), head.data(), head_bytes, &score);
+        }
+        if (score != 0) {
+            ranked.push_back(DemuxChoice{vtbl, &desc, score});
+        }
+    }
+
+    std::stable_sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {
+        if (a.score != b.score) {
+            return a.score > b.score;
+        }
+        return a.desc->priority > b.desc->priority;
+    });
+    return ranked;
+}
+
+const MpCodecVtbl* ModuleRegistry::codec_for(MpCodec codec, const std::uint8_t* config,
+                                             std::uint32_t config_bytes) const
+{
+    const MpCodecVtbl* best = nullptr;
+    std::uint32_t best_score = 0;
+    std::uint32_t best_priority = 0;
+
+    for (const auto& module : modules_) {
+        const MpModuleDesc& desc = module->desc();
+        if (desc.kind != MP_KIND_CODEC) {
+            continue;
+        }
+        const auto* vtbl = static_cast<const MpCodecVtbl*>(desc.vtbl);
+        if (vtbl == nullptr || vtbl->size < sizeof(MpCodecVtbl)) {
+            continue;
+        }
+        // The declaration first, because it is data and costs nothing: a module
+        // that listed its codecs has said what it does, and asking it about one
+        // it did not list is asking it to answer twice.
+        if (desc.size >= offsetof(MpModuleDesc, codec_count) + sizeof(std::uint32_t) &&
+            desc.codecs != nullptr && desc.codec_count != 0) {
+            const auto* end = desc.codecs + desc.codec_count;
+            if (std::find(desc.codecs, end, codec) == end) {
+                continue;
+            }
+        }
+        std::uint32_t score = 0;
+        if (vtbl->probe != nullptr) {
+            vtbl->probe(codec, config, config_bytes, &score);
+        } else {
+            score = 100; // it declared the codec and offers no opinion beyond that
+        }
+        if (score == 0) {
+            continue;
+        }
+        if (best == nullptr || score > best_score ||
+            (score == best_score && desc.priority > best_priority)) {
+            best = vtbl;
+            best_score = score;
+            best_priority = desc.priority;
+        }
+    }
+    return best;
+}
+
 std::vector<ModuleRegistry::DecoderChoice> ModuleRegistry::decoders_for(
     const std::string& path, std::string_view prefer) const
 {
