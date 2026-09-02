@@ -109,6 +109,79 @@ meaningful.
 | Matroska, WebM | `ffmpeg` 100 | `ffmpeg` | *nothing* |
 | WavPack, Monkey's Audio, DSF, DFF, TTA, Musepack, CAF | `ffmpeg` 100 | `ffmpeg` | *nothing* |
 
+### Reading the codec before choosing the decoder
+
+An MP4 is claimed at 100 by `decode_alac`, `decode_aac` and `decode_ffmpeg`
+alike, and the order they are tried in owes nothing to what is actually inside.
+The obvious improvement — read the codec, then pick — is right in principle and
+**cannot be done from a probe**, for a reason that is a property of the format
+rather than of this program: the sample entry that names the codec lives in
+`moov`, and `moov` may be at the *end* of the file. FFmpeg writes it there;
+`refalac` writes it at the front. A probe sees four kilobytes. Scoring on what
+happens to be visible would make the chosen decoder depend on which program
+wrote the file.
+
+What happens instead is that `open` reads the real index and declines in about
+two seeks, and the host moves to the next candidate. The order of attempts is
+codec-blind; the outcome is not.
+
+**Ogg shows the version of this that does work.** `decode_ogg` scans the first
+page for `OpusHead` or `\x01vorbis` and claims only those; OggFLAC and Speex get
+**0** and fall to `decode_ffmpeg`. That is possible because Ogg puts its
+identification header in the first page, always — the information is in reach, so
+the probe uses it. The same is true of ADTS, where the profile is in the header
+`decode_aac` already parses.
+
+So the rule is not "MP4 is special": it is that a probe claims on what the first
+four kilobytes actually prove, and different containers prove different amounts.
+
+### What claims what, measured across eighteen containers
+
+Asked with `mediaperch-probe claims` on files built for the purpose. Three
+answers were wrong, and two of the three cost playback:
+
+| Container | Before | After |
+|---|---|---|
+| AC-3, E-AC-3 | **nobody** | `ffmpeg` 100 |
+| MPEG-TS | **nobody** | `ffmpeg` 100 |
+| DTS | `mp3` 100 → refused, and nobody else | `ffmpeg` 100 |
+| AMR | `mp3` 100 → refused, and nobody else | `ffmpeg` 100 |
+| FLV | `mp3` 100 → refused, and nobody else | `ffmpeg` 100 |
+| WavPack | `mp3` 100, `ffmpeg` 100 | `ffmpeg` 100 |
+| MP4, MOV, 3GP | `alac`, `aac`, `mp3` 100, `ffmpeg` 100 | `alac`, `aac`, `ffmpeg` |
+| AIFF, Sony Wave64 | `native` 100 | unchanged |
+| CAF, TTA, WebM, OggFLAC, Speex | `ffmpeg` 100 | unchanged |
+| AVI | `ffmpeg` 30 | unchanged |
+
+**`decode_mp3` was claiming what it could not read.** Its probe walked eight
+kilobytes looking for an MPEG frame header, and eight kilobytes of somebody
+else's compressed audio contains one by chance. On DTS, AMR and FLV it was the
+*only* claimant, so the file was refused outright rather than reaching FFmpeg —
+which reads all three. A claim now needs **two headers a frame apart that agree
+about version, layer and sample rate**; a chance sync does not chain. At an
+ordinary bit rate a frame is a few hundred bytes, so a real MP3 confirms itself
+several times inside the window.
+
+The weak claim that remains is the honest one: an ID3v2 tag larger than the
+window proves the audio is out of reach rather than absent, and that still scores
+60.
+
+**`decode_ffmpeg`'s magic table was simply short.** AC-3, E-AC-3 and MPEG-TS had
+no claimant at all — files it reads perfectly, refused by the whole tree because
+its probe is a table of magic bytes and these were not in it. The alternative is
+running `ffprobe` on every candidate, which is a process per file per probe; the
+table is the right shape and now also carries AC-3, DTS in both byte orders, AMR,
+FLV, Shorten, TAK and OptimFROG, plus MPEG-TS, whose marker is a 0x47 byte every
+188 bytes rather than a prefix.
+
+Six formats went from *refused by everything* to playing: AC-3, E-AC-3, MPEG-TS,
+DTS, AMR and FLV. Shorten, TAK and OptimFROG are added on their documented magic
+and **not measured** — nothing here can encode them.
+
+One capability turned up that nobody had written down: **`decode_native` reads
+Sony Wave64**, because `dr_wav` does and its magic begins with the same four
+bytes the probe already looked for.
+
 ### Media Foundation takes one score, and it is the lowest
 
 It used to claim 100 on MP4, on any MPEG frame header and on ASF, and win two of
@@ -140,19 +213,6 @@ last resort for MP4. **It is the floor, not a competitor.**
 Two rows changed hands: WMA and MPEG layer I/II now go to FFmpeg wherever it is
 installed. WMA gains float instead of a silent quantisation to 16 bits.
 
-### And one probe was claiming what it could not read
-
-The same audit found `decode_mp3` scoring **100** on an M4A and on a raw ADTS
-stream. Its probe walks eight kilobytes looking for an MPEG frame header, and
-eight kilobytes of somebody else's compressed audio contains one by chance. Sat
-at 100 it was tried ahead of `decode_ffmpeg` on both.
-
-Nothing decoded wrongly — `open` refused and the host moved on, which is the
-third resolution rule doing its job. But a probe that claims at full strength
-what it cannot read reorders everything behind it, so it now stops before the
-scan when the first bytes are another container's: `ftyp`, `OggS`, `fLaC`,
-`RIFF`, `FORM`, Matroska, ASF, or an ADTS sync. A file that opens with one of
-those is not an MP3 with junk in front of it.
 
 ### The long tail, measured
 
@@ -1062,3 +1122,6 @@ is that the machinery works, which is the part that rots.
   for WAV, FLAC and ALAC. Left visible rather than deleted because the reason it
   went stale is the point of generating the table.
 - DSD in any form: DoP is designed for and not implemented.
+- Shorten, TAK and OptimFROG. `decode_ffmpeg` claims them on their documented
+  magic bytes and nothing here can encode one, so the claim is unmeasured.
+- Monkey's Audio and Musepack, for the same reason: claimed, no encoder to hand.

@@ -83,6 +83,45 @@ bool is_layer3_header(const std::uint8_t* h) noexcept
     return version != 1u && layer == 1u && bitrate != 0xFu && rate != 3u;
 }
 
+/// How long the Layer III frame with this header is, in bytes, or 0 when the
+/// header does not describe a length -- free format, or a reserved combination.
+///
+/// This exists so that a candidate header can be checked against the next one.
+/// One sync pattern turns up by chance in any few kilobytes of compressed audio;
+/// two that are a frame apart and agree about version, layer and sample rate do
+/// not.
+std::size_t layer3_frame_length(const std::uint8_t* h) noexcept
+{
+    static const unsigned mpeg1_kbps[16] = {0,  32,  40,  48,  56,  64,  80,  96,
+                                            112, 128, 160, 192, 224, 256, 320, 0};
+    static const unsigned mpeg2_kbps[16] = {0,  8,  16, 24, 32, 40,  48,  56,
+                                            64, 80, 96, 112, 128, 144, 160, 0};
+    // Indexed by the version field: 0 is MPEG 2.5, 1 is reserved, 2 is MPEG 2,
+    // 3 is MPEG 1.
+    static const unsigned rates[4][3] = {{11025, 12000, 8000},
+                                         {0, 0, 0},
+                                         {22050, 24000, 16000},
+                                         {44100, 48000, 32000}};
+    const unsigned version = (h[1] >> 3) & 0x3u;
+    const unsigned rate = rates[version][(h[2] >> 2) & 0x3u];
+    const unsigned kbps = version == 3u ? mpeg1_kbps[(h[2] >> 4) & 0xFu]
+                                        : mpeg2_kbps[(h[2] >> 4) & 0xFu];
+    if (rate == 0 || kbps == 0) {
+        return 0;
+    }
+    // 1152 samples a frame on MPEG 1, 576 on MPEG 2 and 2.5.
+    const unsigned per_frame = version == 3u ? 144u : 72u;
+    return per_frame * kbps * 1000u / rate + ((h[2] >> 1) & 0x1u);
+}
+
+/// Whether two headers describe the same stream. A chance match will agree
+/// about the sync bits and disagree about everything else.
+bool same_stream(const std::uint8_t* a, const std::uint8_t* b) noexcept
+{
+    return (a[1] & 0x1Eu) == (b[1] & 0x1Eu) &&          // version and layer
+           ((a[2] >> 2) & 0x3u) == ((b[2] >> 2) & 0x3u); // sample rate
+}
+
 #if defined(_WIN32)
 std::wstring widen(const char* utf8)
 {
@@ -120,34 +159,6 @@ MpResult MP_CALL decoder_probe(const char* path, const std::uint8_t* head, std::
         return MP_OK;
     }
 
-    // **Another container's payload will contain a byte pair that looks like a
-    // frame header.** The scan below walks eight kilobytes looking for one, and
-    // eight kilobytes of compressed audio is more than enough to produce a
-    // false one by chance -- measured with `mediaperch-probe claims`, which
-    // found this module claiming an M4A and a raw ADTS stream at 100, ahead of
-    // `decode_ffmpeg` and behind only the two modules that actually read them.
-    //
-    // Nothing was decoded wrongly, because `open` refuses and the host tries
-    // the next candidate. But a probe that claims at full strength what it
-    // cannot read is a probe that reorders everything behind it, and the fix is
-    // to stop before the scan when the first bytes say the file is something
-    // else. A file that opens with one of these is not an MP3 with junk in
-    // front of it.
-    if ((bytes >= 8 && std::memcmp(head + 4, "ftyp", 4) == 0) ||   // MP4, M4A
-        std::memcmp(head, "OggS", 4) == 0 ||                       // Ogg
-        std::memcmp(head, "fLaC", 4) == 0 ||                       // FLAC
-        std::memcmp(head, "RIFF", 4) == 0 ||                       // WAV
-        std::memcmp(head, "FORM", 4) == 0 ||                       // AIFF
-        std::memcmp(head, "\x1A\x45\xDF\xA3", 4) == 0 ||         // Matroska
-        std::memcmp(head, "\x30\x26\xB2\x75", 4) == 0 ||         // ASF
-        // ADTS: the same eleven sync bits as an MPEG frame, with the layer
-        // field set to the value MPEG reserved. A layer III header can never
-        // have it, so this is a positive identification of the other format
-        // rather than a guess about this one.
-        (bytes >= 2 && head[0] == 0xFFu && (head[1] & 0xF6u) == 0xF0u)) {
-        return MP_OK;
-    }
-
     std::size_t at = 0;
 
     // An ID3v2 tag sits in front of the audio and carries its own length as
@@ -170,14 +181,43 @@ MpResult MP_CALL decoder_probe(const char* path, const std::uint8_t* head, std::
         }
     }
 
-    // A file may open with a few bytes of junk before the first frame.
+    // **One sync pattern is not evidence.** A few kilobytes of somebody else's
+    // compressed audio contains one by chance, and this module used to claim
+    // those at 100 -- measured with `mediaperch-probe claims`, which found it
+    // taking AMR, DTS and FLV files at full strength. That was not merely an
+    // ordering wart: on those three it was the *only* claimant, so a file
+    // FFmpeg could have read was refused outright.
+    //
+    // So a claim now needs two headers a frame apart that agree about version,
+    // layer and sample rate. At an ordinary bit rate a frame is a few hundred
+    // bytes, so a real MP3 confirms itself several times over inside the window
+    // a probe is given.
+    //
+    // A file may still open with a few bytes of junk before the first frame,
+    // which is why this scans rather than looking only at `at`.
     const std::size_t limit = bytes - 4 < at + 8192 ? bytes - 4 : at + 8192;
     for (std::size_t i = at; i <= limit; ++i) {
-        if (is_layer3_header(head + i)) {
+        if (!is_layer3_header(head + i)) {
+            continue;
+        }
+        const std::size_t length = layer3_frame_length(head + i);
+        if (length == 0) {
+            continue; // free format: no length to follow, so nothing to confirm
+        }
+        if (i + length + 4 <= bytes && is_layer3_header(head + i + length) &&
+            same_stream(head + i, head + i + length)) {
             *out_score = 100;
             return MP_OK;
         }
     }
+
+    // Nothing confirmed, so nothing claimed -- not even weakly. A single
+    // unconfirmed header was worth 60 in an earlier version of this, and 60 is
+    // still a claim: on an AMR, a DTS stream and an FLV this module was the
+    // *only* claimant, so the file was refused outright instead of reaching the
+    // fallback that could read it. The weak claim that is still worth making is
+    // the one above, where an ID3 tag proves the audio is out of reach rather
+    // than absent.
     return MP_OK;
 }
 

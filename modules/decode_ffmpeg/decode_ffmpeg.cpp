@@ -337,7 +337,30 @@ MpResult MP_CALL decoder_probe(const char* path, const std::uint8_t* head, std::
         {"TTA1", 0},                     // True Audio
         {"MPCK", 0},                     // Musepack
         {"caff", 0},                     // Core Audio Format
+        // Added after `mediaperch-probe claims` was asked about a spread of
+        // containers and found these had **no claimant at all** -- files this
+        // module reads perfectly, refused by the whole tree because its probe
+        // is a magic table and these were not in it. The alternative to a table
+        // is running `ffprobe` on every candidate, which is a process per file
+        // per probe; the table is the right shape and was simply short.
+        {"\x0B\x77", 0},                 // AC-3, and E-AC-3, which share a sync
+        {"\x7F\xFE\x80\x01", 0},        // DTS, 16-bit big-endian
+        {"\xFE\x7F\x01\x80", 0},        // DTS, 16-bit little-endian
+        {"#!AMR", 0},                    // AMR-NB and AMR-WB
+        {"FLV", 0},                      // Flash video, which carries MP3 and AAC
+        {"ajkg", 0},                     // Shorten
+        {"tBaK", 0},                     // TAK
+        {"OFR ", 0},                     // OptimFROG
     };
+
+    // MPEG-TS is the one that cannot be a magic string: its marker is a 0x47
+    // byte every 188 bytes, which is a pattern rather than a prefix. Three in a
+    // row is enough to tell it from a file that merely starts with a 'G'.
+    if (bytes >= 3 * 188 + 1 && head[0] == 0x47u && head[188] == 0x47u &&
+        head[2 * 188] == 0x47u && head[3 * 188] == 0x47u) {
+        *out_score = 100;
+        return MP_OK;
+    }
 
     for (const auto& candidate : only_here) {
         if (magic(head, bytes, candidate.bytes, candidate.at)) {
