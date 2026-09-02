@@ -5,6 +5,12 @@
 # allowed to include <windows.h> outside a module.
 
 add_library(mediaperch_win STATIC
+    mediaperch/engine_host.cpp
+    mediaperch/engine_host.hpp
+    mediaperch/ipc_client.cpp
+    mediaperch/ipc_client.hpp
+    mediaperch/ipc_server.cpp
+    mediaperch/ipc_server.hpp
     mediaperch/platform.cpp
     mediaperch/platform.hpp
     mediaperch/verify.cpp
@@ -43,3 +49,20 @@ set_target_properties(mediaperch_probe PROPERTIES
 add_dependencies(mediaperch_probe
     mp_sink_wasapi mp_decode_native mp_decode_mf mp_decode_ffmpeg
     mp_decode_alac mp_decode_aac mp_decode_mp3)
+
+# The engine. This is the product: no window, no toolkit, and nothing in the
+# process that a shell could take down with it.
+add_executable(mediaperchd mediaperchd/main.cpp)
+target_link_libraries(mediaperchd PRIVATE MediaPerch::win mediaperch_flags)
+set_target_properties(mediaperchd PROPERTIES OUTPUT_NAME "mediaperchd" FOLDER "win")
+add_dependencies(mediaperchd
+    mp_sink_wasapi mp_decode_native mp_decode_mf mp_decode_ffmpeg
+    mp_decode_alac mp_decode_aac mp_decode_mp3)
+
+# The shell that is always there. It links the client half of the IPC and the
+# protocol, and nothing else: no graph, no modules, no device.
+add_executable(mediaperch_cli ../../shell/cli/main.cpp)
+target_link_libraries(mediaperch_cli PRIVATE MediaPerch::win mediaperch_flags)
+set_target_properties(mediaperch_cli PROPERTIES
+    OUTPUT_NAME "mediaperch-cli"
+    FOLDER "shell")

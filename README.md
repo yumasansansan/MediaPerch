@@ -33,8 +33,26 @@ Working: four decoders chosen by probe — libFLAC, two single headers, Media Fo
 FFmpeg found at run time — all hash-identical to each other and to the reference on
 everything they read, up to 32-bit at 1,048,575 Hz;
 format negotiation against real drivers; the passthrough graph on two threads; WASAPI
-exclusive down to a 2 ms period; 768 kHz / 32-bit on a USB DAC. 199 tests plus libFuzzer
+exclusive down to a 2 ms period; 768 kHz / 32-bit on a USB DAC; a headless engine with a
+shell that can be killed mid-track without the audio noticing. 229 tests plus libFuzzer
 targets, on MSVC.
+
+The engine is `mediaperchd` and has no window, no toolkit and no user interface in it.
+`mediaperch-cli` attaches over a named pipe and is the shell that is always there; a window
+is optional and the engine does not know whether one exists.
+
+```
+mediaperchd                  # the engine. Add files to play them at once
+mediaperch-cli status        # what is playing
+mediaperch-cli play FILE...  # or add, clear, pause, resume, stop, next, prev, seek
+mediaperch-cli settings      # every setting, its value and what it means
+mediaperch-cli set path processed
+                             # changes it while something plays: the device stops and
+                             # starts, and the audio carries on from the frame it left
+mediaperch-cli watch         # a transport bar with no pixels
+```
+
+The probe is milestone 1's user interface and is still the way to measure things.
 
 ```
 mediaperch-probe devices     # opens nothing, disturbs nothing

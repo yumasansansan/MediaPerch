@@ -27,6 +27,7 @@
 
 #include "mediaperch/source.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <vector>
 
@@ -89,7 +90,17 @@ public:
     /// Abandons the rest of the current item and moves on. What a "next track"
     /// button is: the queue is asked, not the graph, and the device never
     /// notices.
-    void skip() noexcept { skip_ = true; }
+    ///
+    /// Atomic because the asking is done by whichever thread a shell is on and
+    /// the reading by the decode thread.
+    void skip() noexcept { skip_.store(true, std::memory_order_release); }
+
+    /// The queue frame at which the current item began, and the one before it.
+    /// What a "previous track" button needs, and it is a question only the
+    /// queue can answer: a graph counts frames and has never seen a boundary.
+    [[nodiscard]] std::uint64_t item_start() const noexcept;
+    [[nodiscard]] bool has_previous() const noexcept;
+    [[nodiscard]] std::uint64_t previous_start() const noexcept;
 
 private:
     /// Opens item `index_ + 1`, or reports why it will not.
@@ -121,7 +132,7 @@ private:
     std::size_t completed_ = 0;
     std::uint64_t position_ = 0;
     QueueStop stopped_ = QueueStop::end;
-    bool skip_ = false;
+    std::atomic<bool> skip_{false};
     bool done_ = false;
 };
 

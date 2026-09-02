@@ -71,8 +71,8 @@ std::size_t Queue::read(void* dst, std::size_t bytes)
     auto* out = static_cast<std::uint8_t*>(dst);
     std::size_t filled = 0;
     while (filled < bytes) {
-        if (skip_) {
-            skip_ = false;
+        if (skip_.load(std::memory_order_acquire)) {
+            skip_.store(false, std::memory_order_release);
             ++completed_;
             if (!advance()) {
                 done_ = true;
@@ -114,6 +114,22 @@ std::size_t Queue::mark_for(std::uint64_t run) const noexcept
     return m == 0 ? 0 : m - 1;
 }
 
+std::uint64_t Queue::item_start() const noexcept
+{
+    return marks_.empty() ? 0 : marks_[mark_for(position_)].run_base;
+}
+
+bool Queue::has_previous() const noexcept
+{
+    return mark_for(position_) > 0;
+}
+
+std::uint64_t Queue::previous_start() const noexcept
+{
+    const std::size_t m = mark_for(position_);
+    return m > 0 ? marks_[m - 1].run_base : 0;
+}
+
 std::uint64_t Queue::item_position() const noexcept
 {
     if (marks_.empty()) {
@@ -141,7 +157,7 @@ bool Queue::seek(std::uint64_t frame)
     current_ = item;
     position_ = frame;
     done_ = false;
-    skip_ = false;
+    skip_.store(false, std::memory_order_release);
     stopped_ = QueueStop::end;
     return true;
 }

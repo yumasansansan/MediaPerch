@@ -23,7 +23,9 @@ add_executable(mediaperch_tests
     format_test.cpp
     graph_test.cpp
     negotiation_test.cpp
+    player_test.cpp
     property_test.cpp
+    protocol_test.cpp
     repack_test.cpp
     ring_test.cpp
     sine_test.cpp
@@ -80,6 +82,14 @@ endif()
 if(TARGET mediaperch_loudness)
     target_sources(mediaperch_tests PRIVATE loudness_test.cpp)
     target_link_libraries(mediaperch_tests PRIVATE mediaperch_loudness)
+endif()
+
+# The pipe, with a real pipe on the other side of it. Windows-only because the
+# transport is: the protocol above it is in the core and is tested there, and
+# the Linux head will bring its own socket and its own version of this file.
+if(TARGET mediaperch_win)
+    target_sources(mediaperch_tests PRIVATE ipc_test.cpp)
+    target_link_libraries(mediaperch_tests PRIVATE MediaPerch::win)
 endif()
 
 target_link_libraries(mediaperch_tests

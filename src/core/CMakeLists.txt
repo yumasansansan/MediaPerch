@@ -24,9 +24,18 @@ add_library(mediaperch_core STATIC
     mediaperch/format.hpp
     mediaperch/negotiation.cpp
     mediaperch/negotiation.hpp
+    mediaperch/log.cpp
+    mediaperch/log.hpp
     mediaperch/passthrough.cpp
-    mediaperch/queue.cpp
     mediaperch/passthrough.hpp
+    mediaperch/player.cpp
+    mediaperch/player.hpp
+    mediaperch/protocol.cpp
+    mediaperch/protocol.hpp
+    mediaperch/queue.cpp
+    mediaperch/queue.hpp
+    mediaperch/result.cpp
+    mediaperch/result.hpp
     mediaperch/processed.cpp
     mediaperch/processed.hpp
     mediaperch/repack.cpp

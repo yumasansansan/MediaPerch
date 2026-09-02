@@ -913,6 +913,67 @@ can see. `use_processed` is that distinction and `classify` is the other one.
 a real `IAudioClient::Initialize`, and in exclusive mode each one takes the device away
 from whatever else is using it.
 
+### The engine is a process, and a shell is a guest
+
+The player is `mediaperchd`: no window, no toolkit, no user interface at all. It loads the
+modules, opens the device, plays what it is told to play, and answers a pipe. A shell
+attaches to it, or several do, or none. That is the product, and everything else in the tree
+is either inside it or talking to it.
+
+**`mp::Player` is in the core, and that is the load-bearing decision.** A playlist, a queue
+and the decision to rebuild a graph are not Windows. What genuinely belongs to a platform is
+four things — open a file with a decoder, open an endpoint, find a filter, say something —
+and those are `IEngineHost`, which the Windows head implements in about a hundred lines. The
+test suite implements it in eighty, which is why the whole engine can be tested with no COM,
+no `LoadLibrary` and no audio hardware: `tests/player_test.cpp` plays a playlist, pauses it,
+seeks it, loses a device and rebuilds, all against the same fake sink the graph tests use.
+
+**One thread owns the graph.** Commands arrive from whichever thread a shell is on and are
+either applied straight away, where the graph already promises that they are safe — pause,
+resume, seek, all of which the transport work made so — or posted to the engine thread,
+where they mean building a new graph. A shell asking for a rebuild must not block on one.
+
+**A setting is a rebuild, and a rebuild resumes.** `mediaperch-cli set path processed` stops
+the device, builds the other graph, and starts again on the frame the last one stopped on:
+the same machinery as coming back from a device somebody unplugged, pointed at a different
+cause. And a setting the device will not take — bit-exact on a device that refuses the
+file's own format — is put *back*, because somebody who asked for something impossible
+should hear the music carry on and be told no, not be left in silence.
+
+### What the two processes say to each other
+
+A named pipe, and a versioned binary stream rather than a text protocol. The reason is the
+one that made the module ABI plain C: a protocol somebody has to parse is a protocol
+somebody parses differently, and two processes disagreeing about what "position" means is a
+bug nobody can see. Every field has a width, an order and an endianness; the version in the
+header says which set of them a message belongs to, and a message from a version this build
+does not speak is refused rather than guessed at.
+
+**The shell is not trusted.** It is another process, it may be a third party's, and it may
+be wrong or hostile. So the reader never throws, never reads past the end, and never
+allocates on a length it has not checked — a truncated message and a malicious one take the
+same path, which is to be rejected. `tests/protocol_test.cpp` is mostly that: every prefix
+of a message is either rejected or complete, a string length nothing can back up costs
+nothing, and a list that claims sixty-five thousand items is a claim rather than a count.
+
+**A shell may die at any moment, and this is where that is made true.** Every client gets a
+reader thread and a writer thread with a bounded queue between the engine and its pipe. A
+shell that stops reading fills its queue and is dropped; it cannot slow the engine down and
+it certainly cannot stop it. `tests/ipc_test.cpp` ends by attaching three shells to a
+playing engine, subscribing them to events, and cutting them off without a goodbye: the
+audio carries on, the underrun count stays at zero, and the next shell to knock is answered.
+That test is the reason the shell is a separate process at all.
+
+**One Windows detail worth writing down**, because it cost a day. The pipe has to be opened
+with `FILE_FLAG_OVERLAPPED`: a synchronous handle serialises every operation on it, so a
+reader blocked on a request would hold up the write that answers it, and a duplex pipe with
+a reader thread and a writer thread would deadlock on its first message. And an overlapped
+handle has to be given a real `OVERLAPPED` — passing a null one is a promise to the kernel
+that the buffer and the byte count will still be there when the I/O finishes. Getting the
+first right and the second wrong produced a crash that only appeared in Release, only once
+data had flowed, and that moved whenever anything was added to look at it, because what the
+kernel was writing into was a stack frame that had already gone.
+
 ## Layout
 
 ```
