@@ -44,6 +44,15 @@ public:
                                  std::uint32_t channels, std::uint32_t partition,
                                  std::string& why);
 
+    /// One impulse response *per channel*, which is what a stereo room
+    /// measurement is: the left ear's response is not the right ear's, and
+    /// applying one of them to both is a measurement of half the room.
+    ///
+    /// They may differ in length; the shorter ones are read as zero past their
+    /// end, which is what they are.
+    [[nodiscard]] bool configure(const std::vector<std::vector<double>>& impulses,
+                                 std::uint32_t partition, std::string& why);
+
     /// Deinterleaved in, deinterleaved out. **The output is not the same length
     /// as the input**: results arrive a partition at a time, so a call may
     /// produce nothing and the next may produce two blocks. That is what
@@ -61,11 +70,7 @@ public:
     /// Room a caller must have for `frames` of input.
     [[nodiscard]] std::uint32_t max_output(std::uint32_t frames) const noexcept;
     [[nodiscard]] std::uint32_t partition() const noexcept { return partition_; }
-    [[nodiscard]] std::uint32_t partitions() const noexcept
-    {
-        return transform_ == 0 ? 0
-                               : static_cast<std::uint32_t>(spectra_.size() / transform_);
-    }
+    [[nodiscard]] std::uint32_t partitions() const noexcept { return partitions_; }
     [[nodiscard]] std::size_t taps() const noexcept { return taps_; }
     /// Multiply-accumulates per output frame per channel, for a report that has
     /// to say what this costs.
@@ -77,11 +82,12 @@ private:
     void run_block(std::uint32_t channel, double* out) noexcept;
 
     std::uint32_t partition_ = 0;
+    std::uint32_t partitions_ = 0;
     std::uint32_t transform_ = 0; ///< twice the partition
     std::uint32_t channels_ = 0;
     std::size_t taps_ = 0;
 
-    /// The impulse, one transformed partition after another.
+    /// The impulse, one transformed partition after another, per channel.
     std::vector<std::complex<double>> spectra_;
     /// The frequency-domain delay line: `partitions` spectra per channel.
     std::vector<std::complex<double>> history_;

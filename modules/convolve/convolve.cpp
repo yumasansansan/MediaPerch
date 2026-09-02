@@ -12,8 +12,26 @@ namespace mp::convolve {
 bool Convolver::configure(const std::vector<double>& impulse, std::uint32_t channels,
                           std::uint32_t partition, std::string& why)
 {
-    if (impulse.empty() || channels == 0 || channels > 64) {
-        why = "a convolver needs an impulse response and some channels";
+    if (channels == 0 || channels > 64) {
+        why = "a convolver needs some channels";
+        return false;
+    }
+    return configure(std::vector<std::vector<double>>(channels, impulse), partition, why);
+}
+
+bool Convolver::configure(const std::vector<std::vector<double>>& impulses,
+                          std::uint32_t partition, std::string& why)
+{
+    if (impulses.empty() || impulses.size() > 64) {
+        why = "a convolver needs an impulse response for every channel";
+        return false;
+    }
+    std::size_t longest = 0;
+    for (const std::vector<double>& impulse : impulses) {
+        longest = std::max(longest, impulse.size());
+    }
+    if (longest == 0) {
+        why = "an impulse response of no samples is not one";
         return false;
     }
     // A partition somewhere near a device period is the usual compromise: small
@@ -28,21 +46,33 @@ bool Convolver::configure(const std::vector<double>& impulse, std::uint32_t chan
 
     partition_ = want;
     transform_ = want * 2;
-    channels_ = channels;
-    taps_ = impulse.size();
+    channels_ = static_cast<std::uint32_t>(impulses.size());
+    taps_ = longest;
+    partitions_ =
+        static_cast<std::uint32_t>((longest + partition_ - 1) / partition_);
 
-    const std::size_t count = (impulse.size() + partition_ - 1) / partition_;
-    spectra_.assign(count * transform_, {0.0, 0.0});
+    spectra_.assign(static_cast<std::size_t>(channels_) * partitions_ * transform_,
+                    {0.0, 0.0});
     std::vector<std::complex<double>> piece(transform_);
-    for (std::size_t p = 0; p < count; ++p) {
-        std::fill(piece.begin(), piece.end(), std::complex<double>{0.0, 0.0});
-        const std::size_t from = p * partition_;
-        const std::size_t n = std::min<std::size_t>(partition_, impulse.size() - from);
-        for (std::size_t i = 0; i < n; ++i) {
-            piece[i] = {impulse[from + i], 0.0};
+    for (std::uint32_t c = 0; c < channels_; ++c) {
+        const std::vector<double>& impulse = impulses[c];
+        for (std::uint32_t p = 0; p < partitions_; ++p) {
+            std::fill(piece.begin(), piece.end(), std::complex<double>{0.0, 0.0});
+            const std::size_t from = static_cast<std::size_t>(p) * partition_;
+            // A channel whose impulse is shorter than the longest simply has
+            // zeros there, which is what a shorter impulse means.
+            const std::size_t n =
+                from >= impulse.size() ? 0
+                                       : std::min<std::size_t>(partition_,
+                                                               impulse.size() - from);
+            for (std::size_t i = 0; i < n; ++i) {
+                piece[i] = {impulse[from + i], 0.0};
+            }
+            mp::transform::fft(piece, false);
+            std::copy(piece.begin(), piece.end(),
+                      spectra_.begin() +
+                          (static_cast<std::size_t>(c) * partitions_ + p) * transform_);
         }
-        mp::transform::fft(piece, false);
-        std::copy(piece.begin(), piece.end(), spectra_.begin() + p * transform_);
     }
 
     reset();
@@ -110,7 +140,9 @@ void Convolver::run_block(std::uint32_t channel, double* out) noexcept
         const std::complex<double>* x =
             history_.data() +
             (static_cast<std::size_t>(channel) * count + at) * transform_;
-        const std::complex<double>* h = spectra_.data() + p * transform_;
+        const std::complex<double>* h =
+            spectra_.data() +
+            (static_cast<std::size_t>(channel) * count + p) * transform_;
         for (std::uint32_t k = 0; k < transform_; ++k) {
             sum_[k] += h[k] * x[k];
         }

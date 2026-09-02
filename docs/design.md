@@ -590,9 +590,48 @@ lengths against three partition sizes, agreeing to 10⁻¹², plus the impulse-i
 identity, block-size invariance and channel isolation. There is nothing to interpret in a
 convolution — it has an answer, and either this produces it or it does not.
 
-A `dsp_convolve` module — an impulse response read from a file, for a room correction or a
-speaker measurement — is the same engine with the taps coming from somewhere else, and is
-not written yet.
+#### An impulse response somebody measured
+
+`dsp_convolve` is that engine with the taps coming from a file. What is new is not the
+arithmetic — it is that a *measurement* raises four questions a designed filter does not,
+and each of them is answered out loud.
+
+**The rate.** An impulse measured at 44.1 kHz applied to a 96 kHz stream is the wrong
+filter: every feature of it lands more than an octave from where it belongs. It is
+**resampled**, using this tree's own resampler at `quality=best`, which is the same decision
+the equaliser makes when it re-derives its biquads at each rate rather than transcribing
+them at one. Refusing here would be refusing to design.
+
+That has a trap in it worth naming. **A resampler preserves the signal, so it does not
+preserve a filter's gain.** An impulse spreads over more samples and its taps sum to more of
+them — a wire resampled from 44.1 to 88.2 kHz has taps adding to two. A filter's gain is the
+sum of its taps at any rate, so the ratio is divided back out. Without that, a 44.1 kHz
+response on a 96 kHz stream is 6.7 dB loud, and it sounds like a resampler bug. The proof is
+two paths agreeing:
+
+| | Measured at | Built | Gain at DC |
+|---|---|---|---|
+| the room, native | 44100 Hz | 13230 taps at 44100 | **+20.30 dB** |
+| the same room | 48000 Hz | 13230 taps at 44100 | **+20.32 dB** |
+
+**The channels.** One response is applied to every channel; one per channel is applied one to
+one. Anything else — a four-channel file against a stereo stream — is somebody's true-stereo
+matrix, which is a different convolution, and it is refused rather than guessed at.
+
+**The length.** A ten-second cathedral is half a million taps. `max_taps` truncates with a
+raised-cosine fade over the last hundredth, so the cut is a fade and not a click.
+
+**The gain.** Reported always, changed only when asked, because a room correction is already
+at the level its author meant and a reverb usually is not. The room above has +20.3 dB at DC
+and drives the output to a peak of 7.2 — the report says so before anything clips, and
+`normalise=dc` brings it to unity:
+
+```
+built       4096 taps at 44100 Hz
+gain_at_dc  +0.00 dB
+peak        0.711203
+cost        372   multiplies per output frame   (804 before truncation)
+```
 
 ### ReplayGain, measured rather than read
 
@@ -824,12 +863,14 @@ modules/             everything that can be loaded and unloaded at runtime.
   transform/         the FFT, Bluestein, and the cepstral factorisation. Began
                      in the resampler; moved when the equaliser wanted them too.
   convolve/          partitioned overlap-save. What makes an FIR equaliser
-                     possible, and what a dsp_convolve would be built on.
+                     possible, and what dsp_convolve is built on.
+  dsp_convolve/      an impulse response from a file: its rate, its channels,
+                     its length and its gain, each made to agree out loud.
   biquad/            second-order sections, shared: the equaliser is a cascade a
                      person chose and the loudness meter is one BS.1770 chose.
   dsp_eq/            the equaliser, anywhere on the axis.
   dsp_replaygain/    the loudness meter, and the gain a previous scan found.
-  dsp_*/             convolve and crossfeed. Never present in passthrough.
+  dsp_*/             crossfeed, and whatever else. Never present in passthrough.
   video_d3d11/       presentation, and the three tone-map providers.
 shell/windows/       the WinUI 3 window. C#, Native AOT, **optional**: the engine runs
                      with none of it on disk, the same way DragonPerch's daemon does.

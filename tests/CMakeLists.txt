@@ -61,6 +61,12 @@ if(TARGET mediaperch_convolve)
     target_link_libraries(mediaperch_tests PRIVATE mediaperch_convolve)
 endif()
 
+# An impulse response is a file, so the test writes one and reads it back.
+if(TARGET mediaperch_impulse)
+    target_sources(mediaperch_tests PRIVATE impulse_test.cpp)
+    target_link_libraries(mediaperch_tests PRIVATE mediaperch_impulse)
+endif()
+
 if(TARGET mediaperch_biquad)
     target_sources(mediaperch_tests PRIVATE eq_test.cpp autoeq_test.cpp
                    ../modules/dsp_eq/autoeq.cpp)

@@ -81,6 +81,7 @@ if(MEDIAPERCH_BUILD_PLATFORM)
     add_subdirectory(modules/dsp_mix)
     add_subdirectory(modules/dsp_eq)
     add_subdirectory(modules/dsp_replaygain)
+    add_subdirectory(modules/dsp_convolve)
 endif()
 
 if(MEDIAPERCH_BUILD_PLATFORM AND WIN32)

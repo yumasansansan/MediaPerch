@@ -275,7 +275,10 @@ Options
                     reads an AutoEq or Equalizer APO profile -- either the
                     parametric one or the graphic curve, which needs
                     mode=linear or mode=minimum because a curve is a target
-                    rather than a cascade
+                    rather than a cascade. `--dsp convolve:file=<path>` takes an
+                    impulse response somebody measured, resamples it to the
+                    stream's rate, and reports what gain it has before it
+                    applies it
   --dither KIND     Path B only, and only where bits are actually being thrown
                     away. `triangular` (default) is the standard answer;
                     `highpass` is the same distribution with its noise tilted
