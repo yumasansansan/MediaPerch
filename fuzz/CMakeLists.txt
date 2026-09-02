@@ -52,7 +52,6 @@ function(mediaperch_add_fuzzer name source corpus)
         "${CMAKE_SOURCE_DIR}/src/core"
         "${CMAKE_SOURCE_DIR}/modules/codec/alac"
         "${CMAKE_SOURCE_DIR}/modules/shared/mp4"
-        "${CMAKE_SOURCE_DIR}/modules/shared/flacframe"
         "${CMAKE_SOURCE_DIR}/modules/codec/aac")
 
     # MSVC's STL annotates container bounds for ASan, and the annotations only
@@ -118,12 +117,6 @@ mediaperch_add_fuzzer(alac_fuzzer alac_fuzzer.cpp alac
                       "${CMAKE_SOURCE_DIR}/modules/codec/alac/alac.cpp"
                       "${CMAKE_SOURCE_DIR}/modules/shared/mp4/mp4.cpp")
 
-# FLAC's framing, which `demux_flac` uses to decide where a frame ends. It is a
-# scan over bytes somebody else wrote, and it is ours -- the two properties that
-# together say "fuzz this". The corpus is the FLAC one: a real file is a valid
-# STREAMINFO followed by real frames, which is the shape the scan is about.
-mediaperch_add_fuzzer(flacframe_fuzzer flacframe_fuzzer.cpp flac
-                      "${CMAKE_SOURCE_DIR}/modules/shared/flacframe/flacframe.cpp")
 
 # The settings file, on DragonPerch's INI corpus rather than a second one of
 # ours. The parser is shared as a submodule for the same reason: two INI parsers

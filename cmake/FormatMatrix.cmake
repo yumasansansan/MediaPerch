@@ -87,7 +87,7 @@ endfunction()
 #
 # The heading drops the `demux_` that all of them share.
 set(decoders demux_wav demux_flac demux_mpeg demux_adts demux_mp4 demux_ogg
-             demux_ffmpeg demux_mf)
+             demux_mkv demux_ffmpeg demux_mf)
 
 set(rows "")      # "label|file|reference-file-or-NONE"
 set(row_notes "")
@@ -146,6 +146,10 @@ add_row("Opus in Ogg, 48 kHz stereo" "${W}/a.opus" NONE -c:a libopus -b:a 192k)
 add_row("WMA v2, 44.1 kHz stereo" "${W}/a.wma" NONE -c:a wmav2 -b:a 192k)
 add_row("WavPack, 16-bit 44.1 kHz stereo" "${W}/a.wv" "${SOURCE}" -c:a wavpack)
 add_row("FLAC in Matroska, 16-bit stereo" "${W}/a.mka" "${SOURCE}" -c:a flac -f matroska)
+add_row("ALAC in Matroska, 16-bit stereo" "${W}/a_alac.mka" "${SOURCE}" -c:a alac -f matroska)
+add_row("PCM in Matroska, 16-bit stereo" "${W}/a_pcm.mka" "${SOURCE}" -c:a pcm_s16le -f matroska)
+add_row("Vorbis in Matroska, 44.1 kHz stereo" "${W}/a_vorbis.mka" NONE -c:a libvorbis -q:a 6 -f matroska)
+add_row("Opus in WebM, 48 kHz stereo" "${W}/a_opus.webm" NONE -c:a libopus -b:a 192k -f webm)
 
 set(SOURCE "${W}/s24_96000_2.wav")
 add_row("FLAC, 24-bit 96 kHz stereo" "${W}/b.flac" "${SOURCE}" -c:a flac)

@@ -29,12 +29,13 @@ mode. `ReleaseBuffer` is where the claim stops and the driver begins, and
 an ordinary machine can see past it — including why a virtual cable, the obvious instrument,
 turns out not to be one.
 
-Working: **eight container readers and seven codecs**, resolved container-first — a file is
+Working: **nine container readers and seven codecs**, resolved container-first — a file is
 identified, opened, and asked what is in it, and the codec for each stream is looked up
-rather than tried. Nothing is tried. Four of the containers are read by code in this tree;
-the rest are libogg, dr_wav, and Media Foundation and FFmpeg as whole pipelines. All
-hash-identical to each other and to the reference on everything they read, up to 32-bit at
-1,048,575 Hz. Format negotiation against real drivers; the passthrough graph on two threads;
+rather than tried. Nothing is tried. Matroska is where that pays: it can hold any of seven
+codecs this tree already decodes, and reading it added no decoding at all. Three of the
+containers are parsed by code here; the rest are libFLAC, libogg, libmatroska, dr_wav, and
+Media Foundation and FFmpeg as whole pipelines. All hash-identical to each other and to the
+reference on everything they read, up to 32-bit at 1,048,575 Hz. Format negotiation against real drivers; the passthrough graph on two threads;
 WASAPI exclusive down to a 2 ms period; 768 kHz / 32-bit on a USB DAC; a headless engine
 with a shell that can be killed mid-track without the audio noticing. 254 tests plus
 libFuzzer targets, on MSVC.
@@ -46,26 +47,30 @@ container reader in the tree, and fails if what it measures is not what this tab
 coverage table nobody generates is a coverage table that is wrong.
 
 <!-- formats:begin -->
-| Format | `wav` | `flac` | `mpeg` | `adts` | `mp4` | `ogg` | `ffmpeg` | `mf` |
-|---|---|---|---|---|---|---|---|---|
-| WAV, 16-bit 44.1 kHz stereo | **exact** | — | — | — | — | — | exact | exact |
-| WAV, 24-bit 96 kHz stereo | **exact** | — | — | — | — | — | exact | exact |
-| WAV, 32-bit float 48 kHz stereo | **exact** | — | — | — | — | — | exact | S32 |
-| WAV, 16-bit 5.1 at 48 kHz | **exact** | — | — | — | — | — | exact | exact |
-| FLAC, 16-bit 44.1 kHz stereo | — | **exact** | — | — | — | — | exact | exact |
-| ALAC, 16-bit 44.1 kHz stereo | — | — | — | — | **exact** | — | exact | exact |
-| MP3, 44.1 kHz stereo 256k | — | — | **F32** | — | — | — | F32 | S32 |
-| AAC-LC in M4A, 44.1 kHz stereo | — | — | — | — | **F32** | — | F32 | S16 |
-| AAC-LC raw ADTS, 44.1 kHz stereo | — | — | — | **F32** | — | — | F32 | S32 |
-| Vorbis in Ogg, 44.1 kHz stereo | — | — | — | — | — | **F32** | F32 | — |
-| Opus in Ogg, 48 kHz stereo | — | — | — | — | — | **F32** | F32 | — |
-| WMA v2, 44.1 kHz stereo | — | — | — | — | — | — | **F32** | S16 |
-| WavPack, 16-bit 44.1 kHz stereo | — | — | — | — | — | — | **exact** | — |
-| FLAC in Matroska, 16-bit stereo | — | — | — | — | — | — | **exact** | (exact) |
-| FLAC, 24-bit 96 kHz stereo | — | **exact** | — | — | — | — | exact | exact |
-| ALAC, 24-bit 96 kHz stereo | — | — | — | — | **exact** | — | exact | exact |
-| FLAC, 16-bit 5.1 at 48 kHz | — | **exact** | — | — | — | — | exact | exact |
-| ALAC, 16-bit 5.1 at 48 kHz | — | — | — | — | **exact** | — | exact | — |
+| Format | `wav` | `flac` | `mpeg` | `adts` | `mp4` | `ogg` | `mkv` | `ffmpeg` | `mf` |
+|---|---|---|---|---|---|---|---|---|---|
+| WAV, 16-bit 44.1 kHz stereo | **exact** | — | — | — | — | — | — | exact | exact |
+| WAV, 24-bit 96 kHz stereo | **exact** | — | — | — | — | — | — | exact | exact |
+| WAV, 32-bit float 48 kHz stereo | **exact** | — | — | — | — | — | — | exact | S32 |
+| WAV, 16-bit 5.1 at 48 kHz | **exact** | — | — | — | — | — | — | exact | exact |
+| FLAC, 16-bit 44.1 kHz stereo | — | **exact** | — | — | — | — | — | exact | exact |
+| ALAC, 16-bit 44.1 kHz stereo | — | — | — | — | **exact** | — | — | exact | exact |
+| MP3, 44.1 kHz stereo 256k | — | — | **F32** | — | — | — | — | F32 | S32 |
+| AAC-LC in M4A, 44.1 kHz stereo | — | — | — | — | **F32** | — | — | F32 | S16 |
+| AAC-LC raw ADTS, 44.1 kHz stereo | — | — | — | **F32** | — | — | — | F32 | S32 |
+| Vorbis in Ogg, 44.1 kHz stereo | — | — | — | — | — | **F32** | — | F32 | — |
+| Opus in Ogg, 48 kHz stereo | — | — | — | — | — | **F32** | — | F32 | — |
+| WMA v2, 44.1 kHz stereo | — | — | — | — | — | — | — | **F32** | S16 |
+| WavPack, 16-bit 44.1 kHz stereo | — | — | — | — | — | — | — | **exact** | — |
+| FLAC in Matroska, 16-bit stereo | — | (S16) | — | — | — | — | **exact** | exact | (exact) |
+| ALAC in Matroska, 16-bit stereo | — | — | — | — | — | — | **exact** | exact | (exact) |
+| PCM in Matroska, 16-bit stereo | — | — | — | — | — | — | **exact** | exact | (exact) |
+| Vorbis in Matroska, 44.1 kHz stereo | — | — | — | — | — | — | **F32** | F32 | (S32) |
+| Opus in WebM, 48 kHz stereo | — | — | — | — | — | — | **F32** | F32 | (S16) |
+| FLAC, 24-bit 96 kHz stereo | — | **exact** | — | — | — | — | — | exact | exact |
+| ALAC, 24-bit 96 kHz stereo | — | — | — | — | **exact** | — | — | exact | exact |
+| FLAC, 16-bit 5.1 at 48 kHz | — | **exact** | — | — | — | — | — | exact | exact |
+| ALAC, 16-bit 5.1 at 48 kHz | — | — | — | — | **exact** | — | — | exact | — |
 
 Every column is a demuxer -- `wav` is `demux_wav` -- and the codec each one
 hands its packets to is looked up rather than tried: `mediaperch-probe claims`

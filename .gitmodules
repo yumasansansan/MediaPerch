@@ -16,3 +16,9 @@
 [submodule "external/dragonperch"]
 	path = external/dragonperch
 	url = https://github.com/yumasansansan/DragonPerch.git
+[submodule "external/libebml"]
+	path = external/libebml
+	url = https://github.com/Matroska-Org/libebml.git
+[submodule "external/libmatroska"]
+	path = external/libmatroska
+	url = https://github.com/Matroska-Org/libmatroska.git

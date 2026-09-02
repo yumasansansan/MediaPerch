@@ -1,11 +1,22 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# The native FLAC container, on this tree's own framing code and nothing else.
-# No submodule, which is worth having on its own: the container is read the same
-# way whatever decodes the frames, so a second FLAC codec would drop in beside
-# codec_flac without this file being touched.
+# The native FLAC container, on libFLAC -- which is asked where frames begin and
+# end and never to decode one. `skip_single_frame` and `get_decode_position` are
+# documented by Xiph for exactly this, and the module says why the first version
+# of this file did not use them.
+#
+# It links the same target `codec_flac` does; the submodule is brought in there,
+# and this directory is added first, so the guard below is what makes the order
+# not matter.
+
+if(NOT EXISTS "${CMAKE_SOURCE_DIR}/external/flac/CMakeLists.txt")
+    message(WARNING
+        "external/flac is empty -- run `git submodule update --init`. "
+        "Skipping demux_flac; the tree still builds without it.")
+    return()
+endif()
 
 mediaperch_add_module(mp_demux_flac
     KIND demux
     SOURCES demux_flac.cpp
-    LINK mediaperch_flacframe)
+    LINK FLAC)

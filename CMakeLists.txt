@@ -77,8 +77,11 @@ if(MEDIAPERCH_BUILD_PLATFORM)
     # target modules/demux/ogg creates -- so the Ogg container comes before the
     # Vorbis codec. Each submodule now sits with the one module that needs it,
     # which is what made that the only ordering left.
-    add_subdirectory(modules/shared/flacframe)
     add_subdirectory(modules/shared/mp4)
+
+    # codec/flac is where external/flac is brought in, and demux/flac links the
+    # same target -- so the codec comes first, and the container reader after it.
+    add_subdirectory(modules/codec/flac)
 
     add_subdirectory(modules/demux/wav)
     add_subdirectory(modules/demux/flac)
@@ -86,9 +89,9 @@ if(MEDIAPERCH_BUILD_PLATFORM)
     add_subdirectory(modules/demux/adts)
     add_subdirectory(modules/demux/mp4)
     add_subdirectory(modules/demux/ogg)
+    add_subdirectory(modules/demux/mkv)
 
     add_subdirectory(modules/codec/pcm)
-    add_subdirectory(modules/codec/flac)
     add_subdirectory(modules/codec/mp3)
     add_subdirectory(modules/codec/aac)
     add_subdirectory(modules/codec/alac)

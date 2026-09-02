@@ -119,6 +119,7 @@ add_test(NAME core_purity
 add_test(NAME clang_syntax
     COMMAND "${CMAKE_COMMAND}"
             -D "MEDIAPERCH_ROOT=${CMAKE_SOURCE_DIR}"
+            -D "MEDIAPERCH_BUILD_DIR=${CMAKE_BINARY_DIR}"
             -P "${CMAKE_SOURCE_DIR}/cmake/ClangSyntax.cmake")
 
 # Also not a unit test: the decoders held against the audio that was encoded,

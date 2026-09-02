@@ -808,7 +808,7 @@ Two mechanisms, and which one a dependency gets is decided by whether **we** bui
 
 | | Examples | Why |
 |---|---|---|
-| **Git submodule, built from source** | `external/dr_libs`, `external/flac`, `external/ogg`, `external/vorbis`, `external/opus` | Pinned to a commit by the gitlink, so a checkout is reproducible and an upgrade is a reviewable diff. All of them have (or need) no build system of consequence: dr_libs is headers, the Xiph libraries are CMake-native. The tree builds them; CI builds them; nothing is downloaded at configure time except Catch2 |
+| **Git submodule, built from source** | `external/dr_libs`, `external/flac`, `external/ogg`, `external/vorbis`, `external/opus`, `external/libebml`, `external/libmatroska` | Pinned to a commit by the gitlink, so a checkout is reproducible and an upgrade is a reviewable diff. All of them have (or need) no build system of consequence: dr_libs is headers, the Xiph libraries are CMake-native. The tree builds them; CI builds them; nothing is downloaded at configure time except Catch2 |
 | **Found at run time, never vendored** | FFmpeg | Its configure is a shell script needing MSYS2 and nasm on Windows, its build is tens of minutes, its output is tens of megabytes, and **its licence is a choice the user should make** — LGPL-2.1+ by default, GPL with `--enable-gpl`, and non-free options past that. Vendoring one configuration decides all of that for them |
 
 The rule generalises: **vendor what you compile, resolve what you don't.** A module that
@@ -841,6 +841,9 @@ rather than an identity, so the argument is weaker — though not absent, since 
 still defines the tolerance. WAV fails this test in the other direction: there is no
 reference implementation to prefer, because there is no reference implementation.
 
+libebml and libmatroska are LGPL 2.1-or-later, which a GPL-3.0 program may
+link: LGPLv2.1+ can be taken as LGPLv3, and LGPLv3 is compatible with GPLv3.
+
 **Is the licence compatible?** libogg, libvorbis and libopus are all
 three-clause BSD, which is GPL-compatible, so they can be linked into a GPL-3.0 program and
 the combination stays distributable. Apple's ALAC reference is Apache-2.0, which is
@@ -864,6 +867,8 @@ looking for these bugs and that somebody is expected to fix them. Checked direct
 | `flac` | yes |
 | `vorbis` | yes |
 | `opus` | yes |
+| `libebml` | yes (LGPL 2.1+) |
+| `libmatroska` | yes (LGPL 2.1+) |
 | `faad2` | yes |
 | `ffmpeg` | yes |
 | `libxaac` | yes |

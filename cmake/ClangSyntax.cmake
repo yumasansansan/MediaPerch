@@ -37,15 +37,35 @@ endif()
 set(includes
     "-I${MEDIAPERCH_ROOT}/include"
     "-I${MEDIAPERCH_ROOT}/src/core"
-    "-I${MEDIAPERCH_ROOT}/modules/shared/flacframe"
     "-I${MEDIAPERCH_ROOT}/modules/shared/mp4"
     "-I${MEDIAPERCH_ROOT}/modules/shared/transform"
     "-I${MEDIAPERCH_ROOT}/modules/shared/biquad"
     "-I${MEDIAPERCH_ROOT}/modules/shared/convolve"
     "-I${MEDIAPERCH_ROOT}/modules/codec/alac"
     "-I${MEDIAPERCH_ROOT}/modules/codec/aac"
-    "-I${MEDIAPERCH_ROOT}/external/dr_libs"
     "-I${MEDIAPERCH_ROOT}/external/dragonperch/src/core")
+
+# **Somebody else's headers go in with `-isystem`**, which is what stops their
+# diagnostics from being ours. libebml and libmatroska are full of conversions
+# this tree would not write and is not going to fix; what matters is the
+# diagnostics in the file being checked.
+set(system_includes
+    "-isystem" "${MEDIAPERCH_ROOT}/external/dr_libs"
+    "-isystem" "${MEDIAPERCH_ROOT}/external/flac/include"
+    "-isystem" "${MEDIAPERCH_ROOT}/external/libebml"
+    "-isystem" "${MEDIAPERCH_ROOT}/external/libmatroska"
+    "-isystem" "${MEDIAPERCH_ROOT}/external/ogg/include")
+
+# libebml and libmatroska generate an export header into the build tree. Without
+# a build directory to point at, the sources that need them are skipped -- and
+# the skip is reported, because a check that silently does not run is worse than
+# no check.
+if(MEDIAPERCH_BUILD_DIR)
+    list(APPEND system_includes
+        "-isystem" "${MEDIAPERCH_BUILD_DIR}/external/libebml"
+        "-isystem" "${MEDIAPERCH_BUILD_DIR}/external/libmatroska"
+        "-isystem" "${MEDIAPERCH_BUILD_DIR}/external/ogg/include")
+endif()
 
 # The warning set the tree builds with, minus the one a pure-C header cannot
 # satisfy: MP_MAKE_VERSION is a macro with C casts in it, and rewriting the ABI
@@ -58,7 +78,6 @@ set(warnings
 # platform head, the sink and the two pipelines are left out on purpose: they are
 # Windows-only by definition, and MSVC is the compiler they are written for.
 set(sources
-    modules/shared/flacframe/flacframe.cpp
     modules/shared/mp4/mp4.cpp
     modules/shared/transform/transform.cpp
     modules/shared/biquad/biquad.cpp
@@ -75,8 +94,20 @@ set(sources
     modules/demux/adts/demux_adts.cpp
     modules/demux/mp4/demux_mp4.cpp)
 
+# These need a header the build generates, so they are checked only when a build
+# directory is named.
+set(generated_sources
+    modules/demux/ogg/demux_ogg.cpp
+    modules/demux/mkv/demux_mkv.cpp)
+if(MEDIAPERCH_BUILD_DIR AND EXISTS "${MEDIAPERCH_BUILD_DIR}/external/libebml/ebml_export.h")
+    list(APPEND sources ${generated_sources})
+else()
+    foreach(source IN LISTS generated_sources)
+        list(APPEND skipped "${source} (needs a configured build directory)")
+    endforeach()
+endif()
+
 set(checked 0)
-set(skipped "")
 set(failed "")
 foreach(source IN LISTS sources)
     set(full "${MEDIAPERCH_ROOT}/${source}")
@@ -86,7 +117,8 @@ foreach(source IN LISTS sources)
     endif()
     execute_process(
         COMMAND "${clang_exe}" -fsyntax-only -std=c++23
-                -target x86_64-pc-windows-msvc ${warnings} ${includes} "${full}"
+                -target x86_64-pc-windows-msvc ${warnings} ${includes}
+                ${system_includes} "${full}"
         RESULT_VARIABLE status OUTPUT_VARIABLE said ERROR_VARIABLE complained)
     if(NOT status EQUAL 0 OR complained MATCHES "warning:")
         list(APPEND failed "${source}")

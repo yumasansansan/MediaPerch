@@ -31,6 +31,8 @@ git submodule update --init
 | `external/ogg` | libogg | `demux_ogg` |
 | `external/vorbis` | libvorbis | `codec_vorbis` |
 | `external/opus` | libopus | `codec_opus` |
+| `external/libebml` | EBML, the encoding Matroska is written in | `demux_mkv` |
+| `external/libmatroska` | the Matroska schema on top of it | `demux_mkv` |
 
 **Each submodule sits with the one module that needs it**, which is a property of the
 container/codec split rather than a tidying. One module used to bring in four of the Xiph
@@ -38,10 +40,19 @@ libraries at once, because it was the container and both codecs together. libFLA
 *codec* dependency and nothing else -- `demux_flac` reads the FLAC container with no library
 at all -- and libogg belongs to the container reader.
 
-The one ordering that survives: libvorbis asks `find_package(Ogg REQUIRED)`, so
-`modules/demux/ogg` is added before `modules/codec/vorbis`.
+Two orderings survive, both for the same reason -- a library asking
+`find_package` for one this build has already compiled, answered by a shim in
+`cmake/`:
 
-### Three small CMake overrides, and why they are in `cmake/`
+- libvorbis asks for `Ogg`, so `modules/demux/ogg` comes before
+  `modules/codec/vorbis`.
+- libmatroska asks for `EBML`, so `modules/demux/mkv` adds `external/libebml`
+  before `external/libmatroska`.
+
+And one that is not a `find_package`: `modules/codec/flac` brings in libFLAC and
+`modules/demux/flac` links the same target, so the codec comes first.
+
+### Four small CMake overrides, and why they are in `cmake/`
 
 The Xiph libraries are built in-tree, which their own CMake does not quite expect. Four
 files in `cmake/` fix that, all by the same mechanism: every one of those projects reaches
@@ -51,6 +62,7 @@ already on that path from the top-level `CMakeLists.txt`, so ours is found first
 | File | What it replaces |
 |---|---|
 | `FindOgg.cmake` | libvorbis calling `find_package(Ogg REQUIRED)` for an *installed* libogg. Ours answers with the in-tree `Ogg::ogg` target, which `modules/demux/ogg` creates first |
+| `FindEBML.cmake` | libmatroska calling `find_package(EBML 2.0.0)` for an *installed* libebml. The same trick, plus the `EBML::ebml` alias libebml does not declare for itself |
 | `OpusPackageVersion.cmake` | opus asking `git describe --tags` for its version number |
 
 The second matters more than it looks. Upstream has **no working fallback** when git cannot

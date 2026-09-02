@@ -1,31 +1,42 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// The native FLAC container: `fLaC`, its metadata blocks, and the frames.
+// The native FLAC container, on libFLAC.
 //
-// **FLAC is the case where "the reference implementation does both halves" is
-// most tempting and least true.** libFLAC reads the container and decodes, so it
-// would have been easy to make this a self-decoding pipeline and move on. What
-// that would have cost is visible one directory away: `demux_ogg` already reads
-// OggFLAC, names the codec, and has nowhere to send it. A FLAC *codec* -- one
-// that takes a STREAMINFO and frames and knows nothing about files -- is what
-// makes that stream playable, and a codec that exists needs a demuxer that
-// produces frames for it. So the split is done properly on both sides and
-// OggFLAC starts playing as a consequence rather than as a special case.
+// **This was written by hand once, and that was a mistake worth recording.** A
+// FLAC frame does not carry its length, so a demuxer has to find the end of one
+// by finding the beginning of the next -- and the first version of this module
+// did that itself, scanning forward while running the format's CRC-16 and
+// testing every position where it read zero. The reasoning written here was that
+// the reference decoder does not expose frame boundaries.
 //
-// The framing itself is in `shared/flacframe`, and the reason it is a real
-// parser rather than a scan for sync bytes is written there: a FLAC frame does
-// not carry its length, so its end has to be found, and the format's own CRC-16
-// is what turns finding into confirming.
+// It does. `FLAC__stream_decoder_skip_single_frame` advances one frame without
+// reconstructing its samples, and `FLAC__stream_decoder_get_decode_position`
+// says where that left the stream. libFLAC's own header documents the pair for
+// exactly this use, in these words: *"separating a FLAC stream into frames for
+// editing or storing in a container"*. So the tree had a hand-written parser
+// over a stranger's bytes standing in front of the reference implementation of
+// the same format, doing a job that implementation offers.
 //
-// This module has no dependency of any kind, which is worth having on its own:
-// the container is read the same way whatever decodes the frames, so a second
-// FLAC codec -- one on a different library, or one written here -- would drop in
-// beside `codec_flac` without any of this being touched. That is exactly what
-// having a container reader was for.
-
-#include "flacframe.hpp"
+// What replaced it is smaller and safer in the way that matters. The scan is
+// gone, and with it a bug the fuzzer found in ninety seconds -- a frame header
+// can parse in fewer bytes than the shortest frame it implies, and the CRC loop
+// began by reading past the end of its buffer. libFLAC's decoder is fuzzed
+// continuously on OSS-Fuzz (`external/flac/oss-fuzz/decoder.cc`), which no local
+// campaign is going to match.
+//
+// **The split is unaffected, which is the point worth being clear about.**
+// libFLAC is used here as a *container reader*: it is asked where frames begin
+// and end, and never to decode one. The frames go to `codec_flac`, which is the
+// same module `demux_ogg` hands an OggFLAC to. Two containers, one codec,
+// neither aware of the other.
+//
+// What remains this module's own is the seek index, because that is about
+// positions rather than about parsing: the file's SEEKTABLE where it has one,
+// plus a point recorded every so often on the way past.
 
 #include <mediaperch/module.h>
+
+#include <FLAC/stream_decoder.h>
 
 #include <cstdarg>
 #include <cstdio>
@@ -71,142 +82,239 @@ FILE* open_file(const char* path)
 FILE* open_file(const char* path) { return std::fopen(path, "rb"); }
 #endif
 
-/// How much of the file is held in the window at once.
+/// The smallest container that holds `bits`, in bytes, or 0 if none does.
+std::uint32_t container_for(std::uint32_t bits) noexcept
+{
+    if (bits == 0 || bits > 32) {
+        return 0;
+    }
+    if (bits <= 16) {
+        return 2;
+    }
+    if (bits <= 24) {
+        return 3;
+    }
+    return 4;
+}
+
+MpSampleType sample_type_for(std::uint32_t container, std::uint32_t valid) noexcept
+{
+    if (valid == 0 || valid > container * 8) {
+        return MP_SAMPLE_NONE;
+    }
+    switch (container) {
+    case 2: return MP_SAMPLE_S16;
+    case 3: return MP_SAMPLE_S24_PACKED;
+    case 4: return valid <= 24 ? MP_SAMPLE_S24_IN_32 : MP_SAMPLE_S32;
+    default: return MP_SAMPLE_NONE;
+    }
+}
+
+/// One remembered position: which sample, and where its frame begins.
 ///
-/// A frame has to fit inside it, and STREAMINFO's `max_frame` says how large one
-/// can be -- but an encoder is allowed to write zero there, so the window grows
-/// on demand rather than being sized once from a number that may be missing.
-constexpr std::size_t k_window = 1u << 16;
-
-/// One remembered position in this many frames. The same trade as
-/// `demux_mpeg`'s, for the same reason.
-constexpr std::uint64_t k_index_stride = 32;
-
-/// A position in the stream: which sample, and where its frame begins.
-///
-/// **The list of these is not evenly spaced and must not be treated as if it
-/// were.** Some come from the file's own SEEKTABLE, whose points sit wherever
-/// the encoder chose; the rest are recorded on the way past, one in
-/// `k_index_stride`. Indexing it arithmetically -- entry *i* is frame *i* times
-/// the stride -- is true of the second kind and false of the first, and mixing
-/// the two was a bug: after a seek in a file with a seek table, the counter that
-/// decides where the next point goes was wrong by however far the encoder's
-/// points were from evenly spaced. Each point carries its own sample instead.
-
+/// **The list is not evenly spaced and must not be indexed as if it were.**
+/// Some points come from the file's own SEEKTABLE and sit wherever the encoder
+/// chose; the rest are recorded on the way past, one in `k_index_stride`
+/// frames. Each carries its own sample number for that reason.
 struct Point {
     std::uint64_t sample = 0;
-    std::uint64_t at = 0; ///< byte offset in the file
+    std::uint64_t at = 0;
 };
+
+/// One remembered position in this many frames.
+constexpr std::uint64_t k_index_stride = 32;
 
 } // namespace
 
 struct MpDemux {
+    /// libFLAC's handle on the file, and ours. Two of them on purpose: reading
+    /// a packet's bytes means going back to where its frame started, and doing
+    /// that on the decoder's own handle would mean moving its file pointer
+    /// behind its back and hoping to put it back exactly.
     FILE* fp = nullptr;
-    std::uint64_t audio_at = 0;
+    FILE* bytes = nullptr;
+    FLAC__StreamDecoder* dec = nullptr;
     std::uint64_t file_bytes = 0;
 
-    flacframe::StreamInfo info{};
     std::vector<std::uint8_t> config; ///< the STREAMINFO block, verbatim
     MpFormat format{};
+    std::uint64_t total_samples = 0;
+    bool have_info = false;
 
-    /// The window: `window` holds `file_bytes` from `window_at` onwards.
-    std::vector<std::uint8_t> window;
-    std::uint64_t window_at = 0;
-    std::size_t window_have = 0;
-    std::size_t window_used = 0;
-
+    std::uint64_t audio_at = 0; ///< byte offset of the first frame
     std::uint64_t position = 0; ///< the next packet's first sample
-
-    /// Sorted by sample: the SEEKTABLE's points, then whatever was recorded
-    /// while reading. Never empty -- the start of the audio is always in it.
+    /// Sorted by sample; never empty after `open`.
     std::vector<Point> index;
-    /// Frames read since the last point was recorded.
     std::uint64_t since_point = 0;
+
+    ~MpDemux()
+    {
+        if (dec != nullptr) {
+            FLAC__stream_decoder_delete(dec);
+        }
+        if (fp != nullptr) {
+            std::fclose(fp);
+        }
+        if (bytes != nullptr) {
+            std::fclose(bytes);
+        }
+    }
 };
 
 namespace {
 
-/// Fills the window so that at least `least` bytes are available from
-/// `window_at + window_used`, moving what is unread to the front.
-bool fill(MpDemux* d, std::size_t least)
+// --------------------------------------------------------------------------
+// The file, as libFLAC sees it
+// --------------------------------------------------------------------------
+
+FLAC__StreamDecoderReadStatus read_cb(const FLAC__StreamDecoder*, FLAC__byte buffer[],
+                                      std::size_t* bytes, void* client)
 {
-    const std::size_t left = d->window_have - d->window_used;
-    if (left >= least) {
-        return true;
+    auto* d = static_cast<MpDemux*>(client);
+    if (*bytes == 0) {
+        return FLAC__STREAM_DECODER_READ_STATUS_ABORT;
     }
-    if (d->window.size() < least) {
-        d->window.resize(least > k_window ? least : k_window);
+    const std::size_t got = std::fread(buffer, 1, *bytes, d->fp);
+    *bytes = got;
+    return got == 0 ? FLAC__STREAM_DECODER_READ_STATUS_END_OF_STREAM
+                    : FLAC__STREAM_DECODER_READ_STATUS_CONTINUE;
+}
+
+FLAC__StreamDecoderSeekStatus seek_cb(const FLAC__StreamDecoder*, FLAC__uint64 at,
+                                      void* client)
+{
+    auto* d = static_cast<MpDemux*>(client);
+    return _fseeki64(d->fp, static_cast<std::int64_t>(at), SEEK_SET) == 0
+               ? FLAC__STREAM_DECODER_SEEK_STATUS_OK
+               : FLAC__STREAM_DECODER_SEEK_STATUS_ERROR;
+}
+
+FLAC__StreamDecoderTellStatus tell_cb(const FLAC__StreamDecoder*, FLAC__uint64* at,
+                                      void* client)
+{
+    auto* d = static_cast<MpDemux*>(client);
+    const std::int64_t here = _ftelli64(d->fp);
+    if (here < 0) {
+        return FLAC__STREAM_DECODER_TELL_STATUS_ERROR;
     }
-    if (d->window_used != 0) {
-        std::memmove(d->window.data(), d->window.data() + d->window_used, left);
-        d->window_at += d->window_used;
-        d->window_used = 0;
-        d->window_have = left;
+    *at = static_cast<FLAC__uint64>(here);
+    return FLAC__STREAM_DECODER_TELL_STATUS_OK;
+}
+
+FLAC__StreamDecoderLengthStatus length_cb(const FLAC__StreamDecoder*, FLAC__uint64* out,
+                                          void* client)
+{
+    auto* d = static_cast<MpDemux*>(client);
+    *out = d->file_bytes;
+    return FLAC__STREAM_DECODER_LENGTH_STATUS_OK;
+}
+
+FLAC__bool eof_cb(const FLAC__StreamDecoder*, void* client)
+{
+    auto* d = static_cast<MpDemux*>(client);
+    return std::feof(d->fp) != 0 ? 1 : 0;
+}
+
+/// Never called. Nothing here decodes: `skip_single_frame` is the only thing
+/// that reads a frame, and it does not reconstruct one.
+FLAC__StreamDecoderWriteStatus write_cb(const FLAC__StreamDecoder*, const FLAC__Frame*,
+                                        const FLAC__int32* const[], void*)
+{
+    return FLAC__STREAM_DECODER_WRITE_STATUS_CONTINUE;
+}
+
+void metadata_cb(const FLAC__StreamDecoder*, const FLAC__StreamMetadata* meta, void* client)
+{
+    auto* d = static_cast<MpDemux*>(client);
+    if (meta->type == FLAC__METADATA_TYPE_STREAMINFO) {
+        const auto& info = meta->data.stream_info;
+        const std::uint32_t container = container_for(info.bits_per_sample);
+        d->format.sample_rate = info.sample_rate;
+        d->format.channels = info.channels;
+        d->format.channel_mask = 0; // FLAC's channel assignment is implicit
+        d->format.encoding = MP_ENCODING_PCM;
+        d->format.valid_bits = info.bits_per_sample;
+        // **The sample type is the codec's to state.** The container knows the
+        // depth and says so through `valid_bits`; what a decoder puts those
+        // bits into is its own answer.
+        d->format.sample_type = MP_SAMPLE_NONE;
+        d->total_samples = info.total_samples;
+        d->have_info = container != 0 && info.sample_rate != 0 &&
+                       sample_type_for(container, info.bits_per_sample) != MP_SAMPLE_NONE;
+
+        // **The blob the ABI defines for MP_CODEC_FLAC is the STREAMINFO block
+        // itself**, and libFLAC hands it over parsed rather than raw -- so it is
+        // written back out. Thirty-four bytes whose layout the format fixes,
+        // which is what lets the ABI define the blob and mean something precise.
+        d->config.assign(34, 0);
+        std::uint8_t* p = d->config.data();
+        p[0] = static_cast<std::uint8_t>((info.min_blocksize >> 8) & 0xFFu);
+        p[1] = static_cast<std::uint8_t>(info.min_blocksize & 0xFFu);
+        p[2] = static_cast<std::uint8_t>((info.max_blocksize >> 8) & 0xFFu);
+        p[3] = static_cast<std::uint8_t>(info.max_blocksize & 0xFFu);
+        p[4] = static_cast<std::uint8_t>((info.min_framesize >> 16) & 0xFFu);
+        p[5] = static_cast<std::uint8_t>((info.min_framesize >> 8) & 0xFFu);
+        p[6] = static_cast<std::uint8_t>(info.min_framesize & 0xFFu);
+        p[7] = static_cast<std::uint8_t>((info.max_framesize >> 16) & 0xFFu);
+        p[8] = static_cast<std::uint8_t>((info.max_framesize >> 8) & 0xFFu);
+        p[9] = static_cast<std::uint8_t>(info.max_framesize & 0xFFu);
+        const std::uint32_t packed =
+            (info.sample_rate << 12) | (((info.channels - 1u) & 0x7u) << 9) |
+            (((info.bits_per_sample - 1u) & 0x1Fu) << 4) |
+            static_cast<std::uint32_t>((info.total_samples >> 32) & 0xFu);
+        p[10] = static_cast<std::uint8_t>((packed >> 24) & 0xFFu);
+        p[11] = static_cast<std::uint8_t>((packed >> 16) & 0xFFu);
+        p[12] = static_cast<std::uint8_t>((packed >> 8) & 0xFFu);
+        p[13] = static_cast<std::uint8_t>(packed & 0xFFu);
+        const auto low = static_cast<std::uint32_t>(info.total_samples & 0xFFFFFFFFu);
+        p[14] = static_cast<std::uint8_t>((low >> 24) & 0xFFu);
+        p[15] = static_cast<std::uint8_t>((low >> 16) & 0xFFu);
+        p[16] = static_cast<std::uint8_t>((low >> 8) & 0xFFu);
+        p[17] = static_cast<std::uint8_t>(low & 0xFFu);
+        std::memcpy(p + 18, info.md5sum, 16);
+        return;
     }
-    if (_fseeki64(d->fp, static_cast<std::int64_t>(d->window_at + d->window_have),
-                  SEEK_SET) != 0) {
+    if (meta->type == FLAC__METADATA_TYPE_SEEKTABLE) {
+        const auto& table = meta->data.seek_table;
+        for (unsigned i = 0; i < table.num_points; ++i) {
+            const auto& point = table.points[i];
+            // A placeholder point says "unused" with a sample number of all
+            // ones, and following one would seek into the metadata.
+            if (point.sample_number != 0xFFFFFFFFFFFFFFFFull) {
+                d->index.push_back(Point{point.sample_number, point.stream_offset});
+            }
+        }
+    }
+}
+
+void error_cb(const FLAC__StreamDecoder*, FLAC__StreamDecoderErrorStatus status, void*)
+{
+    log_fmt(MP_LOG_WARN, "libFLAC: %s", FLAC__StreamDecoderErrorStatusString[status]);
+}
+
+/// Where libFLAC has read up to, in bytes.
+bool position_of(MpDemux* d, std::uint64_t& out) noexcept
+{
+    FLAC__uint64 at = 0;
+    if (FLAC__stream_decoder_get_decode_position(d->dec, &at) == 0) {
         return false;
     }
-    const std::size_t room = d->window.size() - d->window_have;
-    const std::size_t got =
-        std::fread(d->window.data() + d->window_have, 1, room, d->fp);
-    d->window_have += got;
-    return d->window_have - d->window_used >= least || got != 0;
+    out = at;
+    return true;
 }
 
-/// Puts the window at `at`, discarding whatever it held.
-void rewind_to(MpDemux* d, std::uint64_t at)
+/// Puts libFLAC back at `at`, looking for a frame sync.
+bool restart_at(MpDemux* d, std::uint64_t at) noexcept
 {
-    d->window_at = at;
-    d->window_have = 0;
-    d->window_used = 0;
-}
-
-/// The next frame in the window, without consuming it. Grows the window until a
-/// whole frame fits or the file runs out.
-const std::uint8_t* peek_frame(MpDemux* d, std::size_t& out_length)
-{
-    for (;;) {
-        const std::uint64_t at = d->window_at + d->window_used;
-        if (at >= d->file_bytes) {
-            return nullptr;
-        }
-        // Ask for a window that could hold the largest frame the encoder said it
-        // wrote, or a page if it said nothing.
-        const std::size_t want = d->info.max_frame != 0 ? d->info.max_frame + 64 : k_window;
-        (void)fill(d, want);
-        const std::size_t have = d->window_have - d->window_used;
-        if (have == 0) {
-            return nullptr;
-        }
-        const std::uint8_t* p = d->window.data() + d->window_used;
-        const bool at_end = at + have >= d->file_bytes;
-        const std::size_t length = flacframe::frame_length(p, have, d->info, at_end);
-        if (length != 0) {
-            out_length = length;
-            return p;
-        }
-        if (at_end) {
-            return nullptr; // the tail is not a frame this stream could contain
-        }
-        // Not enough bytes for a whole frame. Grow and read again; if that
-        // cannot happen either, this file is not one we can follow.
-        const std::size_t bigger = d->window.size() * 2;
-        if (bigger > (1u << 26)) {
-            return nullptr;
-        }
-        d->window.resize(bigger);
-        if (!fill(d, bigger - 1)) {
-            return nullptr;
-        }
+    if (FLAC__stream_decoder_flush(d->dec) == 0) {
+        return false;
     }
+    return _fseeki64(d->fp, static_cast<std::int64_t>(at), SEEK_SET) == 0;
 }
 
-/// Records where a frame begins, one in `k_index_stride`.
-///
-/// Appended only when it is past everything already known, which is what keeps
-/// the list sorted whatever the SEEKTABLE contained and however playback
-/// jumped around.
+/// Records where a frame begins, one in `k_index_stride`. Appended only when it
+/// is past everything already known, which keeps the list sorted whatever the
+/// SEEKTABLE held and however playback jumped around.
 void remember(MpDemux* d, std::uint64_t sample, std::uint64_t at)
 {
     if (d->since_point < k_index_stride) {
@@ -218,6 +326,10 @@ void remember(MpDemux* d, std::uint64_t sample, std::uint64_t at)
         d->index.push_back(Point{sample, at});
     }
 }
+
+// --------------------------------------------------------------------------
+// The vtable
+// --------------------------------------------------------------------------
 
 MpResult MP_CALL demux_probe(const char* path, const std::uint8_t* head, std::size_t bytes,
                              std::uint32_t* out_score) noexcept
@@ -231,8 +343,8 @@ MpResult MP_CALL demux_probe(const char* path, const std::uint8_t* head, std::si
         return MP_OK;
     }
     // Four bytes of magic and nothing else is needed: unlike MP4, a native FLAC
-    // stream says what it is in its first word and says what is inside it in the
-    // next forty.
+    // stream says what it is in its first word and what is inside it in the next
+    // forty.
     if (std::memcmp(head, "fLaC", 4) == 0) {
         *out_score = 100;
     }
@@ -251,88 +363,50 @@ try {
         return MP_ERR_NO_MEMORY;
     }
     d->fp = open_file(path);
-    if (d->fp == nullptr) {
+    d->bytes = open_file(path);
+    if (d->fp == nullptr || d->bytes == nullptr) {
         delete d;
         return MP_ERR_IO;
     }
     if (_fseeki64(d->fp, 0, SEEK_END) != 0) {
-        std::fclose(d->fp);
         delete d;
         return MP_ERR_IO;
     }
     d->file_bytes = static_cast<std::uint64_t>(_ftelli64(d->fp));
+    if (_fseeki64(d->fp, 0, SEEK_SET) != 0) {
+        delete d;
+        return MP_ERR_IO;
+    }
 
-    std::uint8_t magic[4];
-    if (_fseeki64(d->fp, 0, SEEK_SET) != 0 || std::fread(magic, 1, 4, d->fp) != 4 ||
-        std::memcmp(magic, "fLaC", 4) != 0) {
-        std::fclose(d->fp);
+    d->dec = FLAC__stream_decoder_new();
+    if (d->dec == nullptr) {
+        delete d;
+        return MP_ERR_NO_MEMORY;
+    }
+    // Nothing here decodes, so there is nothing for the MD5 to check.
+    FLAC__stream_decoder_set_md5_checking(d->dec, false);
+    // STREAMINFO always arrives; the seek table has to be asked for, and it is
+    // the one other block a container reader has any use for.
+    FLAC__stream_decoder_set_metadata_respond(d->dec, FLAC__METADATA_TYPE_SEEKTABLE);
+
+    if (FLAC__stream_decoder_init_stream(d->dec, &read_cb, &seek_cb, &tell_cb, &length_cb,
+                                         &eof_cb, &write_cb, &metadata_cb, &error_cb,
+                                         d) != FLAC__STREAM_DECODER_INIT_STATUS_OK) {
+        delete d;
+        return MP_ERR_INTERNAL;
+    }
+    if (FLAC__stream_decoder_process_until_end_of_metadata(d->dec) == 0 || !d->have_info) {
+        log_fmt(MP_LOG_DEBUG, "%s: no STREAMINFO this demuxer could use", path);
         delete d;
         return MP_ERR_UNSUPPORTED;
     }
-
-    // The metadata blocks, of which only STREAMINFO and SEEKTABLE are this
-    // module's business. Everything else -- the tags, the cover art, the padding
-    // -- belongs to whatever reads metadata, and reading past it is the whole
-    // interaction a demuxer has with it.
-    std::uint64_t at = 4;
-    bool have_info = false;
-    for (int guard = 0; guard < 4096; ++guard) {
-        std::uint8_t header[4];
-        if (_fseeki64(d->fp, static_cast<std::int64_t>(at), SEEK_SET) != 0 ||
-            std::fread(header, 1, 4, d->fp) != 4) {
-            break;
-        }
-        const bool last = (header[0] & 0x80u) != 0;
-        const unsigned type = header[0] & 0x7Fu;
-        const std::uint32_t length = (static_cast<std::uint32_t>(header[1]) << 16) |
-                                     (static_cast<std::uint32_t>(header[2]) << 8) |
-                                     static_cast<std::uint32_t>(header[3]);
-        at += 4;
-        if (type == 0) { // STREAMINFO
-            std::vector<std::uint8_t> raw(length);
-            if (length < 34 || std::fread(raw.data(), 1, length, d->fp) != length ||
-                !flacframe::parse_streaminfo(raw.data(), raw.size(), d->info)) {
-                break;
-            }
-            // The blob the ABI defines for MP_CODEC_FLAC is the block itself,
-            // without the four bytes that said how long it was.
-            d->config.assign(raw.begin(), raw.begin() + 34);
-            have_info = true;
-        } else if (type == 3) { // SEEKTABLE
-            const std::uint32_t points = length / 18;
-            std::vector<std::uint8_t> raw(length);
-            if (std::fread(raw.data(), 1, length, d->fp) == length) {
-                for (std::uint32_t i = 0; i < points; ++i) {
-                    const std::uint8_t* p = raw.data() + static_cast<std::size_t>(i) * 18;
-                    std::uint64_t sample = 0;
-                    std::uint64_t offset = 0;
-                    for (int b = 0; b < 8; ++b) {
-                        sample = (sample << 8) | p[b];
-                        offset = (offset << 8) | p[8 + b];
-                    }
-                    // A placeholder point says "unused" with a sample number of
-                    // all ones, and following one would seek into the metadata.
-                    if (sample != 0xFFFFFFFFFFFFFFFFull) {
-                        d->index.push_back(Point{sample, offset});
-                    }
-                }
-            }
-        }
-        at += length;
-        if (last) {
-            break;
-        }
-    }
-    if (!have_info) {
-        log_fmt(MP_LOG_DEBUG, "%s: no STREAMINFO this demuxer could read", path);
-        std::fclose(d->fp);
+    if (!position_of(d, d->audio_at)) {
         delete d;
-        return MP_ERR_UNSUPPORTED;
+        return MP_ERR_IO;
     }
 
-    d->audio_at = at;
-    // The seek table's offsets are relative to the first frame, and the index
-    // this module keeps is absolute, so they are made absolute once, here.
+    // The seek table's offsets are relative to the first frame; the index this
+    // module keeps is absolute, so they are made absolute once, here.
     for (Point& point : d->index) {
         point.at += d->audio_at;
     }
@@ -340,17 +414,6 @@ try {
         d->index.insert(d->index.begin(), Point{0, d->audio_at});
     }
 
-    d->format.sample_rate = d->info.sample_rate;
-    d->format.channels = d->info.channels;
-    d->format.channel_mask = 0; // FLAC's channel assignment is implicit
-    d->format.encoding = MP_ENCODING_PCM;
-    d->format.valid_bits = d->info.bits;
-    // **The sample type is the codec's to state.** The container knows the depth
-    // and says so through `valid_bits`; what a decoder puts those bits into is
-    // its own answer, and the two FLAC codecs here could reasonably differ.
-    d->format.sample_type = MP_SAMPLE_NONE;
-
-    rewind_to(d, d->audio_at);
     *out = d;
     return MP_OK;
 } catch (...) {
@@ -380,7 +443,7 @@ MpResult MP_CALL demux_stream_info(MpDemux* d, std::uint32_t index, MpStreamInfo
     out->flags = MP_STREAM_DEFAULT;
     out->config_bytes = static_cast<std::uint32_t>(d->config.size());
     out->format = d->format;
-    out->total_frames = d->info.total_samples;
+    out->total_frames = d->total_samples;
     return MP_OK;
 }
 
@@ -421,33 +484,53 @@ try {
     std::memset(out, 0, size);
     out->size = size;
 
-    std::size_t length = 0;
-    const std::uint8_t* frame = peek_frame(d, length);
-    if (frame == nullptr) {
+    std::uint64_t start = 0;
+    if (!position_of(d, start) || start >= d->file_bytes) {
         return MP_END;
     }
-    if (dst == nullptr || dst_bytes < length) {
-        // Nothing is consumed: the window still holds the frame.
-        out->bytes = static_cast<std::uint32_t>(length);
-        return MP_ERR_NO_MEMORY;
+
+    if (FLAC__stream_decoder_skip_single_frame(d->dec) == 0) {
+        return MP_END;
+    }
+    const FLAC__StreamDecoderState state = FLAC__stream_decoder_get_state(d->dec);
+    if (state == FLAC__STREAM_DECODER_END_OF_STREAM ||
+        state == FLAC__STREAM_DECODER_ABORTED) {
+        return MP_END;
     }
 
-    flacframe::FrameHeader header{};
-    (void)flacframe::parse_header(frame, length, header);
-    const std::uint64_t sample =
-        header.variable ? header.number : header.number * d->info.min_block;
+    std::uint64_t end = 0;
+    if (!position_of(d, end) || end <= start) {
+        return MP_END;
+    }
+    const std::uint64_t length = end - start;
+    if (length > 0xFFFFFFFFull) {
+        return MP_ERR_FORMAT;
+    }
 
-    remember(d, sample, d->window_at + d->window_used);
-    std::memcpy(dst, frame, length);
-    d->window_used += length;
-    d->position = sample + header.block_size;
+    if (dst == nullptr || dst_bytes < length) {
+        // **Nothing is consumed by a read that could not deliver.** The frame
+        // has already been skipped, so putting it back is arranged rather than
+        // assumed: libFLAC is flushed and repositioned, and the next call reads
+        // the same frame again.
+        out->bytes = static_cast<std::uint32_t>(length);
+        return restart_at(d, start) ? MP_ERR_NO_MEMORY : MP_ERR_IO;
+    }
 
+    // The frame's own bytes, on the handle libFLAC does not know about.
+    if (_fseeki64(d->bytes, static_cast<std::int64_t>(start), SEEK_SET) != 0 ||
+        std::fread(dst, 1, static_cast<std::size_t>(length), d->bytes) != length) {
+        return MP_END;
+    }
+
+    const std::uint32_t blocksize = FLAC__stream_decoder_get_blocksize(d->dec);
+    remember(d, d->position, start);
     out->bytes = static_cast<std::uint32_t>(length);
-    out->frame = sample;
+    out->frame = d->position;
     // **Every FLAC frame stands alone.** There is no reservoir and no overlap:
-    // the format was designed so that a decoder can start at any frame, which is
-    // why seeking here needs no pre-roll at all.
+    // the format was designed so a decoder can start at any frame, which is why
+    // seeking here needs no pre-roll at all.
     out->flags = MP_PACKET_SYNC | MP_PACKET_TIMED;
+    d->position += blocksize;
     return MP_OK;
 } catch (...) {
     return MP_ERR_NO_MEMORY;
@@ -458,53 +541,29 @@ try {
     if (d == nullptr) {
         return MP_ERR_INVALID;
     }
-    // The nearest remembered point at or before the target: a seek table point
-    // the encoder wrote, or one this module recorded on the way past. The list
-    // is sorted, so the last one that qualifies is the nearest.
+    // **The nearest remembered point at or before the target**, rather than
+    // `FLAC__stream_decoder_seek_absolute`. That function decodes the frame it
+    // lands on and leaves the stream past it, which is one block too far for a
+    // demuxer: the packet the caller asked for would already be spent. The
+    // index answers the same question and consumes nothing.
     Point best = d->index.front();
     for (const Point& point : d->index) {
         if (point.sample <= frame && point.sample >= best.sample) {
             best = point;
         }
     }
-    rewind_to(d, best.at);
+    if (!restart_at(d, best.at)) {
+        return MP_ERR_IO;
+    }
     d->position = best.sample;
     d->since_point = 0;
-
-    // Then forward, a frame at a time, until the one holding the target. The
-    // header says where each frame starts, so this reads headers and skips
-    // bodies rather than decoding anything.
-    for (;;) {
-        std::size_t length = 0;
-        const std::uint8_t* p = peek_frame(d, length);
-        if (p == nullptr) {
-            return MP_OK; // past the end: the next read reports it
-        }
-        flacframe::FrameHeader header{};
-        if (!flacframe::parse_header(p, length, header)) {
-            return MP_ERR_IO;
-        }
-        const std::uint64_t sample =
-            header.variable ? header.number : header.number * d->info.min_block;
-        if (sample + header.block_size > frame) {
-            d->position = sample;
-            return MP_OK; // leave it unconsumed: this is the packet to hand back
-        }
-        remember(d, sample, d->window_at + d->window_used);
-        d->window_used += length;
-    }
+    return MP_OK;
 } catch (...) {
     return MP_ERR_NO_MEMORY;
 }
 
 void MP_CALL demux_close(MpDemux* d) noexcept
 {
-    if (d == nullptr) {
-        return;
-    }
-    if (d->fp != nullptr) {
-        std::fclose(d->fp);
-    }
     delete d;
 }
 
@@ -544,7 +603,7 @@ const MpModuleDesc g_desc = {
     /* kind        */ MP_KIND_DEMUX,
     /* priority    */ 120,
     /* id          */ "demux_flac",
-    /* name        */ "FLAC (the container, written here)",
+    /* name        */ "FLAC (libFLAC, the reference framing)",
     /* init        */ &module_init,
     /* shutdown    */ &module_shutdown,
     /* vtbl        */ &g_vtbl,

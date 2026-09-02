@@ -1036,10 +1036,11 @@ modules/             everything that can be loaded and unloaded at runtime, sort
                      file holds -- the width, the valid bits, whether the samples
                      are float, that 8-bit WAV is unsigned -- because all of that
                      was the container's statement and never the codec's.
-  demux/flac/        the native FLAC container, written here. A FLAC frame carries
-                     no length, so its end is found by running the format's own
-                     CRC-16 forward and testing every position where it reads zero.
-                     shared/flacframe/ is that, fuzzed on its own.
+  demux/flac/        the native FLAC container, on libFLAC -- which is asked
+                     where frames begin and end and never to decode one.
+                     skip_single_frame and get_decode_position are documented by
+                     Xiph for exactly that. It was written by hand first, which
+                     was a mistake and is recorded as one at the top of the file.
   demux/mpeg/        MPEG audio layers I to III: the frame headers, the ID3v2 skip
                      and the LAME/Xing tag, which is where an MP3's real length and
                      its encoder delay live. Reads all three layers, so an MP2 stops
@@ -1060,6 +1061,11 @@ modules/             everything that can be loaded and unloaded at runtime, sort
                      hands each one on. Ogg timestamps pages rather than packets, so
                      only the first packet of a page carries a position and the
                      demuxer says which ones those are.
+  demux/mkv/         Matroska and WebM, on libebml and libmatroska. The container
+                     that makes MpStreamInfo mean what it says: a file here is
+                     genuinely several streams, and the video and subtitle tracks
+                     are reported rather than hidden. Seven codecs arrive at once
+                     because every one of them already had a module.
   demux/ffmpeg/      the long tail, and a pipeline rather than a container reader:
                      every stream is MP_STREAM_SELF_DECODES. Enumerates every audio
                      track, which the decoder it replaced threw away.

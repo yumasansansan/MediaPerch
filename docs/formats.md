@@ -54,23 +54,163 @@ is tried.
 | Container | Behind it | Codec it names | Behind that |
 |---|---|---|---|
 | `demux_wav` | dr_wav | `codec_pcm` | **nothing at all** -- it is a memcpy |
-| `demux_flac` | **nothing** | `codec_flac` | libFLAC |
+| `demux_flac` | libFLAC | `codec_flac` | libFLAC |
 | `demux_mpeg` | **nothing** | `codec_mp3` | dr_mp3 |
 | `demux_adts` | **nothing** | `codec_aac` | **nothing** |
 | `demux_mp4` | **nothing** | `codec_alac`, `codec_aac` | **nothing** |
 | `demux_ogg` | libogg | `codec_opus`, `codec_vorbis`, `codec_flac` | libopus, libvorbis, libFLAC |
+| `demux_mkv` | libmatroska | seven of them, see below | |
 | `demux_ffmpeg` | `ffmpeg`, `ffprobe` | *itself* -- `SELF_DECODES` | |
 | `demux_mf` | Media Foundation | *itself* -- `SELF_DECODES` | |
 
-Four of the eight containers are read by code in this tree with no library
-behind them, which is not a boast: a container reader is a parser over bytes
-somebody else wrote, and the ones written here are the ones that had to be
-[fuzzed](../fuzz).
-
 The `codec_flac` row is the one worth reading twice. It is the codec half of the
-native FLAC reader *and* what `demux_ogg` hands an OggFLAC to, and neither
-container knows the other exists. That is the whole argument for the split in one
-line of a table.
+native FLAC reader, what `demux_ogg` hands an OggFLAC to, *and* what `demux_mkv`
+hands a FLAC-in-Matroska to -- and none of the three containers knows the others
+exist. That is the whole argument for the split in one line of a table.
+
+### How much of ISO 14496-12 `demux_mp4` actually reads
+
+Not much, on purpose, and it is worth writing down exactly how much rather than
+leaving it to be discovered.
+
+**What it parses.** Twelve boxes: `moov`, `trak`, `mdia`, `minf`, `stbl` as
+containers; `stsd` for the sample entry; `stsz`, `stco`/`co64`, `stsc` and `stts`
+for where the packets are and how long they run; `mdhd` and `mvhd` for the two
+timescales; `elst` for the gapless edit. Two sample entries: `alac` and `mp4a`,
+the second reached through an `esds` descriptor chain. That is the shape a music
+file has and nothing else.
+
+**What it refuses, measured** with files built for the purpose:
+
+| File | `demux_mp4` | Chosen instead |
+|---|---|---|
+| M4A written with `-movflags +faststart` | reads it | `demux_mp4` |
+| MP4 written with `-movflags +frag_keyframe+empty_moov` | `unsupported by this module` | `demux_ffmpeg` |
+| MP4 written with `-movflags +dash` | `unsupported by this module` | `demux_ffmpeg` |
+| QuickTime `.mov` carrying ALAC | `unsupported by this module` | `demux_ffmpeg` |
+
+**Fragmented MP4 is the gap that matters.** `moof`/`traf`/`trun` is how every
+DASH, CMAF and HLS-fMP4 stream is written, and how `ffmpeg` writes an MP4 when
+told to make one that can be produced without seeking backwards. There is no
+`stbl` in such a file at all -- the sample table lives in a run box per fragment
+-- so nothing this parser knows how to read is there. It declines in `open`, the
+host moves to the next candidate, and FFmpeg reads it. Correct outcome; the
+coverage is simply absent.
+
+Also absent: more than one track (`stream_count` is always 1), sample entries
+other than the two named, `cenc` encryption, edit lists past the first entry, and
+every box that exists for video, subtitles or metadata.
+
+**Against Bento4 and GPAC**, the comparison is not close and is not meant to be.
+Both are complete ISOBMFF implementations: they read and *write* the format, hold
+a class per box across the whole standard and its amendments, do fragmented and
+segmented MP4, DASH and HLS packaging, Common Encryption with several DRM
+systems, editing, and every track type. GPAC is a multimedia framework with a
+filter graph around all of that. Either of them is the right answer for a tool
+that has to accept whatever an MP4 turns out to be.
+
+This is a reader for one audio track of a non-fragmented file, and it is about
+five hundred lines. What it buys over linking one of those is the same thing
+`decode_alac` buys over Apple's reference decoder: no dependency at all, so an
+ALAC in an M4A plays on a checkout with no submodules and no FFmpeg, and the
+whole path from file to samples is code that gets fuzzed here. What it costs is
+the table above.
+
+**If fragmented MP4 should play without FFmpeg, that is a real piece of work and
+a decision rather than an oversight** -- either parsing `moof`/`trun` here, which
+is a fair amount of new parser over a stranger's bytes, or linking Bento4 as a
+submodule and making `demux_mp4` a wrapper the way `demux_mkv` wraps libmatroska.
+The second is the smaller change and the one consistent with what this document
+says about FLAC above.
+
+### Where the reference implementation is used, and where it is not
+
+**Three of these read a container with a library written by the people who
+define the format**, and one of those three did not always. `demux_flac` was
+hand-written first, on the reasoning that libFLAC does not expose frame
+boundaries -- which is wrong: `FLAC__stream_decoder_skip_single_frame` advances
+one frame without reconstructing it and `FLAC__stream_decoder_get_decode_position`
+says where that left the stream, and Xiph's own header documents the pair for
+*"separating a FLAC stream into frames for editing or storing in a container"*.
+So the tree had a scan of its own standing in front of the reference
+implementation of the same format. It does not now, and the six FLAC files below
+decode to the same bytes as before the change, including 32-bit and 768 kHz.
+
+The parser that was deleted had cost something. `flacframe_fuzzer` found an
+out-of-bounds read in it within ninety seconds -- a frame header can parse in
+fewer bytes than the shortest frame it implies, and the CRC scan began past the
+end of its buffer. libFLAC's decoder is fuzzed continuously on OSS-Fuzz, which no
+local campaign matches.
+
+Where a container is still read by code here, it is because there is no library
+that reads only the container: `demux_mp4`'s parser is a slice of ISO 14496-12
+(see below), `demux_mpeg` and `demux_adts` are frame headers, and dr_wav is a
+header rather than a build.
+
+### Matroska, which is what a container reader was for
+
+`demux_mkv` reads Matroska and WebM on libebml and libmatroska. It is the
+container that makes the v2 split pay for itself twice over.
+
+**Seven codecs at once, and no decoding written.** Matroska carries FLAC, Vorbis,
+Opus, AAC, MP3, ALAC and PCM, and every one already had a codec module here. The
+module maps `A_FLAC`, `A_VORBIS`, `A_OPUS`, `A_AAC`, `A_MPEG/L1..L3`, `A_ALAC`
+and `A_PCM/INT/LIT` onto MpCodec, converts each codec's `CodecPrivate` into the
+blob the ABI defines, and hands over packets. Under v1 an `.mka` went to FFmpeg
+entire, because "which decoder reads this file" has no answer for a container
+that could hold any of them.
+
+Measured against FFmpeg on the same files:
+
+| File | Through | Frames | Against FFmpeg |
+|---|---|---|---|
+| FLAC in Matroska | `demux_mkv` + `codec_flac` | 88200 | **byte-identical**, and identical to the source WAV |
+| ALAC in Matroska | `demux_mkv` + `codec_alac` | 88200 | **byte-identical**, and identical to the source WAV |
+| PCM in Matroska | `demux_mkv` + `codec_pcm` | 88200 | **byte-identical**, and identical to the source WAV |
+| AAC in Matroska | `demux_mkv` + `codec_aac` | 89088 | same length; two AAC decoders, so not the same bytes |
+| Vorbis in Matroska | `demux_mkv` + `codec_vorbis` | 88332 | 132 frames longer -- see below |
+| Opus in WebM | `demux_mkv` + `codec_opus` | 96384 | 384 frames longer -- see below |
+| MP3 in Matroska | `demux_mkv` + `codec_mp3` | 88752 | 552 frames longer -- see below |
+
+**The three lossless rows being byte-identical is the result that matters**: a
+container reader that changed a sample would be a container reader that was
+wrong, and Matroska is by some distance the most complicated container this tree
+reads.
+
+**Where the lossy lengths come from, and what is not implemented.** Matroska
+states the encoder's head padding per track, as `CodecDelay`, and this module
+converts it to `MpStreamInfo::skip_frames` -- the same fact `elst` carries in MP4
+and `pre_skip` carries in an Opus header, spelled a third way, and the reason
+that field is the container's rather than the codec's. For the *tail* Matroska
+states only the segment's `Duration`, which is what `play_frames` is set from,
+and which for these files is the encoded length rather than the audible one. The
+exact tail is in the last block's `BlockDuration`, which this module does not yet
+read. Until it does, a lossy track plays its encoder's final padding: 384 frames
+of an Opus file, 8 ms.
+
+**A file is genuinely several streams, and this is where that stops being
+theory.** Given a Matroska with H.264 video, a FLAC track and an Opus track,
+`mediaperch-probe claims` prints:
+
+```
+demux_mkv        100  Matroska and WebM (libmatroska, the reference container)
+  stream 0  video    unknown  -> nothing here decodes it
+  stream 1  audio    FLAC     -> codec_flac
+  stream 2  audio    Opus     -> codec_opus
+demux_ffmpeg     100  FFmpeg (found at run time, not shipped)
+  stream 0  audio    internal -> this module, itself
+  stream 1  audio    internal -> this module, itself
+```
+
+Three streams against two, and the video track named rather than hidden. §9's
+video path will ask for it. `select` picks between them and the host takes the
+default audio track.
+
+**Seeking is by Cues**, Matroska's own index of timestamp to cluster position,
+which lands on a cluster boundary at or before the target; `MP_PACKET_TIMED` on
+the first block is what lets the host discard the rest. Measured on the three
+lossless Matroska files against a WAV of the same audio: frames 0, 1000, 44100
+and 44101 all produce identical bytes.
 
 **Nothing about the audio changed, and that is the measurement that matters.** A
 split that cost a sample would not be worth making, so every file that crossed
@@ -201,7 +341,7 @@ meaningful.
 | AAC in ADTS | **`demux_adts` 100**, `demux_ffmpeg` 30, `demux_mf` 20 | `demux_adts` | `demux_adts` |
 | MP4, M4A | **`demux_mp4` 100**, `demux_ffmpeg` 100 (priority 60), `demux_mf` 20 | `demux_mp4`, and the codec it names | `demux_mp4` where a codec here takes the stream, else `demux_mf` |
 | ASF, WMA | `demux_ffmpeg` 30, `demux_mf` 20 | `demux_ffmpeg` | `demux_mf` |
-| Matroska, WebM | `demux_ffmpeg` 100 | `demux_ffmpeg` | *nothing* |
+| Matroska, WebM | **`demux_mkv` 100**, `demux_ffmpeg` 100 (priority 60) | `demux_mkv`, and the codec it names | `demux_mkv` where a codec here takes the stream |
 | WavPack, Monkey's Audio, DSF, DFF, TTA, Musepack, CAF | `demux_ffmpeg` 100 | `demux_ffmpeg` | *nothing* |
 
 **Every row is a demuxer now**, and the bold entries are the ones that read a
