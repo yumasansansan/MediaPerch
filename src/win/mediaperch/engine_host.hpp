@@ -29,6 +29,15 @@ public:
 
     std::unique_ptr<ISource> open_source(const std::string& path, std::string& decoder,
                                          std::string& why) override;
+
+    /// The same resolution with a module named. `prefer` may be a demuxer's id
+    /// or a v1 decoder's, because "use that one" is a question about a module
+    /// and not about which half of the ABI it belongs to.
+    ///
+    /// The probe and the engine share this on purpose: two ways of opening a
+    /// file that were not the same way would be worse than either.
+    std::unique_ptr<ISource> open_source(const std::string& path, std::string_view prefer,
+                                         std::string& decoder, std::string& why);
     Sink open_sink(const std::string& want, bool shared, std::string& resolved,
                    std::string& why) override;
     [[nodiscard]] const MpDspVtbl* dsp(const std::string& id) override;

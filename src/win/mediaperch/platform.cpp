@@ -223,10 +223,26 @@ const MpSinkVtbl* LoadedModule::sink_vtbl() const noexcept
 void ModuleRegistry::scan(const std::filesystem::path& directory,
                           const std::vector<std::string>& allow)
 {
+    // Beside the executable *and* under it, because modules are sorted by kind
+    // on disk: `modules/demux`, `modules/codec`, `modules/dsp`, `modules/sink`.
+    // An install is a directory somebody can look at and see what is in it, and
+    // that is worth one recursive walk at start-up.
+    //
+    // The `mp_` prefix is still what makes something a candidate, so a walk that
+    // wanders into a build directory full of other people's DLLs finds nothing.
     std::error_code error;
     std::vector<std::filesystem::path> candidates;
-    for (const auto& entry : std::filesystem::directory_iterator{directory, error}) {
-        const auto& path = entry.path();
+    const auto options = std::filesystem::directory_options::skip_permission_denied;
+    for (auto entry = std::filesystem::recursive_directory_iterator{directory, options,
+                                                                    error};
+         entry != std::filesystem::recursive_directory_iterator{}; ++entry) {
+        // Two levels is the layout: the executable's directory, `modules`, and
+        // one folder per kind. Deeper is somebody else's tree.
+        if (entry.depth() > 2) {
+            entry.disable_recursion_pending();
+            continue;
+        }
+        const auto& path = entry->path();
         if (path.extension() != ".dll") {
             continue;
         }

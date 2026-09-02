@@ -242,8 +242,14 @@ const MpCodecVtbl& codec_vtbl()
 
 mp::PacketSource::FindCodec finds_flac()
 {
-    return [](MpCodec codec) -> const MpCodecVtbl* {
-        return codec == MP_CODEC_FLAC ? &codec_vtbl() : nullptr;
+    return [](MpCodec codec, const std::uint8_t* config,
+              std::uint32_t config_bytes) -> const MpCodecVtbl* {
+        // The blob reaches the lookup, which is how a codec declines a stream
+        // it cannot take rather than failing to open one it could have.
+        if (codec != MP_CODEC_FLAC || config == nullptr || config_bytes != 4) {
+            return nullptr;
+        }
+        return &codec_vtbl();
     };
 }
 
@@ -303,8 +309,12 @@ TEST_CASE("a codec nobody has is a different sentence from a file nobody reads",
     g = World{};
     mp::PacketSource source;
     std::string why;
-    CHECK_FALSE(source.open(demux_vtbl(), "x",
-                            [](MpCodec) -> const MpCodecVtbl* { return nullptr; }, why));
+    CHECK_FALSE(source.open(
+        demux_vtbl(), "x",
+        [](MpCodec, const std::uint8_t*, std::uint32_t) -> const MpCodecVtbl* {
+            return nullptr;
+        },
+        why));
     CHECK(why.find("decodes that codec") != std::string::npos);
 }
 
@@ -388,7 +398,8 @@ TEST_CASE("a demuxer that decodes for itself is asked to", "[packet]")
     mp::PacketSource source;
     std::string why;
     REQUIRE(source.open(demux_vtbl(), "x",
-                        [](MpCodec) -> const MpCodecVtbl* {
+                        [](MpCodec, const std::uint8_t*, std::uint32_t)
+                            -> const MpCodecVtbl* {
                             FAIL("a self-decoding stream must not look up a codec");
                             return nullptr;
                         },

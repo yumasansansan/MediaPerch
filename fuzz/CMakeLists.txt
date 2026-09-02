@@ -49,9 +49,9 @@ function(mediaperch_add_fuzzer name source corpus)
         "${CMAKE_SOURCE_DIR}/external/dragonperch/src/core"
         "${CMAKE_SOURCE_DIR}/include"
         "${CMAKE_SOURCE_DIR}/src/core"
-        "${CMAKE_SOURCE_DIR}/modules/decode_alac"
-        "${CMAKE_SOURCE_DIR}/modules/mp4"
-        "${CMAKE_SOURCE_DIR}/modules/decode_aac")
+        "${CMAKE_SOURCE_DIR}/modules/decode/alac"
+        "${CMAKE_SOURCE_DIR}/modules/shared/mp4"
+        "${CMAKE_SOURCE_DIR}/modules/decode/aac")
 
     # MSVC's STL annotates container bounds for ASan, and the annotations only
     # agree when every translation unit that touches a container was built the
@@ -103,11 +103,11 @@ mediaperch_add_fuzzer(wav_fuzzer wav_fuzzer.cpp wav)
 mediaperch_add_fuzzer(flac_fuzzer flac_fuzzer.cpp flac)
 mediaperch_add_fuzzer(mp3_fuzzer mp3_fuzzer.cpp mp3)
 mediaperch_add_fuzzer(aac_fuzzer aac_fuzzer.cpp aac
-                      "${CMAKE_SOURCE_DIR}/modules/decode_aac/aac.cpp"
-                      "${CMAKE_SOURCE_DIR}/modules/decode_aac/aac_tables.cpp")
+                      "${CMAKE_SOURCE_DIR}/modules/decode/aac/aac.cpp"
+                      "${CMAKE_SOURCE_DIR}/modules/decode/aac/aac_tables.cpp")
 mediaperch_add_fuzzer(alac_fuzzer alac_fuzzer.cpp alac
-                      "${CMAKE_SOURCE_DIR}/modules/decode_alac/alac.cpp"
-                      "${CMAKE_SOURCE_DIR}/modules/mp4/mp4.cpp")
+                      "${CMAKE_SOURCE_DIR}/modules/decode/alac/alac.cpp"
+                      "${CMAKE_SOURCE_DIR}/modules/shared/mp4/mp4.cpp")
 
 # The settings file, on DragonPerch's INI corpus rather than a second one of
 # ours. The parser is shared as a submodule for the same reason: two INI parsers

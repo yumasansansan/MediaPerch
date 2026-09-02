@@ -17,6 +17,25 @@ namespace mp {
 /// tells somebody what to do and `MP_ERR_BUSY` does not.
 [[nodiscard]] const char* result_name(MpResult r) noexcept;
 
+/// What a codec id is called. Never null: an id nobody here knows comes back as
+/// "codec 0x…", which is still something a person can look up.
+///
+/// Here rather than in the probe for the same reason `result_name` is: a
+/// container now names the codec of every stream, so the probe prints it, the
+/// engine logs it, and a shell will want to show it. One table, so the three
+/// cannot disagree about what 37 means.
+[[nodiscard]] const char* codec_name(MpCodec codec) noexcept;
+
+/// Audio, video, subtitle. A file is not one stream, and this is what says so
+/// in a listing.
+[[nodiscard]] const char* stream_kind_name(MpStreamKind kind) noexcept;
+
+/// What a module kind is called: demux, codec, dsp. Never null.
+///
+/// There are seven of them now and two were added this year, so a listing that
+/// prints the number makes a reader go and look it up.
+[[nodiscard]] const char* module_kind_name(MpKind kind) noexcept;
+
 } // namespace mp
 
 #endif // MEDIAPERCH_RESULT_HPP

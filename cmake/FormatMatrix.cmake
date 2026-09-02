@@ -82,7 +82,11 @@ endfunction()
 # The decoders, in the order §7 of the plan lists them. A fixed list rather than
 # whatever loaded, because a decoder that is *missing* is a column of dashes and
 # that is information too.
-set(decoders native flac ogg mp3 aac alac mf ffmpeg)
+# The v2 demuxers first, because they are what the resolution rules reach
+# before anything else, and then the v1 decoders that are still being moved
+# across. A column per module is the point: this table is where the migration is
+# visible from outside.
+set(decoders demux_mp4 demux_ogg native flac ogg mp3 aac alac mf ffmpeg)
 
 set(rows "")      # "label|file|reference-file-or-NONE"
 set(row_notes "")
@@ -152,10 +156,14 @@ add_row("ALAC, 16-bit 5.1 at 48 kHz" "${W}/d_alac.m4a" "${SOURCE}" -c:a alac)
 
 # ---------------------------------------------------------------- the asking
 
-# Which decoders claim a file, by the same probe the resolution rules use.
-# Forcing a decoder that would have declined still measures something -- that it
+# Which modules claim a file, by the same probe the resolution rules use.
+# Forcing a module that would have declined still measures something -- that it
 # copes rather than crashes -- but it is not coverage, and a table that could not
 # tell the two apart would overstate every row.
+#
+# `claims` reports both halves of v2 resolution, so both are read: a demuxer
+# claims a container and keeps its full name, a v1 decoder claims a file and is
+# known by its suffix. The column headings say which is which.
 function(who_claims out file)
     execute_process(
         COMMAND "${MEDIAPERCH_PROBE}" claims --file "${file}"
@@ -164,7 +172,9 @@ function(who_claims out file)
     if(status EQUAL 0)
         string(REPLACE "\n" ";" lines "${said}")
         foreach(line IN LISTS lines)
-            if(line MATCHES "^decode_([a-z0-9_]+) ")
+            if(line MATCHES "^ *(demux_[a-z0-9_]+) +[0-9]")
+                list(APPEND claimed "${CMAKE_MATCH_1}")
+            elseif(line MATCHES "^ *decode_([a-z0-9_]+) +[0-9]")
                 list(APPEND claimed "${CMAKE_MATCH_1}")
             endif()
         endforeach()
@@ -245,8 +255,11 @@ foreach(row IN LISTS rows)
         RESULT_VARIABLE status OUTPUT_VARIABLE said)
     set(chosen "")
     if(status EQUAL 0)
-        string(REGEX MATCH "decoder +decode_([a-z0-9_]+)" _ "${said}")
+        string(REGEX MATCH "decoder +([a-z0-9_]+)" _ "${said}")
         set(chosen "${CMAKE_MATCH_1}")
+        # A v1 decoder answers `decode_alac` and the column is called `alac`; a
+        # v2 demuxer answers `demux_mp4` and the column is called that.
+        string(REGEX REPLACE "^decode_" "" chosen "${chosen}")
     endif()
 
     who_claims(claimed "${file}")

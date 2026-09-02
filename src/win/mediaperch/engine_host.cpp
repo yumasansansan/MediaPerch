@@ -28,17 +28,25 @@ std::string lowered(std::string_view s)
 std::unique_ptr<ISource> EngineHost::open_source(const std::string& path,
                                                  std::string& decoder, std::string& why)
 {
+    return open_source(path, {}, decoder, why);
+}
+
+std::unique_ptr<ISource> EngineHost::open_source(const std::string& path,
+                                                 std::string_view prefer,
+                                                 std::string& decoder, std::string& why)
+{
     // **The container first.** A demuxer identifies the file, says what is in
     // it, and the codec is looked up by name. Nothing is tried.
     //
     // The v1 path below is what runs while the modules are still being moved
     // across, and it goes with the last of them -- see docs/plan.md §4, *ABI
     // v2: the container decides*.
-    for (const auto& candidate : registry_->demuxers_for(path, {})) {
+    for (const auto& candidate : registry_->demuxers_for(path, prefer)) {
         auto source = std::make_unique<PacketSource>();
         std::string trouble;
-        const auto find = [this](MpCodec codec) {
-            return registry_->codec_for(codec, nullptr, 0);
+        const auto find = [this](MpCodec codec, const std::uint8_t* config,
+                                 std::uint32_t config_bytes) {
+            return registry_->codec_for(codec, config, config_bytes);
         };
         if (source->open(*candidate.vtbl, path.c_str(), find, trouble)) {
             decoder = candidate.desc->id;
@@ -50,9 +58,12 @@ std::unique_ptr<ISource> EngineHost::open_source(const std::string& path,
         why = trouble;
     }
 
-    auto ranked = registry_->decoders_for(path, {});
+    auto ranked = registry_->decoders_for(path, prefer);
     if (ranked.empty()) {
-        why = "no decoder recognised it";
+        if (why.empty()) {
+            why = prefer.empty() ? "no decoder recognised it"
+                                 : "no module called `" + std::string{prefer} + "` is loaded";
+        }
         return nullptr;
     }
     // A preference is a reordering, not a veto: a decoder somebody named that

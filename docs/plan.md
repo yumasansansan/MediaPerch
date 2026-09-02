@@ -307,7 +307,7 @@ and this tree already vendors them separately: `external/ogg` is the container, 
 
 | Today | Becomes | Note |
 |---|---|---|
-| `modules/mp4/mp4.cpp` | `demux_mp4` | **already a container parser**, already shared by two modules. It gains a vtable and stops being a library |
+| `modules/shared/mp4/mp4.cpp` | `demux_mp4` | **already a container parser**, already shared by two modules. It gains a vtable and stops being a library |
 | `decode_alac/alac.cpp` | `codec_alac` | **already a pure codec**: it takes a config blob and packets |
 | `decode_aac/aac.cpp` | `codec_aac` | likewise. Both keep their fuzz targets unchanged |
 | `decode_mp3` | `demux_mpeg` + `codec_mp3` | the "container" is frame headers and the LAME tag, which is a demuxer's work; `dr_mp3` decodes |
@@ -342,17 +342,32 @@ for them**, which is a better description of what it is.
 
 Each step leaves the tree building and playing music.
 
-1. The ABI header: the two vtables, `MpStreamInfo`, the codec ids, and the descriptor's
-   capability lists that §4.6 asked for. Nothing implements them yet.
-2. The host: resolve by container then codec, with `MP_KIND_DECODER` still supported, so
-   the old and new modules coexist while the rest of the list is worked through.
-3. `demux_mp4` + `codec_alac` + `codec_aac` — the split that already exists in the tree, so
-   it is the one that proves the shape with the least new code.
-4. `demux_ogg` + `codec_vorbis` + `codec_opus`, which is where the split buys a format
-   (OggFLAC, Speex) rather than only tidiness.
+1. **Done.** The ABI header: the two vtables, `MpStreamInfo`, the codec ids, and the
+   descriptor's capability lists that §4.6 asked for. Nothing implements them yet.
+2. **Done.** The host: resolve by container then codec, with `MP_KIND_DECODER` still
+   supported, so the old and new modules coexist while the rest of the list is worked
+   through. `mp::PacketSource` is where a demuxer and a codec become one `ISource`, and it
+   is the single place the gapless edit, the seek warm-up and the packet buffer live.
+3. **Done.** `demux_mp4` + `codec_alac` + `codec_aac` — the split that already exists in the
+   tree, so it is the one that proves the shape with the least new code. Every MP4 in the
+   corpus decodes to the same hash through the pair as through the decoder it replaces.
+4. **Done.** `demux_ogg` + `codec_vorbis` + `codec_opus`, which is where the split buys a
+   format (OggFLAC, Speex) rather than only tidiness. Byte-identical to `decode_ogg` on both
+   codecs, and OggFLAC and Speex now get read by `demux_ogg` and refused by name — "nothing
+   here decodes that codec" instead of "this is an Ogg I cannot read", which is the
+   difference the split was for.
 5. `demux_wav`, `demux_flac`, `demux_mpeg` and their codecs.
 6. `demux_mf` and `demux_ffmpeg` with `SELF_DECODES`.
 7. `MP_KIND_DECODER` is deleted, and with it the last of "try them in order".
+
+**Every demuxer is a parser that reads a file somebody else wrote, so every
+demuxer wants a fuzzer** -- and one harness for all of them rather than one
+each, written once there are several to point it at. `demux_mp4`'s parsing is
+already covered, because `alac_fuzzer` links the same `shared/mp4/mp4.cpp`;
+`demux_ogg`'s page handling is libogg's, which Xiph fuzzes upstream, but its
+header identification and config assembly are ours and are not yet fuzzed. That
+is a step-6 deliverable, when `demux_wav`, `demux_flac` and `demux_mpeg` have
+arrived and there is a shape worth generalising.
 
 **Step 7 is not optional and is not "later".** A migration that leaves both structures in
 the tree has not replaced anything: it has added a second way to do the same thing, and the
@@ -472,19 +487,19 @@ megabytes a second. design.md §"The DSP chain" carries the reasoning.
 `src/core/dither.*`, `src/core/shaper_tables.*` and `src/core/dsp.*`: the graph, the
 sample-type conversion through a normalised `double`, five dither distributions, binomial
 noise shaping of any order to 9, 79 transcribed shaping curves, a gain, and the chain
-itself. `modules/dsp_gain` is the first stage behind `MpDspVtbl`, and exists as much to
+itself. `modules/dsp/gain` is the first stage behind `MpDspVtbl`, and exists as much to
 prove the ABI carries a stage as to turn anything down.
 
 A stream with no stages still goes straight from the source to the wire format in one
 conversion: the bus is built only when there is a chain to put on it.
 
-`modules/dsp_resample` is the second stage and the one that proves the shape: it answers
+`modules/dsp/resample` is the second stage and the one that proves the shape: it answers
 `configure` with a sample rate it was not given, and the chain's output format, what
 negotiation offers the device and how much room the graph allocates all follow from that
 answer. It is asked for and never inserted automatically -- §6's refusal is the point of
 this program, and a resampler that appears whenever a device is fussy would quietly end it.
 
-`modules/dsp_mix` is the third and last geometry: the channel matrix. With the sample type,
+`modules/dsp/mix` is the third and last geometry: the channel matrix. With the sample type,
 the rate and the channel count all reachable, **the only thing that can still make a device
 refuse a file is a device that refuses everything** -- and every one of them is asked for
 rather than inserted, which is what keeps §6's refusal meaning something.
@@ -1153,6 +1168,7 @@ HDR state.
 | M3 | `mediaperch-cli` and the IPC | **done.** `mediaperchd` is the engine and has no toolkit in it; `mediaperch-cli` drives it over a named pipe with a versioned binary framing. `mp::Player` is in the core, so the whole engine is tested with no COM and no hardware, and `IEngineHost` is the four things it asks an operating system for. The row is done when killing the shell mid-track is inaudible, and that is a test: three shells attached, subscribed, and cut off, with the underrun count still zero. What is left of it is the tray menu §10 asks for, and one INI file for §11 |
 | M4 | Path B: f64 bus, DSP chain, resampler, dither. Gapless, seek | **done**, and the passthrough path still contains no float. Gapless is `mp::Queue`, a source whose `read` does not stop at a track boundary; seek and pause are on both graphs; every DSP stage can be told to forget where it was. A device that is taken away (`AUDCLNT_E_DEVICE_INVALIDATED`) is a rebuild rather than an ending, and so is switching *paths*: both resume on the frame the device stopped on, which is the only thing a rebuild point can honestly promise and is checked byte for byte |
 | M5 | `decode_mf` and `decode_ffmpeg`, and the resolution table | **done.** `ctest -R format_matrix` builds one file per format, shows it to every decoder, and rewrites the matrix in the README -- and fails when the README stops matching. `mediaperch-probe claims` shows every decoder's probe score for a file, so a cell can say whether a decoder *claimed* the file or was forced to try. The lossless corpus comes from the reference encoders rather than FFmpeg, whose FLAC encoder writes 24 bits when asked for 32. Generating it found two claims in [formats.md](formats.md) that had gone stale and one real gap: nothing but Media Foundation claimed WMA |
+| M4.5 | ABI v2: the container decides (§12) | **steps 1-4 of 7.** The header, the host's two-stage resolution, `demux_mp4` + `codec_alac` + `codec_aac`, and `demux_ogg` + `codec_vorbis` + `codec_opus` are in and prove the shape: every file that crossed decodes to the hash it had under v1. Modules are laid out and installed by kind -- `modules/<kind>/<name>` in the tree, `bin/<config>/modules/<kind>/` out of it. The row is done when `grep MP_KIND_DECODER` finds nothing |
 | M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse |
 | M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled |
 | M8 | WinUI 3 shell | killing it mid-track changes nothing audible |

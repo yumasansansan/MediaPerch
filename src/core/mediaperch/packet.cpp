@@ -273,15 +273,20 @@ bool PacketSource::open(const MpDemuxVtbl& demux, const char* path,
         // build with no ALAC codec is a readable file nobody can play, and that
         // is a different sentence from "unreadable file" -- so it is a
         // different message.
-        const MpCodecVtbl* codec = find_codec ? find_codec(stream_.codec) : nullptr;
+        // The configuration first, because the lookup needs it: a codec module
+        // decides from the blob whether this is a stream it can take.
+        std::vector<std::uint8_t> config;
+        (void)demux_.stream_config(index, config);
+        const std::uint8_t* blob = config.empty() ? nullptr : config.data();
+        const auto blob_bytes = static_cast<std::uint32_t>(config.size());
+
+        const MpCodecVtbl* codec =
+            find_codec ? find_codec(stream_.codec, blob, blob_bytes) : nullptr;
         if (codec == nullptr) {
             why = "nothing here decodes that codec";
             return false;
         }
-        std::vector<std::uint8_t> config;
-        (void)demux_.stream_config(index, config);
-        if (codec_.open(*codec, stream_.codec, config.empty() ? nullptr : config.data(),
-                        static_cast<std::uint32_t>(config.size())) != MP_OK) {
+        if (codec_.open(*codec, stream_.codec, blob, blob_bytes) != MP_OK) {
             why = "the codec would not open this stream";
             return false;
         }

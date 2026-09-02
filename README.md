@@ -44,26 +44,26 @@ decoder in the tree, and fails if what it measures is not what this table says. 
 table nobody generates is a coverage table that is wrong.
 
 <!-- formats:begin -->
-| Format | `native` | `flac` | `ogg` | `mp3` | `aac` | `alac` | `mf` | `ffmpeg` |
-|---|---|---|---|---|---|---|---|---|
-| WAV, 16-bit 44.1 kHz stereo | **exact** | — | — | — | — | — | exact | exact |
-| WAV, 24-bit 96 kHz stereo | **exact** | — | — | — | — | — | exact | exact |
-| WAV, 32-bit float 48 kHz stereo | **exact** | — | — | — | — | — | S32 | exact |
-| WAV, 16-bit 5.1 at 48 kHz | **exact** | — | — | — | — | — | exact | exact |
-| FLAC, 16-bit 44.1 kHz stereo | exact | **exact** | — | — | — | — | exact | exact |
-| ALAC, 16-bit 44.1 kHz stereo | — | — | — | — | — | **exact** | exact | exact |
-| MP3, 44.1 kHz stereo 256k | — | — | — | **F32** | — | — | S32 | F32 |
-| AAC-LC in M4A, 44.1 kHz stereo | — | — | — | — | **F32** | — | S16 | F32 |
-| AAC-LC raw ADTS, 44.1 kHz stereo | — | — | — | — | **F32** | — | S32 | F32 |
-| Vorbis in Ogg, 44.1 kHz stereo | — | — | **F32** | — | — | — | — | F32 |
-| Opus in Ogg, 48 kHz stereo | — | — | **F32** | — | — | — | — | F32 |
-| WMA v2, 44.1 kHz stereo | — | — | — | — | — | — | S16 | **F32** |
-| WavPack, 16-bit 44.1 kHz stereo | — | — | — | — | — | — | — | **exact** |
-| FLAC in Matroska, 16-bit stereo | — | (exact) | — | — | — | — | (exact) | **exact** |
-| FLAC, 24-bit 96 kHz stereo | exact | **exact** | — | — | — | — | exact | exact |
-| ALAC, 24-bit 96 kHz stereo | — | — | — | — | — | **exact** | exact | exact |
-| FLAC, 16-bit 5.1 at 48 kHz | exact | **exact** | — | — | — | — | exact | exact |
-| ALAC, 16-bit 5.1 at 48 kHz | — | — | — | — | — | **exact** | — | exact |
+| Format | `demux_mp4` | `demux_ogg` | `native` | `flac` | `ogg` | `mp3` | `aac` | `alac` | `mf` | `ffmpeg` |
+|---|---|---|---|---|---|---|---|---|---|---|
+| WAV, 16-bit 44.1 kHz stereo | — | — | **exact** | — | — | — | — | — | exact | exact |
+| WAV, 24-bit 96 kHz stereo | — | — | **exact** | — | — | — | — | — | exact | exact |
+| WAV, 32-bit float 48 kHz stereo | — | — | **exact** | — | — | — | — | — | S32 | exact |
+| WAV, 16-bit 5.1 at 48 kHz | — | — | **exact** | — | — | — | — | — | exact | exact |
+| FLAC, 16-bit 44.1 kHz stereo | — | — | exact | **exact** | — | — | — | — | exact | exact |
+| ALAC, 16-bit 44.1 kHz stereo | **exact** | — | — | — | — | — | — | exact | exact | exact |
+| MP3, 44.1 kHz stereo 256k | — | — | — | — | — | **F32** | — | — | S32 | F32 |
+| AAC-LC in M4A, 44.1 kHz stereo | **F32** | — | — | — | — | — | F32 | — | S16 | F32 |
+| AAC-LC raw ADTS, 44.1 kHz stereo | — | — | — | — | — | — | **F32** | — | S32 | F32 |
+| Vorbis in Ogg, 44.1 kHz stereo | — | **F32** | — | — | F32 | — | — | — | — | F32 |
+| Opus in Ogg, 48 kHz stereo | — | **F32** | — | — | F32 | — | — | — | — | F32 |
+| WMA v2, 44.1 kHz stereo | — | — | — | — | — | — | — | — | S16 | **F32** |
+| WavPack, 16-bit 44.1 kHz stereo | — | — | — | — | — | — | — | — | — | **exact** |
+| FLAC in Matroska, 16-bit stereo | — | — | — | (exact) | — | — | — | — | (exact) | **exact** |
+| FLAC, 24-bit 96 kHz stereo | — | — | exact | **exact** | — | — | — | — | exact | exact |
+| ALAC, 24-bit 96 kHz stereo | **exact** | — | — | — | — | — | — | exact | exact | exact |
+| FLAC, 16-bit 5.1 at 48 kHz | — | — | exact | **exact** | — | — | — | — | exact | exact |
+| ALAC, 16-bit 5.1 at 48 kHz | **exact** | — | — | — | — | — | — | exact | — | exact |
 
 `exact` is PCM identical to the audio that went into the encoder; a
 sample type is a decoder that read the file and produced that instead; `—` is one

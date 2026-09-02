@@ -59,7 +59,7 @@ list(GET PROJECT_VERSION_LIST 1 PROJECT_VERSION_MINOR)
 
 fails the whole configure with `list index: 1 out of range`. That is exactly what CI hit,
 and it did not reproduce locally only because a full clone has the tags. The versions are
-now pinned beside the `add_subdirectory` calls in `modules/decode_ogg/CMakeLists.txt`, so
+now pinned beside the `add_subdirectory` calls in `modules/decode/ogg/CMakeLists.txt`, so
 the number and the gitlink move together, and `cmake -D CMAKE_DISABLE_FIND_PACKAGE_Git=ON`
 configures cleanly.
 

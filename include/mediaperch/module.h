@@ -273,16 +273,43 @@ enum {
     MP_CODEC_WMA = 40u,         /* reserved */
     MP_CODEC_AC3 = 41u,         /* reserved */
     MP_CODEC_EAC3 = 42u,        /* reserved */
-    MP_CODEC_DTS = 43u,         /* reserved */
-
-    /* The demuxer will decode this stream itself; there is no codec module to
-     * look up. For a pipeline that cannot be split -- Media Foundation, FFmpeg
-     * through its own programs -- and it is a declaration rather than a
-     * disguise: such a module is a pipeline, and this says so.
-     *
-     * A stream with this codec always carries MP_STREAM_SELF_DECODES. */
-    MP_CODEC_INTERNAL = 0xFFFFFFFFu
+    MP_CODEC_DTS = 43u          /* reserved */
 };
+
+/* **What the configuration blob is, per codec.** A codec module is handed the
+ * container's blob verbatim, so the two have to agree about what it contains,
+ * and an ABI that left that to be discovered would not be one.
+ *
+ *   MP_CODEC_ALAC    the ALACSpecificConfig, 24 bytes big-endian.
+ *   MP_CODEC_AAC_LC  the AudioSpecificConfig.
+ *   MP_CODEC_OPUS    the OpusHead identification header, from its magic on.
+ *   MP_CODEC_VORBIS  the three header packets -- identification, comment,
+ *                    setup -- each preceded by its length as a 32-bit
+ *                    little-endian integer. Vorbis is the one codec whose
+ *                    configuration does not fit in a single blob, and every
+ *                    container that carries it invents a framing; this one is
+ *                    written down rather than guessed at.
+ *   MP_CODEC_FLAC    the STREAMINFO block, without its metadata-block header.
+ *   MP_CODEC_PCM     empty: MpStreamInfo::format is the whole of it.
+ *
+ * A codec that is handed a blob it does not recognise refuses in `open`, which
+ * is why `probe` is given the blob too. */
+
+/* The demuxer will decode this stream itself; there is no codec module to
+ * look up. For a pipeline that cannot be split -- Media Foundation, FFmpeg
+ * through its own programs -- and it is a declaration rather than a
+ * disguise: such a module is a pipeline, and this says so.
+ *
+ * A stream with this codec always carries MP_STREAM_SELF_DECODES.
+ *
+ * A macro rather than an enumerator, and that is not a style choice: MSVC types
+ * an unscoped enum as `int` regardless of its values, and clang does the same
+ * in its MSVC-compatible mode, so 0xFFFFFFFF written inside the enum above
+ * becomes -1 there, and a `switch` over an MpCodec will not compile against it.
+ * The field is a uint32_t either way, so the value on the wire was never in
+ * doubt -- only the constant's own type, and a macro has the type its suffix
+ * says on every compiler. */
+#define MP_CODEC_INTERNAL 0xFFFFFFFFu
 
 enum {
     /* The demuxer decodes this stream. `MpDemuxVtbl::read_frames` is used

@@ -1025,33 +1025,54 @@ src/win/             Windows head: MMDevice/WASAPI, Media Foundation, D3D11,
 src/linux/           Linux head. Not started. The core is shaped so that it can be.
 include/mediaperch/  the module ABI. Pure C, one header, versioned. The only file a
                      third-party module has to read.
-modules/             everything that can be loaded and unloaded at runtime.
-  decode_native/     FLAC and WAV from two single headers. No build system at all: an
+modules/             everything that can be loaded and unloaded at runtime, sorted by
+                     kind -- demux/, codec/, decode/, dsp/, sink/, and shared/ for the
+                     libraries that are not modules at all. The build output is sorted
+                     the same way, into bin/<config>/modules/<kind>/, because an
+                     install should be a directory somebody can look at and see what
+                     is in it. cmake/Module.cmake is where a module says which it is.
+  demux/mp4/         MP4, M4A, MOV and 3GP: the container, written here. Reads moov
+                     wherever it is, which is what makes "read the codec, then pick
+                     the decoder" possible at all -- a probe sees four kilobytes and
+                     moov is often at the end.
+  demux/ogg/         Ogg through libogg, the reference container and nothing else.
+                     Identifies Opus, Vorbis, FLAC and Speex from the first page and
+                     hands each one on; the two it has no codec for are named rather
+                     than refused as "an Ogg I cannot read".
+  codec/alac/        ALAC, written here. The codec half of decode/alac/: a config
+                     blob and packets in, the file's own samples out.
+  codec/aac/         AAC-LC, written here, the same way.
+  codec/opus/        libopus driven directly rather than through opusfile, so the
+                     container is somebody else's job. Decodes at 48 kHz whatever
+                     the encoder was given, because that is what Opus is.
+  codec/vorbis/      libvorbis, likewise, rather than vorbisfile.
+
+  decode/native/     FLAC and WAV from two single headers. No build system at all: an
                      install with nothing else on disk still plays music.
-  decode_flac/       libFLAC, the Xiph reference, as a submodule. Outranks the above
-                     wherever it is installed, and checks the file\'s own MD5.
-  decode_mp3/        MP3 through dr_mp3, which is already in external/dr_libs. It
+  decode/flac/       libFLAC, the Xiph reference, as a submodule. Outranks the above
+                     wherever it is installed, and checks the file's own MD5.
+  decode/mp3/        MP3 through dr_mp3, which is already in external/dr_libs. It
                      exists because Media Foundation does not implement gapless
                      metadata and starts every MP3 36 ms late; dr_mp3 reads the
                      LAME tag and costs no new dependency.
 
-  decode_alac/       ALAC, written here: the codec and the slice of MP4 that finds
+  decode/alac/       ALAC, written here: the codec and the slice of MP4 that finds
                      its packets. No submodule, no runtime library, no OS codec --
                      the reference implementation is the specification and has
                      been unmaintained since 2011, so it was read, not linked.
 
-  decode_aac/        AAC-LC, written here as well: the codec, the ADTS framing and the
+  decode/aac/        AAC-LC, written here as well: the codec, the ADTS framing and the
                      same slice of MP4. Not an unmaintained reference this time --
                      four maintained libraries were measured and each produced the
                      wrong thing rather than a wrong sound. SBR and PS are refused
                      and go to decode_ffmpeg.
 
-  decode_ogg/        libvorbis and libopus, the Xiph reference decoders, as submodules.
+  decode/ogg/        libvorbis and libopus, the Xiph reference decoders, as submodules.
                      Reports F32 because that is what they produce, which puts
                      every file it reads on Path B. Permutes Ogg channel order
                      into WAVE order and changes nothing else.
 
-  decode_mf/         Media Foundation source reader, and now the last resort rather than
+  decode/mf/         Media Foundation source reader, and now the last resort rather than
                      the answer for MP3 and AAC. Its probe once claimed 100 for
                      anything beginning "ID3", which took every tagged MP3 — that
                      is, nearly all of them — away from the decoder that does
@@ -1062,30 +1083,30 @@ modules/             everything that can be loaded and unloaded at runtime.
                      and it is measurably bit-exact for WAV and FLAC -- but it reads
                      gapless metadata in no codec, clips float WAV, and scrambles
                      multichannel ALAC. It stays because it needs nothing installed.
-  decode_ffmpeg/     the long tail, through the ffmpeg and ffprobe *programs*, found at
+  decode/ffmpeg/     the long tail, through the ffmpeg and ffprobe *programs*, found at
                      run time and never shipped. Nothing to build against, no ABI to
                      track, and the LGPL-or-GPL question stays with whoever installs it.
-  sink_wasapi/       exclusive and shared, event-driven, both.
-  sink_asio/         someday. Not for accuracy -- exclusive mode is already exact --
+  sink/wasapi/       exclusive and shared, event-driven, both.
+  sink/asio/         someday. Not for accuracy -- exclusive mode is already exact --
                      but for native DSD above what DoP can carry. Practical since
                      Steinberg relicensed the ASIO SDK under GPLv3 in October 2025.
-  dsp_gain/          the first MpDspVtbl module: a gain, and the peak it saw.
-  dsp_resample/      polyphase, designed at configure by one of three methods. The
+  dsp/gain/          the first MpDspVtbl module: a gain, and the peak it saw.
+  dsp/resample/      polyphase, designed at configure by one of three methods. The
                      stage that answers with a rate it was not given.
-  dsp_mix/           the channel matrix. The third geometry, and the one whose
+  dsp/mix/           the channel matrix. The third geometry, and the one whose
                      answer is a choice rather than an approximation.
-  transform/         the FFT, Bluestein, and the cepstral factorisation. Began
+  shared/transform/  the FFT, Bluestein, and the cepstral factorisation. Began
                      in the resampler; moved when the equaliser wanted them too.
-  convolve/          partitioned overlap-save. What makes an FIR equaliser
+  shared/convolve/   partitioned overlap-save. What makes an FIR equaliser
                      possible, and what dsp_convolve is built on.
-  dsp_convolve/      an impulse response from a file: its rate, its channels,
+  dsp/convolve/      an impulse response from a file: its rate, its channels,
                      its length and its gain, each made to agree out loud.
-  biquad/            second-order sections, shared: the equaliser is a cascade a
+  shared/biquad/     second-order sections, shared: the equaliser is a cascade a
                      person chose and the loudness meter is one BS.1770 chose.
-  dsp_eq/            the equaliser, anywhere on the axis.
-  dsp_replaygain/    the loudness meter, and the gain a previous scan found.
-  dsp_*/             crossfeed, and whatever else. Never present in passthrough.
-  video_d3d11/       presentation, and the three tone-map providers.
+  dsp/eq/            the equaliser, anywhere on the axis.
+  dsp/replaygain/    the loudness meter, and the gain a previous scan found.
+  dsp/*/             crossfeed, and whatever else. Never present in passthrough.
+  video/d3d11/       presentation, and the three tone-map providers.
 shell/windows/       the WinUI 3 window. C#, Native AOT, **optional**: the engine runs
                      with none of it on disk, the same way DragonPerch's daemon does.
 shell/cli/           the shell that is always there. Same IPC, no toolkit.

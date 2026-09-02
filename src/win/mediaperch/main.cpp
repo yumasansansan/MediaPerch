@@ -12,6 +12,9 @@
 #include "mediaperch/compare.hpp"
 #include "mediaperch/decoder.hpp"
 #include "mediaperch/dsp.hpp"
+#include "mediaperch/engine_host.hpp"
+#include "mediaperch/log.hpp"
+#include "mediaperch/packet.hpp"
 #include "mediaperch/result.hpp"
 #include "mediaperch/queue.hpp"
 #if MEDIAPERCH_HAS_LOUDNESS
@@ -200,8 +203,9 @@ void usage()
   play        play a test tone.
               TAKES THE ENDPOINT for the whole duration.
   modules     list what loaded, and what each one claims to be
-  claims      show every decoder's probe score for one file, best first, which is
-              how the resolution rules pick. Opens nothing but the first 4 KB
+  claims      who claims one file, and what is inside it: every demuxer's probe
+              score, the streams each one finds, the codec module that takes
+              each stream, and then the v1 decoders still being retired
   decode      decode a file and print SHA-256 of the PCM it produced. Touches no
               device. Compare it with a reference decoder to check this one.
   compare     decode a file and hold the result against the audio that was
@@ -217,8 +221,9 @@ Options
   --file PATH       the file to decode. WAV and FLAC
   --raw PATH        `decode` writes the decoded PCM here. `verify` writes what it
                     sent to PATH.sent and what it recorded to PATH.recorded
-  --decoder ID      force a decoder: native, mf, ... . Default is whichever
-                    probes highest, ties broken by the module's own priority
+  --decoder ID      force a module: native, mf, ... for a v1 decoder, or a v2
+                    module by its full name -- demux_ogg, codec_opus. Default is
+                    whichever probes highest, ties broken by declared priority
   --device N        index from `devices`; default is the system default endpoint
   --capture N       capture endpoint index; default is one named "CABLE Output"
   --rate R          default 44100
@@ -375,8 +380,13 @@ bool parse(int argc, char** argv, Options& out)
             if (i + 1 < argc) {
                 out.decoder_id = argv[++i];
                 // "native" and "mf" are what a person types; the modules call
-                // themselves decode_native and decode_mf.
-                if (out.decoder_id.rfind("decode_", 0) != 0) {
+                // themselves decode_native and decode_mf. A v2 module is named
+                // in full -- `demux_mp4`, `codec_opus` -- because the kind is
+                // half of what it is, and abbreviating that away would make
+                // `--decoder ogg` ambiguous between three modules.
+                if (out.decoder_id.rfind("decode_", 0) != 0 &&
+                    out.decoder_id.rfind("demux_", 0) != 0 &&
+                    out.decoder_id.rfind("codec_", 0) != 0) {
                     out.decoder_id = "decode_" + out.decoder_id;
                 }
             }
@@ -1648,34 +1658,25 @@ RunOutcome play_run(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& regis
 
 
 
-int decode(const MpDecoderVtbl& vtbl, const Options& options)
+/// Hashes whatever the resolution rules opened.
+///
+/// **A source rather than a decoder vtable**, so this measures what actually
+/// plays. A container and a codec are two modules now, and a `decode` that could
+/// only reach the one-module kind would be a measurement of the half being
+/// retired.
+int decode(mp::ISource& source, const Options& options)
 {
-    if (options.file.empty()) {
-        std::fprintf(stderr, "decode needs --file\n");
+    if (options.seek != 0 && !source.seek(options.seek)) {
+        std::fprintf(stderr, "cannot seek %s to frame %llu\n", options.file.c_str(),
+                     static_cast<unsigned long long>(options.seek));
         return 1;
     }
-
-    mp::Decoder decoder;
-    const MpResult opened = decoder.open(vtbl, options.file.c_str());
-    if (opened != MP_OK) {
-        std::fprintf(stderr, "cannot decode %s: %s\n", options.file.c_str(),
-                     decoder.why().empty() ? result_name(opened) : decoder.why().c_str());
-        return 1;
-    }
-
     if (options.seek != 0) {
-        decoder.seek(options.seek);
-        const MpResult sought = decoder.seek_result();
-        if (sought != MP_OK) {
-            std::fprintf(stderr, "cannot seek %s to frame %llu: %s\n", options.file.c_str(),
-                         static_cast<unsigned long long>(options.seek), result_name(sought));
-            return 1;
-        }
         std::printf("seek       to frame %llu\n",
                     static_cast<unsigned long long>(options.seek));
     }
 
-    const mp::Format format = decoder.format();
+    const mp::Format format = source.format();
     const std::size_t stride = mp::frame_bytes(format);
 
     // mp::win::open_utf8 rather than fopen: the path arrives as UTF-8, and a
@@ -1695,7 +1696,7 @@ int decode(const MpDecoderVtbl& vtbl, const Options& options)
     std::vector<std::uint8_t> chunk(64 * 1024 / stride * stride);
     std::uint64_t total = 0;
     for (;;) {
-        const std::size_t got = decoder.read(chunk.data(), chunk.size());
+        const std::size_t got = source.read(chunk.data(), chunk.size());
         if (got == 0) {
             break;
         }
@@ -1714,9 +1715,9 @@ int decode(const MpDecoderVtbl& vtbl, const Options& options)
     std::printf("frames     %llu (%.3f s)\n",
                 static_cast<unsigned long long>(total / stride),
                 static_cast<double>(total / stride) / format.sample_rate);
-    if (decoder.length_frames() != 0 && decoder.length_frames() != total / stride) {
+    if (source.length_frames() != 0 && source.length_frames() != total / stride) {
         std::printf("           header said %llu\n",
-                    static_cast<unsigned long long>(decoder.length_frames()));
+                    static_cast<unsigned long long>(source.length_frames()));
     }
     std::printf("bytes      %llu\n", static_cast<unsigned long long>(total));
     std::printf("sha256     %s\n", hash.hex().c_str());
@@ -2455,8 +2456,9 @@ int main(int argc, char** argv)
 
     if (options.command == "modules") {
         for (const MpModuleDesc* desc : registry.all()) {
-            std::printf("%-16s %-38s kind %u  priority %3u  v%u.%u.%u%s\n", desc->id,
-                        desc->name, desc->kind, desc->priority, desc->version >> 22,
+            std::printf("%-16s %-38s %-7s priority %3u  v%u.%u.%u%s\n", desc->id,
+                        desc->name, mp::module_kind_name(desc->kind), desc->priority,
+                        desc->version >> 22,
                         (desc->version >> 12) & 0x3FF, desc->version & 0xFFF,
                         (desc->flags & MP_MODULE_NO_UNLOAD) != 0 ? "  [no-unload]" : "");
         }
@@ -2481,11 +2483,71 @@ int main(int argc, char** argv)
             std::fprintf(stderr, "claims needs --file\n");
             return 1;
         }
-        // Every decoder's opinion, not just the winner's. "Several read it" and
-        // "this is the one you get" are different facts, and a table of
+        // **Both halves, because resolution has two.** A container is claimed
+        // on its first bytes; a codec is looked up on what the container then
+        // says is inside. Printing only the first would show the question being
+        // asked and not the answer; printing only the second would show a table
+        // that no longer decides anything.
+        //
+        // Every claimant's opinion, not just the winner's: "several read it"
+        // and "this is the one you get" are different facts, and a table of
         // coverage that cannot tell them apart is a table that overstates.
-        for (const auto& candidate : registry.decoders_for(options.file, {})) {
-            std::printf("%-16s %3u  %s\n", candidate.desc->id, candidate.score,
+        const auto demuxers = registry.demuxers_for(options.file, {});
+        std::printf("container\n");
+        if (demuxers.empty()) {
+            std::printf("  (nobody)\n");
+        }
+        for (const auto& candidate : demuxers) {
+            std::printf("  %-16s %3u  %s\n", candidate.desc->id, candidate.score,
+                        candidate.desc->name);
+            // Claiming a container and reading it are different, so this opens
+            // it. That is allowed here for the reason it is allowed in `open`
+            // and not in `probe`: there is no four-kilobyte window once the
+            // file is ours to read.
+            mp::Demux demux;
+            const MpResult opened = demux.open(*candidate.vtbl, options.file.c_str());
+            if (opened != MP_OK) {
+                std::printf("    opens: %s\n", mp::result_name(opened));
+                continue;
+            }
+            for (std::uint32_t i = 0; i < demux.stream_count(); ++i) {
+                MpStreamInfo info{};
+                if (!demux.stream_info(i, info)) {
+                    continue;
+                }
+                std::vector<std::uint8_t> config;
+                (void)demux.stream_config(i, config);
+                const char* takes = "nothing here decodes it";
+                if ((info.flags & MP_STREAM_SELF_DECODES) != 0u) {
+                    takes = "this module, itself";
+                } else if (const MpCodecVtbl* chosen = registry.codec_for(
+                               info.codec, config.empty() ? nullptr : config.data(),
+                               static_cast<std::uint32_t>(config.size()))) {
+                    // The vtable does not carry the module's name, so the
+                    // module is found again by identity among the loaded ones.
+                    for (const MpModuleDesc* desc : registry.all()) {
+                        if (desc->kind == MP_KIND_CODEC && desc->vtbl == chosen) {
+                            takes = desc->id;
+                            break;
+                        }
+                    }
+                }
+                std::printf("    stream %u  %-8s %-8s -> %s\n", i,
+                            mp::stream_kind_name(info.kind), mp::codec_name(info.codec),
+                            takes);
+            }
+        }
+
+        // The v1 half, and it says so. This block goes when MP_KIND_DECODER
+        // does, and until then a reader deserves to know which of the two
+        // structures they are looking at.
+        std::printf("decoder  (v1, being retired)\n");
+        const auto ranked = registry.decoders_for(options.file, {});
+        if (ranked.empty()) {
+            std::printf("  (nobody)\n");
+        }
+        for (const auto& candidate : ranked) {
+            std::printf("  %-16s %3u  %s\n", candidate.desc->id, candidate.score,
                         candidate.desc->name);
         }
         return 0;
@@ -2506,6 +2568,35 @@ int main(int argc, char** argv)
             std::fprintf(stderr, "%s needs --file\n", options.command.c_str());
             return 1;
         }
+        // **`decode` resolves the way the engine does**: containers first, then
+        // the v1 decoders that are still being moved across. Two ways of
+        // opening a file that were not the same way would be worse than
+        // either, and this is the command whose whole job is to say what came
+        // out -- so it has to be looking at what plays.
+        //
+        // `compare`, `verify` and `loudness` are still on the v1 path below.
+        // They go across with the modules they measure.
+        if (options.command == "decode") {
+            mp::LogRing log;
+            (void)log.listen([&options](const std::string& line) {
+                if (options.verbose) {
+                    std::fprintf(stderr, "%s\n", line.c_str());
+                }
+            });
+            mp::win::EngineHost host{registry, log};
+            std::string opened_by;
+            std::string why;
+            auto source = host.open_source(options.file, options.decoder_id, opened_by, why);
+            if (!source) {
+                std::fprintf(stderr, "cannot decode %s: %s\n", options.file.c_str(),
+                             why.empty() ? "nothing here reads it" : why.c_str());
+                return 1;
+            }
+            std::printf("decoder    %s%s\n", opened_by.c_str(),
+                        options.decoder_id.empty() ? "" : "  [forced]");
+            return decode(*source, options);
+        }
+
         const auto ranked = registry.decoders_for(options.file, options.decoder_id);
         const auto choice = first_that_opens(ranked, options.file);
         if (choice.vtbl == nullptr) {
@@ -2537,12 +2628,8 @@ int main(int argc, char** argv)
             }
             return compare_command(registry, *choice.vtbl, options);
         }
-        return options.command == "decode" ? decode(*choice.vtbl, options)
-                                           : verify(sink, *choice.vtbl, options);
+        return verify(sink, *choice.vtbl, options);
 #else
-        if (options.command == "decode") {
-            return decode(*choice.vtbl, options);
-        }
         return no_diagnostics(options.command.c_str());
 #endif
     }

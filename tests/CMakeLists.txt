@@ -74,8 +74,8 @@ endif()
 
 if(TARGET mediaperch_biquad)
     target_sources(mediaperch_tests PRIVATE eq_test.cpp autoeq_test.cpp
-                   ../modules/dsp_eq/autoeq.cpp)
-    target_include_directories(mediaperch_tests PRIVATE ../modules/dsp_eq)
+                   ../modules/dsp/eq/autoeq.cpp)
+    target_include_directories(mediaperch_tests PRIVATE ../modules/dsp/eq)
     target_link_libraries(mediaperch_tests PRIVATE mediaperch_biquad)
 endif()
 

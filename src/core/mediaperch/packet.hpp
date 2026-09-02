@@ -133,7 +133,13 @@ public:
     /// looking the id up, not by trying anything. It may return nullptr, which
     /// is an honest "nobody here decodes that" and is why the container being
     /// readable and the codec being playable are two different questions.
-    using FindCodec = std::function<const MpCodecVtbl*(MpCodec)>;
+    /// **The configuration is part of the question.** A codec's probe is given
+    /// the container's blob because that is how it declines a stream it cannot
+    /// take -- HE-AAC in an AAC-LC decoder, an ALAC cookie describing a depth
+    /// nobody implements. Asking with the id alone gets a "no" from a module
+    /// that would have said yes.
+    using FindCodec =
+        std::function<const MpCodecVtbl*(MpCodec, const std::uint8_t*, std::uint32_t)>;
     bool open(const MpDemuxVtbl& demux, const char* path, const FindCodec& find_codec,
               std::string& why);
 

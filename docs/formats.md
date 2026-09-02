@@ -85,6 +85,38 @@ FFmpeg's public structs change layout between major versions, so binding the DLL
 would tie this module to one of them. One build of it works against FFmpeg 4
 through 8. §7 of [the plan](plan.md) has the full argument.
 
+## The demuxers and codecs that are replacing them
+
+[ABI v2](plan.md#abi-v2-the-container-decides) splits a decoder into a container
+reader and a packet decoder, and the table above is the half being retired. Four
+steps of seven are done, so both structures are in the tree at once and
+`mediaperch-probe claims` reports both:
+
+| Module | Behind it | Covers | Replaces |
+|---|---|---|---|
+| `demux_mp4` | **nothing** | MP4, M4A, MOV, 3GP | the container half of `decode_alac` and `decode_aac` |
+| `demux_ogg` | libogg | Ogg, whatever is in it | the container half of `decode_ogg` |
+| `codec_alac` | **nothing** | ALAC | the codec half of `decode_alac` |
+| `codec_aac` | **nothing** | AAC-LC | the codec half of `decode_aac` |
+| `codec_opus` | libopus | Opus | |
+| `codec_vorbis` | libvorbis | Vorbis | |
+
+**Nothing about the audio changed, and that is the measurement that matters.** A
+split that cost a sample would not be worth making, so every file that crossed
+was decoded both ways and hashed:
+
+| File | Through | SHA-256 of the PCM | Against v1 |
+|---|---|---|---|
+| ALAC, 16-bit 44.1 kHz stereo | `demux_mp4` + `codec_alac` | `b38bebc6…1af5b059` | identical |
+| ALAC, 24-bit 96 kHz stereo | `demux_mp4` + `codec_alac` | `f434a906…ef3abf1a` | identical |
+| ALAC, 16-bit 5.1 at 48 kHz | `demux_mp4` + `codec_alac` | `5c449afc…621c8a91` | identical |
+| AAC-LC in M4A, 44.1 kHz stereo | `demux_mp4` + `codec_aac` | `7ca728d3…4baba3d6` | identical |
+| Vorbis in Ogg, 44.1 kHz stereo | `demux_ogg` + `codec_vorbis` | `12fec9f3…b77adfaa` | identical |
+| Opus in Ogg, 48 kHz stereo | `demux_ogg` + `codec_opus` | `bffaaece…5b0df268` | identical |
+
+Which is what the split promised: **it adds no conversion.** Bit-exactness is a
+property of the codec, and a container never had any of it to lose.
+
 ## Where each format goes, and why Media Foundation is last
 
 Audited with `mediaperch-probe claims`, which prints every decoder's probe score
@@ -98,16 +130,30 @@ meaningful.
 | WAV — RIFF/WAVE | `native` 100, `ffmpeg` 30, `mf` 20 | `native` | `native` |
 | RIFX, RF64, AIFF, AIFC | `native` 100 | `native` | `native` |
 | FLAC | `flac` 100, `native` 60, `ffmpeg` 30, `mf` 20 | `flac` | `flac` |
-| Ogg — Vorbis or Opus | `ogg` 100 (priority 110), `ffmpeg` 100 (60) | `ogg` | `ogg` |
-| Ogg — FLAC, Speex | `ffmpeg` 100 | `ffmpeg` | *nothing* |
+| Ogg — Vorbis or Opus | **`demux_ogg` 100**, `ogg` 100 (priority 110), `ffmpeg` 100 (60) | `demux_ogg` | `demux_ogg` |
+| Ogg — FLAC, Speex | **`demux_ogg` 100** — reads it, and no codec here takes it — then `ffmpeg` 100 | `ffmpeg` | *nothing* |
 | MP3, frame header in reach | `mp3` 100, `ffmpeg` 30, `mf` 20 | `mp3` | `mp3` |
 | MP3, tag past the 4 KB window | `mp3` 60, `ffmpeg` 30, `mf` 20 | `mp3` | `mp3` |
 | MPEG-1/2 layer I or II | `ffmpeg` 30, `mf` 20 | `ffmpeg` | `mf` |
 | AAC in ADTS | `aac` 100, `ffmpeg` 30, `mf` 20 | `aac` | `aac` |
-| MP4, M4A | `alac` 100 (115), `aac` 100 (108), `ffmpeg` 100 (60), `mf` 20 | `alac`, then `aac`, then `ffmpeg` | `alac`, `aac`, then `mf` |
+| MP4, M4A | **`demux_mp4` 100**, then `alac` 100 (115), `aac` 100 (108), `ffmpeg` 100 (60), `mf` 20 | `demux_mp4`, and the codec it names | `demux_mp4` where a codec here takes the stream, else `mf` |
 | ASF, WMA | `ffmpeg` 30, `mf` 20 | `ffmpeg` | `mf` |
 | Matroska, WebM | `ffmpeg` 100 | `ffmpeg` | *nothing* |
 | WavPack, Monkey's Audio, DSF, DFF, TTA, Musepack, CAF | `ffmpeg` 100 | `ffmpeg` | *nothing* |
+
+The three rows in bold are the ones that have crossed to ABI v2, and they are
+read differently from the rest: a demuxer is asked ahead of every decoder, and
+what it says is inside decides the codec. Nothing is tried. The remaining rows
+still resolve by score, in order, until one of them opens the file, and they
+change as steps 5 and 6 of the migration land.
+
+**A demuxer that claims a container can still decline what is in it, and then
+the old list has it.** Two measured cases: an Ogg carrying FLAC or Speex is read
+by `demux_ogg` and no codec here takes the stream, and a QuickTime `.mov` whose
+sample entry `demux_mp4` does not implement fails in `open` with `unsupported by
+this module`. Both fall through to `decode_ffmpeg` and play. That fallthrough is
+not the v1 "try them in order" coming back — the demuxer is asked once, on
+evidence, and answers about the file rather than guessing at it.
 
 ### Reading the codec before choosing the decoder
 
@@ -131,6 +177,29 @@ page for `OpusHead` or `\x01vorbis` and claims only those; OggFLAC and Speex get
 identification header in the first page, always — the information is in reach, so
 the probe uses it. The same is true of ADTS, where the profile is in the header
 `decode_aac` already parses.
+
+**What was done about it, and it was not a better probe.** `demux_mp4` reads
+`moov` wherever it is, in `open`, where reading a file is allowed and there is no
+four-kilobyte window; the stream it reports names its codec, and the codec module
+is looked up rather than tried. The MP4 ordering problem above is therefore not
+solved, it is *absent* — the question that produced it is no longer asked. What
+`claims` prints is now both halves:
+
+```
+$ mediaperch-probe claims --file x.oga
+container
+  demux_ogg        100  Ogg (libogg, the reference container)
+    stream 0  audio    FLAC     -> nothing here decodes it
+decoder  (v1, being retired)
+  decode_ffmpeg    100  FFmpeg (found at run time, not shipped)
+```
+
+That last line is the difference the split was for. Under `decode_ogg` an OggFLAC
+was "an Ogg this module cannot read", which is a fact about the module; under
+`demux_ogg` it is a container that was read, a stream that was identified, and a
+codec nobody here implements — which is a fact about the file, and names exactly
+what would have to be written to fix it. Speex says `Speex` in the same place.
+Both still play, through `decode_ffmpeg`, as they did before.
 
 So the rule is not "MP4 is special": it is that a probe claims on what the first
 four kilobytes actually prove, and different containers prove different amounts.
@@ -220,7 +289,7 @@ installed. WMA gains float instead of a silent quantisation to 16 bits.
 |---|---|---|---|
 | Vorbis in Ogg | `decode_ogg` | `44100 Hz / 1 ch / F32` | libvorbis itself |
 | Opus in Ogg | `decode_ogg` | `48000 Hz / 1 ch / F32` | libopus through opusfile. Opus decodes at 48 kHz whatever the source rate was; that is the codec, not a resample |
-| OggFLAC | `decode_ffmpeg` | `44100 Hz / 1 ch / S16` | `decode_ogg` scores it **0**, not something low: it is an Ogg stream this module cannot read at all, and saying so lets the fallback have it |
+| OggFLAC | `decode_ffmpeg` | `44100 Hz / 1 ch / S16` | `decode_ogg` scores it **0**, not something low: it is an Ogg stream that module cannot read at all, and saying so lets the fallback have it. `demux_ogg` now reads the container and names the codec, and the refusal moves to the codec lookup — same outcome, said about the file instead of about the module |
 | WavPack | `decode_ffmpeg` | `44100 Hz / 2 ch / S32` | hash identical to the 32-bit WAV of the same signal |
 | ALAC in M4A | `decode_alac` | up to `384000 Hz / 8 ch / S32` | ours, and the only decoder here with no dependency at all. See below |
 | MP3 | `decode_mp3` | `44100 Hz / 2 ch / F32` | `dr_mp3`, at 105. It outranks Media Foundation because MF implements no gapless metadata and starts every MP3 36 ms late -- see *MP3, and the 36 milliseconds* below. Before `decode_mp3` existed this row said `decode_mf` and `S16`, which is what a hand-written table does |
@@ -383,7 +452,7 @@ point of the module boundary.
 
 `decode_alac` is the only decoder in this tree with no dependency of any kind:
 no submodule, no runtime library, no OS codec. Both the ALAC bitstream and the
-slice of MP4 needed to find its packets are in `modules/decode_alac`. [The
+slice of MP4 needed to find its packets are in `modules/decode/alac`. [The
 plan](plan.md) §7 has the argument; the short version is that Apple's reference
 implementation is simultaneously the specification and unmaintained since 2011,
 and the second half of that is what ALHACK was.
