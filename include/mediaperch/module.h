@@ -62,7 +62,10 @@ extern "C" {
 #  define MP_STATIC_ASSERT(cond, msg) /* pre-C11: layout is checked by the host */
 #endif
 
-#define MP_ABI_VERSION 1u
+/* 2: containers and codecs are separate kinds. v1 had one MP_KIND_DECODER that
+ * was both, and asked every one of them whether it could read a file. See
+ * docs/plan.md §4, *ABI v2: the container decides*. */
+#define MP_ABI_VERSION 2u
 
 /* ------------------------------------------------------------------ */
 /* Results                                                             */
@@ -176,6 +179,12 @@ typedef struct MpHost {
 /* Decoders                                                            */
 /* ------------------------------------------------------------------ */
 
+/* **Being removed.** A v1 decoder is a container reader and a codec in one
+ * object, which is why the host had to try them in order. Every module in this
+ * tree is being split into MP_KIND_DEMUX and MP_KIND_CODEC below; this
+ * interface survives only so that the tree builds and plays music at every step
+ * of that, and it goes when the last module has moved. Do not write a new one.
+ */
 typedef struct MpDecoder MpDecoder; /* opaque, module-owned */
 
 typedef struct MpDecoderVtbl {
@@ -197,6 +206,244 @@ typedef struct MpDecoderVtbl {
     MpResult(MP_CALL *seek)(MpDecoder *d, uint64_t frame);
     void(MP_CALL *close)(MpDecoder *d);
 } MpDecoderVtbl;
+
+
+/* ------------------------------------------------------------------ */
+/* Containers and codecs                                               */
+/* ------------------------------------------------------------------ */
+
+/* **The container decides.** A file is identified, opened, and asked what is in
+ * it; each stream names its codec; the codec is looked up. Nothing is tried.
+ *
+ * v1 asked every decoder "can you read this file?" and tried the ones that said
+ * yes. That question has no answer for a Matroska with video, two audio tracks
+ * and three subtitle tracks -- and it had a poor one for MP4, where the box
+ * naming the codec is in `moov` and `moov` may be at the end of a file a probe
+ * sees four kilobytes of. See docs/plan.md §4, *ABI v2: the container decides*.
+ *
+ * The split adds no conversion. Bit-exactness is a property of a codec and a
+ * container has none of it to lose. */
+
+typedef uint32_t MpStreamKind;
+enum {
+    MP_STREAM_AUDIO = 1u,
+    MP_STREAM_VIDEO = 2u,
+    MP_STREAM_SUBTITLE = 3u,
+    /* A stream this build has no name for. It is still counted and still
+     * described, because a host that hides what it does not understand is a
+     * host that cannot tell you why a track is missing. */
+    MP_STREAM_OTHER = 4u
+};
+
+/* Codec identifiers.
+ *
+ * Ours rather than a container's: MP4 says `alac`, Matroska says `A_FLAC`, Ogg
+ * says nothing and puts an identification header in the first page. A demuxer
+ * maps its container's spelling onto these, which is the whole of what makes
+ * the lookup a table rather than a guess.
+ *
+ * Numbered, not four-character-coded, because a fourcc invites a demuxer to
+ * pass a container's bytes through unmapped -- and then two containers spelling
+ * one codec differently become two codecs. */
+typedef uint32_t MpCodec;
+enum {
+    MP_CODEC_UNKNOWN = 0u,
+
+    /* Uncompressed. The "codec" is a memcpy or a container repack, which is an
+     * honest description of what Path A already does. */
+    MP_CODEC_PCM = 1u,
+    MP_CODEC_DSD = 2u, /* reserved: DoP is designed for and not implemented */
+
+    /* Lossless */
+    MP_CODEC_FLAC = 16u,
+    MP_CODEC_ALAC = 17u,
+    MP_CODEC_WAVPACK = 18u,     /* reserved */
+    MP_CODEC_APE = 19u,         /* reserved */
+    MP_CODEC_TTA = 20u,         /* reserved */
+
+    /* Lossy */
+    MP_CODEC_MP1 = 32u,
+    MP_CODEC_MP2 = 33u,
+    MP_CODEC_MP3 = 34u,
+    MP_CODEC_AAC_LC = 35u,
+    MP_CODEC_HE_AAC = 36u,      /* reserved */
+    MP_CODEC_VORBIS = 37u,
+    MP_CODEC_OPUS = 38u,
+    MP_CODEC_SPEEX = 39u,       /* reserved */
+    MP_CODEC_WMA = 40u,         /* reserved */
+    MP_CODEC_AC3 = 41u,         /* reserved */
+    MP_CODEC_EAC3 = 42u,        /* reserved */
+    MP_CODEC_DTS = 43u,         /* reserved */
+
+    /* The demuxer will decode this stream itself; there is no codec module to
+     * look up. For a pipeline that cannot be split -- Media Foundation, FFmpeg
+     * through its own programs -- and it is a declaration rather than a
+     * disguise: such a module is a pipeline, and this says so.
+     *
+     * A stream with this codec always carries MP_STREAM_SELF_DECODES. */
+    MP_CODEC_INTERNAL = 0xFFFFFFFFu
+};
+
+enum {
+    /* The demuxer decodes this stream. `MpDemuxVtbl::read_frames` is used
+     * instead of a codec module. */
+    MP_STREAM_SELF_DECODES = 1u << 0,
+    /* The stream the container itself marks as the one to play. */
+    MP_STREAM_DEFAULT = 1u << 1
+};
+
+/* What a container says about one stream.
+ *
+ * Everything here is what the *container* stated, not what a decoder inferred.
+ * Where a container says nothing -- Ogg does not state a duration without
+ * seeking -- the field is zero and zero means "not stated", never "none". */
+typedef struct MpStreamInfo {
+    uint32_t size;
+    uint32_t index;
+    MpStreamKind kind;
+    MpCodec codec;
+    uint32_t flags;
+    uint32_t config_bytes; /* fetch with MpDemuxVtbl::stream_config */
+
+    /* For an audio stream, as far as the container states it. A container that
+     * states none leaves it zeroed and the codec's own configuration decides. */
+    MpFormat format;
+
+    /* Frames, in the stream's own rate, or 0 when the container does not say. */
+    uint64_t total_frames;
+
+    /* **The gapless edit, which is the container's and always was.** `elst` in
+     * MP4, the LAME tag in an MP3's first frame, `pre_skip` in an Opus header.
+     * v1 hid this inside three separate decoders; here a tagger or a video path
+     * can see it too.
+     *
+     * `skip_frames` is the encoder delay to discard before the audio begins;
+     * `play_frames` is how much to emit after that, or 0 when the file does not
+     * say. */
+    uint64_t skip_frames;
+    uint64_t play_frames;
+
+    /* Milliseconds, for a stream whose rate is not frames -- subtitles, and
+     * video where the audio clock is what matters (§9). 0 when not stated. */
+    uint64_t duration_ms;
+
+    uint32_t reserved[4];
+} MpStreamInfo;
+
+/* One packet, as it sits in the container. Whose memory it is is stated on
+ * `read_packet` and it is the caller's, per §4 rule 1. */
+typedef struct MpPacket {
+    uint32_t size;
+    uint32_t flags;
+    /* Bytes actually written into the caller's buffer -- or, when the buffer
+     * was too small, the bytes the packet needs. See `read_packet`. */
+    uint32_t bytes;
+    uint32_t reserved;
+    /* In the stream's own frames, or 0 where the container does not timestamp.
+     * A demuxer that cannot say must say 0 rather than guess. */
+    uint64_t frame;
+} MpPacket;
+
+enum {
+    /* This packet begins a point the stream can be seeked to and decoded from
+     * with no earlier packet. Every audio packet of most codecs is one; AAC and
+     * MP3 are not, which is why seeking needs pre-roll. */
+    MP_PACKET_SYNC = 1u << 0
+};
+
+typedef struct MpDemux MpDemux; /* opaque, module-owned */
+
+typedef struct MpDemuxVtbl {
+    uint32_t size;
+    uint32_t reserved;
+
+    /* MP_IO. Score 0 = not this container, 100 = certain. `head` is the first
+     * `head_bytes` of the file. **This is a question about the container only.**
+     * What is inside it is not a probe's business and is not visible from four
+     * kilobytes anyway. */
+    MpResult(MP_CALL *probe)(const char *path, const uint8_t *head, size_t head_bytes,
+                             uint32_t *out_score);
+
+    /* MP_IO. Reads the container's index, wherever it is in the file. A demuxer
+     * is not a probe and has the whole file. */
+    MpResult(MP_CALL *open)(const char *path, MpDemux **out);
+
+    /* MP_ANY */
+    MpResult(MP_CALL *stream_count)(MpDemux *d, uint32_t *out_count);
+    /* MP_ANY. `out->size` is set by the caller. */
+    MpResult(MP_CALL *stream_info)(MpDemux *d, uint32_t index, MpStreamInfo *out);
+    /* MP_ANY. The codec's configuration blob, verbatim: ALACSpecificConfig,
+     * AudioSpecificConfig, a FLAC STREAMINFO. Fills at most `out_bytes` and
+     * always reports what it needs, so a caller may ask with `out` NULL first. */
+    MpResult(MP_CALL *stream_config)(MpDemux *d, uint32_t index, uint8_t *out,
+                                     uint32_t out_bytes, uint32_t *out_needed);
+
+    /* MP_IO. Which stream `read_packet` reads. One at a time in v2: the video
+     * path (§9) is what will need several, and it is not built yet. */
+    MpResult(MP_CALL *select)(MpDemux *d, uint32_t index);
+
+    /* MP_IO. Fills the caller's buffer with the next packet of the selected
+     * stream. MP_END with `out->bytes == 0` at the end of the stream.
+     *
+     * When the packet does not fit, nothing is consumed, `out->bytes` is what it
+     * needs and the result is MP_ERR_NO_MEMORY -- so a host grows its buffer and
+     * asks again rather than losing a packet it cannot hold. */
+    MpResult(MP_CALL *read_packet)(MpDemux *d, void *dst, size_t dst_bytes, MpPacket *out);
+
+    /* MP_IO. To the packet containing `frame` of the selected stream, or the
+     * nearest sync point before it. The host feeds what comes back to a codec
+     * that has been reset, and discards what precedes `frame`. */
+    MpResult(MP_CALL *seek)(MpDemux *d, uint64_t frame);
+
+    /* MP_IO. Only for a stream flagged MP_STREAM_SELF_DECODES: PCM in the format
+     * `stream_info` reported, exactly as MpDecoderVtbl::read did. Null on a
+     * demuxer that splits properly, which is most of them. */
+    MpResult(MP_CALL *read_frames)(MpDemux *d, void *dst, size_t dst_bytes,
+                                   size_t *out_bytes);
+
+    void(MP_CALL *close)(MpDemux *d);
+} MpDemuxVtbl;
+
+/* Named apart from `MpCodec`, which is an identifier rather than an object. The
+ * two colliding was the first thing this header caught after v2 was written. */
+typedef struct MpCodecInstance MpCodecInstance; /* opaque, module-owned */
+
+typedef struct MpCodecVtbl {
+    uint32_t size;
+    uint32_t reserved;
+
+    /* MP_ANY. Whether this module decodes `codec`, and how well. A codec module
+     * never sees a file: this is a question about an identifier and a
+     * configuration blob, answered from data. */
+    MpResult(MP_CALL *probe)(MpCodec codec, const uint8_t *config, uint32_t config_bytes,
+                             uint32_t *out_score);
+
+    /* MP_IO. `config` is the container's blob, verbatim and possibly empty. */
+    MpResult(MP_CALL *open)(MpCodec codec, const uint8_t *config, uint32_t config_bytes,
+                            MpCodecInstance **out);
+
+    /* MP_ANY. What this codec produces. Known after `open` for a codec whose
+     * configuration states it, and after the first `decode` otherwise. */
+    MpResult(MP_CALL *get_format)(MpCodecInstance *c, MpFormat *out);
+
+    /* MP_IO. One packet in, PCM out, in the format `get_format` reports.
+     * **Never converts**: conversion is the graph's job, here as in v1. A packet
+     * that decodes to nothing -- a priming frame -- returns MP_OK with
+     * *out_bytes == 0. */
+    MpResult(MP_CALL *decode)(MpCodecInstance *c, const void *packet, size_t packet_bytes,
+                              void *dst, size_t dst_bytes, size_t *out_bytes);
+
+    /* MP_IO. What is still inside after the last packet. */
+    MpResult(MP_CALL *flush)(MpCodecInstance *c, void *dst, size_t dst_bytes, size_t *out_bytes);
+
+    /* MP_IO. Forget everything: the audio after a seek is not adjacent to the
+     * audio before it. The host then feeds pre-roll packets before keeping any
+     * output, which is where AAC's priming frame and MP3's bit reservoir live.
+     * v1 hid that inside each decoder; here it is the host's, once. */
+    MpResult(MP_CALL *reset)(MpCodecInstance *c);
+
+    void(MP_CALL *close)(MpCodecInstance *c);
+} MpCodecVtbl;
 
 /* ------------------------------------------------------------------ */
 /* Sinks                                                               */
@@ -395,6 +642,27 @@ typedef struct MpDspVtbl {
      * memory, which is what `size` is for.
      */
     MpResult(MP_CALL *reset)(MpDsp *d);
+
+    /* MP_ANY. How many frames of the *output* are older audio -- the delay this
+     * stage adds between a sample going in and coming out, at the format
+     * `configure` was given. 0 for a stage that delays nothing.
+     *
+     * **A number, not a sentence.** Three stages here have latency and until now
+     * all three reported it only through `describe`, as text for a person: a
+     * linear-phase equaliser delays by half its filter, a convolver by its
+     * partition, a resampler by its own. Nothing could ask.
+     *
+     * Two things need to. A player's position is the device's, and with a
+     * linear-phase stage in the chain what is *audible* is this many frames
+     * behind what the position says. And an engine running several chains into
+     * one bus -- a mixer, a DAW -- must delay the short chains to match the
+     * long one, which is impossible without the number. Getting that wrong
+     * moves tracks against each other, which is the one error in a mixer that
+     * is never subtle.
+     *
+     * Valid after `configure` and may change with it: latency is a property of
+     * the filter that was built, not of the module. */
+    MpResult(MP_CALL *get_latency)(MpDsp *d, uint32_t *out_frames);
 } MpDspVtbl;
 
 /* ------------------------------------------------------------------ */
@@ -407,7 +675,9 @@ enum {
     MP_KIND_SINK = 2u,
     MP_KIND_DSP = 3u,   /* MpDspVtbl */
     MP_KIND_VIDEO = 4u, /* reserved */
-    MP_KIND_META = 5u   /* reserved */
+    MP_KIND_META = 5u,  /* reserved */
+    MP_KIND_DEMUX = 6u, /* MpDemuxVtbl */
+    MP_KIND_CODEC = 7u  /* MpCodecVtbl */
 };
 
 enum {
@@ -438,9 +708,22 @@ typedef struct MpModuleDesc {
     /* MP_ANY. Called once before unload, after every object is closed. */
     void(MP_CALL *shutdown)(void);
 
-    /* MpDecoderVtbl* or MpSinkVtbl*, per `kind`. Owned by the module and valid
-     * until shutdown returns. */
+
+    /* MpDecoderVtbl*, MpSinkVtbl*, MpDemuxVtbl* or MpCodecVtbl*, per `kind`.
+     * Owned by the module and valid until shutdown returns. */
     const void *vtbl;
+
+    /* **Capability declaration is data, not code** (§4 rule 6). What a module
+     * claims, so the registry can build the resolution table without loading
+     * and initialising everything at every start.
+     *
+     * For MP_KIND_CODEC: the MpCodec values it decodes. For MP_KIND_DEMUX: the
+     * codecs it can produce, which is a hint for a report rather than a promise
+     * -- a container carries what it carries. NULL and 0 mean "ask", which is
+     * what every v1 module says by having been compiled before this existed. */
+    const MpCodec *codecs;
+    uint32_t codec_count;
+    uint32_t reserved_desc;
 } MpModuleDesc;
 
 /*
@@ -472,6 +755,8 @@ MP_STATIC_ASSERT(offsetof(MpDspVtbl, open) == 8, "MpDspVtbl::open follows the he
  * header keeps working and simply has no reset. */
 MP_STATIC_ASSERT(offsetof(MpDspVtbl, describe) < offsetof(MpDspVtbl, reset),
                  "MpDspVtbl only ever grows at the end");
+MP_STATIC_ASSERT(offsetof(MpDspVtbl, reset) < offsetof(MpDspVtbl, get_latency),
+                 "MpDspVtbl only ever grows at the end");
 
 MP_STATIC_ASSERT(sizeof(MpFormat) == 32, "MpFormat layout is ABI");
 MP_STATIC_ASSERT(offsetof(MpFormat, sample_rate) == 0, "MpFormat layout is ABI");
@@ -491,6 +776,17 @@ MP_STATIC_ASSERT(offsetof(MpHost, size) == 0, "size must lead");
 MP_STATIC_ASSERT(offsetof(MpDecoderVtbl, size) == 0, "size must lead");
 MP_STATIC_ASSERT(offsetof(MpSinkVtbl, size) == 0, "size must lead");
 MP_STATIC_ASSERT(offsetof(MpModuleDesc, size) == 0, "size must lead");
+
+/* v2's two vtables. Both open with a size, both are only ever appended to. */
+MP_STATIC_ASSERT(offsetof(MpDemuxVtbl, size) == 0, "size must lead");
+MP_STATIC_ASSERT(offsetof(MpCodecVtbl, size) == 0, "size must lead");
+MP_STATIC_ASSERT(sizeof(MpStreamKind) == 4, "MpStreamKind is a u32 field");
+MP_STATIC_ASSERT(sizeof(MpCodec) == 4, "MpCodec is a u32 field");
+MP_STATIC_ASSERT(offsetof(MpStreamInfo, size) == 0, "size must lead");
+MP_STATIC_ASSERT(offsetof(MpStreamInfo, format) == 24, "MpStreamInfo layout is ABI");
+MP_STATIC_ASSERT(offsetof(MpPacket, size) == 0, "size must lead");
+MP_STATIC_ASSERT(sizeof(MpPacket) == 24, "MpPacket layout is ABI");
+
 
 #ifdef __cplusplus
 } /* extern "C" */

@@ -72,6 +72,11 @@ public:
     /// knows the seek is not clean.
     [[nodiscard]] MpResult reset() noexcept;
 
+    /// How many frames of this stage's output are older audio. 0 both for a
+    /// stage that delays nothing and for one built against a header that had
+    /// no way to ask -- the two are indistinguishable and neither is a fault.
+    [[nodiscard]] std::uint32_t latency_frames() const noexcept;
+
     [[nodiscard]] const std::string& name() const noexcept { return name_; }
     [[nodiscard]] const Format& output_format() const noexcept { return output_; }
     /// Channel pointers into this stage's own output, for the next stage.
@@ -131,6 +136,16 @@ public:
     /// Returns false when a stage could not, which means the audio after the
     /// seek carries a few hundred samples of the audio before it.
     [[nodiscard]] bool reset();
+
+    /// Every stage's latency added up: how far behind the input the chain's
+    /// output is.
+    ///
+    /// A player wants it because its position is the device's, and with a
+    /// linear-phase stage in the chain what is audible is this many frames
+    /// behind what the position says. Anything summing several chains into one
+    /// bus wants it because the short chains have to be delayed to match the
+    /// long one.
+    [[nodiscard]] std::uint32_t latency_frames() const noexcept;
 
     /// Drains the chain at the end of the stream, one round per call, until
     /// `flush_done()`.

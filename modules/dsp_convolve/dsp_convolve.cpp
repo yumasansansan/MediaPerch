@@ -355,6 +355,27 @@ MpResult MP_CALL dsp_reset(MpDsp* d) noexcept
     return MP_OK;
 }
 
+MpResult MP_CALL dsp_get_latency(MpDsp* d, std::uint32_t* out_frames) noexcept
+{
+    if (d == nullptr || out_frames == nullptr) {
+        return MP_ERR_INVALID;
+    }
+    // **Zero, and that is not a shrug.** The engine adds no delay of its own --
+    // output frame n is the convolution at frame n, and the partitioning
+    // changes when results arrive rather than where they sit. Whatever delay a
+    // listener hears belongs to the impulse response somebody supplied: half
+    // its length for a linear-phase filter, nearly nothing for a minimum-phase
+    // one.
+    //
+    // That delay is deliberately not reported here. Latency is the number a
+    // host may compensate for, and compensating an impulse response's own
+    // group delay would change what the effect does. `dsp_convolve`'s describe
+    // reports the response's shape for a person to read; this reports what the
+    // machinery costs, which is nothing.
+    *out_frames = 0;
+    return MP_OK;
+}
+
 const MpDspVtbl g_vtbl = {
     /* size      */ sizeof(MpDspVtbl),
     /* reserved  */ 0,
@@ -366,6 +387,7 @@ const MpDspVtbl g_vtbl = {
     /* set       */ &dsp_set,
     /* describe  */ &dsp_describe,
     /* reset     */ &dsp_reset,
+    /* latency   */ &dsp_get_latency,
 };
 
 MpResult MP_CALL module_init(const MpHost* host) noexcept

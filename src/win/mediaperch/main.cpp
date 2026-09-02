@@ -1558,6 +1558,15 @@ RunOutcome play_run(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& regis
             }
             std::printf(" on an f64 bus, %s\n",
                         mp::describe(chain.output_format()).c_str());
+            if (const std::uint32_t delay = chain.latency_frames(); delay != 0) {
+                // What is audible is this far behind what `position` says. Said
+                // out loud because a player that shifts its own audio should say
+                // by how much -- and because anything summing two chains into
+                // one bus has to delay the shorter one by exactly this.
+                std::printf("           latency %u frames (%.2f ms) the chain adds\n",
+                            delay,
+                            1000.0 * delay / chain.output_format().sample_rate);
+            }
             if (options.path != mp::PathPolicy::processed) {
                 std::printf("           --dsp implied --path processed\n");
             }

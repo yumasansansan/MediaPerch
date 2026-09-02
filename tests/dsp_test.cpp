@@ -177,6 +177,10 @@ MpResult MP_CALL fake_describe(MpDsp* d, std::uint32_t index, char* out,
 template <MpDsp::Kind K>
 const MpDspVtbl& fake_vtbl()
 {
+    // No `reset` and no `get_latency`: this is a module built against the older
+    // header, which the host has to keep working with. The trailing slots are
+    // zero because aggregate initialisation says so, and null means "cannot be
+    // asked".
     static const MpDspVtbl vtbl{sizeof(MpDspVtbl),
                                 0,
                                 &fake_open<K>,
@@ -186,6 +190,37 @@ const MpDspVtbl& fake_vtbl()
                                 &fake_flush,
                                 &fake_set,
                                 &fake_describe};
+    return vtbl;
+}
+
+/// How many frames the next `delaying_vtbl` will claim. A file-scope knob
+/// rather than per-instance state, because the fake stages have none.
+std::uint32_t g_fake_latency = 0;
+
+MpResult MP_CALL fake_get_latency(MpDsp* d, std::uint32_t* out_frames) noexcept
+{
+    if (d == nullptr || out_frames == nullptr) {
+        return MP_ERR_INVALID;
+    }
+    *out_frames = g_fake_latency;
+    return MP_OK;
+}
+
+/// A stage that answers the question, so the host's summing can be checked
+/// against something that is not also the thing being checked.
+const MpDspVtbl& delaying_vtbl()
+{
+    static const MpDspVtbl vtbl{sizeof(MpDspVtbl),
+                                0,
+                                &fake_open<MpDsp::Kind::gain>,
+                                &fake_close,
+                                &fake_configure,
+                                &fake_process,
+                                &fake_flush,
+                                &fake_set,
+                                &fake_describe,
+                                nullptr, /* reset */
+                                &fake_get_latency};
     return vtbl;
 }
 
@@ -551,4 +586,48 @@ TEST_CASE("a chain configured for something else is refused, not run", "[dsp][pr
     mp::ProcessedGraph graph{source,          sink, source_format, 64, {}, nullptr,
                              mp::PassthroughConfig{}, &chain};
     CHECK(graph.start() == MP_ERR_INVALID);
+}
+
+TEST_CASE("a chain says how far behind its output is", "[dsp][latency]")
+{
+    // Three stages in this tree have latency and until now all three reported
+    // it only through `describe`, as text for a person to read. Nothing could
+    // ask -- which is tolerable for one chain and wrong for two, because
+    // anything summing several chains into one bus has to delay the short ones
+    // by exactly this and cannot read English to find out.
+    std::string why;
+
+    SECTION("a stage that cannot be asked reports nothing, and does not fail")
+    {
+        // A module built against the header before `get_latency` existed. It
+        // has whatever latency it has; the honest answer is that this build
+        // cannot get it, and 0 is the only number available.
+        mp::DspChain chain;
+        chain.add(fake_vtbl<MpDsp::Kind::gain>(), "old");
+        REQUIRE(chain.configure(cd_audio_f64(), 64, why));
+        CHECK(chain.latency_frames() == 0);
+    }
+
+    SECTION("a stage that can be asked is")
+    {
+        g_fake_latency = 511;
+        mp::DspChain chain;
+        chain.add(delaying_vtbl(), "linear");
+        REQUIRE(chain.configure(cd_audio_f64(), 64, why));
+        CHECK(chain.latency_frames() == 511);
+    }
+
+    SECTION("and a chain adds them, because they are in series")
+    {
+        g_fake_latency = 100;
+        mp::DspChain chain;
+        chain.add(delaying_vtbl(), "one");
+        chain.add(delaying_vtbl(), "two");
+        chain.add(fake_vtbl<MpDsp::Kind::gain>(), "silent");
+        REQUIRE(chain.configure(cd_audio_f64(), 64, why));
+        // Added rather than maximised: each stage's delay is paid after the one
+        // before it, and the stage that cannot be asked contributes nothing.
+        CHECK(chain.latency_frames() == 200);
+        g_fake_latency = 0;
+    }
 }

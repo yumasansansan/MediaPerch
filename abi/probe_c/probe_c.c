@@ -60,6 +60,18 @@ MP_STATIC_ASSERT(sizeof(MpDspVtbl) == 8 + 8 * sizeof(void *),
 MP_STATIC_ASSERT(sizeof(MpResult) == 4, "MpResult is not 32 bits in C");
 MP_STATIC_ASSERT(sizeof(MpSampleType) == 4, "MpSampleType is not 32 bits in C");
 
+/* v2's containers and codecs, from the other language. The descriptor grew two
+ * fields and a pad when capability declaration arrived; a probe that did not
+ * check would find out by reading a vtable pointer out of the wrong slot. */
+MP_STATIC_ASSERT(sizeof(MpCodec) == 4, "MpCodec is not 32 bits in C");
+MP_STATIC_ASSERT(sizeof(MpStreamKind) == 4, "MpStreamKind is not 32 bits in C");
+MP_STATIC_ASSERT(sizeof(MpPacket) == 24, "MpPacket is not what C++ thinks it is");
+MP_STATIC_ASSERT(offsetof(MpStreamInfo, format) == 24, "MpStreamInfo.format moved");
+MP_STATIC_ASSERT(offsetof(MpModuleDesc, vtbl) == 24 + 4 * sizeof(void *),
+                 "MpModuleDesc.vtbl moved");
+MP_STATIC_ASSERT(offsetof(MpModuleDesc, codecs) == 24 + 5 * sizeof(void *),
+                 "MpModuleDesc.codecs is not where the descriptor grew");
+
 struct MpDsp {
     MpFormat format;
     /* What the host actually did, so `describe` can say whether it matched what
@@ -248,6 +260,12 @@ static const MpModuleDesc g_desc = {
     &probe_init,
     &probe_shutdown,
     &g_vtbl,
+    /* codecs, codec_count, reserved: a DSP stage declares no codecs, and saying
+     * so positionally is the point -- a descriptor written field by field in
+     * another language is the thing this probe exists to check. */
+    NULL,
+    0,
+    0,
 };
 
 MP_EXPORT const MpModuleDesc *MP_CALL mp_module_entry(uint32_t host_abi_version)

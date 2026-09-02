@@ -444,6 +444,19 @@ MpResult MP_CALL dsp_reset(MpDsp* d) noexcept
     return MP_OK;
 }
 
+MpResult MP_CALL dsp_get_latency(MpDsp* d, std::uint32_t* out_frames) noexcept
+{
+    if (d == nullptr || out_frames == nullptr) {
+        return MP_ERR_INVALID;
+    }
+    // In *input* frames, which is what the engine counts, and rounded up: a
+    // caller aligning two chains cannot use half a frame, and rounding down
+    // would claim the audio is earlier than it is.
+    const double frames = d->engine.identity() ? 0.0 : d->engine.latency_frames();
+    *out_frames = frames > 0.0 ? static_cast<std::uint32_t>(frames + 0.5) : 0u;
+    return MP_OK;
+}
+
 const MpDspVtbl g_vtbl = {
     /* size      */ sizeof(MpDspVtbl),
     /* reserved  */ 0,
@@ -455,6 +468,7 @@ const MpDspVtbl g_vtbl = {
     /* set       */ &dsp_set,
     /* describe  */ &dsp_describe,
     /* reset     */ &dsp_reset,
+    /* latency   */ &dsp_get_latency,
 };
 
 MpResult MP_CALL module_init(const MpHost* host) noexcept

@@ -231,6 +231,195 @@ Interfaces in v1:
 | `MP_KIND_VIDEO` | `create_surface`, `present`, `set_colour_target` | §9 |
 | `MP_KIND_META` | `read_tags`, `read_art` (`MP_IO`) | the most hostile input in the program; fuzzed hardest |
 
+
+### ABI v2: the container decides
+
+**v1 asks every decoder "can you read this file?" and tries the ones that say yes, in
+order.** That is the wrong question, and §4.6 above already knew it: it says the descriptor
+should list "kinds, container and codec IDs" so the registry can build a resolution table
+without asking anybody. v1 shipped without those lists, and the question became "try them
+and see" instead.
+
+What that costs is now measured rather than argued. An MP4 is claimed at 100 by
+`decode_alac`, `decode_aac` and `decode_ffmpeg` alike, because the box that names the codec
+is in `moov` and `moov` may be at the end of a file a probe sees four kilobytes of --
+measured: FFmpeg puts it 1,110 bytes from the end of a 49 KB file, and a two-hour album
+puts a megabyte of it there. So the order of attempts owes nothing to what is inside, and
+each wrong guess is a module opening a file to say no. The outcome is correct and the
+structure is not, and [formats.md](formats.md) records two more of its failures: a probe
+that claimed AMR, DTS and FLV by finding a false frame sync, and containers that no module
+claimed at all.
+
+**And it gets worse with video and subtitles, which is the actual argument.** A file is not
+one stream. "Which decoder reads this file" has no answer for a Matroska with video, two
+audio tracks and three subtitle tracks; the question is "what is in it, and which decoder
+takes each one". A structure built on trying decoders in order cannot be extended to that
+-- it has to be replaced by one built on asking the container.
+
+So v2 is the shape every media stack that survived contact with containers has:
+
+```
+identify the container  →  read it  →  it names the codec of each stream  →  the codec is
+                                                                            looked up
+```
+
+Nothing is tried. The container is identified from its first bytes, which is what magic
+bytes are *for* and what the probes here already do well; everything after that is a table
+lookup on data the container stated.
+
+#### Three kinds where there was one
+
+| Kind | What it is | Interface |
+|---|---|---|
+| `MP_KIND_DEMUX` | a container reader | `probe`, `open`, `stream_count`, `stream_info`, `select`, `read_packet`, `seek`, `close` |
+| `MP_KIND_CODEC` | a packet decoder | `open(codec_id, config, config_bytes)`, `get_format`, `decode`, `flush`, `reset`, `close` |
+| `MP_KIND_DECODER` | **gone.** Its two halves are the two above | — |
+
+`MpStreamInfo` is what a container says about one stream: its kind (audio, video, subtitle),
+its codec id, the codec's configuration blob verbatim — `ALACSpecificConfig`,
+`AudioSpecificConfig`, a FLAC `STREAMINFO` — the format where the container states one, the
+duration, and **the gapless edit**, because that lives in the container and always did:
+`elst` in MP4, the LAME tag in an MP3's first frame, `pre_skip` in an Opus header.
+
+A codec module never sees a file. It is handed an id, a configuration blob and packets, and
+it produces the file's own samples — which is the point worth saying plainly: **the split
+adds no conversion.** Bit-exactness is a property of the codec and the container has none of
+it to lose.
+
+#### The library that does both
+
+libFLAC reads the FLAC container *and* decodes FLAC. `opusfile` reads Ogg and drives libopus.
+Media Foundation and FFmpeg are whole pipelines with a file at one end and PCM at the other.
+A split that could not accommodate those would be a split that could not use a reference
+implementation, which is not a trade this project makes.
+
+So a stream may be flagged `MP_STREAM_SELF_DECODES`: the demuxer that produced it will also
+decode it, and the host asks the same module rather than looking up a codec. That is one
+structure with one declared exception, not two structures. It is also honest about what such
+a module is — Media Foundation is not a container reader that happens to decode, it is a
+pipeline, and the flag says so.
+
+Where the split *is* available it is taken, because Xiph already ships the pieces separately
+and this tree already vendors them separately: `external/ogg` is the container, `vorbis` and
+`opus` are the codecs. Ogg is where v2 costs least and shows most.
+
+#### What each module becomes
+
+| Today | Becomes | Note |
+|---|---|---|
+| `modules/mp4/mp4.cpp` | `demux_mp4` | **already a container parser**, already shared by two modules. It gains a vtable and stops being a library |
+| `decode_alac/alac.cpp` | `codec_alac` | **already a pure codec**: it takes a config blob and packets |
+| `decode_aac/aac.cpp` | `codec_aac` | likewise. Both keep their fuzz targets unchanged |
+| `decode_mp3` | `demux_mpeg` + `codec_mp3` | the "container" is frame headers and the LAME tag, which is a demuxer's work; `dr_mp3` decodes |
+| `decode_native` | `demux_wav` + `codec_pcm`, and `demux_flac` + `codec_flac` | `dr_wav` and `dr_flac` are separable; PCM's codec is a memcpy, which is the honest description of what Path A already does |
+| `decode_flac` | `demux_flac` + `codec_flac` (libFLAC) | libFLAC's stream decoder takes a read callback, so it can be driven either way. Outranks the `dr_flac` pair on priority as it does today |
+| `decode_ogg` | `demux_ogg` (libogg) + `codec_vorbis` + `codec_opus` | the case that pays for itself: OggFLAC and Speex stop being "an Ogg this module cannot read" and become an Ogg whose codec nobody has yet |
+| `decode_mf` | `demux_mf`, every stream `SELF_DECODES` | it can enumerate streams, which is more than it does now |
+| `decode_ffmpeg` | `demux_ffmpeg`, every stream `SELF_DECODES` | `ffprobe` already enumerates streams; the module throws that away today and asks for one |
+
+Two things fall out of the table that are worth naming. **The MP4 problem disappears
+entirely**: `demux_mp4` reads `moov` wherever it is, in `open`, where reading a file is
+allowed — there is no four-kilobyte window because a demuxer is not a probe. And
+**`decode_ffmpeg` stops being a fallback for containers it can read and becomes a demuxer
+for them**, which is a better description of what it is.
+
+#### What this costs, and what it breaks
+
+- **`MP_ABI_VERSION` goes to 2**, and every module in the tree is rewritten. Nothing has
+  shipped, so nothing outside this repository breaks. The C and Rust probes in `abi/` are
+  rewritten with it, which is the second thing they are for.
+- **Seeking splits in two**, and the seam is real: the demuxer seeks to a packet boundary
+  and the codec has to be reset and given its pre-roll — AAC needs a priming frame, MP3 has
+  a bit reservoir. v1 hid that inside each decoder; v2 makes it the host's, once, instead of
+  each module's, repeatedly. That is the change with the most room to be got wrong and it
+  gets the seek test that already exists, per codec.
+- **The registry's resolution table is rewritten** (§7): container by probe score, codec by
+  id. `mediaperch-probe claims` becomes a report about both.
+- **The gapless edit moves** from the decoder to `MpStreamInfo`, which is where it belongs
+  and where a second consumer — a tagger, a video path — can see it.
+
+#### The order to do it in
+
+Each step leaves the tree building and playing music.
+
+1. The ABI header: the two vtables, `MpStreamInfo`, the codec ids, and the descriptor's
+   capability lists that §4.6 asked for. Nothing implements them yet.
+2. The host: resolve by container then codec, with `MP_KIND_DECODER` still supported, so
+   the old and new modules coexist while the rest of the list is worked through.
+3. `demux_mp4` + `codec_alac` + `codec_aac` — the split that already exists in the tree, so
+   it is the one that proves the shape with the least new code.
+4. `demux_ogg` + `codec_vorbis` + `codec_opus`, which is where the split buys a format
+   (OggFLAC, Speex) rather than only tidiness.
+5. `demux_wav`, `demux_flac`, `demux_mpeg` and their codecs.
+6. `demux_mf` and `demux_ffmpeg` with `SELF_DECODES`.
+7. `MP_KIND_DECODER` is deleted, and with it the last of "try them in order".
+
+**Step 7 is not optional and is not "later".** A migration that leaves both structures in
+the tree has not replaced anything: it has added a second way to do the same thing, and the
+first one goes on working, so nothing forces the last module across. The interface is marked
+*being removed* in the header from the day step 1 lands, and the milestone is not done until
+`grep MP_KIND_DECODER` finds nothing.
+
+Two things fall out of the order that are worth stating now, because they are what the
+result has to look like:
+
+- **`demux_ffmpeg` is the fallback and `demux_mf` is the floor.** FFmpeg claims a container
+  it can read at the fallback score; Media Foundation claims the same container below it, so
+  it is chosen only where nothing else is. That is the ordering §7 already measures its way
+  to, expressed as data instead of as a probe's opinion.
+- **Both are `SELF_DECODES`, and both are honest about it.** Neither is a container reader
+  that happens to decode; each is a pipeline, and the flag says so rather than pretending
+  they are demuxers that could be paired with somebody else's codec.
+
+
+### Whether this ABI could carry a DAW's engine
+
+It is intended to, so the question is asked here rather than discovered later. The short
+answer is yes, and the reason is not that the ABI is complete — it is that **the two things
+that cannot be added later are already right**, and everything found missing can be appended
+without breaking a module compiled today.
+
+**What is already right, and it is the expensive half:**
+
+- **Thread classes are part of the contract, not a convention.** `MP_RT` may not block,
+  allocate or unwind, and it says so on every entry point. Most plugin APIs leave this to a
+  guideline and a hope; an engine that must not miss a 3 ms deadline cannot.
+- **Everything is size-prefixed and only ever grows at the end**, so a field added in two
+  years costs a module nothing. This is the whole reason the answer above is "yes": what is
+  missing is missing, not precluded.
+- `configure` / `process` / `flush` / `reset` is already block processing with a variable
+  output count — which is what lets a resampler be a stage at all, and what a bounce at a
+  different rate needs.
+- Deinterleaved `f64` planes, which is what a mixing engine wants and what a player only
+  needs because Path B exists.
+- The container/codec split of v2 *is* project import: a DAW opening a file asks the same
+  two questions in the same order.
+
+**What was missing and could not wait: latency.** Three stages here have it and all three
+reported it only through `describe`, as a sentence. Nothing could ask. For one chain that is
+a cosmetic gap — the position a player reports is the device's, and with a linear-phase
+stage the audible audio is that far behind it. For an engine summing several chains into one
+bus it is fatal: the short chains must be delayed to match the long one, and getting that
+wrong moves tracks against each other, which is the one error in a mixer that is never
+subtle. `MpDspVtbl::get_latency` was added for this, at the end of the vtable where growth
+is allowed, and a 1023-tap linear-phase equaliser now reports 511 frames to anything that
+asks.
+
+**What is missing and can wait, because appending is cheap:**
+
+| Missing | Why a DAW needs it | Where it would go |
+|---|---|---|
+| Numeric, automatable parameters | `set(key, value)` is strings on the control thread. Automation needs an id, a range, and a change that lands on a known sample with a ramp | `param_count`, `param_info`, `set_param(id, value, frame_offset)` appended to `MpDspVtbl` |
+| Encoders and muxers | a DAW bounces, and nothing in this tree writes a file | `MP_KIND_ENCODER` and `MP_KIND_MUX`, the mirror of what v2 just built for reading |
+| Several buses, and sidechains | `configure` is one format in and one out | a bus index on `configure` and `process`, appended |
+| Events | instruments, if the engine ever hosts one | a separate vtable; not an audio question |
+
+Two things are deliberately *not* on that list. **A timeline with a tempo map is not the
+module ABI's business** — a player's transport is a file position and a DAW's is a musical
+one, and both live above the boundary in exactly the same place. And **state save and
+restore already works**: `describe` reports every setting and `set` takes it back, which is
+what the settings file round-trips through today and what a project file would.
+
 **Out-of-process modules use the same ABI.** A future `mp_host_ffmpeg.exe` implements the
 identical vtable over shared memory and a pipe, so a decoder that dies on a malformed file
 takes a helper process down and not the audio. The ABI is shaped now so that this needs no
@@ -517,6 +706,12 @@ design:
 Implemented in `ModuleRegistry`, which loads every `mp_*.dll` beside the executable rather
 than naming the one it wants. `mediaperch-probe claims --file X` prints every decoder's score
 for one file, and [formats.md](formats.md) carries the audit of all of them.
+
+**FFmpeg is RECOMMENDED; Media Foundation is NOT RECOMMENDED.** In the key words of RFC
+2119: installing FFmpeg is OPTIONAL and exists so that Media Foundation can be avoided,
+and using Media Foundation SHOULD NOT be relied on for anything a person cares about the
+samples of. It is kept because an install with nothing else on disk still has to play
+something, and that is the whole of its remit.
 
 **Media Foundation is last everywhere, and that is a conclusion rather than a preference.**
 It scores 20 on everything it recognises, one below `decode_ffmpeg`'s fallback 30, because

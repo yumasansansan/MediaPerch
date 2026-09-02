@@ -507,6 +507,18 @@ MpResult MP_CALL dsp_reset(MpDsp* d) noexcept
     return MP_OK;
 }
 
+MpResult MP_CALL dsp_get_latency(MpDsp* d, std::uint32_t* out_frames) noexcept
+{
+    if (d == nullptr || out_frames == nullptr) {
+        return MP_ERR_INVALID;
+    }
+    // A cascade of biquads delays nothing; a linear-phase FIR delays by half of
+    // itself. The same number `describe` prints, now in a form something can
+    // act on.
+    *out_frames = d->mode == Mode::linear ? d->taps / 2 : 0u;
+    return MP_OK;
+}
+
 const MpDspVtbl g_vtbl = {
     /* size      */ sizeof(MpDspVtbl),
     /* reserved  */ 0,
@@ -518,6 +530,7 @@ const MpDspVtbl g_vtbl = {
     /* set       */ &dsp_set,
     /* describe  */ &dsp_describe,
     /* reset     */ &dsp_reset,
+    /* latency   */ &dsp_get_latency,
 };
 
 MpResult MP_CALL module_init(const MpHost* host) noexcept

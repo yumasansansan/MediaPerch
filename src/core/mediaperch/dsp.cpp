@@ -155,6 +155,31 @@ MpResult DspStage::reset() noexcept
     return vtbl_->reset(handle_);
 }
 
+std::uint32_t DspStage::latency_frames() const noexcept
+{
+    // Same reasoning as `reset`: a vtable that stops before this belongs to a
+    // module built against the older header. It has a latency; it simply cannot
+    // be asked, and reporting 0 is the only answer available.
+    if (handle_ == nullptr ||
+        vtbl_->size < offsetof(MpDspVtbl, get_latency) + sizeof(void*) ||
+        vtbl_->get_latency == nullptr) {
+        return 0;
+    }
+    std::uint32_t frames = 0;
+    return vtbl_->get_latency(handle_, &frames) == MP_OK ? frames : 0;
+}
+
+std::uint32_t DspChain::latency_frames() const noexcept
+{
+    // Added rather than maximised: they are in series, so each one's delay is
+    // paid after the one before it.
+    std::uint32_t total = 0;
+    for (const auto& stage : stages_) {
+        total += stage->latency_frames();
+    }
+    return total;
+}
+
 void DspChain::add(const MpDspVtbl& vtbl, std::string name)
 {
     stages_.push_back(std::make_unique<DspStage>(vtbl, std::move(name)));

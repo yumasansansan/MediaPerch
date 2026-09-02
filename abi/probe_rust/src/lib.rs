@@ -40,7 +40,7 @@ const MP_ERR_INVALID: MpResult = 2;
 const MP_ERR_UNSUPPORTED: MpResult = 3;
 const MP_ERR_FORMAT: MpResult = 4;
 
-const MP_ABI_VERSION: u32 = 1;
+const MP_ABI_VERSION: u32 = 2;
 const MP_KIND_DSP: u32 = 3;
 const MP_SAMPLE_F64: u32 = 7;
 
@@ -102,6 +102,12 @@ pub struct MpModuleDesc {
     init: extern "C" fn(host: *const c_void) -> MpResult,
     shutdown: extern "C" fn(),
     vtbl: *const c_void,
+    // v2: capability declaration is data, not code. A DSP stage declares no
+    // codecs, and transcribing the fields anyway is what makes this a layout
+    // check rather than a hope.
+    codecs: *const u32,
+    codec_count: u32,
+    reserved_desc: u32,
 }
 
 // The layout claims, from the other language. If any of these is wrong the
@@ -109,7 +115,7 @@ pub struct MpModuleDesc {
 const _: () = assert!(std::mem::size_of::<MpFormat>() == 32);
 const _: () = assert!(std::mem::size_of::<MpDspVtbl>() == 8 + 8 * std::mem::size_of::<usize>());
 const _: () = assert!(
-    std::mem::size_of::<MpModuleDesc>() == 24 + 5 * std::mem::size_of::<usize>()
+    std::mem::size_of::<MpModuleDesc>() == 32 + 6 * std::mem::size_of::<usize>()
 );
 
 // ---------------------------------------------------------------------------
@@ -367,6 +373,9 @@ static DESC: MpModuleDesc = MpModuleDesc {
     init: module_init,
     shutdown: module_shutdown,
     vtbl: &VTBL as *const MpDspVtbl as *const c_void,
+    codecs: std::ptr::null(),
+    codec_count: 0,
+    reserved_desc: 0,
 };
 
 // `MpModuleDesc` holds raw pointers, which Rust will not call `Sync` on its
