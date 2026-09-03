@@ -28,3 +28,6 @@
 [submodule "external/utfcpp"]
 	path = external/utfcpp
 	url = https://github.com/nemtrif/utfcpp.git
+[submodule "external/mpg123"]
+	path = external/mpg123
+	url = https://github.com/madebr/mpg123.git

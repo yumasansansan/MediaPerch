@@ -139,7 +139,7 @@ Named, so that it is a decision rather than a someday:
 argument was that Rust protects the small parsing surface we write and not the large one we
 link -- and since it was written, the small surface shrank: `demux_flac` moved onto libFLAC,
 `demux_mp4` onto Bento4, `demux_mkv` onto libmatroska. What remains written here is four
-modules -- `codec_aac`, `codec_alac`, `demux_mpeg`, `demux_adts` -- and they are exactly the
+modules -- `codec_aac`, `codec_alac`, `demux_mpa`, `demux_adts` -- and they are exactly the
 residue the argument said Rust would protect. ALAC went first because it is integer
 arithmetic, so bit-exactness against the recorded hashes is a machine check rather than a
 judgement; it passed on every one. `docs/formats.md` has the measurements and
@@ -147,7 +147,7 @@ judgement; it passed on every one. `docs/formats.md` has the measurements and
 mixed-language linking, no CRT mixing, no change to the C++ build -- was the cost paid:
 `cmake/Rust.cmake` is a `cargo build` and a copy.
 
-The other three are open, in the order `demux_adts`, `demux_mpeg`, `codec_aac` -- the last
+The other three are open, in the order `demux_adts`, `demux_mpa`, `codec_aac` -- the last
 because it is float and its recorded hashes are its own, so a port has to reproduce its
 arithmetic order or the record changes. The demuxers may instead become wrappers if a better
 reader turns up, which is the same decision this tree made for FLAC, MP4 and Matroska.
@@ -332,7 +332,7 @@ and this tree already vendors them separately: `external/ogg` is the container, 
 | `decode_alac/alac.cpp` | `codec_alac` | **already a pure codec**: it takes a config blob and packets |
 | `decode_aac/aac.cpp` | `codec_aac` | likewise. Both keep their fuzz targets unchanged |
 | `decode_aac`'s ADTS framer | `demux_adts` | **the row this table was missing.** `decode_aac` had three parts, not two: a codec, half an MP4 parser, and a framer for raw AAC. Leaving the third out would have taken `.aac` from a first-class format to an FFmpeg-only one |
-| `decode_mp3` | `demux_mpeg` + `codec_mp3` | the "container" is frame headers and the LAME tag, which is a demuxer's work; `dr_mp3` decodes |
+| `decode_mp3` | `demux_mpa` + `codec_mpa` | the "container" is frame headers and the LAME tag, which is a demuxer's work; `dr_mp3` decodes |
 | `decode_native` | `demux_wav` + `codec_pcm` | `dr_wav` reads the container; PCM's codec is a memcpy, which is the honest description of what Path A already does. **`codec_pcm` has no dependency at all**, so every container that carries uncompressed audio -- MP4, Matroska, CAF, the day they name it -- gets a decoder for free |
 | `decode_native`'s FLAC half | *dropped* | it was `demux_flac` + a dr_flac codec, and the second was written and then removed: `demux_flac` needs no library either, so the pair added a reimplementation with a known 32-bit hole and nothing else. FLAC without libFLAC now falls to FFmpeg like any other unimplemented codec |
 | `decode_flac` | `demux_flac` (written here) + `codec_flac` (libFLAC) | the container is ours because a FLAC frame carries no length and finding its end is a scan the reference decoder does not expose; the codec is libFLAC driven one frame at a time, opened on the STREAMINFO the container hands over. **OggFLAC starts playing as a consequence**, through `demux_ogg` and the same codec |
@@ -380,7 +380,7 @@ Each step leaves the tree building and playing music.
    here decodes that codec" instead of "this is an Ogg I cannot read", which is the
    difference the split was for.
 5. **Done, and it needed a fourth demuxer the table above missed.** `demux_wav`
-   + `codec_pcm`, `demux_flac` + `codec_flac`, `demux_mpeg` + `codec_mp3` -- and
+   + `codec_pcm`, `demux_flac` + `codec_flac`, `demux_mpa` + `codec_mpa` -- and
    `demux_adts`, because `decode_aac` had three parts rather than two and the
    ADTS framer was one of them. Without it a raw `.aac` would have gone from a
    format with a first-class reader to one only FFmpeg could open, which is
@@ -424,7 +424,7 @@ given. Eighteen bytes beginning `FF FB`, an MPEG sync that also satisfies FLAC's
 fourteen-bit one, read past the end of the buffer. Reachable for real on a file
 whose last frame is truncated. The input is in `fuzz/corpus/flac`.
 
-Still not fuzzed and worth saying so: `demux_mpeg`'s LAME-tag reader and
+Still not fuzzed and worth saying so: `demux_mpa`'s LAME-tag reader and
 `demux_adts`'s header parser, both of which are ours and both of which read
 attacker-controlled bytes. They want the same treatment.
 
@@ -839,7 +839,7 @@ Two mechanisms, and which one a dependency gets is decided by whether **we** bui
 
 | | Examples | Why |
 |---|---|---|
-| **Git submodule, built from source** | `external/dr_libs`, `external/flac`, `external/ogg`, `external/vorbis`, `external/opus`, `external/libebml`, `external/libmatroska`, `external/utfcpp`, `external/Bento4` | Pinned to a commit by the gitlink, so a checkout is reproducible and an upgrade is a reviewable diff. All of them have (or need) no build system of consequence: dr_libs is headers, the Xiph libraries are CMake-native. The tree builds them; CI builds them; nothing is downloaded at configure time except Catch2 |
+| **Git submodule, built from source** | `external/dr_libs`, `external/flac`, `external/ogg`, `external/vorbis`, `external/opus`, `external/libebml`, `external/libmatroska`, `external/utfcpp`, `external/Bento4`, `external/mpg123` | Pinned to a commit by the gitlink, so a checkout is reproducible and an upgrade is a reviewable diff. All of them have (or need) no build system of consequence: dr_libs is headers, the Xiph libraries are CMake-native. The tree builds them; CI builds them; nothing is downloaded at configure time except Catch2 |
 | **Found at run time, never vendored** | FFmpeg | Its configure is a shell script needing MSYS2 and nasm on Windows, its build is tens of minutes, its output is tens of megabytes, and **its licence is a choice the user should make** — LGPL-2.1+ by default, GPL with `--enable-gpl`, and non-free options past that. Vendoring one configuration decides all of that for them |
 
 The rule generalises: **vendor what you compile, resolve what you don't.** A module that
@@ -910,6 +910,7 @@ looking for these bugs and that somebody is expected to fix them. Checked direct
 | `libebml` | yes (LGPL 2.1+) |
 | `libmatroska` | yes (LGPL 2.1+) |
 | `utfcpp` | yes (BSL-1.0) |
+| `mpg123` | yes (LGPL 2.1) |
 | `Bento4` | yes (GPL-2.0-**or-later**; GPLv2-only would not be) |
 | `faad2` | yes |
 | `ffmpeg` | yes |

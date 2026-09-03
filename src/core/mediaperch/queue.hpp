@@ -19,7 +19,7 @@
 // 44.1 kHz followed by 96 kHz needs the device renegotiated, which is a new
 // graph and an audible gap, so the queue stops and says why rather than
 // resampling something nobody asked it to. And it does not remove the encoder's
-// padding -- that is the container's, and `demux_mpeg` reads the LAME tag for
+// padding -- that is the container's, and `demux_mpa` reads the LAME tag for
 // exactly this reason.
 
 #ifndef MEDIAPERCH_QUEUE_HPP

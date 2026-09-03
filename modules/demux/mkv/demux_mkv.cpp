@@ -482,7 +482,7 @@ void read_track_entry(MpDemux* d, KaxTrackEntry& entry)
 ///
 /// **Matroska stores no CodecPrivate for A_MPEG/L1, L2 or L3**, because MPEG
 /// audio has no setup data -- every frame restates the rate and the channel
-/// mode in its own header. `codec_mp3` is handed those four bytes so it can
+/// mode in its own header. `codec_mpa` is handed those four bytes so it can
 /// answer `get_format` before decoding anything, which is what the ABI asks of
 /// it, so the container has to go and find them. Reading one packet is what a
 /// demuxer is allowed to do in `open`.

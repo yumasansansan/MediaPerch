@@ -391,9 +391,9 @@ bool PacketSource::pump()
             //
             // It has to be the first packet that *decoded*, not the first that
             // arrived: a codec fed a cold packet may hand back nothing at all --
-            // dr_mp3 does exactly that for the frame it has no bit reservoir
-            // for -- and counting from a packet whose samples never existed puts
-            // the discard a whole frame out.
+            // an MPEG audio decoder does exactly that for the frame it has no
+            // bit reservoir for -- and counting from a packet whose samples
+            // never existed puts the discard a whole frame out.
             //
             // `MP_PACKET_TIMED` is the demuxer vouching for the number. Without
             // it the packet has no position and there is nothing to compute.

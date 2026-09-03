@@ -55,7 +55,7 @@ is tried.
 |---|---|---|---|
 | `demux_wav` | dr_wav | `codec_pcm` | **nothing at all** -- it is a memcpy |
 | `demux_flac` | libFLAC | `codec_flac` | libFLAC |
-| `demux_mpeg` | **nothing** | `codec_mp3` | dr_mp3 |
+| `demux_mpa` | libmpg123 | `codec_mpa` | libmpg123 |
 | `demux_adts` | **nothing** | `codec_aac` | **nothing** |
 | `demux_mp4` | Bento4 | `codec_alac`, `codec_aac` | **nothing** |
 | `demux_ogg` | libogg | `codec_opus`, `codec_vorbis`, `codec_flac` | libopus, libvorbis, libFLAC |
@@ -228,9 +228,92 @@ end of its buffer. libFLAC's decoder is fuzzed continuously on OSS-Fuzz, which n
 local campaign matches.
 
 Where a container is still read by code here, it is because there is no library
-that reads only the container: `demux_mp4`'s parser is a slice of ISO 14496-12
-(see below), `demux_mpeg` and `demux_adts` are frame headers, and dr_wav is a
-header rather than a build.
+that reads only the container: `demux_adts` is seven bytes of frame header and
+nothing ships a reader for those alone, and dr_wav is a header rather than a
+build. That list used to include `demux_mpa`; it does not now.
+
+### MPEG audio, and the two names that were wrong
+
+Two modules were renamed, and the reason is the same one twice: they were never
+only about the thing they were named after.
+
+| Was | Is | Why |
+|---|---|---|
+| `demux_mpeg` | **`demux_mpa`** | It reads an MPEG audio *elementary stream* -- a run of frame headers. MPEG-1 System Streams, MPEG-2 Program Streams (`.mpg`, `.vob`) and Transport Streams (`.ts`) are multiplexed containers with pack headers, PES packets and 188-byte cells, and this module has never contained a line that reads one. It could not demux MPEG-1 or MPEG-2 *video* and would have to be a different parser to try. The old name would have collided with §9's video path; `demux_mpeg`, `demux_ps` and `demux_ts` are free for it now |
+| `codec_mp3` | **`codec_mpa`** | It has always decoded layers I, II and III and claimed `MP_CODEC_MP1`, `MP_CODEC_MP2` and `MP_CODEC_MP3`. Its own file comment said "MPEG audio layers I, II and III"; only the name said otherwise |
+
+MPA is what RFC 3551 names the family, and what FFmpeg and GStreamer call it
+internally. (Bento4 does carry MPEG-2 Transport Stream code, but it is
+`AP4_Mpeg2TsWriter` -- a writer. Reading one is still unimplemented and still
+somebody's future work.)
+
+### What libmpg123 replaced, and what it cost to get right
+
+Both halves are libmpg123 now, the way both halves of FLAC are libFLAC. mpg123
+documents `mpg123_framebyframe_next` and `mpg123_framedata` for exactly the
+container use -- *"together with the raw header, you can reconstruct the whole
+raw MPEG stream without junk and meta data"* -- so the ID3v2 skip, the
+resynchronisation, the Xing/Info/LAME tag and the frame index all came from one
+place instead of four pieces of code here.
+
+Measured against FFmpeg on two seconds of the same audio:
+
+| File | Reported | Frames | FFmpeg |
+|---|---|---|---|
+| MP3, layer III, 44.1 kHz stereo | `44100 Hz / 2 ch / F32` | 88200 | 88200 |
+| MP2, layer II, 44.1 kHz stereo | `44100 Hz / 2 ch / F32` | 88704 | 88704 |
+| MP3, MPEG-2 at 22.05 kHz | `22050 Hz / 2 ch / F32` | 44100 | 44100 |
+| MP3, mono | `44100 Hz / 1 ch / F32` | 88200 | 88200 |
+
+Seeking is byte-identical to the tail of a straight decode at frames 1, 1000,
+5000, 44100, 44101 and 88199.
+
+**Three things had to be found by measuring rather than by reading the API**,
+and each was a whole frame or more of audio:
+
+- **`mpg123_scan` leaves the reader at the end of the file**, and a
+  frame-by-frame walk started from there loses the last frame:
+  `mpg123_framebyframe_next` says `MPG123_DONE` on the call that would have
+  parsed it. 77 frames of a 78-frame file, 87599 samples where FFmpeg gives
+  88200 -- the last 26 milliseconds of every track. The handle is reopened
+  after the scan, which costs one `open_handle64` and no pass over the file.
+- **`mpg123_seek_frame64` on a walked handle does not leave it where an open
+  would.** A seek to frame 1000 disagreed with the same frames of a straight
+  decode in 2510 samples of the first five frames, and agreed exactly
+  everywhere after. `demux_mpa` reopens and then seeks, so the two paths are
+  one path.
+- **`MPG123_NEW_FORMAT` is a message, not a failure**, and it arrives on the
+  first frame of every file. Testing `< 0` made the module decline every MP3 it
+  was handed. What is a real failure -- a stream that changes rate or channel
+  count mid-file -- is now checked against the format the instance was opened
+  on, because a codec here never converts.
+
+**A fifth thing came from the fuzzer, and it is a memory bound.**
+`store_id3v2` allocates an ID3v2 tag's *declared* length before reading it, so a
+ten-byte header claiming 147 MB gets 147 MB: `mpa_fuzzer` reached that in a few
+thousand executions, out of an input a few hundred bytes long. Neither module
+reads a tag -- the frame boundaries and the LAME gapless numbers do not come
+from ID3 -- so both set `MPG123_SKIP_ID3V2`, which removes the class rather than
+bounding it. `demux_mpa`'s own header test caps a tag at 4 MB as well, and walks
+*runs* of tags rather than one: a tagger that appends leaves two, the format
+allows it, and a file with two was declined until that was measured.
+
+For the record, the fuzzer's peak RSS is **ASan's quarantine and not a leak** --
+403 MB with the default 256 MB quarantine, 77 MB with `quarantine_size_mb=16`
+over the same number of executions. That was worth confirming rather than
+assuming, because a fuzz target that grows is usually the other thing.
+
+The campaign after all of the above: **533,100 executions in five minutes,
+6,639 new corpus entries, 152 MB peak, nothing found.**
+
+**And one thing libmpg123 does that dr_mp3 did not: it resynchronises into
+anything.** `mpg123_scan` finds frames inside the PCM of a WAV, inside an M4A
+and inside a Matroska, so `open` succeeded on all three and the format matrix
+grew five rows of files this module cannot read. That is right for a broken MP3
+and wrong as an answer to "is this an MP3", so `open` now applies the same test
+the probe does -- an ID3v2 tag if there is one, then a frame header where the
+audio should start -- where the whole file is in reach rather than four
+kilobytes. The matrix is back to what it measured before.
 
 ### Matroska, which is what a container reader was for
 
@@ -257,7 +340,7 @@ one 88200-frame WAV:
 | PCM in Matroska | `demux_mkv` + `codec_pcm` | 88200 | 88200 | **byte-identical**, and identical to the source WAV |
 | AAC in Matroska | `demux_mkv` + `codec_aac` | 89088 | 89088 | same length; two AAC decoders, so not the same bytes |
 | Vorbis in Matroska | `demux_mkv` + `codec_vorbis` | 88200 | 88200 | same length, and the source's |
-| MP3 in Matroska | `demux_mkv` + `codec_mp3` | 88200 | 88200 | same length, and the source's |
+| MP3 in Matroska | `demux_mkv` + `codec_mpa` | 88200 | 88200 | same length, and the source's |
 | Opus in WebM | `demux_mkv` + `codec_opus` | 96000 | 96000 | same length -- 2.000 s at Opus's 48 kHz |
 
 **The three lossless rows being byte-identical is the result that matters**: a
@@ -393,7 +476,7 @@ was decoded both ways and hashed:
 | **FLAC, 32-bit 44.1 kHz mono** | `demux_flac` + `codec_flac` | `beea7eb2…7b0abbf0` | identical |
 | **FLAC, 16-bit 37800 Hz mono** | `demux_flac` + `codec_flac` | `42673449…97997f86` | identical |
 | **FLAC, 16-bit 768000 Hz mono** | `demux_flac` + `codec_flac` | `2fe0b8f6…67b5bfaf` | identical |
-| MP3, 44.1 kHz stereo 256k | `demux_mpeg` + `codec_mp3` | `c86e36b4…c49d6482` | identical |
+| MP3, 44.1 kHz stereo 256k | `demux_mpa` + `codec_mpa` | `c86e36b4…c49d6482` | identical |
 | AAC-LC raw ADTS, 44.1 kHz | `demux_adts` + `codec_aac` | `3b261164…6d516a6b` | identical |
 | ALAC, 16-bit 44.1 kHz stereo | `demux_mp4` + `codec_alac` | `b38bebc6…1af5b059` | identical |
 | ALAC, 24-bit 96 kHz stereo | `demux_mp4` + `codec_alac` | `f434a906…ef3abf1a` | identical |
@@ -424,8 +507,8 @@ how a decoder ends up refusing a file that is perfectly legal.
 
 **MPEG layer II.** `decode_mp3`'s probe tested for Layer III explicitly, so an
 MP2 went to FFmpeg and, without FFmpeg, to Media Foundation. The layer is two
-bits of the frame header and `dr_mp3` decodes all three, so `demux_mpeg` names
-MP_CODEC_MP1, MP2 or MP3 and `codec_mp3` takes any of them.
+bits of the frame header and `dr_mp3` decodes all three, so `demux_mpa` names
+MP_CODEC_MP1, MP2 or MP3 and `codec_mpa` takes any of them.
 
 Measured against the audio that was encoded, with `compare`: 88704 frames, which
 is exactly what FFmpeg reports, and **11.99 dB** from the source -- where FFmpeg
@@ -475,7 +558,7 @@ return exactly the file's length minus the seek.
 
 Two of those needed the mechanism to be got right rather than merely present:
 
-- **MP3's bit reservoir reaches backwards**, so `demux_mpeg` hands back two
+- **MP3's bit reservoir reaches backwards**, so `demux_mpa` hands back two
   frames before the target and the host throws them away. The first of those
   decodes to *nothing* -- dr_mp3 declines a frame it has no reservoir for --
   which is why the discard is counted from the first packet that produced
@@ -499,9 +582,9 @@ meaningful.
 | FLAC | **`demux_flac` 100**, `demux_ffmpeg` 30, `demux_mf` 20 | `demux_flac` | `demux_flac` |
 | Ogg — Vorbis, Opus or FLAC | **`demux_ogg` 100**, then `demux_ffmpeg` 100 | `demux_ogg` | `demux_ogg` |
 | Ogg — Speex | **`demux_ogg` 100** — reads it, and no codec here takes the stream — then `demux_ffmpeg` 100 | `demux_ffmpeg` | *nothing* |
-| MP3, frame header in reach | **`demux_mpeg` 100**, `demux_ffmpeg` 30, `demux_mf` 20 | `demux_mpeg` | `demux_mpeg` |
-| MP3, tag past the 4 KB window | **`demux_mpeg` 60**, `demux_ffmpeg` 30, `demux_mf` 20 | `demux_mpeg` | `demux_mpeg` |
-| MPEG-1/2 layer I or II | **`demux_mpeg` 100**, `demux_ffmpeg` 30, `demux_mf` 20 | `demux_mpeg` | `demux_mpeg` |
+| MP3, frame header in reach | **`demux_mpa` 100**, `demux_ffmpeg` 30, `demux_mf` 20 | `demux_mpa` | `demux_mpa` |
+| MP3, tag past the 4 KB window | **`demux_mpa` 60**, `demux_ffmpeg` 30, `demux_mf` 20 | `demux_mpa` | `demux_mpa` |
+| MPEG-1/2 layer I or II | **`demux_mpa` 100**, `demux_ffmpeg` 30, `demux_mf` 20 | `demux_mpa` | `demux_mpa` |
 | AAC in ADTS | **`demux_adts` 100**, `demux_ffmpeg` 30, `demux_mf` 20 | `demux_adts` | `demux_adts` |
 | MP4, M4A | **`demux_mp4` 100**, `demux_ffmpeg` 100 (priority 60), `demux_mf` 20 | `demux_mp4`, and the codec it names | `demux_mp4` where a codec here takes the stream, else `demux_mf` |
 | ASF, WMA | `demux_ffmpeg` 30, `demux_mf` 20 | `demux_ffmpeg` | `demux_mf` |
@@ -615,12 +698,12 @@ window proves the audio is out of reach rather than absent, and that still score
 60.
 
 **The same audit, run again on the v2 modules, found the wart had a twin.**
-`demux_adts` was written with `demux_mpeg`'s shape and inherited its ID3
+`demux_adts` was written with `demux_mpa`'s shape and inherited its ID3
 speculation, so an MP3 with cover art was claimed at 60 by both -- and
 `demux_adts` won the tie on priority, opened the file, failed, and let the host
 fall through. The right answer by the wrong route. An ADTS stream behind a large
 tag is rare enough that the guess costs more than it buys, so that module claims
-nothing there; `demux_mpeg` keeps its 60 because a tagged MP3 is most MP3s.
+nothing there; `demux_mpa` keeps its 60 because a tagged MP3 is most MP3s.
 Measured with an ID3v2 tag of eight kilobytes stitched in front of the corpus's
 MP3: one claimant now, and the same hash out.
 
@@ -681,7 +764,7 @@ installed. WMA gains float instead of a silent quantisation to 16 bits.
 | OggFLAC | `demux_ogg` + `codec_flac` | `44100 Hz / 2 ch / S16` | it used to be FFmpeg's, because `decode_ogg` scored it **0** -- not something low, but "this is an Ogg I cannot read at all". `demux_ogg` reads the container and names the codec; `codec_flac` takes it. Byte-identical to the FLAC and the WAV of the same audio |
 | WavPack | `demux_ffmpeg` | `44100 Hz / 2 ch / S32` | hash identical to the 32-bit WAV of the same signal |
 | ALAC in M4A | `demux_mp4` + `codec_alac` | up to `384000 Hz / 8 ch / S32` | both halves ours, and between them no dependency at all. See below |
-| MP3 | `demux_mpeg` + `codec_mp3` | `44100 Hz / 2 ch / F32` | `dr_mp3`, at 105. It outranks Media Foundation because MF implements no gapless metadata and starts every MP3 36 ms late -- see *MP3, and the 36 milliseconds* below. This row once said `mf` and `S16`, which is what a hand-written table does |
+| MP3 | `demux_mpa` + `codec_mpa` | `44100 Hz / 2 ch / F32` | `dr_mp3`, at 105. It outranks Media Foundation because MF implements no gapless metadata and starts every MP3 36 ms late -- see *MP3, and the 36 milliseconds* below. This row once said `mf` and `S16`, which is what a hand-written table does |
 
 ## Vorbis and Opus: float, and what that costs
 
@@ -1104,7 +1187,7 @@ The output is `F32`, and the build defines `DR_MP3_FLOAT_OUTPUT` to make that
 true rather than nominal: without it dr_mp3 decodes to int16 and converts up on
 the way out, which would be a quantisation performed inside a decoder.
 
-`fuzz/mp3_fuzzer.cpp` drives it: 1.5 million executions under ASan, nothing
+`fuzz/mpa_fuzzer.cpp` drives it: 1.5 million executions under ASan, nothing
 found. MP3 earns a fuzzer more than the others here, because its frame parser
 resynchronises after garbage and will keep decoding through a file that is
 mostly not MP3.

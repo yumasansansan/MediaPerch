@@ -89,7 +89,6 @@ set(sources
     modules/codec/aac/codec_aac.cpp
     modules/demux/wav/demux_wav.cpp
     modules/demux/flac/demux_flac.cpp
-    modules/demux/mpeg/demux_mpeg.cpp
     modules/demux/adts/demux_adts.cpp
     modules/demux/mp4/demux_mp4.cpp)
 

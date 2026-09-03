@@ -26,7 +26,7 @@ git submodule update --init
 
 | Submodule | What for | Which module brings it in |
 |---|---|---|
-| `external/dr_libs` | `dr_wav`, and `dr_mp3` | `demux_wav`, `codec_mp3` |
+| `external/dr_libs` | `dr_wav` | `demux_wav` |
 | `external/flac` | libFLAC | `codec_flac` |
 | `external/ogg` | libogg | `demux_ogg` |
 | `external/vorbis` | libvorbis | `codec_vorbis` |
@@ -35,6 +35,7 @@ git submodule update --init
 | `external/libmatroska` | the Matroska schema on top of it | `demux_mkv` |
 | `external/utfcpp` | header-only UTF-8, which libebml asks for by `find_package` | `demux_mkv`, through libebml |
 | `external/Bento4` | ISOBMFF: MP4, M4A, `.mov`, fragmented MP4 | `demux_mp4` |
+| `external/mpg123` | MPEG audio layers I to III, both halves | `demux_mpa`, `codec_mpa` |
 
 **Each submodule sits with the one module that needs it**, which is a property of the
 container/codec split rather than a tidying. One module used to bring in four of the Xiph
@@ -291,6 +292,57 @@ a crates.io dependency, and a module build must not depend on that resolving.
 AddressSanitizer is what stable cannot do; for safe Rust that is the smaller
 loss, because the bounds checks are the sanitizer and a missed one is a panic
 libFuzzer reports as a crash.
+
+### mpg123, whose upstream is SVN
+
+Every other submodule is pinned to a tag or a commit of the project's own git.
+**mpg123 has no git at all** -- upstream is Subversion, at mpg123.org -- so the
+pin is a mirror, and which mirror took checking rather than choosing:
+
+| Candidate | State |
+|---|---|
+| `libsdl-org/mpg123` | newest *tag* is v1.30.0. Upstream is 1.33.7, and 1.33.7 fixes heap buffer overflows in Windows Unicode path handling. Its 1.33.x content is only on `-SDL` branches, which are a fork |
+| `mileswu`, `georgi`, `wkpark`, `gypified`, `Bandwidth` | mirrors with **no tags at all** |
+| **`madebr/mpg123`** | tracks SVN trunk, currently past 1.33.7 |
+
+`madebr` is the one upstream itself uses: mpg123's own NEWS credits "github PR
+23", "PR 29" and "PR 30", and those numbers are that repository's. The pin is
+`c1d38c6`, which carries the 1.33.7 security fix and the bug 392 hardening after
+it -- the same reasoning that pins Bento4 past its last tag.
+
+**It was verified rather than trusted.** The official
+`mpg123-1.33.7.tar.bz2` was downloaded from mpg123.de and its `src/` compared
+against the mirror at the same day's commit. Twenty files differ: eleven are
+ARM/NEON assembly this build never compiles, two are headers the tarball ships
+generated, five are `libout123` and tests that `BUILD_LIBOUT123=OFF` excludes,
+one is `version.h`. **Exactly one file that this build compiles differs --
+`libmpg123/id3.c` -- and its difference is upstream commit `e1be2ba`, "store
+UFID like TXXX (bug 384)", which postdates the release.** No commit is
+byte-identical to a release tarball because the mirror linearises trunk and
+releases are cut with packaging; that is expected of an SVN mirror, not evidence
+of anything.
+
+If that dependence is unwanted, the alternative is a mirror of your own:
+`git svn clone` the upstream repository, push it to your account, and change one
+URL in `.gitmodules`. It costs a periodic `git svn fetch && git push`.
+
+**mpg123's own I/O is never used.** `mpg123_reader64` installs the read and seek
+callbacks over a `FILE*` this tree opened with `open_utf8`, so the Windows path
+conversion that 1.33.7 fixed is not reached at all -- the same arrangement
+`demux_flac` has with libFLAC and `demux_mp4` with Bento4.
+
+The fuzz build compiles libmpg123 a second time with
+`-fsanitize=fuzzer-no-link,address`, for the reason the Rust ALAC target
+records: `address` alone gives the sanitizer and no coverage counters, and
+libFuzzer then walks the library blind. Measured here: `cov: 20` -- the harness
+and nothing else -- over 289,000 executions before the flag was added, and 5,281
+counters after.
+
+One build note: `ports/cmake` sets its include paths with directory-scoped
+`include_directories` rather than on the target, so `libmpg123` carries no usage
+requirements and a consumer gets `fatal error C1083: mpg123.h`. The headers ship
+in the source tree, so `modules/codec/mpa/CMakeLists.txt` puts one INTERFACE
+path on the target and both modules inherit it.
 
 ### Two policy settings for the same submodules
 

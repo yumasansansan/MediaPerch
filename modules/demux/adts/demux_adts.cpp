@@ -224,12 +224,12 @@ MpResult MP_CALL demux_probe(const char* path, const std::uint8_t* head, std::si
                    (static_cast<std::size_t>(head[8] & 0x7Fu) << 7) |
                    static_cast<std::size_t>(head[9] & 0x7Fu));
         if (at + 16 > bytes) {
-            // **Nothing, not a weak claim.** `demux_mpeg` claims 60 here
+            // **Nothing, not a weak claim.** `demux_mpa` claims 60 here
             // because an MP3 with cover art is most MP3s and its frame header
             // is genuinely out of reach; an ADTS stream with a large ID3v2 tag
             // in front of it is rare enough that the same guess costs more than
             // it buys. Measured: with a speculative 60 this module outranked
-            // `demux_mpeg` on priority for every big-tagged MP3, opened it,
+            // `demux_mpa` on priority for every big-tagged MP3, opened it,
             // failed, and made the host fall through -- the right answer by the
             // wrong route, and the exact wart the probe audit removed from
             // `decode_mp3`.
@@ -237,7 +237,7 @@ MpResult MP_CALL demux_probe(const char* path, const std::uint8_t* head, std::si
         }
     }
 
-    // Two headers a frame apart that agree, for the reason `demux_mpeg` needs
+    // Two headers a frame apart that agree, for the reason `demux_mpa` needs
     // the same rule: one sync pattern turns up by chance in any few kilobytes of
     // somebody else's compressed audio.
     const std::size_t limit = bytes < at + 8192 ? bytes : at + 8192;

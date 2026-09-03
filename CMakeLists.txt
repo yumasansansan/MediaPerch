@@ -105,16 +105,19 @@ if(MEDIAPERCH_BUILD_PLATFORM)
     # same target -- so the codec comes first, and the container reader after it.
     add_subdirectory(modules/codec/flac)
 
+    # codec/mpa is where external/mpg123 is brought in, and demux/mpa links the
+    # same target -- so it comes before the demuxers for the same reason.
+    add_subdirectory(modules/codec/mpa)
+
     add_subdirectory(modules/demux/wav)
     add_subdirectory(modules/demux/flac)
-    add_subdirectory(modules/demux/mpeg)
+    add_subdirectory(modules/demux/mpa)
     add_subdirectory(modules/demux/adts)
     add_subdirectory(modules/demux/mp4)
     add_subdirectory(modules/demux/ogg)
     add_subdirectory(modules/demux/mkv)
 
     add_subdirectory(modules/codec/pcm)
-    add_subdirectory(modules/codec/mp3)
     add_subdirectory(modules/codec/aac)
     add_subdirectory(modules/codec/alac)
     add_subdirectory(modules/codec/opus)

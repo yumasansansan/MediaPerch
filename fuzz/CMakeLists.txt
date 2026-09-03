@@ -107,7 +107,40 @@ endfunction()
 
 mediaperch_add_fuzzer(wav_fuzzer wav_fuzzer.cpp wav)
 mediaperch_add_fuzzer(flac_fuzzer flac_fuzzer.cpp flac)
-mediaperch_add_fuzzer(mp3_fuzzer mp3_fuzzer.cpp mp3)
+# MPEG audio is libmpg123 now, on both sides, so the fuzzer links it rather
+# than compiling a parser of ours into itself. The library is built by
+# modules/codec/mpa, which this build does not add -- so it is built here, with
+# the sanitizer on, for the reason the Bento4 one gives: a library linked in
+# uninstrumented is a library the fuzzer runs through and reports nothing about.
+if(NOT TARGET libmpg123 AND EXISTS "${CMAKE_SOURCE_DIR}/external/mpg123/ports/cmake/CMakeLists.txt")
+    set(BUILD_LIBOUT123 OFF CACHE BOOL "" FORCE)
+    set(BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(CMAKE_SKIP_INSTALL_RULES ON)
+    add_subdirectory("${CMAKE_SOURCE_DIR}/external/mpg123/ports/cmake"
+                     "${CMAKE_BINARY_DIR}/external/mpg123" EXCLUDE_FROM_ALL)
+endif()
+if(TARGET libmpg123)
+    # The same INTERFACE path modules/codec/mpa adds: mpg123's CMake sets its
+    # include paths per-directory, so the target carries none of its own.
+    target_include_directories(libmpg123
+        INTERFACE "${CMAKE_SOURCE_DIR}/external/mpg123/src/include")
+    foreach(_ext IN ITEMS libmpg123 libsyn123 compat compat_str)
+        if(TARGET ${_ext})
+            # **`fuzzer-no-link` is the half that puts coverage counters in.**
+            # With `address` alone libFuzzer runs the library blind: measured,
+            # this target reported `cov: 20` -- the harness and nothing else --
+            # over a quarter of a million executions. `no-link` because the
+            # entry point comes from the fuzzer target, not from the library.
+            target_compile_options(${_ext} PRIVATE -fsanitize=fuzzer-no-link,address -w)
+            target_compile_definitions(${_ext} PRIVATE
+                _DISABLE_VECTOR_ANNOTATION _DISABLE_STRING_ANNOTATION)
+            set_target_properties(${_ext} PROPERTIES FOLDER "external")
+        endif()
+    endforeach()
+    mediaperch_add_fuzzer(mpa_fuzzer mpa_fuzzer.cpp mp3)
+    target_link_libraries(mpa_fuzzer PRIVATE libmpg123)
+endif()
 mediaperch_add_fuzzer(aac_fuzzer aac_fuzzer.cpp aac
                       "${CMAKE_SOURCE_DIR}/modules/codec/aac/aac.cpp"
                       "${CMAKE_SOURCE_DIR}/modules/codec/aac/aac_tables.cpp")

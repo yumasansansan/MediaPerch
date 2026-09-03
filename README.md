@@ -51,7 +51,7 @@ container reader in the tree, and fails if what it measures is not what this tab
 coverage table nobody generates is a coverage table that is wrong.
 
 <!-- formats:begin -->
-| Format | `wav` | `flac` | `mpeg` | `adts` | `mp4` | `ogg` | `mkv` | `ffmpeg` | `mf` |
+| Format | `wav` | `flac` | `mpa` | `adts` | `mp4` | `ogg` | `mkv` | `ffmpeg` | `mf` |
 |---|---|---|---|---|---|---|---|---|---|
 | WAV, 16-bit 44.1 kHz stereo | **exact** | — | — | — | — | — | — | exact | exact |
 | WAV, 24-bit 96 kHz stereo | **exact** | — | — | — | — | — | — | exact | exact |

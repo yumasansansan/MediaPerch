@@ -811,7 +811,7 @@ next       …96000 Hz / 2 ch / S24_PACKED…, which this device cannot take wit
            being reopened. That is the gap, and it is not ours.
 ```
 
-It also does not remove the encoder's padding. That is the *container's*, and `demux_mpeg`
+It also does not remove the encoder's padding. That is the *container's*, and `demux_mpa`
 reads the LAME tag for exactly this reason -- the edit is a fact about the file, which is
 why `MpStreamInfo` carries it and a codec never sees it.
 
@@ -1051,14 +1051,20 @@ modules/             everything that can be loaded and unloaded at runtime, sort
                      skip_single_frame and get_decode_position are documented by
                      Xiph for exactly that. It was written by hand first, which
                      was a mistake and is recorded as one at the top of the file.
-  demux/mpeg/        MPEG audio layers I to III: the frame headers, the ID3v2 skip
-                     and the LAME/Xing tag, which is where an MP3's real length and
-                     its encoder delay live. Reads all three layers, so an MP2 stops
-                     being FFmpeg's problem. It claims 60 rather than 100 behind a
-                     tag larger than a probe's window -- a tag with cover art in it
-                     is larger than four kilobytes, and an ID3 tag identifies
-                     nothing, so the honest score is "the audio is out of reach"
-                     rather than "this is not an MP3".
+  demux/mpa/         MPEG audio layers I to III, on libmpg123: the frame headers,
+                     the ID3v2 skip and the LAME/Xing tag, which is where an MP3's
+                     real length and its encoder delay live. **MPA, not MPEG**: it
+                     reads an audio elementary stream, and MPEG program and
+                     transport streams are different formats -- demux_mpeg,
+                     demux_ps and demux_ts are free names for §9's video path.
+                     Reads all three layers, so an MP2 stops being FFmpeg's problem.
+                     It claims 60 rather than 100 behind a tag larger than a probe's
+                     window -- a tag with cover art in it is larger than four
+                     kilobytes, and an ID3 tag identifies nothing, so the honest
+                     score is "the audio is out of reach" rather than "this is not
+                     an MP3". Its `open` re-applies the probe's test with the whole
+                     file in reach, because libmpg123 resynchronises into anything
+                     and would otherwise claim to have opened a WAV.
   demux/adts/        raw AAC's framing. Assembles the AudioSpecificConfig an MP4
                      would have carried out of the first frame header, so codec/aac/
                      cannot tell the two containers apart.
@@ -1094,8 +1100,11 @@ modules/             everything that can be loaded and unloaded at runtime, sort
   codec/flac/        libFLAC, driven one frame at a time: the configuration blob is
                      the beginning of a FLAC file, so the decoder is opened on
                      forty-two synthesised bytes and then fed packets.
-  codec/mp3/         dr_mp3's low-level entry point, which takes a frame and gives
-                     back its samples. Layers I, II and III.
+  codec/mpa/         libmpg123's feed interface: one frame in, its samples out.
+                     Layers I, II and III, and where external/mpg123 enters the
+                     build -- demux/mpa links the same target, the arrangement
+                     libFLAC has. Gapless is off on purpose: the edit is the
+                     container's and PacketSource applies it once.
   codec/alac/        ALAC, written here, in Rust -- the first module that is not
                      C++. A config blob and packets in, the file's own samples
                      out, no dependency of any kind, and #![forbid(unsafe_code)]

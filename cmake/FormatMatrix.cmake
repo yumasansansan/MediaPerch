@@ -86,7 +86,7 @@ endfunction()
 # MP_KIND_DECODER is gone and so are the eight modules that used it.
 #
 # The heading drops the `demux_` that all of them share.
-set(decoders demux_wav demux_flac demux_mpeg demux_adts demux_mp4 demux_ogg
+set(decoders demux_wav demux_flac demux_mpa demux_adts demux_mp4 demux_ogg
              demux_mkv demux_ffmpeg demux_mf)
 
 set(rows "")      # "label|file|reference-file-or-NONE"
