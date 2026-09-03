@@ -839,7 +839,7 @@ Two mechanisms, and which one a dependency gets is decided by whether **we** bui
 
 | | Examples | Why |
 |---|---|---|
-| **Git submodule, built from source** | `external/dr_libs`, `external/flac`, `external/ogg`, `external/vorbis`, `external/opus`, `external/libebml`, `external/libmatroska`, `external/Bento4` | Pinned to a commit by the gitlink, so a checkout is reproducible and an upgrade is a reviewable diff. All of them have (or need) no build system of consequence: dr_libs is headers, the Xiph libraries are CMake-native. The tree builds them; CI builds them; nothing is downloaded at configure time except Catch2 |
+| **Git submodule, built from source** | `external/dr_libs`, `external/flac`, `external/ogg`, `external/vorbis`, `external/opus`, `external/libebml`, `external/libmatroska`, `external/utfcpp`, `external/Bento4` | Pinned to a commit by the gitlink, so a checkout is reproducible and an upgrade is a reviewable diff. All of them have (or need) no build system of consequence: dr_libs is headers, the Xiph libraries are CMake-native. The tree builds them; CI builds them; nothing is downloaded at configure time except Catch2 |
 | **Found at run time, never vendored** | FFmpeg | Its configure is a shell script needing MSYS2 and nasm on Windows, its build is tens of minutes, its output is tens of megabytes, and **its licence is a choice the user should make** — LGPL-2.1+ by default, GPL with `--enable-gpl`, and non-free options past that. Vendoring one configuration decides all of that for them |
 
 The rule generalises: **vendor what you compile, resolve what you don't.** A module that
@@ -909,6 +909,7 @@ looking for these bugs and that somebody is expected to fix them. Checked direct
 | `opus` | yes |
 | `libebml` | yes (LGPL 2.1+) |
 | `libmatroska` | yes (LGPL 2.1+) |
+| `utfcpp` | yes (BSL-1.0) |
 | `Bento4` | yes (GPL-2.0-**or-later**; GPLv2-only would not be) |
 | `faad2` | yes |
 | `ffmpeg` | yes |

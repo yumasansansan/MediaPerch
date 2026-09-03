@@ -70,6 +70,28 @@ target_include_directories(mediaperch_abi INTERFACE "${CMAKE_CURRENT_LIST_DIR}/i
 
 add_subdirectory(src/core)
 
+# **Two settings for the submodules' CMake, which is older than ours.**
+#
+# libogg, libvorbis, libebml and libmatroska declare cmake_minimum_required
+# 3.5 or 3.6, and CMake 4 warns on every configure that compatibility with
+# anything below 3.10 is going away. The same declaration leaves CMP0069 unset
+# in those projects, so the INTERPROCEDURAL_OPTIMIZATION this tree sets for
+# Release was being *ignored* for six of their targets -- silently, apart from
+# one warning per target. CMAKE_POLICY_VERSION_MINIMUM raises the policy
+# version they are given to 3.10, which ends the deprecation warning and makes
+# CMP0069 NEW, so the submodules get the LTO everything else already gets.
+# Verified on a two-line project before it was trusted here.
+#
+# CMP0183 (3.31) is libebml's add_feature_info() calls; NEW is the full
+# condition syntax, which the ON/OFF values they pass satisfy either way.
+#
+# Set here rather than in each module's CMakeLists because they are properties
+# of *dependencies*, not of any one module, and a default set after a submodule
+# was added would miss it. Neither touches this project's own policy version,
+# which cmake_minimum_required at the top sets.
+set(CMAKE_POLICY_VERSION_MINIMUM 3.10)
+set(CMAKE_POLICY_DEFAULT_CMP0183 NEW)
+
 # Portable modules build wherever the core does.
 if(MEDIAPERCH_BUILD_PLATFORM)
     # **Containers, then codecs, then everything else.** One ordering

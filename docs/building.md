@@ -33,6 +33,7 @@ git submodule update --init
 | `external/opus` | libopus | `codec_opus` |
 | `external/libebml` | EBML, the encoding Matroska is written in | `demux_mkv` |
 | `external/libmatroska` | the Matroska schema on top of it | `demux_mkv` |
+| `external/utfcpp` | header-only UTF-8, which libebml asks for by `find_package` | `demux_mkv`, through libebml |
 | `external/Bento4` | ISOBMFF: MP4, M4A, `.mov`, fragmented MP4 | `demux_mp4` |
 
 **Each submodule sits with the one module that needs it**, which is a property of the
@@ -53,9 +54,9 @@ Two orderings survive, both for the same reason -- a library asking
 And one that is not a `find_package`: `modules/codec/flac` brings in libFLAC and
 `modules/demux/flac` links the same target, so the codec comes first.
 
-### Four small CMake overrides, and why they are in `cmake/`
+### Five small CMake overrides, and why they are in `cmake/`
 
-The Xiph libraries are built in-tree, which their own CMake does not quite expect. Four
+The Xiph libraries are built in-tree, which their own CMake does not quite expect. Five
 files in `cmake/` fix that, all by the same mechanism: every one of those projects reaches
 its own modules with `list(APPEND CMAKE_MODULE_PATH ...)`, and this project's `cmake/` is
 already on that path from the top-level `CMakeLists.txt`, so ours is found first.
@@ -64,6 +65,7 @@ already on that path from the top-level `CMakeLists.txt`, so ours is found first
 |---|---|
 | `FindOgg.cmake` | libvorbis calling `find_package(Ogg REQUIRED)` for an *installed* libogg. Ours answers with the in-tree `Ogg::ogg` target, which `modules/demux/ogg` creates first |
 | `FindEBML.cmake` | libmatroska calling `find_package(EBML 2.0.0)` for an *installed* libebml. The same trick, plus the `EBML::ebml` alias libebml does not declare for itself |
+| `Findutf8cpp.cmake` | libebml calling `find_package(utf8cpp)` -- and, finding none, **downloading one from GitHub at configure time** with FetchContent. That had been happening on every configure, locally and in CI, with a warning as the only sign. utfcpp is a submodule now, at the tag libebml would have fetched, and this answers with it |
 | `OpusPackageVersion.cmake` | opus asking `git describe --tags` for its version number |
 
 The second matters more than it looks. Upstream has **no working fallback** when git cannot
@@ -289,6 +291,25 @@ a crates.io dependency, and a module build must not depend on that resolving.
 AddressSanitizer is what stable cannot do; for safe Rust that is the smaller
 loss, because the bounds checks are the sanitizer and a missed one is a panic
 libFuzzer reports as a crash.
+
+### Two policy settings for the same submodules
+
+CMake 4 warns, on every configure, about four submodules whose
+`cmake_minimum_required` is 3.5 or 3.6: compatibility below 3.10 is going away.
+The same declaration leaves policy CMP0069 unset in those projects, and CMP0069
+unset means the `INTERPROCEDURAL_OPTIMIZATION` this tree sets for Release is
+*ignored* for their targets -- six of them, each with a warning saying so, which
+is how it was noticed. So libogg, libvorbis, libebml and libmatroska had been
+building without the LTO the rest of the Release build has, since the day they
+were added.
+
+`CMAKE_POLICY_VERSION_MINIMUM 3.10`, set at the top level before any submodule
+is added, gives those projects a policy version of 3.10: the deprecation warning
+ends and CMP0069 becomes NEW, so they get the same LTO. `CMAKE_POLICY_DEFAULT_CMP0183
+NEW` is for libebml's `add_feature_info()` calls, where NEW is the full condition
+syntax and the ON/OFF values they pass mean the same under either. Seventeen
+warnings per configure before; none after; every hash in the corpus the same
+with LTO on.
 
 ## What makes a binary big
 

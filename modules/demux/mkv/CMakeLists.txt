@@ -11,9 +11,13 @@
 # Both are LGPL 2.1-or-later, which a GPL-3.0 program may link. See docs/plan.md
 # for the licence table.
 
+# utfcpp is libebml's, not this module's: a header-only UTF-8 library it asks
+# for with find_package and would otherwise download at configure time.
+# cmake/Findutf8cpp.cmake answers with the submodule.
 set(_mkv_deps
     "${CMAKE_SOURCE_DIR}/external/libebml/CMakeLists.txt"
-    "${CMAKE_SOURCE_DIR}/external/libmatroska/CMakeLists.txt")
+    "${CMAKE_SOURCE_DIR}/external/libmatroska/CMakeLists.txt"
+    "${CMAKE_SOURCE_DIR}/external/utfcpp/CMakeLists.txt")
 foreach(_dep IN LISTS _mkv_deps)
     if(NOT EXISTS "${_dep}")
         message(WARNING
