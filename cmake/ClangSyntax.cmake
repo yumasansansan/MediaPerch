@@ -37,7 +37,6 @@ endif()
 set(includes
     "-I${MEDIAPERCH_ROOT}/include"
     "-I${MEDIAPERCH_ROOT}/src/core"
-    "-I${MEDIAPERCH_ROOT}/modules/shared/mp4"
     "-I${MEDIAPERCH_ROOT}/modules/shared/transform"
     "-I${MEDIAPERCH_ROOT}/modules/shared/biquad"
     "-I${MEDIAPERCH_ROOT}/modules/shared/convolve"
@@ -54,7 +53,11 @@ set(system_includes
     "-isystem" "${MEDIAPERCH_ROOT}/external/flac/include"
     "-isystem" "${MEDIAPERCH_ROOT}/external/libebml"
     "-isystem" "${MEDIAPERCH_ROOT}/external/libmatroska"
-    "-isystem" "${MEDIAPERCH_ROOT}/external/ogg/include")
+    "-isystem" "${MEDIAPERCH_ROOT}/external/ogg/include"
+    "-isystem" "${MEDIAPERCH_ROOT}/external/Bento4/Source/C++/Core"
+    "-isystem" "${MEDIAPERCH_ROOT}/external/Bento4/Source/C++/Codecs"
+    "-isystem" "${MEDIAPERCH_ROOT}/external/Bento4/Source/C++/Crypto"
+    "-isystem" "${MEDIAPERCH_ROOT}/external/Bento4/Source/C++/MetaData")
 
 # libebml and libmatroska generate an export header into the build tree. Without
 # a build directory to point at, the sources that need them are skipped -- and
@@ -78,7 +81,6 @@ set(warnings
 # platform head, the sink and the two pipelines are left out on purpose: they are
 # Windows-only by definition, and MSVC is the compiler they are written for.
 set(sources
-    modules/shared/mp4/mp4.cpp
     modules/shared/transform/transform.cpp
     modules/shared/biquad/biquad.cpp
     modules/shared/convolve/convolve.cpp

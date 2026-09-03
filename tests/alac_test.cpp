@@ -10,7 +10,6 @@
 // does, so they are the ones a regression can hide in.
 
 #include <alac.hpp>
-#include <mp4.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -165,20 +164,4 @@ TEST_CASE("a decoder handed junk produces nothing and says so")
         const std::uint8_t byte = 0;
         CHECK(fresh.decode(&byte, 1, out.data()) == 0);
     }
-}
-
-TEST_CASE("a moov box that is not an ALAC track is declined without a diagnosis of luck")
-{
-    mp::mp4::AudioTrack track;
-    const char* why = "";
-
-    CHECK_FALSE(mp::mp4::parse_moov(nullptr, 0, track, &why));
-
-    std::vector<std::uint8_t> junk(256, 0xAB);
-    CHECK_FALSE(mp::mp4::parse_moov(junk.data(), junk.size(), track, &why));
-
-    // A box whose declared size reaches past the buffer it sits in. The parser
-    // has to notice; the buffer is not going to tell it.
-    const std::uint8_t liar[] = {0x7f, 0xff, 0xff, 0xff, 't', 'r', 'a', 'k', 0x00, 0x00};
-    CHECK_FALSE(mp::mp4::parse_moov(liar, sizeof(liar), track, &why));
 }

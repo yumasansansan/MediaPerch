@@ -22,3 +22,6 @@
 [submodule "external/libmatroska"]
 	path = external/libmatroska
 	url = https://github.com/Matroska-Org/libmatroska.git
+[submodule "external/Bento4"]
+	path = external/Bento4
+	url = https://github.com/axiomatic-systems/Bento4.git

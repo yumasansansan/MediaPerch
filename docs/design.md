@@ -1062,10 +1062,12 @@ modules/             everything that can be loaded and unloaded at runtime, sort
   demux/adts/        raw AAC's framing. Assembles the AudioSpecificConfig an MP4
                      would have carried out of the first frame header, so codec/aac/
                      cannot tell the two containers apart.
-  demux/mp4/         MP4, M4A, MOV and 3GP: the container, written here. Reads moov
-                     wherever it is, which is what makes "read the codec, then pick
-                     the decoder" possible at all -- a probe sees four kilobytes and
-                     moov is often at the end.
+  demux/mp4/         MP4, M4A, QuickTime .mov and fragmented MP4, on Bento4. Reads
+                     moov wherever it is, which is what makes "read the codec, then
+                     pick the decoder" possible at all -- a probe sees four kilobytes
+                     and moov is often at the end. It was a parser written here until
+                     the three things it declined were measured; docs/formats.md has
+                     the table.
   demux/ogg/         Ogg through libogg, the reference container and nothing else.
                      Identifies Opus, Vorbis, FLAC and Speex from the first page and
                      hands each one on. Ogg timestamps pages rather than packets, so

@@ -32,9 +32,11 @@ turns out not to be one.
 Working: **nine container readers and seven codecs**, resolved container-first — a file is
 identified, opened, and asked what is in it, and the codec for each stream is looked up
 rather than tried. Nothing is tried. Matroska is where that pays: it can hold any of seven
-codecs this tree already decodes, and reading it added no decoding at all. Three of the
-containers are parsed by code here; the rest are libFLAC, libogg, libmatroska, dr_wav, and
-Media Foundation and FFmpeg as whole pipelines. All hash-identical to each other and to the
+codecs this tree already decodes, and reading it added no decoding at all. Two of the
+containers are parsed by code here — the two that are a frame header rather than a format;
+the rest are libFLAC, libogg, libmatroska, Bento4, dr_wav, and Media Foundation and FFmpeg
+as whole pipelines. Where the people who define a container ship a reader for it, that is
+what reads it. All hash-identical to each other and to the
 reference on everything they read, up to 32-bit at 1,048,575 Hz. Format negotiation against real drivers; the passthrough graph on two threads;
 WASAPI exclusive down to a 2 ms period; 768 kHz / 32-bit on a USB DAC; a headless engine
 with a shell that can be killed mid-track without the audio noticing. 254 tests plus

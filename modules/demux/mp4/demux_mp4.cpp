@@ -1,29 +1,43 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// MP4, as a container and nothing else.
+// MP4, as a container and nothing else, on Bento4.
 //
-// **This is the module the v1 design could not have.** `decode_alac` and
-// `decode_aac` each carried half of it -- the same half, from the same shared
-// parser -- and each had to claim every MP4 at full strength and then decline
-// the ones that were not theirs, because the box naming the codec is in `moov`
-// and `moov` may be at the end of a file a probe sees four kilobytes of.
+// **This module used to be a parser written here, and the reason it is not any
+// more is the reason recorded for FLAC and Matroska.** Where a reference
+// implementation of the container exists, this tree reads the container with it
+// and keeps its own code for the places where none does. The five hundred lines
+// that went away read twelve boxes of ISO 14496-12 -- `moov`, `trak`, `mdia`,
+// `minf`, `stbl`, `stsd`, `stsz`, `stco`/`co64`, `stsc`, `stts`, `mdhd`, `mvhd`
+// and `elst` -- which is the shape a music file has and nothing else. Measured
+// at the time: a fragmented MP4, a DASH segment and a QuickTime `.mov` were all
+// declined, and FFmpeg read them instead.
 //
-// A demuxer is not a probe. It has the whole file, so it reads `moov` wherever
-// the muxer put it, says what the codec is, and hands over the configuration
-// blob and the packets. Which decoder gets them is then a table lookup on a
-// number the container stated, rather than two modules taking turns.
+// `ap4` reads the standard. What that buys, measured the same way:
 //
-// It reads exactly one audio track, which is what `mp::mp4` parses. Video and
-// subtitles are §9's, and the interface is shaped for them now so that adding
-// them is not another migration.
+//   * **Fragmented MP4.** `moof`/`traf`/`trun`, which is how every DASH, CMAF
+//     and HLS-fMP4 stream is written, and how ffmpeg writes an MP4 that can be
+//     produced without seeking backwards. There is no `stbl` in such a file at
+//     all, so the old parser had nothing to read.
+//   * **QuickTime `.mov`**, which is the same box structure under a different
+//     brand and was declined for no better reason than that.
+//   * **Every track, not the first audio one.** `MpStreamInfo` has always been
+//     able to describe a file as several streams; this module could not, and
+//     now says what is in the file the way `demux_mkv` does.
+//
+// It still decodes nothing. `AP4_LinearReader` hands over samples; which codec
+// gets them is a table lookup on what `stsd` said, and the configuration blob
+// goes across verbatim.
 
-#include "mp4.hpp"
+#include "mp4_guard.hpp"
 
 #include <mediaperch/module.h>
+
+#include <Ap4.h>
 
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <new>
 #include <string>
 #include <vector>
@@ -52,6 +66,15 @@ void log_fmt(MpLogLevel level, const char* format, ...) noexcept
     g_host->log(g_host->ctx, level, line);
 }
 
+/// Stream operations one `open` may spend, and one packet or seek may spend.
+///
+/// Parsing is proportional to a file's *boxes*, not its samples: a normal MP4
+/// has dozens, and even a pathological but legal one with a hundred thousand
+/// stays far under a million. Reading a packet is a seek and a read; a
+/// fragmented one adds a walk over the boxes of a single fragment.
+constexpr std::uint64_t k_parse_budget = 1000000;
+constexpr std::uint64_t k_packet_budget = 100000;
+
 FILE* open_utf8(const char* path) noexcept
 {
 #if defined(_WIN32)
@@ -68,106 +91,381 @@ FILE* open_utf8(const char* path) noexcept
 #endif
 }
 
-std::uint32_t container_for(unsigned bits) noexcept
-{
-    if (bits <= 16) {
-        return 2;
-    }
-    return bits <= 24 ? 3 : 4;
-}
-
-MpSampleType sample_type_for(std::uint32_t container, unsigned valid) noexcept
-{
-    switch (container) {
-    case 2:
-        return MP_SAMPLE_S16;
-    case 3:
-        return MP_SAMPLE_S24_PACKED;
-    default:
-        return valid <= 24 ? MP_SAMPLE_S24_IN_32 : MP_SAMPLE_S32;
-    }
-}
-
-/// `moov` is a top-level box and where it sits is the muxer's choice: FFmpeg
-/// writes it after the audio, `refalac` before. Walking the top level by header
-/// alone finds it either way and reads only the box it wants.
+/// A read-only AP4_ByteStream over a FILE* this module opened itself, with a
+/// budget.
 ///
-/// This walk used to be copied into two decoders. It is here once now, which is
-/// the smallest of the reasons for the split and the easiest to see.
-bool read_moov(FILE* fp, std::vector<std::uint8_t>& out) noexcept
+/// **Not AP4_FileByteStream**, for two reasons.
+///
+/// The first is that it opens with the narrow CRT call: on Windows that is the
+/// process code page, so a path with a character outside it -- most of a
+/// Japanese music library -- would not open at all. Every other module here goes
+/// through the same `open_utf8`, and this is the adapter that lets Bento4 do the
+/// same.
+///
+/// **The second is the budget, and it is a security control.** Bento4 has more
+/// than one box parser that reads a count out of a file and then loops that many
+/// times without checking the count against the bytes the box actually has.
+/// `mp4_fuzzer` found two in the first ten minutes it ran:
+///
+///  * `sgpd` -- 67,108,865 entries declared by a 26-byte box, one allocation
+///    each. Measured: 2 GB and no return, from a 1143-byte file.
+///  * `dref` -- 956,301,312 entries declared by a 28-byte box. The inner loop
+///    drains the stream on the first pass, so the other 956 million iterations
+///    each do a `Tell`, two `ReadUI32`s and a `Seek` against nothing. Measured:
+///    84 seconds, from a 1269-byte file.
+///
+/// Both are the same defect, and finding two of them in ten minutes is a good
+/// reason to assume more. Suppressing boxes one at a time is whack-a-mole; the
+/// stream is the one thing every parser in the library has to come through, so
+/// the bound goes here. Each entry point arms a budget, and past it every read
+/// and seek reports end-of-stream -- which is a thing every parser in Bento4
+/// already handles, because a truncated file does the same.
+///
+/// The number is deliberately far above any real file: parsing is proportional
+/// to the *boxes* in a file, not its samples, and even a pathological but legal
+/// MP4 with a hundred thousand boxes stays under a million operations. Reading
+/// one packet costs a seek and a read.
+class FileStream : public AP4_ByteStream {
+public:
+    FileStream(FILE* fp, AP4_LargeSize size) noexcept : fp_(fp), size_(size) {}
+
+    /// Starts a new budget. Called once per module entry point, so that a long
+    /// playback is not bounded -- one *call* is.
+    void arm(std::uint64_t operations) noexcept
+    {
+        used_ = 0;
+        budget_ = operations;
+    }
+
+    /// Whether the last armed budget ran out, so a caller can say why rather
+    /// than reporting a truncated file.
+    [[nodiscard]] bool exhausted() const noexcept { return used_ > budget_; }
+
+    FileStream(const FileStream&) = delete;
+    FileStream& operator=(const FileStream&) = delete;
+
+    // Bento4 hands streams around by reference count rather than by owner.
+    void AddReference() override { ++refs_; }
+    void Release() override
+    {
+        if (--refs_ == 0) {
+            delete this;
+        }
+    }
+
+    AP4_Result ReadPartial(void* buffer, AP4_Size want, AP4_Size& got) override
+    {
+        got = 0;
+        if (++used_ > budget_) {
+            return AP4_ERROR_EOS;
+        }
+        got = static_cast<AP4_Size>(std::fread(buffer, 1, want, fp_));
+        if (got == 0) {
+            return want == 0 ? AP4_SUCCESS : AP4_ERROR_EOS;
+        }
+        return AP4_SUCCESS;
+    }
+
+    // Nothing here writes a file. Saying so is better than a stub that looks
+    // like it might.
+    AP4_Result WritePartial(const void*, AP4_Size, AP4_Size& written) override
+    {
+        written = 0;
+        return AP4_ERROR_NOT_SUPPORTED;
+    }
+
+    AP4_Result Seek(AP4_Position position) override
+    {
+        if (++used_ > budget_) {
+            return AP4_ERROR_EOS;
+        }
+        return _fseeki64(fp_, static_cast<std::int64_t>(position), SEEK_SET) == 0
+                   ? AP4_SUCCESS
+                   : AP4_ERROR_EOS;
+    }
+
+    AP4_Result Tell(AP4_Position& position) override
+    {
+        const std::int64_t at = _ftelli64(fp_);
+        if (at < 0) {
+            return AP4_FAILURE;
+        }
+        position = static_cast<AP4_Position>(at);
+        return AP4_SUCCESS;
+    }
+
+    AP4_Result GetSize(AP4_LargeSize& size) override
+    {
+        size = size_;
+        return AP4_SUCCESS;
+    }
+
+    /// Opens `path`, or returns null. The caller owns one reference.
+    static FileStream* open(const char* path) noexcept
+    {
+        FILE* fp = open_utf8(path);
+        if (fp == nullptr) {
+            return nullptr;
+        }
+        std::int64_t bytes = -1;
+        if (_fseeki64(fp, 0, SEEK_END) == 0) {
+            bytes = _ftelli64(fp);
+        }
+        if (bytes < 0 || _fseeki64(fp, 0, SEEK_SET) != 0) {
+            std::fclose(fp);
+            return nullptr;
+        }
+        auto* stream = new (std::nothrow)
+            FileStream(fp, static_cast<AP4_LargeSize>(bytes));
+        if (stream == nullptr) {
+            std::fclose(fp);
+        }
+        return stream;
+    }
+
+protected:
+    // Only Release() may destroy one, which is what AP4_Referenceable means.
+    ~FileStream() override
+    {
+        if (fp_ != nullptr) {
+            std::fclose(fp_);
+        }
+    }
+
+private:
+    FILE* fp_ = nullptr;
+    AP4_LargeSize size_ = 0;
+    int refs_ = 1;
+    std::uint64_t used_ = 0;
+    std::uint64_t budget_ = k_parse_budget;
+};
+
+/// Frees a Bento4 object by releasing a reference rather than deleting it.
+struct Releaser {
+    template <typename T>
+    void operator()(T* object) const noexcept
+    {
+        if (object != nullptr) {
+            object->Release();
+        }
+    }
+};
+
+MpStreamKind kind_for(AP4_Track::Type type) noexcept
 {
-    if (_fseeki64(fp, 0, SEEK_END) != 0) {
+    switch (type) {
+    case AP4_Track::TYPE_AUDIO:
+        return MP_STREAM_AUDIO;
+    case AP4_Track::TYPE_VIDEO:
+        return MP_STREAM_VIDEO;
+    case AP4_Track::TYPE_TEXT:
+    case AP4_Track::TYPE_SUBTITLES:
+        return MP_STREAM_SUBTITLE;
+    default:
+        return MP_STREAM_OTHER;
+    }
+}
+
+/// The ALAC magic cookie, out of the `alac` box inside an `alac` sample entry.
+///
+/// Bento4 has no class for ALAC, so the box arrives as an AP4_UnknownAtom whose
+/// payload it keeps private -- the way to read one is to ask it to write itself.
+/// What comes back is the whole box: an 8-byte header, then the version and
+/// flags every full box carries, then the 24 bytes of ALACSpecificConfig that
+/// `codec_alac` is defined to take.
+///
+/// **Two places, because QuickTime puts it somewhere else.** An MP4 written by
+/// ffmpeg has the `alac` box as a direct child of the sample entry; a `.mov`
+/// wraps it in `wave`, QuickTime's own container for a decompression parameter
+/// list, beside `frma` and `chan`. Measured on the same audio encoded both ways:
+/// the first layout has one child, `alac`; the second has `wave` and `chan`, and
+/// looking only in the first place is what made this module decline every `.mov`
+/// with "nothing here decodes that codec".
+bool alac_config(const AP4_SampleDescription& desc, std::vector<std::uint8_t>& out)
+{
+    auto& details = const_cast<AP4_AtomParent&>(desc.GetDetails());
+    AP4_Atom* box = details.GetChild(AP4_ATOM_TYPE_ALAC);
+    if (box == nullptr) {
+        box = details.FindChild("wave/alac");
+    }
+    if (box == nullptr) {
         return false;
     }
-    const std::int64_t file_bytes = _ftelli64(fp);
-    if (file_bytes < 8) {
+    auto* bytes = new (std::nothrow) AP4_MemoryByteStream();
+    if (bytes == nullptr) {
         return false;
     }
-
-    std::int64_t at = 0;
-    // A file is a short list of top-level boxes. A thousand is already absurd
-    // and bounds the walk against a file describing a loop of empty ones.
-    for (int guard = 0; guard < 1000 && at + 8 <= file_bytes; ++guard) {
-        if (_fseeki64(fp, at, SEEK_SET) != 0) {
-            return false;
-        }
-        std::uint8_t header[16];
-        if (std::fread(header, 1, 8, fp) != 8) {
-            return false;
-        }
-        std::uint64_t size = (static_cast<std::uint32_t>(header[0]) << 24) |
-                             (static_cast<std::uint32_t>(header[1]) << 16) |
-                             (static_cast<std::uint32_t>(header[2]) << 8) |
-                             static_cast<std::uint32_t>(header[3]);
-        std::int64_t header_bytes = 8;
-        if (size == 1) {
-            if (std::fread(header + 8, 1, 8, fp) != 8) {
-                return false;
-            }
-            size = 0;
-            for (int i = 0; i < 8; ++i) {
-                size = (size << 8) | header[8 + i];
-            }
-            header_bytes = 16;
-        } else if (size == 0) {
-            size = static_cast<std::uint64_t>(file_bytes - at);
-        }
-        if (size < static_cast<std::uint64_t>(header_bytes) ||
-            at + static_cast<std::int64_t>(size) > file_bytes) {
-            return false;
-        }
-
-        if (std::memcmp(header + 4, "moov", 4) == 0) {
-            const std::uint64_t body = size - static_cast<std::uint64_t>(header_bytes);
-            // A moov large enough to matter describes millions of packets, and
-            // mp4.cpp bounds those separately. 256 MB is past any real file and
-            // is still a bound.
-            if (body == 0 || body > (256ull << 20)) {
-                return false;
-            }
-            out.resize(static_cast<std::size_t>(body));
-            if (_fseeki64(fp, at + header_bytes, SEEK_SET) != 0) {
-                return false;
-            }
-            return std::fread(out.data(), 1, out.size(), fp) == out.size();
-        }
-        at += static_cast<std::int64_t>(size);
+    const std::unique_ptr<AP4_ByteStream, Releaser> owner(bytes);
+    if (AP4_FAILED(box->Write(*bytes))) {
+        return false;
     }
-    return false;
+    constexpr AP4_Size k_header = 8 + 4; // box header, then version and flags
+    constexpr AP4_Size k_config = 24;    // ALACSpecificConfig
+    if (bytes->GetDataSize() < k_header + k_config) {
+        return false;
+    }
+    const AP4_UI08* at = bytes->GetData() + k_header;
+    out.assign(at, at + k_config);
+    return true;
+}
+
+/// What `stsd` said, mapped onto an MpCodec and the blob the ABI defines for it.
+///
+/// A demuxer that passed the fourcc straight through would make two containers
+/// spelling one codec differently into two codecs, which is the whole reason
+/// this mapping exists rather than the number travelling raw.
+MpCodec codec_for(AP4_SampleDescription* desc, std::vector<std::uint8_t>& config)
+{
+    config.clear();
+    if (desc == nullptr) {
+        return MP_CODEC_UNKNOWN;
+    }
+
+    if (desc->GetFormat() == AP4_SAMPLE_FORMAT_ALAC) {
+        return alac_config(*desc, config) ? MP_CODEC_ALAC : MP_CODEC_UNKNOWN;
+    }
+
+    if (auto* mpeg = AP4_DYNAMIC_CAST(AP4_MpegAudioSampleDescription, desc)) {
+        // MPEG-4 audio and the three MPEG-2 AAC profiles all carry an
+        // AudioSpecificConfig, which is what `codec_aac` is defined to take.
+        // MPEG-1/2 layer audio in an MP4 does not, and is left unnamed rather
+        // than handed over as something it is not.
+        const AP4_UI08 oti = mpeg->GetObjectTypeId();
+        const bool is_aac = oti == AP4_OTI_MPEG4_AUDIO ||
+                            oti == AP4_OTI_MPEG2_AAC_AUDIO_MAIN ||
+                            oti == AP4_OTI_MPEG2_AAC_AUDIO_LC ||
+                            oti == AP4_OTI_MPEG2_AAC_AUDIO_SSRP;
+        if (!is_aac) {
+            return MP_CODEC_UNKNOWN;
+        }
+        const AP4_DataBuffer& info = mpeg->GetDecoderInfo();
+        if (info.GetDataSize() == 0) {
+            return MP_CODEC_UNKNOWN;
+        }
+        config.assign(info.GetData(), info.GetData() + info.GetDataSize());
+        return MP_CODEC_AAC_LC;
+    }
+
+    // Read perfectly, and carrying something nothing here names. That is a
+    // sentence a host can act on, unlike "this demuxer declines".
+    return MP_CODEC_UNKNOWN;
+}
+
+/// One track, as this module reports it.
+struct Stream {
+    AP4_Track* track = nullptr; ///< owned by the movie, not by this
+    MpStreamKind kind = MP_STREAM_OTHER;
+    MpCodec codec = MP_CODEC_UNKNOWN;
+    std::vector<std::uint8_t> config;
+    MpFormat format{};
+    std::uint64_t total_frames = 0;
+    std::uint64_t skip_frames = 0;
+    std::uint64_t play_frames = 0;
+    bool is_default = false;
+};
+
+/// The gapless edit, from `edts`/`elst`.
+///
+/// **This is the box most demuxers skip**, and it is the whole of what separates
+/// a decoder that starts a track twenty-one milliseconds late from one that does
+/// not. `media_time` is where the audio begins, in media frames; the segment
+/// duration is how much of it is real, in the *movie* timescale, which is not
+/// always the same one.
+void read_edit(Stream& s)
+{
+    auto* trak = const_cast<AP4_TrakAtom*>(s.track->GetTrakAtom());
+    if (trak == nullptr) {
+        return;
+    }
+    auto* elst = AP4_DYNAMIC_CAST(AP4_ElstAtom, trak->FindChild("edts/elst"));
+    if (elst == nullptr) {
+        return;
+    }
+    AP4_Array<AP4_ElstEntry>& entries = elst->GetEntries();
+    for (AP4_Cardinal i = 0; i < entries.ItemCount(); ++i) {
+        if (entries[i].m_MediaTime < 0) {
+            continue; // an empty edit: silence, not a delay
+        }
+        s.skip_frames = static_cast<std::uint64_t>(entries[i].m_MediaTime);
+
+        // The segment duration is stated in the movie timescale and the media
+        // time in the track's own. They are usually equal for an audio-only
+        // file and there is no reason to rely on that.
+        const std::uint64_t duration = entries[i].m_SegmentDuration;
+        const std::uint32_t movie = s.track->GetMovieTimeScale();
+        const std::uint32_t media = s.track->GetMediaTimeScale();
+        s.play_frames = (duration != 0 && movie != 0 && media != 0 && movie != media)
+                            ? AP4_ConvertTime(duration, movie, media)
+                            : duration;
+        return; // the first real edit is the one that describes the audio
+    }
 }
 
 } // namespace
 
 struct MpDemux {
-    FILE* fp = nullptr;
-    mp::mp4::AudioTrack track;
-    MpCodec codec = MP_CODEC_UNKNOWN;
-    MpFormat format{};
-    std::size_t next_packet = 0;
-    std::string path;
+    std::unique_ptr<FileStream, Releaser> stream;
+    std::unique_ptr<AP4_File> file;
+    AP4_Movie* movie = nullptr; ///< owned by `file`
+    std::vector<Stream> streams;
+    std::size_t selected = 0;
+
+    /// Rebuilt on every seek, because it is a cursor and not a reader.
+    std::unique_ptr<AP4_LinearReader> reader;
+    AP4_DataBuffer sample_data;
+    bool at_end = false;
+
+    /// Held back when the host's buffer was too small, so the packet is not
+    /// read from the file twice.
+    bool have_pending = false;
+    std::uint64_t pending_frame = 0;
 };
 
 namespace {
+
+/// Points the reader at `index` within the selected track, or at the start.
+bool restart(MpDemux* d, AP4_Ordinal index)
+{
+    d->reader.reset();
+    d->at_end = false;
+    d->have_pending = false;
+    if (d->movie == nullptr || d->streams.empty()) {
+        return false;
+    }
+    AP4_Track* track = d->streams[d->selected].track;
+    if (track == nullptr) {
+        return false;
+    }
+
+    // **Rewound first, because the reader starts looking for fragments wherever
+    // the stream happens to be.** Its constructor takes the current position as
+    // the first fragment's, and parsing the file left that at the end -- so a
+    // fragmented MP4 opened cleanly, reported its track, and then produced zero
+    // samples, because every `moof` was already behind the cursor. Measured: 0
+    // frames against ffmpeg's 90112, on a file ffmpeg wrote with
+    // `-movflags +frag_keyframe+empty_moov`.
+    //
+    // From zero it walks the whole box list and skips what is not a `moof`,
+    // which costs one pass over the headers. A non-fragmented file never gets
+    // there at all and takes its samples straight out of the table.
+    d->stream->arm(k_parse_budget);
+    if (AP4_FAILED(d->stream->Seek(0))) {
+        return false;
+    }
+    auto reader = std::unique_ptr<AP4_LinearReader>(
+        new (std::nothrow) AP4_LinearReader(*d->movie, d->stream.get()));
+    if (reader == nullptr) {
+        return false;
+    }
+    if (AP4_FAILED(reader->EnableTrack(track->GetId()))) {
+        return false;
+    }
+    if (index != 0 && AP4_FAILED(reader->SetSampleIndex(track->GetId(), index))) {
+        return false;
+    }
+    d->reader = std::move(reader);
+    return true;
+}
 
 MpResult MP_CALL demux_probe(const char* path, const std::uint8_t* head,
                              std::size_t bytes, std::uint32_t* out_score) noexcept
@@ -178,74 +476,116 @@ MpResult MP_CALL demux_probe(const char* path, const std::uint8_t* head,
     }
     *out_score = 0;
     // **A question about the container only.** What is inside is not a probe's
-    // business, which is the entire difference between this module and the two
-    // it replaces: they both had to claim every MP4 and then find out.
-    if (head != nullptr && bytes >= 12 && std::memcmp(head + 4, "ftyp", 4) == 0) {
-        *out_score = 100;
+    // business -- `moov` may be at the end of a file a probe sees four kilobytes
+    // of, and under v1 that meant two decoders each claiming every MP4 and then
+    // finding out.
+    //
+    // `ftyp` is the first box of a conformant file. A QuickTime `.mov` may have
+    // `moov` first instead and no `ftyp` at all, which is why that is a second,
+    // weaker answer rather than no answer: it is the same box structure and
+    // `ap4` reads it.
+    if (head != nullptr && bytes >= 12) {
+        if (std::memcmp(head + 4, "ftyp", 4) == 0) {
+            *out_score = 100;
+        } else if (std::memcmp(head + 4, "moov", 4) == 0 ||
+                   std::memcmp(head + 4, "skip", 4) == 0 ||
+                   std::memcmp(head + 4, "wide", 4) == 0) {
+            *out_score = 70;
+        }
     }
     return MP_OK;
 }
 
 MpResult MP_CALL demux_open(const char* path, MpDemux** out) noexcept
-{
+try {
     if (path == nullptr || out == nullptr) {
         return MP_ERR_INVALID;
     }
     *out = nullptr;
 
-    auto* d = new (std::nothrow) MpDemux();
+    auto d = std::unique_ptr<MpDemux>(new (std::nothrow) MpDemux());
     if (d == nullptr) {
         return MP_ERR_NO_MEMORY;
     }
-    d->path = path;
-    d->fp = open_utf8(path);
-    if (d->fp == nullptr) {
-        delete d;
+    d->stream.reset(FileStream::open(path));
+    if (d->stream == nullptr) {
         return MP_ERR_IO;
     }
 
-    std::vector<std::uint8_t> moov;
-    if (!read_moov(d->fp, moov)) {
-        std::fclose(d->fp);
-        delete d;
+    // `moov_only` false: a fragmented file keeps its sample tables in the
+    // `moof`s, and the reader needs the whole thing to walk them.
+    //
+    // The factory is ours because one box Bento4 parses can be made to allocate
+    // without bound -- see mp4_guard.hpp for the file that does it. It is a
+    // local because `AP4_File` parses in its constructor and does not keep it.
+    mp::mp4::GuardedAtomFactory factory;
+    d->stream->arm(k_parse_budget);
+    d->file.reset(new (std::nothrow) AP4_File(*d->stream, factory, false));
+    if (d->stream->exhausted()) {
+        // Not a truncated file: a file that asked the parser to do more work
+        // than any real one needs. Saying which is the difference between a
+        // diagnosis and a shrug.
+        log_fmt(MP_LOG_WARN, "%s: gave up parsing after %llu stream operations",
+                path, static_cast<unsigned long long>(k_parse_budget));
+        return MP_ERR_UNSUPPORTED;
+    }
+    if (d->file == nullptr) {
+        return MP_ERR_NO_MEMORY;
+    }
+    d->movie = d->file->GetMovie();
+    if (d->movie == nullptr) {
+        log_fmt(MP_LOG_DEBUG, "%s: no moov -- not an MP4 this reads", path);
         return MP_ERR_UNSUPPORTED;
     }
 
-    const char* why = "";
-    if (!mp::mp4::parse_moov(moov.data(), moov.size(), d->track, &why)) {
-        log_fmt(MP_LOG_DEBUG, "%s: %s", path, why);
-        std::fclose(d->fp);
-        delete d;
+    // **Every track, in the file's own order.** The old parser found one audio
+    // track and reported a stream count of 1 whatever else was there.
+    AP4_List<AP4_Track>& tracks = d->movie->GetTracks();
+    for (AP4_List<AP4_Track>::Item* item = tracks.FirstItem(); item != nullptr;
+         item = item->GetNext()) {
+        AP4_Track* track = item->GetData();
+        if (track == nullptr) {
+            continue;
+        }
+        Stream s;
+        s.track = track;
+        s.kind = kind_for(track->GetType());
+        s.codec = codec_for(track->GetSampleDescription(0), s.config);
+        s.total_frames = track->GetMediaDuration();
+
+        // What the *container* states about the audio. The codec's own
+        // configuration decides the depth -- ALAC's states it and AAC's does
+        // not -- so only the rate is taken here, and `PacketSource` lets the
+        // codec's answer win where the two differ.
+        if (s.kind == MP_STREAM_AUDIO) {
+            s.format.sample_rate = track->GetMediaTimeScale();
+            s.format.encoding = MP_ENCODING_PCM;
+            read_edit(s);
+        }
+        d->streams.push_back(std::move(s));
+    }
+    if (d->streams.empty()) {
+        log_fmt(MP_LOG_DEBUG, "%s: a moov with no tracks in it", path);
         return MP_ERR_UNSUPPORTED;
     }
 
-    // The container's own name for the codec, mapped onto ours. A demuxer that
-    // passed the fourcc straight through would make two containers spelling one
-    // codec differently into two codecs.
-    switch (d->track.codec) {
-    case mp::mp4::k_codec_alac:
-        d->codec = MP_CODEC_ALAC;
-        break;
-    case mp::mp4::k_codec_mp4a:
-        d->codec = MP_CODEC_AAC_LC;
-        break;
-    default:
-        // Read perfectly, and carrying something nothing here names. That is a
-        // sentence a host can act on, unlike "this decoder declines".
-        d->codec = MP_CODEC_UNKNOWN;
-        break;
+    // The first audio track is the default, which is what a player wants and
+    // what the old module reported as the only one.
+    for (std::size_t i = 0; i < d->streams.size(); ++i) {
+        if (d->streams[i].kind == MP_STREAM_AUDIO) {
+            d->streams[i].is_default = true;
+            d->selected = i;
+            break;
+        }
+    }
+    if (!restart(d.get(), 0)) {
+        return MP_ERR_UNSUPPORTED;
     }
 
-    // What the *container* states about the audio. ALAC's own configuration
-    // states the depth and AAC's does not, which is why the codec's answer wins
-    // where the two differ -- the codec is the one producing the samples.
-    const std::uint32_t container = container_for(24);
-    d->format.sample_rate = d->track.media_timescale;
-    d->format.channels = 0;
-    d->format.sample_type = sample_type_for(container, 24);
-    d->format.encoding = MP_ENCODING_PCM;
-    *out = d;
+    *out = d.release();
     return MP_OK;
+} catch (...) {
+    return MP_ERR_NO_MEMORY;
 }
 
 MpResult MP_CALL demux_stream_count(MpDemux* d, std::uint32_t* out) noexcept
@@ -253,32 +593,30 @@ MpResult MP_CALL demux_stream_count(MpDemux* d, std::uint32_t* out) noexcept
     if (d == nullptr || out == nullptr) {
         return MP_ERR_INVALID;
     }
-    // One, because `mp::mp4` finds one audio track. The interface counts
-    // because §9's video and subtitles will need it to, and an interface that
-    // gained counting later would be another migration.
-    *out = 1;
+    *out = static_cast<std::uint32_t>(d->streams.size());
     return MP_OK;
 }
 
 MpResult MP_CALL demux_stream_info(MpDemux* d, std::uint32_t index,
                                    MpStreamInfo* out) noexcept
 {
-    if (d == nullptr || out == nullptr || index != 0) {
+    if (d == nullptr || out == nullptr || index >= d->streams.size()) {
         return MP_ERR_INVALID;
     }
-    out->index = 0;
-    out->kind = MP_STREAM_AUDIO;
-    out->codec = d->codec;
-    out->flags = MP_STREAM_DEFAULT;
-    out->config_bytes = static_cast<std::uint32_t>(d->track.config.size());
-    out->format = d->format;
-    out->total_frames = d->track.total_frames;
+    const Stream& s = d->streams[index];
+    out->index = index;
+    out->kind = s.kind;
+    out->codec = s.codec;
+    out->flags = s.is_default ? MP_STREAM_DEFAULT : 0u;
+    out->config_bytes = static_cast<std::uint32_t>(s.config.size());
+    out->format = s.format;
+    out->total_frames = s.total_frames;
     // **The gapless edit, which was always the container's.** `elst` says how
     // much of the front is the encoder's warm-up and how much of the rest is
     // the audio. v1 applied this inside each decoder; now it is stated once and
     // applied once.
-    out->skip_frames = d->track.skip_frames;
-    out->play_frames = d->track.play_frames;
+    out->skip_frames = s.skip_frames;
+    out->play_frames = s.play_frames;
     return MP_OK;
 }
 
@@ -286,10 +624,11 @@ MpResult MP_CALL demux_stream_config(MpDemux* d, std::uint32_t index, std::uint8
                                      std::uint32_t out_bytes,
                                      std::uint32_t* out_needed) noexcept
 {
-    if (d == nullptr || index != 0 || out_needed == nullptr) {
+    if (d == nullptr || index >= d->streams.size() || out_needed == nullptr) {
         return MP_ERR_INVALID;
     }
-    const auto needed = static_cast<std::uint32_t>(d->track.config.size());
+    const auto& config = d->streams[index].config;
+    const auto needed = static_cast<std::uint32_t>(config.size());
     *out_needed = needed;
     if (out == nullptr) {
         return MP_OK; // asked what it would take, which the ABI allows
@@ -298,74 +637,112 @@ MpResult MP_CALL demux_stream_config(MpDemux* d, std::uint32_t index, std::uint8
         return MP_ERR_NO_MEMORY;
     }
     if (needed != 0) {
-        std::memcpy(out, d->track.config.data(), needed);
+        std::memcpy(out, config.data(), needed);
     }
     return MP_OK;
 }
 
 MpResult MP_CALL demux_select(MpDemux* d, std::uint32_t index) noexcept
 {
-    return d != nullptr && index == 0 ? MP_OK : MP_ERR_INVALID;
+    if (d == nullptr || index >= d->streams.size()) {
+        return MP_ERR_INVALID;
+    }
+    d->selected = index;
+    return restart(d, 0) ? MP_OK : MP_ERR_UNSUPPORTED;
 }
 
 MpResult MP_CALL demux_read_packet(MpDemux* d, void* dst, std::size_t dst_bytes,
                                    MpPacket* out) noexcept
-{
+try {
     if (d == nullptr || out == nullptr) {
         return MP_ERR_INVALID;
     }
     out->bytes = 0;
-    if (d->next_packet >= d->track.packets.size()) {
-        return MP_END;
+    if (d->reader == nullptr) {
+        return MP_ERR_INVALID;
     }
-    const mp::mp4::Packet& packet = d->track.packets[d->next_packet];
-    if (dst == nullptr || dst_bytes < packet.size) {
+
+    if (!d->have_pending) {
+        if (d->at_end) {
+            return MP_END;
+        }
+        AP4_Sample sample;
+        d->stream->arm(k_packet_budget);
+        const AP4_Result r = d->reader->ReadNextSample(
+            d->streams[d->selected].track->GetId(), sample, d->sample_data);
+        if (r == AP4_ERROR_EOS) {
+            d->at_end = true;
+            return MP_END;
+        }
+        if (AP4_FAILED(r)) {
+            return MP_ERR_IO;
+        }
+        // **The decode timestamp is the frame number.** For audio it is stated
+        // in the media timescale, which is the sample rate, so nothing stands
+        // between the file and `MpPacket::frame` -- and no assumption that
+        // every packet is the same length, which the last one of a track is not.
+        d->pending_frame = sample.GetDts();
+        d->have_pending = true;
+    }
+
+    const AP4_Size bytes = d->sample_data.GetDataSize();
+    if (dst == nullptr || dst_bytes < bytes) {
         // **Nothing is consumed.** The host grows its buffer and asks again,
         // which is the only way a packet larger than somebody's guess is not
-        // silently lost.
-        out->bytes = packet.size;
+        // silently lost. The sample stays read, so the file is not walked twice.
+        out->bytes = bytes;
         return MP_ERR_NO_MEMORY;
     }
-    if (_fseeki64(d->fp, static_cast<std::int64_t>(packet.offset), SEEK_SET) != 0) {
-        return MP_ERR_IO;
+    if (bytes != 0) {
+        std::memcpy(dst, d->sample_data.GetData(), bytes);
     }
-    if (std::fread(dst, 1, packet.size, d->fp) != packet.size) {
-        return MP_ERR_IO;
-    }
-    out->bytes = packet.size;
+    out->bytes = bytes;
     out->flags = MP_PACKET_SYNC | MP_PACKET_TIMED;
-    out->frame = static_cast<std::uint64_t>(d->next_packet) * d->track.frames_per_packet;
-    ++d->next_packet;
+    out->frame = d->pending_frame;
+    d->have_pending = false;
     return MP_OK;
+} catch (...) {
+    return MP_ERR_NO_MEMORY;
 }
 
 MpResult MP_CALL demux_seek(MpDemux* d, std::uint64_t frame) noexcept
-{
-    if (d == nullptr) {
+try {
+    if (d == nullptr || d->streams.empty()) {
         return MP_ERR_INVALID;
     }
-    if (d->track.frames_per_packet == 0) {
+    AP4_Track* track = d->streams[d->selected].track;
+    if (track == nullptr) {
         return MP_ERR_UNSUPPORTED;
     }
-    // To the packet containing the frame, which is the nearest point the codec
-    // can be started from. What precedes the target inside that packet is the
-    // host's to discard, and warming the codec is the host's as well -- written
-    // once there rather than once per decoder.
-    const std::uint64_t index = frame / d->track.frames_per_packet;
-    d->next_packet = index < d->track.packets.size()
-                         ? static_cast<std::size_t>(index)
-                         : d->track.packets.size();
-    return MP_OK;
+
+    // **To the sample containing the frame**, which is the nearest point the
+    // codec can be started from. `stts` says which one that is exactly, and
+    // never past it -- what precedes the target inside that sample is the
+    // host's to discard, and `MP_PACKET_TIMED` is what lets it.
+    AP4_SampleTable* table = track->GetSampleTable();
+    AP4_Ordinal index = 0;
+    if (table != nullptr &&
+        AP4_SUCCEEDED(table->GetSampleIndexForTimeStamp(frame, index))) {
+        return restart(d, index) ? MP_OK : MP_ERR_IO;
+    }
+
+    // A fragmented file has no sample table to ask, so the reader is asked
+    // instead. It takes milliseconds, so the target is rounded *down* to one:
+    // landing early costs the host a discard, landing late loses audio.
+    const std::uint32_t rate = track->GetMediaTimeScale();
+    if (rate == 0 || !restart(d, 0)) {
+        return MP_ERR_UNSUPPORTED;
+    }
+    const auto ms = static_cast<std::uint32_t>(frame * 1000ull / rate);
+    return AP4_SUCCEEDED(d->reader->SeekTo(ms)) ? MP_OK : MP_ERR_UNSUPPORTED;
+} catch (...) {
+    return MP_ERR_NO_MEMORY;
 }
 
 void MP_CALL demux_close(MpDemux* d) noexcept
 {
-    if (d == nullptr) {
-        return;
-    }
-    if (d->fp != nullptr) {
-        std::fclose(d->fp);
-    }
+    // The reader points into the movie and the movie into the file, so they go
+    // in that order -- which is what the member order gives, in reverse.
     delete d;
 }
 
@@ -403,11 +780,11 @@ const MpModuleDesc g_desc = {
     /* size        */ sizeof(MpModuleDesc),
     /* abi_version */ MP_ABI_VERSION,
     /* flags       */ 0,
-    /* version     */ MP_MAKE_VERSION(0, 1, 0),
+    /* version     */ MP_MAKE_VERSION(0, 2, 0),
     /* kind        */ MP_KIND_DEMUX,
     /* priority    */ 100,
     /* id          */ "demux_mp4",
-    /* name        */ "MP4 (the container, written here)",
+    /* name        */ "MP4, QuickTime and fragmented MP4 (Bento4)",
     /* init        */ &module_init,
     /* shutdown    */ &module_shutdown,
     /* vtbl        */ &g_vtbl,

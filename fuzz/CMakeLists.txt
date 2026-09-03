@@ -51,7 +51,7 @@ function(mediaperch_add_fuzzer name source corpus)
         "${CMAKE_SOURCE_DIR}/include"
         "${CMAKE_SOURCE_DIR}/src/core"
         "${CMAKE_SOURCE_DIR}/modules/codec/alac"
-        "${CMAKE_SOURCE_DIR}/modules/shared/mp4"
+        "${CMAKE_SOURCE_DIR}/modules/demux/mp4"
         "${CMAKE_SOURCE_DIR}/modules/codec/aac")
 
     # MSVC's STL annotates container bounds for ASan, and the annotations only
@@ -114,8 +114,41 @@ mediaperch_add_fuzzer(aac_fuzzer aac_fuzzer.cpp aac
                       "${CMAKE_SOURCE_DIR}/modules/codec/aac/aac.cpp"
                       "${CMAKE_SOURCE_DIR}/modules/codec/aac/aac_tables.cpp")
 mediaperch_add_fuzzer(alac_fuzzer alac_fuzzer.cpp alac
-                      "${CMAKE_SOURCE_DIR}/modules/codec/alac/alac.cpp"
-                      "${CMAKE_SOURCE_DIR}/modules/shared/mp4/mp4.cpp")
+                      "${CMAKE_SOURCE_DIR}/modules/codec/alac/alac.cpp")
+
+# The container, which is Bento4 rather than a parser here since demux_mp4 was
+# rewritten on it. Deleting the old target along with the old parser would have
+# traded five hundred fuzzed lines for eighty thousand unfuzzed ones.
+#
+# **Bento4 is built again here, with the sanitizer on.** This build configures
+# with MEDIAPERCH_BUILD_PLATFORM=OFF, so modules/demux/mp4 never runs and there
+# is no `ap4` target to borrow -- and borrowing one would be the wrong thing
+# anyway: a library linked in uninstrumented is a library the fuzzer runs
+# through and reports nothing about. Every other fuzzer here compiles the parser
+# it tests into its own binary for the same reason.
+if(NOT TARGET ap4 AND EXISTS "${CMAKE_SOURCE_DIR}/external/Bento4/CMakeLists.txt")
+    set(BUILD_APPS OFF CACHE BOOL "" FORCE)
+    set(BUILD_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
+    set(MSVC_FORCE_STATIC_C_RUNTIME OFF CACHE BOOL "" FORCE)
+    set(CMAKE_SKIP_INSTALL_RULES ON)
+    add_subdirectory("${CMAKE_SOURCE_DIR}/external/Bento4"
+                     "${CMAKE_BINARY_DIR}/external/Bento4" EXCLUDE_FROM_ALL)
+endif()
+if(TARGET ap4)
+    # **`fuzzer-no-link` is the half that matters**: it is what puts coverage
+    # counters in Bento4's code. With `address` alone the fuzzer still catches a
+    # crash, but it is walking blind -- the first campaign here reported "36
+    # inline 8-bit counters", which is this file's own harness and nothing else,
+    # and every mutation it made was guesswork. `no-link` because the entry point
+    # comes from the fuzzer target, not from the library.
+    target_compile_options(ap4 PRIVATE -fsanitize=fuzzer-no-link,address -w)
+    target_compile_definitions(ap4 PRIVATE
+        _DISABLE_VECTOR_ANNOTATION _DISABLE_STRING_ANNOTATION)
+    set_target_properties(ap4 PROPERTIES FOLDER "external")
+
+    mediaperch_add_fuzzer(mp4_fuzzer mp4_fuzzer.cpp mp4)
+    target_link_libraries(mp4_fuzzer PRIVATE ap4)
+endif()
 
 
 # The settings file, on DragonPerch's INI corpus rather than a second one of

@@ -1,33 +1,27 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// The ALAC container parser and codec, given arbitrary bytes.
+// The ALAC codec, given arbitrary bytes.
 //
 // This is the fuzzer that had to exist before an ALAC decoder written here could
 // be defended. The argument for writing our own is that Apple's is unmaintained
 // and that ALHACK is what unmaintained decoders eventually produce -- an
 // argument that would be worth nothing if ours were merely newer rather than
-// actually exercised. Every bounds check in alac.cpp and mp4.cpp is here to be
-// tested by this file.
+// actually exercised. Every bounds check in alac.cpp is here to be tested by
+// this file.
 //
-// Two parsers, one input, because they sit on opposite sides of the same file:
-// mp4.cpp decides where a packet is, and alac.cpp decides what is in it.
+// **It used to fuzz the container too**, because a parser here decided where an
+// ALAC packet was. `demux_mp4` reads MP4 with Bento4 now and that parser is
+// gone; the other side of the same file is `mp4_fuzzer`, over the library that
+// took its place.
 
 #include "alac.hpp"
-#include "mp4.hpp"
 
 #include <cstddef>
 #include <cstdint>
 
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size)
 {
-    // The container: the input as the payload of a `moov` box.
-    {
-        mp::mp4::AudioTrack track;
-        const char* why = "";
-        mp::mp4::parse_moov(data, size, track, &why);
-    }
-
-    // The codec: the first 24 bytes as a magic cookie, the rest as one packet.
+    // The first 24 bytes as a magic cookie, the rest as one packet.
     if (size > 24) {
         mp::alac::Config cfg;
         if (mp::alac::parse_config(data, 24, cfg)) {

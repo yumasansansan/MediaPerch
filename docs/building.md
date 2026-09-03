@@ -33,12 +33,13 @@ git submodule update --init
 | `external/opus` | libopus | `codec_opus` |
 | `external/libebml` | EBML, the encoding Matroska is written in | `demux_mkv` |
 | `external/libmatroska` | the Matroska schema on top of it | `demux_mkv` |
+| `external/Bento4` | ISOBMFF: MP4, M4A, `.mov`, fragmented MP4 | `demux_mp4` |
 
 **Each submodule sits with the one module that needs it**, which is a property of the
 container/codec split rather than a tidying. One module used to bring in four of the Xiph
-libraries at once, because it was the container and both codecs together. libFLAC is now a
-*codec* dependency and nothing else -- `demux_flac` reads the FLAC container with no library
-at all -- and libogg belongs to the container reader.
+libraries at once, because it was the container and both codecs together. libogg belongs to the
+container reader, and libFLAC is asked for two different things by two different modules:
+`codec_flac` decodes with it, and `demux_flac` asks it only where frames begin and end.
 
 Two orderings survive, both for the same reason -- a library asking
 `find_package` for one this build has already compiled, answered by a shim in

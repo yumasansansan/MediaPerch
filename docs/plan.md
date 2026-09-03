@@ -314,7 +314,7 @@ and this tree already vendors them separately: `external/ogg` is the container, 
 
 | Today | Becomes | Note |
 |---|---|---|
-| `modules/shared/mp4/mp4.cpp` | `demux_mp4` | **already a container parser**, already shared by two modules. It gains a vtable and stops being a library |
+| `modules/shared/mp4/mp4.cpp` | `demux_mp4` | **already a container parser**, already shared by two modules. It gains a vtable and stops being a library. *(Later replaced outright: `demux_mp4` reads MP4 with Bento4 now, and this file is gone. See docs/formats.md.)* |
 | `decode_alac/alac.cpp` | `codec_alac` | **already a pure codec**: it takes a config blob and packets |
 | `decode_aac/aac.cpp` | `codec_aac` | likewise. Both keep their fuzz targets unchanged |
 | `decode_aac`'s ADTS framer | `demux_adts` | **the row this table was missing.** `decode_aac` had three parts, not two: a codec, half an MP4 parser, and a framer for raw AAC. Leaving the third out would have taken `.aac` from a first-class format to an FFmpeg-only one |
@@ -388,9 +388,19 @@ Each step leaves the tree building and playing music.
 **Every demuxer is a parser that reads a file somebody else wrote, so every
 demuxer wants a fuzzer.** Where the parsing is somebody else's it is fuzzed
 somewhere else -- dr_wav and dr_mp3 by their own targets here, libogg by Xiph
-upstream -- and where it is ours it is fuzzed here: `demux_mp4` through
-`alac_fuzzer`, which links the same `shared/mp4/mp4.cpp`, and FLAC's framing
-through `flacframe_fuzzer`, added with step 5.
+upstream -- and where it is ours it is fuzzed here: FLAC's framing through
+`flacframe_fuzzer`, added with step 5.
+
+**Somebody else's parser gets one too when this tree is the one that adopted
+it.** `demux_mp4` was rewritten on Bento4, which deleted `shared/mp4/mp4.cpp`
+and the fuzz target that linked it; `mp4_fuzzer` replaced both, because trading
+five hundred fuzzed lines for eighty thousand unfuzzed ones is not a trade worth
+making. It found **two** denials of service in Bento4 in its first ten minutes,
+both the same defect -- a box states an entry count, the parser loops that many
+times, and nothing checks the count against the bytes the box has. `sgpd`: 2 GB
+and no return, from a 1143-byte file. `dref`: 84 seconds, from a 1269-byte one.
+That is the argument for the target in two sentences. `docs/formats.md` has the
+mechanism, the two defences, and the upstream fix.
 
 That one earned its keep in ninety seconds. FLAC frames carry no length, so
 `demux_flac` finds the end of one by running the format's CRC-16 forward and
@@ -815,7 +825,7 @@ Two mechanisms, and which one a dependency gets is decided by whether **we** bui
 
 | | Examples | Why |
 |---|---|---|
-| **Git submodule, built from source** | `external/dr_libs`, `external/flac`, `external/ogg`, `external/vorbis`, `external/opus`, `external/libebml`, `external/libmatroska` | Pinned to a commit by the gitlink, so a checkout is reproducible and an upgrade is a reviewable diff. All of them have (or need) no build system of consequence: dr_libs is headers, the Xiph libraries are CMake-native. The tree builds them; CI builds them; nothing is downloaded at configure time except Catch2 |
+| **Git submodule, built from source** | `external/dr_libs`, `external/flac`, `external/ogg`, `external/vorbis`, `external/opus`, `external/libebml`, `external/libmatroska`, `external/Bento4` | Pinned to a commit by the gitlink, so a checkout is reproducible and an upgrade is a reviewable diff. All of them have (or need) no build system of consequence: dr_libs is headers, the Xiph libraries are CMake-native. The tree builds them; CI builds them; nothing is downloaded at configure time except Catch2 |
 | **Found at run time, never vendored** | FFmpeg | Its configure is a shell script needing MSYS2 and nasm on Windows, its build is tens of minutes, its output is tens of megabytes, and **its licence is a choice the user should make** — LGPL-2.1+ by default, GPL with `--enable-gpl`, and non-free options past that. Vendoring one configuration decides all of that for them |
 
 The rule generalises: **vendor what you compile, resolve what you don't.** A module that
@@ -851,6 +861,15 @@ reference implementation to prefer, because there is no reference implementation
 libebml and libmatroska are LGPL 2.1-or-later, which a GPL-3.0 program may
 link: LGPLv2.1+ can be taken as LGPLv3, and LGPLv3 is compatible with GPLv3.
 
+Bento4 is the one that has to be read rather than glanced at. "GPL" beside a
+GPL-3.0-or-later tree looks like a problem and would be one if it were
+GPLv2-**only** -- GPLv2 and GPLv3 cannot be combined. Every Bento4 source file
+says *"either version 2, or (at your option) any later version"*, so it may be
+taken as GPLv3 and linked here. It is also dual-licensed, with a commercial
+licence for anyone who cannot take the GPL; that is not this tree's problem, but
+it is why the project's own README says only "dual-license model" and sends you
+to a web page.
+
 **Is the licence compatible?** libogg, libvorbis and libopus are all
 three-clause BSD, which is GPL-compatible, so they can be linked into a GPL-3.0 program and
 the combination stays distributable. Apple's ALAC reference is Apache-2.0, which is
@@ -876,6 +895,7 @@ looking for these bugs and that somebody is expected to fix them. Checked direct
 | `opus` | yes |
 | `libebml` | yes (LGPL 2.1+) |
 | `libmatroska` | yes (LGPL 2.1+) |
+| `Bento4` | yes (GPL-2.0-**or-later**; GPLv2-only would not be) |
 | `faad2` | yes |
 | `ffmpeg` | yes |
 | `libxaac` | yes |

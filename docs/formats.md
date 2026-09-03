@@ -57,7 +57,7 @@ is tried.
 | `demux_flac` | libFLAC | `codec_flac` | libFLAC |
 | `demux_mpeg` | **nothing** | `codec_mp3` | dr_mp3 |
 | `demux_adts` | **nothing** | `codec_aac` | **nothing** |
-| `demux_mp4` | **nothing** | `codec_alac`, `codec_aac` | **nothing** |
+| `demux_mp4` | Bento4 | `codec_alac`, `codec_aac` | **nothing** |
 | `demux_ogg` | libogg | `codec_opus`, `codec_vorbis`, `codec_flac` | libopus, libvorbis, libFLAC |
 | `demux_mkv` | libmatroska | seven of them, see below | |
 | `demux_ffmpeg` | `ffmpeg`, `ffprobe` | *itself* -- `SELF_DECODES` | |
@@ -68,62 +68,65 @@ native FLAC reader, what `demux_ogg` hands an OggFLAC to, *and* what `demux_mkv`
 hands a FLAC-in-Matroska to -- and none of the three containers knows the others
 exist. That is the whole argument for the split in one line of a table.
 
-### How much of ISO 14496-12 `demux_mp4` actually reads
+### MP4, and the parser that is no longer here
 
-Not much, on purpose, and it is worth writing down exactly how much rather than
-leaving it to be discovered.
+`demux_mp4` read MP4 with a parser written in this tree until it didn't. What it
+read was twelve boxes of ISO 14496-12 -- `moov`, `trak`, `mdia`, `minf`, `stbl`
+as containers; `stsd` for the sample entry; `stsz`, `stco`/`co64`, `stsc` and
+`stts` for where the packets are and how long they run; `mdhd` and `mvhd` for the
+two timescales; `elst` for the gapless edit -- and two sample entries, `alac` and
+`mp4a`. That is the shape a music file has and nothing else, and it was about
+five hundred lines.
 
-**What it parses.** Twelve boxes: `moov`, `trak`, `mdia`, `minf`, `stbl` as
-containers; `stsd` for the sample entry; `stsz`, `stco`/`co64`, `stsc` and `stts`
-for where the packets are and how long they run; `mdhd` and `mvhd` for the two
-timescales; `elst` for the gapless edit. Two sample entries: `alac` and `mp4a`,
-the second reached through an `esds` descriptor chain. That is the shape a music
-file has and nothing else.
+**What it refused, measured with files built for the purpose, is why it is
+gone:**
 
-**What it refuses, measured** with files built for the purpose:
-
-| File | `demux_mp4` | Chosen instead |
+| File | The old parser | On Bento4 |
 |---|---|---|
-| M4A written with `-movflags +faststart` | reads it | `demux_mp4` |
-| MP4 written with `-movflags +frag_keyframe+empty_moov` | `unsupported by this module` | `demux_ffmpeg` |
-| MP4 written with `-movflags +dash` | `unsupported by this module` | `demux_ffmpeg` |
-| QuickTime `.mov` carrying ALAC | `unsupported by this module` | `demux_ffmpeg` |
+| M4A, ALAC | 88200 frames, byte-identical to the source WAV | **unchanged** |
+| M4A written `-movflags +faststart` | reads it | **unchanged** |
+| MP4 written `-movflags +frag_keyframe+empty_moov` | `unsupported by this module`, FFmpeg read it | **90112 frames, the same as FFmpeg** |
+| MP4 written `-movflags +dash` | `unsupported by this module`, FFmpeg read it | **90112 frames, the same as FFmpeg** |
+| QuickTime `.mov`, ALAC | `unsupported by this module`, FFmpeg read it | **byte-identical to the source WAV** |
 
-**Fragmented MP4 is the gap that matters.** `moof`/`traf`/`trun` is how every
-DASH, CMAF and HLS-fMP4 stream is written, and how `ffmpeg` writes an MP4 when
-told to make one that can be produced without seeking backwards. There is no
-`stbl` in such a file at all -- the sample table lives in a run box per fragment
--- so nothing this parser knows how to read is there. It declines in `open`, the
-host moves to the next candidate, and FFmpeg reads it. Correct outcome; the
-coverage is simply absent.
+Fragmented MP4 was the gap that mattered. `moof`/`traf`/`trun` is how every DASH,
+CMAF and HLS-fMP4 stream is written, and how `ffmpeg` writes an MP4 when told to
+make one that can be produced without seeking backwards -- there is no `stbl` in
+such a file at all, so nothing the old parser knew how to read was there.
 
-Also absent: more than one track (`stream_count` is always 1), sample entries
-other than the two named, `cenc` encryption, edit lists past the first entry, and
-every box that exists for video, subtitles or metadata.
+**Two things had to be found by measurement rather than by reading Bento4's
+headers**, and both are in the module with the numbers beside them:
 
-**Against Bento4 and GPAC**, the comparison is not close and is not meant to be.
-Both are complete ISOBMFF implementations: they read and *write* the format, hold
-a class per box across the whole standard and its amendments, do fragmented and
-segmented MP4, DASH and HLS packaging, Common Encryption with several DRM
-systems, editing, and every track type. GPAC is a multimedia framework with a
-filter graph around all of that. Either of them is the right answer for a tool
-that has to accept whatever an MP4 turns out to be.
+- **A `.mov` keeps the ALAC configuration somewhere else.** An MP4 has the
+  `alac` box as a direct child of the sample entry; QuickTime wraps it in
+  `wave`, its own decompression-parameter container, beside `frma` and `chan`.
+  Looking only in the first place made the module open every `.mov`, find the
+  track, and then say "nothing here decodes that codec".
+- **`AP4_LinearReader` starts looking for fragments wherever the stream is.**
+  Its constructor takes the current position as the first fragment's, and
+  parsing the file has left that at the end -- so a fragmented MP4 opened
+  cleanly, reported its track, and produced *zero* samples against ffmpeg's
+  90112, because every `moof` was already behind the cursor. It is rewound now.
 
-This is a reader for one audio track of a non-fragmented file, and it is about
-five hundred lines. What it buys over linking one of those is the same thing
-`decode_alac` buys over Apple's reference decoder: no dependency at all, so an
-ALAC in an M4A plays on a checkout with no submodules and no FFmpeg, and the
-whole path from file to samples is code that gets fuzzed here. What it costs is
-the table above.
+**Seeking got better rather than merely surviving.** The old module divided by a
+frames-per-packet taken from the first `stts` entry; this one asks `stts` which
+sample contains the frame. Measured against a WAV of the same audio, ALAC in
+M4A and ALAC in `.mov` both come back byte-identical at frames 0, 1, 1000,
+44100, 44101 and 88199 -- and a fragmented MP4, which has no sample table at all
+and is seeked through the reader, lands on the exact frame asked for at 0, 1024
+and 44100.
 
-**If fragmented MP4 should play without FFmpeg, that is a real piece of work and
-a decision rather than an oversight** -- either parsing `moof`/`trun` here, which
-is a fair amount of new parser over a stranger's bytes, or linking one of them as
-a submodule and making `demux_mp4` a wrapper the way `demux_mkv` wraps
-libmatroska. The second is the smaller change and the one consistent with what
-this document says about FLAC above.
+**What is still not read.** `cenc` encryption; sample entries other than `alac`
+and `mp4a`, which leaves FLAC-in-MP4 (`dfLa`) and Opus-in-MP4 (`dOps`) unnamed
+even though this tree decodes both -- Bento4 has no class for either, so they
+would need the same hand extraction `alac` gets; and edit lists past the first
+entry. Multi-track files *are* read now: every track is reported, the way
+`demux_mkv` reports them, rather than the first audio one being the only stream
+the module admitted to.
 
-**Which one, if it comes to that: Bento4.** Checked against both checkouts:
+### Bento4 or GPAC, and why Bento4
+
+Checked against both checkouts rather than from memory:
 
 | | Bento4 | GPAC |
 |---|---|---|
@@ -134,24 +137,76 @@ this document says about FLAC above.
 | Build system | **CMake** | `./configure` + Makefile, or hand-kept MSVC projects |
 | Reader API | `AP4_Track` / `AP4_SampleTable`, C++ | `gf_isom_open` / `gf_isom_get_sample`, C |
 
-The licence question resolves the other way from what it looks like at a glance:
+The licence question resolves the other way from what it looks like at a glance.
 Bento4 being "GPL" reads as a problem for a GPL-3.0-or-later tree, and it would
 be if it were GPLv2-**only**. Its file headers say *"either version 2, or (at your
-option) any later version"*, so it may be taken as GPLv3 and linked here. GPAC's
-LGPL-2.1-or-later is looser still, and would matter to anyone wanting to link
-this ABI's modules into something non-free; nothing in this tree does.
+option) any later version"*, so it may be taken as GPLv3 and linked here.
 
 What decides it is the other two rows. **GPAC has no CMake build**, and every
-other dependency here is a submodule that `add_subdirectory` picks up and builds
-with the same compiler and flags as everything else -- `docs/building.md` is most
-of a page on why that is not negotiable. And GPAC is a framework twelve times the
+dependency here is a submodule that `add_subdirectory` picks up and builds with
+the same compiler and flags as everything else -- `docs/building.md` is most of a
+page on why that is not negotiable. And GPAC is a framework twelve times the
 size, of which `src/isomedia` is the part wanted; taking it means taking its
 configure script, its platform layer and its build assumptions to reach one
 directory. Bento4 is an ISOBMFF library with a CMakeLists.txt, which is the shape
 of every submodule already here.
 
-None of this is scheduled. It is written down so that the next person to look at
-fragmented MP4 does not have to measure it again.
+**It is pinned past its last release tag on purpose.** Bento4 tags rarely: 119
+commits separate `v1.6.0-641` from the pinned one, and among them are a heap
+overflow in `AP4_BitReader::ReadCache`, a heap overflow in the AC-3 parser, and a
+leak in `AP4_LinearReader::Tracker` -- which is the class this module uses on
+every fragmented file.
+
+### What the change cost, and what the fuzzer found in ten minutes
+
+Deleting `modules/shared/mp4` deleted a fuzz target with it, and swapping five
+hundred fuzzed lines for eighty thousand unfuzzed ones is not a trade this tree
+makes. `fuzz/mp4_fuzzer.cpp` walks the path `demux_mp4` walks -- open, enumerate
+tracks, read every sample through `AP4_LinearReader` -- over a seed corpus of
+plain ALAC, AAC, a fragmented MP4 and a `.mov`. Bento4 is compiled into it with
+the sanitizer *and coverage* on rather than linked from the main build: a library
+linked in uninstrumented is a library the fuzzer runs through and reports nothing
+about, and the first campaign here proved it by reporting "36 inline 8-bit
+counters" -- the harness, and nothing else. With coverage it reports 15,865.
+
+**It found two denials of service in Bento4, both the same defect.** A box states
+an entry count; the parser loops that many times; nothing checks the count
+against the bytes the box actually has.
+
+| Box | Declared entries | Box size | Measured |
+|---|---|---|---|
+| `sgpd` | 67,108,865 | 26 bytes | **2 GB and no return** -- one allocation per entry, from a 1143-byte file |
+| `dref` | 956,301,312 | 28 bytes | **84 seconds** -- the inner loop drains the stream on the first pass, so the rest spin on nothing |
+
+Both files are kept, as `fuzz/corpus/mp4/found_sgpd_unbounded_entries.m4a` and
+`found_dref_unbounded_entries.mp4`. `mediaperch-probe claims` on either of them
+did not come back. They now return in about 220 ms.
+
+**Two defences, because one was not enough.**
+
+The blunt one is a *budget on the stream*: `FileStream` counts reads and seeks,
+each entry point arms a limit, and past it every operation reports end-of-stream
+-- which every parser in Bento4 already handles, because a truncated file does
+the same. It bounds any parse loop that touches the file, including ones nobody
+has found yet. A million operations for an `open` is far above any real file:
+parsing is proportional to a file's *boxes*, not its samples.
+
+The sharp one is *not parsing three boxes at all*. The budget does not catch
+`dref`, because its spin never reads a byte -- `bytes_available < 8` returns
+before any I/O -- and that is exactly why both are here. `sgpd`, `sbgp` and
+`dref` are declined in the atom factory: sample groups describe roll distances
+for editors and packagers, and `dref` says which file the media lives in, which
+this tree answers by only reading self-contained ones. Nothing in Bento4 reads a
+parsed `dref` either -- the only other mention of the class is `Ap4TrakAtom.cpp`
+constructing one when *writing* a track.
+
+**The durable fix is upstream and it is small.** In `Ap4SgpdAtom.cpp`, subtract
+each entry from `bytes_available` as it is read, and stop after the first entry
+when the version is 0, since a version-0 entry consumes the rest of the box by
+definition. In `Ap4DrefAtom.cpp`, leave the outer loop when the inner one adds
+nothing. Until that lands, the two defences above stand, and the fuzzer keeps
+running without the budget so that the next one of these is reported rather than
+quietly absorbed.
 
 ### Where the reference implementation is used, and where it is not
 
@@ -464,10 +519,11 @@ them ships here. The rows that become *nothing* are the long tail, which is what
 `demux_ffmpeg` is for.
 
 **A demuxer that claims a container can still decline what is in it, and then
-the old list has it.** Two measured cases: an Ogg carrying FLAC or Speex is read
-by `demux_ogg` and no codec here takes the stream, and a QuickTime `.mov` whose
-sample entry `demux_mp4` does not implement fails in `open` with `unsupported by
-this module`. Both fall through to `demux_ffmpeg` and play. That fallthrough is
+the old list has it.** Two measured cases: an Ogg carrying Speex is read by
+`demux_ogg` and no codec here takes the stream, and an MP4 carrying AC-3 is read
+by `demux_mp4` and the same. Both fall through to `demux_ffmpeg` and play. (A
+QuickTime `.mov` used to be the second example. It is not one any more:
+`demux_mp4` reads `.mov` since it was rewritten on Bento4.) That fallthrough is
 not the v1 "try them in order" coming back — the demuxer is asked once, on
 evidence, and answers about the file rather than guessing at it.
 
@@ -495,8 +551,8 @@ the probe uses it. The same is true of ADTS, where the profile is in the header
 `decode_aac` already parses.
 
 **What was done about it, and it was not a better probe.** `demux_mp4` reads
-`moov` wherever it is, in `open`, where reading a file is allowed and there is no
-four-kilobyte window; the stream it reports names its codec, and the codec module
+`moov` wherever it is -- and wherever the `moof`s are, on a fragmented file -- in
+`open`, where reading a file is allowed and there is no four-kilobyte window; the stream it reports names its codec, and the codec module
 is looked up rather than tried. The MP4 ordering problem above is therefore not
 solved, it is *absent* — the question that produced it is no longer asked. What
 `claims` prints is now both halves:
