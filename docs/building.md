@@ -229,6 +229,67 @@ numbers name nothing — so every flag in the file needed a second reading to wo
 out which compilers it reached. Two toolchains that share nothing are simpler
 than three that share most things, and Linux arrives with a real Clang anyway.
 
+## Rust, for the modules that are Rust
+
+One module is Rust -- `codec_alac` -- and the way it is built is meant to be the
+way the next one is built, so it is written down here rather than left in
+`cmake/Rust.cmake`'s comments alone.
+
+**The toolchain is stable, from rustup, on the MSVC target.** Nothing here needs
+nightly, including the fuzzer (below). `cargo` has to be on PATH when CMake
+configures; if it is not, the module is skipped with a warning the way a
+missing submodule is, and ALAC falls to the next reader.
+
+**Nothing links across the language boundary.** A module is a `.dll` on disk
+that exports `mp_module_entry`, and the host cannot tell which compiler made
+it. So `mediaperch_add_rust_module` is a `cargo build` into
+`<build>/cargo/` and a copy to `bin/<config>/modules/<kind>/` under the same
+name the C++ layout would give it -- no Corrosion, no CRT matching, no change
+to a single C++ flag. The cargo profile follows the CMake configuration: Debug
+builds the dev profile, with overflow checks on; every other configuration
+builds `--release`, with fat LTO and one codegen unit, set once in
+`modules/Cargo.toml`.
+
+**One workspace, no dependencies.** `modules/Cargo.toml` is a virtual workspace
+over every Rust crate in the tree: `shared/mp-abi`, which is the C ABI crossed
+once and the only place a module's `unsafe` lives; `codec/alac/decoder`, the
+decoder, `#![forbid(unsafe_code)]` at crate level; and `codec/alac`, the glue
+that implements `mp_abi::Codec` and is the `.dll`. None of them depends on
+anything outside the tree, so the lock file is small and a build needs no
+network. The tests live in the decoder crates, and ctest runs
+`cargo test --workspace` as one entry, `rust_modules`.
+
+**The fuzzer is coverage-guided on stable, which took finding.** `cargo-fuzz`
+wants nightly for `-Zsanitizer`, but the coverage half of what it does is
+LLVM's SanitizerCoverage pass, which stable `rustc` reaches through
+`-C passes=sancov-module` and a few `-C llvm-args`; `libfuzzer-sys` supplies
+the `__sanitizer_cov_*` symbols those emit. Four things bit on the way, each
+as a link error first:
+
+- `RUSTFLAGS` reach cargo's *build scripts* too unless `--target` is spelled
+  out, and a build script instrumented for sancov references symbols nothing
+  provides. Measured: `getrandom`'s build script failed to link, LNK1120.
+  `fuzz/CMakeLists.txt` passes `--target <host triple>`.
+- A crate that is both `cdylib` and `rlib` gets its `cdylib` built when it is a
+  dependency, and the `.dll` then needs the sancov symbols too. That is why the
+  decoder is its own `rlib` crate and the module crate is `cdylib` only.
+- libFuzzer's `main` lives inside an archive, and `link.exe` will not infer an
+  entry point from a library member: LNK1561. `-C link-arg=/ENTRY:mainCRTStartup`
+  names it, and the CRT's reference to `main` pulls it in.
+- The coverage counters live in a section whose start and end symbols an ELF
+  linker synthesises and a COFF linker does not; clang gets them from
+  compiler-rt's sanitizer runtime, which `libfuzzer-sys` does not carry.
+  `modules/codec/alac/fuzz/sancov_sections.c` is that runtime's one relevant
+  page -- six sentinels in `$A`/`$Z`-suffixed sections -- built by the fuzz
+  crate's `build.rs` on the MSVC target only. Measured: LNK2001 on
+  `__start___sancov_cntrs` from every instrumented object.
+
+The fuzz crate is outside the workspace -- it is the one crate in the tree with
+a crates.io dependency, and a module build must not depend on that resolving.
+AddressSanitizer is what stable cannot do; for safe Rust that is the smaller
+loss, because the bounds checks are the sanitizer and a missed one is a panic
+libFuzzer reports as a crash.
+
 ## What makes a binary big
 
 The flags are settled and there is nothing left to tune there. What is left is

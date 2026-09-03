@@ -40,7 +40,6 @@ set(includes
     "-I${MEDIAPERCH_ROOT}/modules/shared/transform"
     "-I${MEDIAPERCH_ROOT}/modules/shared/biquad"
     "-I${MEDIAPERCH_ROOT}/modules/shared/convolve"
-    "-I${MEDIAPERCH_ROOT}/modules/codec/alac"
     "-I${MEDIAPERCH_ROOT}/modules/codec/aac"
     "-I${MEDIAPERCH_ROOT}/external/dragonperch/src/core")
 
@@ -85,8 +84,6 @@ set(sources
     modules/shared/biquad/biquad.cpp
     modules/shared/convolve/convolve.cpp
     modules/codec/pcm/codec_pcm.cpp
-    modules/codec/alac/alac.cpp
-    modules/codec/alac/codec_alac.cpp
     modules/codec/aac/aac.cpp
     modules/codec/aac/aac_tables.cpp
     modules/codec/aac/codec_aac.cpp

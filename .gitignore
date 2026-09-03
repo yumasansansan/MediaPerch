@@ -28,6 +28,10 @@ crash-*
 leak-*
 timeout-*
 
-# Cargo, for the throwaway Rust ABI probe. The crate has no dependencies, so
-# Cargo.lock is kept and this is only build output.
+# Cargo. The workspace in modules/ builds into the CMake build tree
+# (CARGO_TARGET_DIR is set there), so these only catch a cargo run by hand.
+# Cargo.lock is kept: the modules have no dependencies outside the tree, and the
+# fuzz crate's lock pins libfuzzer-sys.
 abi/probe_rust/target/
+/modules/target/
+/modules/codec/alac/fuzz/target/

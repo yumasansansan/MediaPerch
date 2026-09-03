@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# The Rust modules, as one workspace so there is one lock file and one target
+# directory rather than one per module.
+#
+# CMake builds each member with `cargo build --manifest-path` and copies the
+# result into bin/<config>/modules/<kind>/, beside the C++ ones -- see
+# cmake/Rust.cmake. Nothing links across the language boundary: a module is a
+# .dll on disk either way, and the host cannot tell which compiler made it.
+#
+# No member has a dependency outside this tree, so the lock file is small and
+# a build needs no network. The fuzz crates are excluded on purpose: they pull
+# in libfuzzer-sys, and a module build must not depend on that resolving.
+
+[workspace]
+resolver = "2"
+members = ["shared/mp-abi", "codec/alac/decoder", "codec/alac"]
+exclude = ["codec/alac/fuzz"]
+
+[workspace.package]
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+
+[profile.release]
+# The boundary is a .dll on disk, so there is nothing to link against and
+# nothing to match. `unwind` is what lets a panic be caught at the boundary
+# instead of aborting the host; mp-abi's guard depends on it.
+panic = "unwind"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+[profile.dev]
+panic = "unwind"

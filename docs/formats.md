@@ -837,20 +837,100 @@ fixed there, while a divergence in a reimplementation has to be found first.
 `demux_ffmpeg` remains one command away for anyone who disagrees, which is the
 point of the module boundary.
 
-## ALAC, decoded here
+## ALAC, decoded here -- in Rust
 
-ALAC is the one format this tree reads end to end with no dependency of any kind:
-no submodule, no runtime library, no OS codec. Both the ALAC bitstream and the
-slice of MP4 needed to find its packets are in `modules/decode/alac`. [The
-plan](plan.md) §7 has the argument; the short version is that Apple's reference
-implementation is simultaneously the specification and unmaintained since 2011,
-and the second half of that is what ALHACK was.
+ALAC is the one codec this tree decodes with no dependency of any kind: no
+submodule, no runtime library, no OS codec. The decoder is
+`modules/codec/alac/decoder`, a crate of its own, and it is the first module in
+the tree that is not C++. [The plan](plan.md) §7 has the argument for writing it at all; the
+short version is that Apple's reference implementation is simultaneously the
+specification and unmaintained since 2011, and the second half of that is what
+ALHACK was. §2 has the argument for the language, and the reason it was taken
+up for this module first.
+
+### What changed in the move to Rust, and what did not
+
+**Not a sample.** The decoder is a port of the C++ one, itself written from the
+reference read as a specification, and the port was accepted on one criterion:
+every hash this document already records had to come out the same. They did.
+
+| File | Through | Recorded | From Rust |
+|---|---|---|---|
+| ALAC, 16-bit 44.1 kHz stereo | `demux_mp4` + `codec_alac` | `b38bebc6…` | **identical** |
+| ALAC, 24-bit 96 kHz stereo | `demux_mp4` + `codec_alac` | `f434a906…` | **identical** |
+| ALAC, 16-bit 5.1 at 48 kHz | `demux_mp4` + `codec_alac` | `5c449afc…` | **identical** |
+| ALAC in Matroska | `demux_mkv` + `codec_alac` | `b38bebc6…` | **identical** |
+| ALAC in QuickTime `.mov` | `demux_mp4` + `codec_alac` | `b38bebc6…` | **identical** |
+
+Seeking too: frames 0, 1, 1000, 44100, 44101 and 88199 all match the source WAV
+seeked to the same frame, as they did before. And the ceiling of the format,
+re-encoded by hand with Apple's reference encoder and decoded back:
+
+| Channels | Rate | Depth | Reported | Against the source WAV |
+|---|---|---|---|---|
+| 2 | 48000 | 32 | `S32` | **identical** |
+| 2 | 96000 | 24 | `S24_PACKED` | **identical** |
+| 6 | 48000 | 24 | `S24_PACKED`, mask `0x3f` | **identical** |
+| 8 | 48000 | 16 | `S16`, mask `0xff` | **identical** |
+| 8 | 96000 | 24 | `S24_PACKED`, mask `0xff` | **identical** |
+| 8 | 384000 | 32 | `S32`, mask `0xff` | **identical** |
+
+(The reference encoder refuses ffmpeg's `7.1` layout, which has side channels;
+ALAC's eight-channel layout is `7.1(wide)`, with front-centre pairs, and that is
+what those rows are. The channel permutation the next section is about is
+exercised by every row past stereo.)
+
+**What did change is what a missed check costs.** In C++ the five things Apple's
+decoder does not check -- the table under *What was written instead of linked*
+-- were five bounds checks somebody had to think of, and the FLAC parser that
+used to sit beside this decoder showed what happens when one is not thought of:
+`flacframe_fuzzer` found an out-of-bounds read in it in ninety seconds. In Rust
+an index past a slice is a panic; `mp-abi` catches the panic at the module
+boundary, logs it, and returns `MP_ERR_INTERNAL`, and the host sees a packet
+that failed to decode. The class of bug is gone rather than guarded against.
+
+**Where the `unsafe` went.** The ABI is C -- raw pointers and lengths -- so a
+module cannot cross it without `unsafe`, and the question was only where to put
+it. It is in `modules/shared/mp-abi`, once: turning `(ptr, len)` into a slice,
+handing a `Box` across as an opaque handle and getting it back, and calling the
+host's `log` through its function pointer. Nineteen `unsafe` blocks, two
+`unsafe fn` and two `unsafe impl Sync`, every one of those three shapes, all in
+one file. The decoder is its own crate and carries `#![forbid(unsafe_code)]` at
+crate level, which the compiler enforces; the module glue carries
+`#![deny(unsafe_code)]` with one `allow` for the `#[no_mangle]` on
+`mp_module_entry`, which Rust counts as unsafe because a colliding symbol is. `abi/probe_rust` measured that a panic can
+be contained at this boundary before any of this was written.
+
+**Arithmetic is wrapping where the C++ relied on it.** ALAC's adaptive Golomb
+parameters are tuned around unsigned 32-bit wraparound and the predictor's sums
+overflow on hostile input; in C++ that was implicit (and, for the signed sums,
+undefined). In Rust each such site says `wrapping_*`, and the crate's tests run
+under the dev profile with overflow checks on, so any site that was missed is a
+test failure rather than a difference in a release build.
+
+**One hardening the C++ did not have.** `mix_bits` is a byte from the stream and
+a shift count; a value of 32 or more is an undefined shift in the reference and
+was a masked one in the C++ (x86 masks the count). A real encoder writes 2. The
+Rust refuses the packet.
+
+The fuzzer moved with the decoder and kept its corpus: `fuzz/corpus/alac` seeds
+`modules/codec/alac/fuzz` exactly as it seeded `alac_fuzzer.cpp`, with the same
+input shape. It is coverage-guided on the stable toolchain -- LLVM's
+SanitizerCoverage pass reached through `-C passes=sancov-module`, libFuzzer
+supplying the `__sanitizer_cov_*` symbols and a one-page C shim supplying the
+section sentinels a COFF linker will not -- which is written up in
+`docs/building.md` because it is not the documented way to fuzz Rust and took
+four link errors to find. Measured: 608 counters in the decoder, and a five-minute
+campaign -- 1,304,111 executions, 3,286 new corpus entries, 37 MB peak -- that
+found nothing, which for a port is the second result that matters.
 
 ### Bit-exact to the ceiling of the format
 
 ALAC tops out at 32 bits, 384 kHz, 7.1. Every row here was encoded from the WAV
 in the first column with `refalac` — Apple's own reference *encoder*, so the
-files are not FFmpeg's idea of ALAC — and decoded back:
+files are not FFmpeg's idea of ALAC — and decoded back. (This table is the C++
+decoder's, kept as the record it was; the Rust decoder's rows are above and
+agree with every one of these it repeats.)
 
 | Channels | Rate | Depth | `decode_alac` | `decode_mf` | `decode_ffmpeg` |
 |---|---|---|---|---|---|

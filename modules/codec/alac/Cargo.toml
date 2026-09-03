@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# ALAC, written here, in Rust. See decoder/src/lib.rs for why it is written at
+# all and src/lib.rs for why it is written in this language.
+#
+# Only the .dll: the decoder is the `alac` crate in decoder/, which the tests
+# and the fuzz target reach directly, so nothing here needs to be linkable.
+
+[package]
+name = "mp_codec_alac"
+version = "0.2.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "ALAC for MediaPerch: a config blob and packets in, the file's own samples out, no dependency of any kind"
+
+[lib]
+name = "mp_codec_alac"
+crate-type = ["cdylib"]
+
+[dependencies]
+mp-abi = { path = "../../shared/mp-abi" }
+alac = { path = "decoder" }

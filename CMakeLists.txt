@@ -55,6 +55,7 @@ endif()
 
 include(CompilerOptions)
 include(Module)
+include(Rust)
 
 # The module ABI. Header only, pure C, and the one thing every layer may see.
 # The decode-quality test needs FFmpeg to build its corpus, and skips itself

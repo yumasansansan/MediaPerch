@@ -135,8 +135,22 @@ Named, so that it is a decision rather than a someday:
 - the Rust probe in M2 shows the boundary is *pleasant* rather than merely possible.
   **It did** -- see [abi/README.md](../abi/README.md). Layout and calling convention were uneventful and a panic is contained by `catch_unwind` at the boundary. That opens the option; it does not on its own take it, because the argument above still holds: Rust protects the small parsing surface we write and not the large one we link.
 
-Any of those, and `decode_native` becomes the first Rust module. Until then the ABI is ready
-and the toolchain is one.
+**Taken, for `codec_alac`, and the reason is the one the argument above left open.** The
+argument was that Rust protects the small parsing surface we write and not the large one we
+link -- and since it was written, the small surface shrank: `demux_flac` moved onto libFLAC,
+`demux_mp4` onto Bento4, `demux_mkv` onto libmatroska. What remains written here is four
+modules -- `codec_aac`, `codec_alac`, `demux_mpeg`, `demux_adts` -- and they are exactly the
+residue the argument said Rust would protect. ALAC went first because it is integer
+arithmetic, so bit-exactness against the recorded hashes is a machine check rather than a
+judgement; it passed on every one. `docs/formats.md` has the measurements and
+`modules/shared/mp-abi` has the boundary. The cost the deferral predicted -- no Corrosion, no
+mixed-language linking, no CRT mixing, no change to the C++ build -- was the cost paid:
+`cmake/Rust.cmake` is a `cargo build` and a copy.
+
+The other three are open, in the order `demux_adts`, `demux_mpeg`, `codec_aac` -- the last
+because it is float and its recorded hashes are its own, so a port has to reproduce its
+arithmetic order or the record changes. The demuxers may instead become wrappers if a better
+reader turns up, which is the same decision this tree made for FLAC, MP4 and Matroska.
 
 ### What the shell is written in is a separate question
 

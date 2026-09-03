@@ -1096,9 +1096,17 @@ modules/             everything that can be loaded and unloaded at runtime, sort
                      forty-two synthesised bytes and then fed packets.
   codec/mp3/         dr_mp3's low-level entry point, which takes a frame and gives
                      back its samples. Layers I, II and III.
-  codec/alac/        ALAC, written here: a config blob and packets in, the file's
-                     own samples out, and no dependency of any kind. alac.cpp is
-                     a library beside it so alac_fuzzer can link it directly.
+  codec/alac/        ALAC, written here, in Rust -- the first module that is not
+                     C++. A config blob and packets in, the file's own samples
+                     out, no dependency of any kind, and #![forbid(unsafe_code)]
+                     on the decoder: every unsafe line a module needs is in
+                     shared/mp-abi, once. Bit-identical to the C++ it replaced
+                     on every recorded hash; docs/formats.md has the table.
+  shared/mp-abi/     The C module ABI from the Rust side. repr(C) transcriptions
+                     of module.h checked by size, a Codec trait with slices
+                     where the header has pointers, and extern "C" trampolines
+                     that check, slice, call, and catch_unwind. The one place a
+                     Rust module's unsafe lives.
   codec/aac/         AAC-LC, written here, the same way.
   codec/opus/        libopus driven directly. opusfile -- the container and the
                      codec in one -- is not in the tree at all: nothing was left

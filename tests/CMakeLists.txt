@@ -38,10 +38,14 @@ add_executable(mediaperch_tests
 # tree. They live in a module rather than in the core because they are not
 # portable-by-policy code -- but the test suite does not care where a thing
 # lives, only whether it is ours.
-if(TARGET mediaperch_alac)
-    target_sources(mediaperch_tests PRIVATE alac_test.cpp aac_test.cpp)
-    target_link_libraries(mediaperch_tests PRIVATE mediaperch_alac mediaperch_aac)
+if(TARGET mediaperch_aac)
+    target_sources(mediaperch_tests PRIVATE aac_test.cpp)
+    target_link_libraries(mediaperch_tests PRIVATE mediaperch_aac)
 endif()
+# The Rust modules' tests are in their crates: `cargo test` over the workspace,
+# registered here as rust_modules because this directory is added after
+# enable_testing() and an add_test before it is dropped silently.
+mediaperch_add_rust_tests()
 
 # The resampler is measured, not sampled: the tests take its response apart with
 # a DFT and compare it with the specification it was designed to.

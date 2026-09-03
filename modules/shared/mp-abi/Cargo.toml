@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# The C module ABI, crossed once. See src/lib.rs.
+
+[package]
+name = "mp-abi"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The MediaPerch module ABI from the Rust side: every unsafe line a module needs, in one crate, so the modules need none"
+
+[lib]
+name = "mp_abi"
+crate-type = ["rlib"]
+
+[dependencies]

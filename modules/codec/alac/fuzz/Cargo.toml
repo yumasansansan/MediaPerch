@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# The ALAC decoder under libFuzzer, from Rust.
+#
+# **Its own package, outside the workspace**, the way cargo-fuzz lays things
+# out: this is the one crate in the tree with a dependency from crates.io
+# (`libfuzzer-sys`, which carries libFuzzer's own sources and builds them with
+# the C++ compiler), and a module build must not depend on that resolving.
+# Nothing here ships.
+#
+# Coverage instrumentation on stable: rustc accepts LLVM's SanitizerCoverage
+# pass through `-C passes=sancov-module` and `-C llvm-args=...`, which is what
+# fuzz/CMakeLists.txt sets in RUSTFLAGS when it builds this. Without those the
+# binary still runs but libFuzzer is blind, which the first Bento4 campaign
+# showed the cost of. What stable cannot do is AddressSanitizer; for safe Rust
+# that is the smaller loss, because the bounds checks are the sanitizer.
+
+[package]
+name = "mp_codec_alac_fuzz"
+version = "0.0.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+alac = { path = "../decoder" }
+
+[[bin]]
+name = "alac_fuzzer"
+path = "fuzz_targets/alac.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1
+panic = "abort"
+# On, where a release build would have them off: every place the decoder wraps
+# on purpose says `wrapping_*`, so an overflow that is *not* spelled out is a
+# site the port missed, and this is where it should be found.
+overflow-checks = true
+
+# Its own workspace root, so cargo stops looking upward and the modules
+# workspace never sees this crate or its dependency.
+[workspace]
+
+
+[build-dependencies]
+# For sancov_sections.c, the Windows half of coverage on stable; see there.
+cc = "1"
+

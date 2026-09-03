@@ -14,7 +14,7 @@
 # static CRT. Objects here default to the dynamic one, and the two disagree
 # through a /failifmismatch record that MSVC's STL headers emit -- so the
 # mismatch only appears once a fuzz target includes <vector>, which is why it
-# waited until alac_fuzzer to show up rather than failing on the first one.
+# waited until a fuzz target included <vector> rather than failing on the first one.
 # Matching libFuzzer is the fix; the alternative is fuzz targets that may not
 # use the standard library.
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
@@ -40,17 +40,15 @@ else()
 endif()
 
 function(mediaperch_add_fuzzer name source corpus)
-    # Extra translation units after the corpus name: the ALAC, AAC and FLAC
-    # parsers are ours, so they are compiled into the fuzzer directly and get
-    # instrumented with it. The dr_libs ones need no extra sources -- they are
-    # headers.
+    # Extra translation units after the corpus name: the AAC parser is ours,
+    # so it is compiled into the fuzzer directly and gets instrumented with it.
+    # The dr_libs ones need no extra sources -- they are headers.
     add_executable(${name} ${source} ${ARGN})
     target_include_directories(${name} PRIVATE
         "${CMAKE_SOURCE_DIR}/external/dr_libs"
         "${CMAKE_SOURCE_DIR}/external/dragonperch/src/core"
         "${CMAKE_SOURCE_DIR}/include"
         "${CMAKE_SOURCE_DIR}/src/core"
-        "${CMAKE_SOURCE_DIR}/modules/codec/alac"
         "${CMAKE_SOURCE_DIR}/modules/demux/mp4"
         "${CMAKE_SOURCE_DIR}/modules/codec/aac")
 
@@ -113,8 +111,63 @@ mediaperch_add_fuzzer(mp3_fuzzer mp3_fuzzer.cpp mp3)
 mediaperch_add_fuzzer(aac_fuzzer aac_fuzzer.cpp aac
                       "${CMAKE_SOURCE_DIR}/modules/codec/aac/aac.cpp"
                       "${CMAKE_SOURCE_DIR}/modules/codec/aac/aac_tables.cpp")
-mediaperch_add_fuzzer(alac_fuzzer alac_fuzzer.cpp alac
-                      "${CMAKE_SOURCE_DIR}/modules/codec/alac/alac.cpp")
+
+# ALAC's decoder is Rust now, and so is its fuzzer: libfuzzer-sys carries
+# libFuzzer's own sources and the target is in the crate's fuzz/ directory,
+# seeded by the same corpus the C++ fuzzer used, with the same input shape.
+#
+# **Coverage-guided, on stable.** cargo-fuzz wants nightly for its sanitizer
+# flags, but the coverage half is LLVM's SanitizerCoverage pass, which stable
+# rustc reaches through `-C passes=sancov-module`; libFuzzer supplies the
+# `__sanitizer_cov_*` symbols those emit. AddressSanitizer stays out of reach,
+# and for safe Rust that is the smaller loss -- the bounds checks are the
+# sanitizer, and a missed one is a panic libFuzzer reports as a crash.
+#
+# Three things had to be found for that to link on MSVC, each measured as a
+# link error first: `--target` is spelled out because RUSTFLAGS otherwise reach
+# cargo's build scripts too (getrandom's failed to link, LNK1120); the entry
+# point is named because libFuzzer's `main` lives inside an archive and
+# link.exe will not infer an entry from one (LNK1561); and the coverage
+# section's boundary symbols, which an ELF linker synthesises, come from a
+# one-page C shim in the fuzz crate on COFF (LNK2001, `__start___sancov_cntrs`).
+# The PC table is left off: it wants the same shim's `__sancov_pcs` half and is
+# only for -print_pcs, not for finding bugs.
+if(MEDIAPERCH_CARGO)
+    execute_process(COMMAND "${MEDIAPERCH_CARGO}" --version OUTPUT_QUIET RESULT_VARIABLE cargo_ok)
+    execute_process(COMMAND rustc -vV OUTPUT_VARIABLE rustc_info)
+    string(REGEX MATCH "host: ([^
+
+]+)" _ "${rustc_info}")
+    set(rust_host "${CMAKE_MATCH_1}")
+    set(rust_target_dir "${CMAKE_BINARY_DIR}/cargo")
+    set(rust_fuzz_exe "${rust_target_dir}/${rust_host}/release/alac_fuzzer${CMAKE_EXECUTABLE_SUFFIX}")
+    set(sancov
+        "-Cpasses=sancov-module"
+        "-Cllvm-args=-sanitizer-coverage-level=4"
+        "-Cllvm-args=-sanitizer-coverage-inline-8bit-counters"
+        "-Cllvm-args=-sanitizer-coverage-trace-compares")
+    if(MSVC OR WIN32)
+        list(APPEND sancov "-Clink-arg=/ENTRY:mainCRTStartup")
+    endif()
+    string(JOIN " " sancov_flags ${sancov})
+    add_custom_target(alac_fuzzer ALL
+        COMMAND "${CMAKE_COMMAND}" -E env "CARGO_TARGET_DIR=${rust_target_dir}"
+                "RUSTFLAGS=${sancov_flags}"
+                "${MEDIAPERCH_CARGO}" build --quiet --release --target "${rust_host}"
+                --manifest-path "${CMAKE_SOURCE_DIR}/modules/codec/alac/fuzz/Cargo.toml"
+        COMMENT "cargo: alac_fuzzer (libFuzzer, coverage on stable)"
+        VERBATIM)
+    set_target_properties(alac_fuzzer PROPERTIES FOLDER "fuzz")
+    add_test(NAME fuzz_alac_fuzzer
+             COMMAND ${CMAKE_COMMAND}
+                     -D "FUZZER=${rust_fuzz_exe}"
+                     -D "SEEDS=${CMAKE_CURRENT_LIST_DIR}/corpus/alac"
+                     -D "SCRATCH=${CMAKE_CURRENT_BINARY_DIR}/alac_fuzzer_scratch"
+                     -D "ARGS=-runs=20000|-max_total_time=30|-print_final_stats=1"
+                     -P "${CMAKE_CURRENT_LIST_DIR}/RunFuzzer.cmake")
+else()
+    message(WARNING "cargo is not on PATH -- the ALAC fuzzer is skipped")
+endif()
 
 # The container, which is Bento4 rather than a parser here since demux_mp4 was
 # rewritten on it. Deleting the old target along with the old parser would have
