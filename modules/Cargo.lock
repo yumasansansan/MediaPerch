@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "aac"
+version = "0.2.0"
+
+[[package]]
+name = "adts"
+version = "0.2.0"
+
+[[package]]
 name = "alac"
 version = "0.2.0"
 
@@ -11,9 +19,25 @@ name = "mp-abi"
 version = "0.1.0"
 
 [[package]]
+name = "mp_codec_aac"
+version = "0.2.0"
+dependencies = [
+ "aac",
+ "mp-abi",
+]
+
+[[package]]
 name = "mp_codec_alac"
 version = "0.2.0"
 dependencies = [
  "alac",
+ "mp-abi",
+]
+
+[[package]]
+name = "mp_demux_adts"
+version = "0.2.0"
+dependencies = [
+ "adts",
  "mp-abi",
 ]

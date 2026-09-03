@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# The ADTS framer under libFuzzer, from Rust. Its own package, outside the
+# workspace, for the reason the AAC and ALAC fuzz crates give: libfuzzer-sys is
+# a crates.io dependency and a module build must not depend on it resolving.
+
+[package]
+name = "mp_demux_adts_fuzz"
+version = "0.0.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+adts = { path = "../framer" }
+
+[[bin]]
+name = "adts_fuzzer"
+path = "fuzz_targets/adts.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1
+panic = "abort"
+overflow-checks = true
+
+[workspace]
+
+[build-dependencies]
+cc = "1"

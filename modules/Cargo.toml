@@ -14,8 +14,13 @@
 
 [workspace]
 resolver = "2"
-members = ["shared/mp-abi", "codec/alac/decoder", "codec/alac"]
-exclude = ["codec/alac/fuzz"]
+members = [
+    "shared/mp-abi",
+    "codec/alac/decoder", "codec/alac",
+    "codec/aac/decoder", "codec/aac",
+    "demux/adts/framer", "demux/adts",
+]
+exclude = ["codec/alac/fuzz", "codec/aac/fuzz", "demux/adts/fuzz"]
 
 [workspace.package]
 edition = "2021"

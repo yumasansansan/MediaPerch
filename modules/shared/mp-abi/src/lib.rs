@@ -12,12 +12,12 @@
 // sitting.
 //
 // **So the boundary is here and the logic is elsewhere.** A codec module
-// implements the `Codec` trait -- slices in, slices out, `Result` for errors --
-// and this crate supplies the `extern "C"` trampolines that the host calls,
-// each of which does exactly three things: check the pointers, make the
-// slices, and call the trait. The module crate carries `#![forbid(unsafe_code)]`
-// on the code that parses the file, which the compiler enforces rather than a
-// reviewer.
+// implements the `Codec` trait and a container module the `Demux` trait --
+// slices in, slices out, `Result` for errors -- and this crate supplies the
+// `extern "C"` trampolines that the host calls, each of which does exactly
+// three things: check the pointers, make the slices, and call the trait. The
+// module crate carries `#![forbid(unsafe_code)]` on the code that parses the
+// file, which the compiler enforces rather than a reviewer.
 //
 // **Every trampoline is wrapped in `catch_unwind`.** A panic that crossed into
 // C++ would be undefined behaviour and, on Windows, a corrupted stack -- and a
@@ -32,7 +32,7 @@
 
 #![allow(clippy::missing_safety_doc)]
 
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -60,6 +60,7 @@ pub const ABI_VERSION: u32 = 2;
 
 pub mod kind {
     pub const DSP: u32 = 3;
+    pub const DEMUX: u32 = 6;
     pub const CODEC: u32 = 7;
 }
 
@@ -67,19 +68,39 @@ pub mod kind {
 pub mod codec {
     pub const UNKNOWN: u32 = 0;
     pub const ALAC: u32 = 17;
+    pub const AAC_LC: u32 = 35;
 }
 
 /// `MpSampleType`.
 pub mod sample {
+    pub const NONE: u32 = 0;
     pub const S16: u32 = 1;
     pub const S24_PACKED: u32 = 2;
     pub const S24_IN_32: u32 = 3;
     pub const S32: u32 = 4;
+    pub const F32: u32 = 5;
 }
 
 /// `MpEncoding`.
 pub mod encoding {
     pub const PCM: u32 = 0;
+}
+
+/// `MpStreamKind`.
+pub mod stream_kind {
+    pub const AUDIO: u32 = 1;
+}
+
+/// `MpStreamInfo::flags`.
+pub mod stream_flag {
+    pub const SELF_DECODES: u32 = 1 << 0;
+    pub const DEFAULT: u32 = 1 << 1;
+}
+
+/// `MpPacket::flags`.
+pub mod packet_flag {
+    pub const SYNC: u32 = 1 << 0;
+    pub const TIMED: u32 = 1 << 1;
 }
 
 /// `MpLogLevel`.
@@ -111,6 +132,41 @@ pub struct Format {
     pub encoding: u32,
     pub valid_bits: u32,
     pub reserved: [u32; 2],
+}
+
+/// `MpStreamInfo`: one stream of a container, as far as the container states
+/// it. Plain data like `Format`; a demuxer fills in what it knows and leaves
+/// the rest zero, which the header defines as "the container did not say".
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StreamInfo {
+    /// Set by the caller and preserved by the trampoline; a module need not
+    /// touch it.
+    pub size: u32,
+    pub index: u32,
+    pub kind: u32,
+    pub codec: u32,
+    pub flags: u32,
+    pub config_bytes: u32,
+    pub format: Format,
+    pub total_frames: u64,
+    pub skip_frames: u64,
+    pub play_frames: u64,
+    pub duration_ms: u64,
+    pub trim_frames: u64,
+    pub reserved: [u32; 2],
+}
+
+/// `MpPacket`, as the host hands it to `read_packet`. Not something a module
+/// fills in itself: `Demux::read_packet` returns a `Next` and the trampoline
+/// writes this.
+#[repr(C)]
+pub struct Packet {
+    size: u32,
+    flags: u32,
+    bytes: u32,
+    reserved: u32,
+    frame: u64,
 }
 
 /// `MpHost`: what the host lends a module. `Option` around each function
@@ -162,6 +218,47 @@ pub struct CodecVtbl {
     close: extern "C" fn(c: *mut c_void),
 }
 
+/// `MpDemuxVtbl`. `read_frames` is `Option` because a demuxer that splits
+/// properly leaves it NULL, which every Rust one does.
+#[repr(C)]
+pub struct DemuxVtbl {
+    size: u32,
+    reserved: u32,
+    probe: extern "C" fn(
+        path: *const c_char,
+        head: *const u8,
+        head_bytes: usize,
+        out_score: *mut u32,
+    ) -> MpResult,
+    open: extern "C" fn(path: *const c_char, out: *mut *mut c_void) -> MpResult,
+    stream_count: extern "C" fn(d: *mut c_void, out_count: *mut u32) -> MpResult,
+    stream_info: extern "C" fn(d: *mut c_void, index: u32, out: *mut StreamInfo) -> MpResult,
+    stream_config: extern "C" fn(
+        d: *mut c_void,
+        index: u32,
+        out: *mut u8,
+        out_bytes: u32,
+        out_needed: *mut u32,
+    ) -> MpResult,
+    select: extern "C" fn(d: *mut c_void, index: u32) -> MpResult,
+    read_packet: extern "C" fn(
+        d: *mut c_void,
+        dst: *mut c_void,
+        dst_bytes: usize,
+        out: *mut Packet,
+    ) -> MpResult,
+    seek: extern "C" fn(d: *mut c_void, frame: u64) -> MpResult,
+    read_frames: Option<
+        extern "C" fn(
+            d: *mut c_void,
+            dst: *mut c_void,
+            dst_bytes: usize,
+            out_bytes: *mut usize,
+        ) -> MpResult,
+    >,
+    close: extern "C" fn(d: *mut c_void),
+}
+
 /// `MpModuleDesc`, the one thing `mp_module_entry` returns.
 #[repr(C)]
 pub struct ModuleDesc {
@@ -184,14 +281,19 @@ pub struct ModuleDesc {
 // The layout claims. If any is wrong the build stops here rather than in the
 // host's stack.
 const _: () = assert!(std::mem::size_of::<Format>() == 32);
+const _: () = assert!(std::mem::size_of::<StreamInfo>() == 104);
+const _: () = assert!(std::mem::size_of::<Packet>() == 24);
 const _: () = assert!(std::mem::size_of::<Host>() == 8 + 4 * std::mem::size_of::<usize>());
 const _: () = assert!(std::mem::size_of::<CodecVtbl>() == 8 + 7 * std::mem::size_of::<usize>());
+const _: () = assert!(std::mem::size_of::<DemuxVtbl>() == 8 + 10 * std::mem::size_of::<usize>());
 const _: () = assert!(std::mem::size_of::<ModuleDesc>() == 32 + 6 * std::mem::size_of::<usize>());
 
-// Both hold raw pointers into other statics of the same object, never written
+// These hold raw pointers into other statics of the same object, never written
 // after the linker laid them out. That is what `Sync` is being promised.
 #[allow(unsafe_code)]
 unsafe impl Sync for CodecVtbl {}
+#[allow(unsafe_code)]
+unsafe impl Sync for DemuxVtbl {}
 #[allow(unsafe_code)]
 unsafe impl Sync for ModuleDesc {}
 
@@ -240,7 +342,11 @@ pub trait Codec: Sized + 'static {
 
     fn open(codec: u32, config: &[u8]) -> Result<Self, Error>;
 
-    fn format(&self) -> Format;
+    /// What this codec produces. `Err(Error::Format)` while it is not yet
+    /// known, which the header allows for a codec whose configuration does
+    /// not state it -- AAC with channel configuration 0 in a raw stream, where
+    /// the layout arrives with the first frame.
+    fn format(&self) -> Result<Format, Error>;
 
     /// One packet in, PCM out into `dst`. Returns the bytes written, or
     /// `Error::NoMemory` when `dst` is too small for what the packet holds.
@@ -250,6 +356,57 @@ pub trait Codec: Sized + 'static {
     fn flush(&mut self, dst: &mut [u8]) -> Result<usize, Error>;
 
     fn reset(&mut self) -> Result<(), Error>;
+}
+
+/// What `Demux::read_packet` hands back, which the trampoline turns into the
+/// header's three-way contract: a packet, MP_END with no bytes, or
+/// MP_ERR_NO_MEMORY with the size the packet needs and nothing consumed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Next {
+    /// `bytes` were written into `dst`; `frame` is the packet's position in
+    /// the stream's own frames, or 0 where the container does not say;
+    /// `flags` are `packet_flag` bits.
+    Packet {
+        bytes: usize,
+        frame: u64,
+        flags: u32,
+    },
+    /// The end of the stream. Not an error.
+    End,
+    /// `dst` was too small; this many bytes are needed, and nothing was
+    /// consumed.
+    TooSmall(usize),
+}
+
+/// A container, as `MpDemuxVtbl` sees it and with the pointers taken out.
+///
+/// `path` is UTF-8, as the header promises, and a Rust module opens it with
+/// `std::fs::File`, which spells it in whatever the OS wants. The one thing
+/// the header says that this trait cannot: `read_frames` is for a stream that
+/// decodes itself, and no Rust demuxer has one, so the vtable leaves it NULL.
+pub trait Demux: Sized + 'static {
+    /// Whether `head`, the first bytes of the file at `path`, is this
+    /// container: 0 for no, up to 100. A question about the container only.
+    fn probe(path: &str, head: &[u8]) -> u32;
+
+    fn open(path: &str) -> Result<Self, Error>;
+
+    fn stream_count(&self) -> u32;
+
+    /// `index`'s description. `size` and `index` are filled in by the
+    /// trampoline, so a module leaves them at their defaults.
+    fn stream_info(&self, index: u32) -> Result<StreamInfo, Error>;
+
+    /// The codec's configuration blob for stream `index`, verbatim.
+    fn stream_config(&self, index: u32) -> Result<&[u8], Error>;
+
+    fn select(&mut self, index: u32) -> Result<(), Error>;
+
+    fn read_packet(&mut self, dst: &mut [u8]) -> Result<Next, Error>;
+
+    /// To the packet containing `frame`, or the nearest point before it from
+    /// which a reset codec decodes correctly.
+    fn seek(&mut self, frame: u64) -> Result<(), Error>;
 }
 
 // ---------------------------------------------------------------------------
@@ -295,6 +452,21 @@ unsafe fn bytes_mut<'a>(ptr: *mut u8, len: usize) -> &'a mut [u8] {
         std::slice::from_raw_parts_mut(ptr, len)
     }
 }
+
+/// A NUL-terminated UTF-8 path as a `String`. Null is the empty path, and a
+/// byte that is not UTF-8 -- which the header says cannot happen -- is
+/// replaced rather than refused, so the module sees a path that fails to open
+/// instead of a call that fails to happen.
+#[allow(unsafe_code)]
+unsafe fn path_string(path: *const c_char) -> String {
+    if path.is_null() {
+        String::new()
+    } else {
+        CStr::from_ptr(path).to_string_lossy().into_owned()
+    }
+}
+
+// ----------------------------------------------------------------- codecs
 
 #[allow(unsafe_code)]
 extern "C" fn probe<C: Codec>(
@@ -344,8 +516,13 @@ extern "C" fn get_format<C: Codec>(c: *mut c_void, out: *mut Format) -> MpResult
             return result::ERR_INVALID;
         }
         let codec = unsafe { &*c.cast::<C>() };
-        unsafe { *out = codec.format() };
-        result::OK
+        match codec.format() {
+            Ok(format) => {
+                unsafe { *out = format };
+                result::OK
+            }
+            Err(e) => e.code(),
+        }
     })
 }
 
@@ -441,6 +618,222 @@ impl CodecVtbl {
     }
 }
 
+// -------------------------------------------------------------- containers
+
+#[allow(unsafe_code)]
+extern "C" fn demux_probe<D: Demux>(
+    path: *const c_char,
+    head: *const u8,
+    head_bytes: usize,
+    out_score: *mut u32,
+) -> MpResult {
+    guard(|| {
+        if out_score.is_null() {
+            return result::ERR_INVALID;
+        }
+        unsafe { *out_score = 0 };
+        let path = unsafe { path_string(path) };
+        let head = unsafe { bytes(head, head_bytes) };
+        let score = D::probe(&path, head);
+        unsafe { *out_score = score };
+        result::OK
+    })
+}
+
+#[allow(unsafe_code)]
+extern "C" fn demux_open<D: Demux>(path: *const c_char, out: *mut *mut c_void) -> MpResult {
+    guard(|| {
+        if path.is_null() || out.is_null() {
+            return result::ERR_INVALID;
+        }
+        unsafe { *out = std::ptr::null_mut() };
+        let path = unsafe { path_string(path) };
+        match D::open(&path) {
+            Ok(instance) => {
+                unsafe { *out = Box::into_raw(Box::new(instance)).cast::<c_void>() };
+                result::OK
+            }
+            Err(e) => e.code(),
+        }
+    })
+}
+
+#[allow(unsafe_code)]
+extern "C" fn demux_stream_count<D: Demux>(d: *mut c_void, out_count: *mut u32) -> MpResult {
+    guard(|| {
+        if d.is_null() || out_count.is_null() {
+            return result::ERR_INVALID;
+        }
+        let demux = unsafe { &*d.cast::<D>() };
+        unsafe { *out_count = demux.stream_count() };
+        result::OK
+    })
+}
+
+#[allow(unsafe_code)]
+extern "C" fn demux_stream_info<D: Demux>(
+    d: *mut c_void,
+    index: u32,
+    out: *mut StreamInfo,
+) -> MpResult {
+    guard(|| {
+        if d.is_null() || out.is_null() {
+            return result::ERR_INVALID;
+        }
+        // The caller states how much of the struct it has. A host speaking
+        // this ABI version has all of it; one with less is not written past.
+        let size = unsafe { (*out).size };
+        if (size as usize) < std::mem::size_of::<StreamInfo>() {
+            return result::ERR_INVALID;
+        }
+        let demux = unsafe { &*d.cast::<D>() };
+        match demux.stream_info(index) {
+            Ok(mut info) => {
+                info.size = size;
+                info.index = index;
+                unsafe { *out = info };
+                result::OK
+            }
+            Err(e) => e.code(),
+        }
+    })
+}
+
+#[allow(unsafe_code)]
+extern "C" fn demux_stream_config<D: Demux>(
+    d: *mut c_void,
+    index: u32,
+    out: *mut u8,
+    out_bytes: u32,
+    out_needed: *mut u32,
+) -> MpResult {
+    guard(|| {
+        if d.is_null() || out_needed.is_null() {
+            return result::ERR_INVALID;
+        }
+        unsafe { *out_needed = 0 };
+        let demux = unsafe { &*d.cast::<D>() };
+        let config = match demux.stream_config(index) {
+            Ok(config) => config,
+            Err(e) => return e.code(),
+        };
+        unsafe { *out_needed = config.len() as u32 };
+        if out.is_null() {
+            return result::OK; // asking how much, which the header allows
+        }
+        if (out_bytes as usize) < config.len() {
+            return result::ERR_NO_MEMORY;
+        }
+        let dst = unsafe { bytes_mut(out, out_bytes as usize) };
+        dst[..config.len()].copy_from_slice(config);
+        result::OK
+    })
+}
+
+#[allow(unsafe_code)]
+extern "C" fn demux_select<D: Demux>(d: *mut c_void, index: u32) -> MpResult {
+    guard(|| {
+        if d.is_null() {
+            return result::ERR_INVALID;
+        }
+        let demux = unsafe { &mut *d.cast::<D>() };
+        match demux.select(index) {
+            Ok(()) => result::OK,
+            Err(e) => e.code(),
+        }
+    })
+}
+
+#[allow(unsafe_code)]
+extern "C" fn demux_read_packet<D: Demux>(
+    d: *mut c_void,
+    dst: *mut c_void,
+    dst_bytes: usize,
+    out: *mut Packet,
+) -> MpResult {
+    guard(|| {
+        if d.is_null() || out.is_null() {
+            return result::ERR_INVALID;
+        }
+        let size = unsafe { (*out).size };
+        unsafe {
+            *out = Packet {
+                size,
+                flags: 0,
+                bytes: 0,
+                reserved: 0,
+                frame: 0,
+            };
+        }
+        let demux = unsafe { &mut *d.cast::<D>() };
+        let dst = unsafe { bytes_mut(dst.cast::<u8>(), dst_bytes) };
+        match demux.read_packet(dst) {
+            Ok(Next::Packet {
+                bytes,
+                frame,
+                flags,
+            }) => {
+                unsafe {
+                    (*out).bytes = bytes as u32;
+                    (*out).frame = frame;
+                    (*out).flags = flags;
+                }
+                result::OK
+            }
+            Ok(Next::End) => result::END,
+            Ok(Next::TooSmall(needed)) => {
+                unsafe { (*out).bytes = needed as u32 };
+                result::ERR_NO_MEMORY
+            }
+            Err(e) => e.code(),
+        }
+    })
+}
+
+#[allow(unsafe_code)]
+extern "C" fn demux_seek<D: Demux>(d: *mut c_void, frame: u64) -> MpResult {
+    guard(|| {
+        if d.is_null() {
+            return result::ERR_INVALID;
+        }
+        let demux = unsafe { &mut *d.cast::<D>() };
+        match demux.seek(frame) {
+            Ok(()) => result::OK,
+            Err(e) => e.code(),
+        }
+    })
+}
+
+#[allow(unsafe_code)]
+extern "C" fn demux_close<D: Demux>(d: *mut c_void) {
+    let _ = guard(|| {
+        if !d.is_null() {
+            drop(unsafe { Box::from_raw(d.cast::<D>()) });
+        }
+        result::OK
+    });
+}
+
+impl DemuxVtbl {
+    /// The vtable for `D`, as a constant, so it can be a `static`.
+    pub const fn new<D: Demux>() -> Self {
+        DemuxVtbl {
+            size: std::mem::size_of::<DemuxVtbl>() as u32,
+            reserved: 0,
+            probe: demux_probe::<D>,
+            open: demux_open::<D>,
+            stream_count: demux_stream_count::<D>,
+            stream_info: demux_stream_info::<D>,
+            stream_config: demux_stream_config::<D>,
+            select: demux_select::<D>,
+            read_packet: demux_read_packet::<D>,
+            seek: demux_seek::<D>,
+            read_frames: None,
+            close: demux_close::<D>,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The host
 // ---------------------------------------------------------------------------
@@ -476,10 +869,9 @@ pub fn log(level: u32, msg: &str) {
 }
 
 impl ModuleDesc {
-    /// A descriptor for a codec module. `id` and `name` must be NUL-terminated;
-    /// the `export_codec!` macro sees to that.
-    pub const fn codec(
-        vtbl: &'static CodecVtbl,
+    const fn new(
+        kind: u32,
+        vtbl: *const c_void,
         id: &'static [u8],
         name: &'static [u8],
         version: u32,
@@ -491,17 +883,60 @@ impl ModuleDesc {
             abi_version: ABI_VERSION,
             flags: 0,
             version,
-            kind: kind::CODEC,
+            kind,
             priority,
             id: id.as_ptr().cast::<c_char>(),
             name: name.as_ptr().cast::<c_char>(),
             init,
             shutdown,
-            vtbl: std::ptr::from_ref(vtbl).cast::<c_void>(),
+            vtbl,
             codecs: codecs.as_ptr(),
             codec_count: codecs.len() as u32,
             reserved_desc: 0,
         }
+    }
+
+    /// A descriptor for a codec module. `id` and `name` must be NUL-terminated;
+    /// the `export_codec!` macro sees to that. `codecs` is what it decodes.
+    pub const fn codec(
+        vtbl: &'static CodecVtbl,
+        id: &'static [u8],
+        name: &'static [u8],
+        version: u32,
+        priority: u32,
+        codecs: &'static [u32],
+    ) -> Self {
+        Self::new(
+            kind::CODEC,
+            std::ptr::from_ref(vtbl).cast::<c_void>(),
+            id,
+            name,
+            version,
+            priority,
+            codecs,
+        )
+    }
+
+    /// A descriptor for a container module. `codecs` is what the container
+    /// can carry, which the header calls a hint for a report rather than a
+    /// promise.
+    pub const fn demux(
+        vtbl: &'static DemuxVtbl,
+        id: &'static [u8],
+        name: &'static [u8],
+        version: u32,
+        priority: u32,
+        codecs: &'static [u32],
+    ) -> Self {
+        Self::new(
+            kind::DEMUX,
+            std::ptr::from_ref(vtbl).cast::<c_void>(),
+            id,
+            name,
+            version,
+            priority,
+            codecs,
+        )
     }
 }
 
@@ -533,6 +968,37 @@ macro_rules! export_codec {
         static __MP_VTBL: $crate::CodecVtbl = $crate::CodecVtbl::new::<$codec>();
         static __MP_CODECS: &[u32] = &[$($code),+];
         static __MP_DESC: $crate::ModuleDesc = $crate::ModuleDesc::codec(
+            &__MP_VTBL,
+            concat!($id, "\0").as_bytes(),
+            concat!($name, "\0").as_bytes(),
+            $crate::make_version($major, $minor, $patch),
+            $priority,
+            __MP_CODECS,
+        );
+
+        #[allow(unsafe_code)]
+        #[no_mangle]
+        pub extern "C" fn mp_module_entry(host_abi: u32) -> *const $crate::ModuleDesc {
+            $crate::entry(host_abi, &__MP_DESC)
+        }
+    };
+}
+
+/// Makes a crate a container module, the way `export_codec!` makes one a
+/// codec. `codecs` is what the container can carry.
+#[macro_export]
+macro_rules! export_demux {
+    (
+        $demux:ty,
+        id: $id:literal,
+        name: $name:literal,
+        version: ($major:expr, $minor:expr, $patch:expr),
+        priority: $priority:expr,
+        codecs: [$($code:expr),+ $(,)?]
+    ) => {
+        static __MP_VTBL: $crate::DemuxVtbl = $crate::DemuxVtbl::new::<$demux>();
+        static __MP_CODECS: &[u32] = &[$($code),+];
+        static __MP_DESC: $crate::ModuleDesc = $crate::ModuleDesc::demux(
             &__MP_VTBL,
             concat!($id, "\0").as_bytes(),
             concat!($name, "\0").as_bytes(),

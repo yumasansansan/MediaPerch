@@ -135,7 +135,7 @@ Named, so that it is a decision rather than a someday:
 - the Rust probe in M2 shows the boundary is *pleasant* rather than merely possible.
   **It did** -- see [abi/README.md](../abi/README.md). Layout and calling convention were uneventful and a panic is contained by `catch_unwind` at the boundary. That opens the option; it does not on its own take it, because the argument above still holds: Rust protects the small parsing surface we write and not the large one we link.
 
-**Taken, for `codec_alac`, and the reason is the one the argument above left open.** The
+**Taken, for `codec_alac` first and then for `demux_adts` and `codec_aac`, and the reason is the one the argument above left open.** The
 argument was that Rust protects the small parsing surface we write and not the large one we
 link -- and since it was written, the small surface shrank: `demux_flac` moved onto libFLAC,
 `demux_mp4` onto Bento4, `demux_mkv` onto libmatroska. What remains written here is four
@@ -147,10 +147,15 @@ judgement; it passed on every one. `docs/formats.md` has the measurements and
 mixed-language linking, no CRT mixing, no change to the C++ build -- was the cost paid:
 `cmake/Rust.cmake` is a `cargo build` and a copy.
 
-The other three are open, in the order `demux_adts`, `demux_mpa`, `codec_aac` -- the last
-because it is float and its recorded hashes are its own, so a port has to reproduce its
-arithmetic order or the record changes. The demuxers may instead become wrappers if a better
-reader turns up, which is the same decision this tree made for FLAC, MP4 and Matroska.
+`demux_adts` and `codec_aac` followed. The codec was the one this order put last, because
+it is float and its recorded hashes are its own, so a port had to reproduce its arithmetic
+order or the record would change; it reproduced it, on every hash and every SNR figure, and
+came out faster than the C++ once the transform's table index was masked rather than
+bounds-checked. `demux_mpa` did not go to Rust at all: it went to libmpg123, which is the
+other outcome this paragraph allowed for -- a demuxer becomes a wrapper when a better reader
+turns up, the decision this tree made for FLAC, MP4 and Matroska. So the four modules that
+were the residue are three Rust crates and one wrapper, and no parser this tree wrote is C++
+any more.
 
 ### What the shell is written in is a separate question
 
@@ -990,7 +995,8 @@ system, and pulling the transitive closure of that is vendoring a slice of FFmpe
 a file. A slice that then has to be tracked against upstream by hand, which is the
 maintenance problem the third test exists to avoid, arriving by a different door.
 
-So the codec is in this tree: 1,599 lines, plus 368 of generated tables. **SBR and PS are
+So the codec is in this tree: written in C++ at 1,599 lines plus 368 of generated tables,
+and since ported to Rust, bit-identical, at 2,126 with its tests. **SBR and PS are
 not** -- another six thousand lines apiece for a profile that is refused at the
 AudioSpecificConfig and handed to `decode_ffmpeg`, which is what a fallback chain is for.
 
@@ -1023,8 +1029,10 @@ did not:
   so 135 dB *is* the agreement, and anything below it is a bug.
 
 `docs/formats.md` has the tables. MSVC and clang-cl produce identical output on every file.
-`fuzz/aac_fuzzer.cpp` drives the container parser and the codec from the same input, as
-`alac_fuzzer.cpp` does: 437,595 executions in five minutes under libFuzzer, nothing found.
+`fuzz/aac_fuzzer.cpp` drove the codec from the same input shape `alac_fuzzer.cpp` did:
+437,595 executions in five minutes under libFuzzer, nothing found. The fuzzer is
+`modules/codec/aac/fuzz` now, in Rust, with the same corpus, and the ADTS framer has one of
+its own for the first time.
 
 **The rule this adds: "is it maintained" is necessary and not sufficient.** Three maintained,
 fuzzed, licence-compatible AAC libraries were available and each produced the wrong *thing*

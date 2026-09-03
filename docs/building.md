@@ -234,14 +234,14 @@ than three that share most things, and Linux arrives with a real Clang anyway.
 
 ## Rust, for the modules that are Rust
 
-One module is Rust -- `codec_alac` -- and the way it is built is meant to be the
-way the next one is built, so it is written down here rather than left in
+Three modules are Rust -- `codec_alac`, `codec_aac` and `demux_adts` -- and
+the way they are built is written down here rather than left in
 `cmake/Rust.cmake`'s comments alone.
 
 **The toolchain is stable, from rustup, on the MSVC target.** Nothing here needs
 nightly, including the fuzzer (below). `cargo` has to be on PATH when CMake
-configures; if it is not, the module is skipped with a warning the way a
-missing submodule is, and ALAC falls to the next reader.
+configures; if it is not, the modules are skipped with a warning the way a
+missing submodule is, and ALAC, AAC-LC and raw ADTS fall to the next reader.
 
 **Nothing links across the language boundary.** A module is a `.dll` on disk
 that exports `mp_module_entry`, and the host cannot tell which compiler made
@@ -255,9 +255,11 @@ builds `--release`, with fat LTO and one codegen unit, set once in
 
 **One workspace, no dependencies.** `modules/Cargo.toml` is a virtual workspace
 over every Rust crate in the tree: `shared/mp-abi`, which is the C ABI crossed
-once and the only place a module's `unsafe` lives; `codec/alac/decoder`, the
-decoder, `#![forbid(unsafe_code)]` at crate level; and `codec/alac`, the glue
-that implements `mp_abi::Codec` and is the `.dll`. None of them depends on
+once and the only place a module's `unsafe` lives; a decoder or framer crate
+per module -- `codec/alac/decoder`, `codec/aac/decoder`, `demux/adts/framer`
+-- each `#![forbid(unsafe_code)]` at crate level; and the module crates,
+`codec/alac`, `codec/aac` and `demux/adts`, the glue that implements
+`mp_abi::Codec` or `mp_abi::Demux` and is the `.dll`. None of them depends on
 anything outside the tree, so the lock file is small and a build needs no
 network. The tests live in the decoder crates, and ctest runs
 `cargo test --workspace` as one entry, `rust_modules`.
@@ -266,8 +268,8 @@ network. The tests live in the decoder crates, and ctest runs
 wants nightly for `-Zsanitizer`, but the coverage half of what it does is
 LLVM's SanitizerCoverage pass, which stable `rustc` reaches through
 `-C passes=sancov-module` and a few `-C llvm-args`; `libfuzzer-sys` supplies
-the `__sanitizer_cov_*` symbols those emit. Four things bit on the way, each
-as a link error first:
+the `__sanitizer_cov_*` symbols those emit. Five things bit on the way, four
+of them as a link error first:
 
 - `RUSTFLAGS` reach cargo's *build scripts* too unless `--target` is spelled
   out, and a build script instrumented for sancov references symbols nothing
@@ -282,13 +284,21 @@ as a link error first:
 - The coverage counters live in a section whose start and end symbols an ELF
   linker synthesises and a COFF linker does not; clang gets them from
   compiler-rt's sanitizer runtime, which `libfuzzer-sys` does not carry.
-  `modules/codec/alac/fuzz/sancov_sections.c` is that runtime's one relevant
-  page -- six sentinels in `$A`/`$Z`-suffixed sections -- built by the fuzz
+  `modules/shared/fuzz/sancov_sections.c` is that runtime's one relevant
+  page -- six sentinels in `$A`/`$Z`-suffixed sections -- built by each fuzz
   crate's `build.rs` on the MSVC target only. Measured: LNK2001 on
   `__start___sancov_cntrs` from every instrumented object.
+- With more than one codegen unit, LLVM's coverage pass died on the AAC
+  decoder with `Associative COMDAT symbol ... does not exist`: it hangs a
+  counter section off each function's COMDAT, and a generic instantiation one
+  unit references and another later drops leaves a section pointing at
+  nothing. Five flag combinations were tried; `-C codegen-units=1` is the one
+  that links, and it is set for every Rust fuzzer. It costs a slower build and
+  nothing at run time.
 
-The fuzz crate is outside the workspace -- it is the one crate in the tree with
-a crates.io dependency, and a module build must not depend on that resolving.
+The fuzz crates are outside the workspace -- they are the only crates in the
+tree with a crates.io dependency, and a module build must not depend on that
+resolving.
 AddressSanitizer is what stable cannot do; for safe Rust that is the smaller
 loss, because the bounds checks are the sanitizer and a missed one is a panic
 libFuzzer reports as a crash.

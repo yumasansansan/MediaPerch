@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# The AAC-LC decoder, and nothing else: no ABI, no I/O, no dependency. Its own
+# crate so that `#![forbid(unsafe_code)]` is a crate-level fact the compiler
+# enforces, and so that the tests and the fuzz target reach it without building
+# the .dll around it. The module crate one directory up is the glue.
+
+[package]
+name = "aac"
+version = "0.2.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "AAC-LC, decoded from the standard, in safe Rust: float out, framed exactly as the container says"
+
+[lib]
+name = "aac"
+crate-type = ["rlib"]
+
+[dependencies]

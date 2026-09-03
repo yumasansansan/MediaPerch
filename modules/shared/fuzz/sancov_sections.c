@@ -13,9 +13,11 @@
 // what compiler-rt's sanitizer runtime does, and clang links that runtime for
 // `-fsanitize=fuzzer`. rustc does not, and libfuzzer-sys ships libFuzzer alone.
 //
-// So this file is that runtime's one relevant page, written for this crate:
-// six variables in the right sections and nothing else. Each sentinel is one
-// zero counter libFuzzer sees and never sees change, which it tolerates.
+// So this file is that runtime's one relevant page, written for the Rust fuzz
+// crates: six variables in the right sections and nothing else. Each sentinel
+// is one zero counter libFuzzer sees and never sees change, which it tolerates.
+// Every Rust fuzz crate's build.rs compiles this same file, which is why it is
+// under modules/shared rather than beside any one of them.
 //
 // Measured before it existed: `error LNK2001: __start___sancov_cntrs is
 // unresolved`, from every instrumented object.

@@ -191,14 +191,43 @@ check("ALAC, 5.1 at 48 kHz" "${W}/q6_alac.m4a" "${W}/src_6_48000.wav"
       --min-snr 120 --vs-rival 200 --band-limit 16000 --band-tol 0.01
       --min-lag-margin 8 --min-channel-margin 3)
 
-# ----------------------------------------------------------------------- MP3
+# ---------------------------------------------------------------- MPEG audio
 # Lossy, and the reason demux_mpa reads the LAME tag is the gapless edit -- so
-# the length
-# and the start are the point of this row.
+# the length and the start are the point of the first row.
 encode("${W}/src_2_44100.wav" "${W}/q.mp3" -c:a libmp3lame -b:a 256k)
 check("MP3, stereo 44.1 kHz 256k" "${W}/q.mp3" "${W}/src_2_44100.wav"
       --min-snr 8 --vs-rival 100 --band-limit 8000 --band-tol 2.5
       --min-lag-margin 8 --min-channel-margin 3)
+
+# The other three things libmpg123 decodes that the module before it did not
+# have a row for: layer II, which is a different codec under the same header;
+# MPEG-2, which halves the rate and the scalefactor band table; and mono, which
+# is the one shape where a stereo-only bug would hide. None of these carries a
+# gapless tag -- there is no LAME tag in an MP2, and the encoder's delay stays in
+# -- so they are checked untrimmed, the way the raw ADTS row is below.
+#
+# Layer II's thresholds are its own. Against the source it sits at 6.44 dB where
+# layer III at the same bit rate sits at 13.75 -- FFmpeg's own decode of the
+# same file measures 6.44 too, so that is the encoder and not the decoder. And
+# against FFmpeg directly the two decoders agree to 88 dB where layer III's
+# agree to 113: a different layer II dequantiser in each, both far inside the
+# RMS bound ISO 11172-4 calls conformance, and no reference outside either to
+# say which is nearer. The floor is set under the measurement, not at it.
+encode("${W}/src_2_44100.wav" "${W}/q_l2.mp2" -c:a mp2 -b:a 256k)
+check("MP2, layer II stereo 44.1 kHz 256k" "${W}/q_l2.mp2" "${W}/src_2_44100.wav"
+      --untrimmed --min-snr 5 --vs-rival 80 --band-limit 8000 --band-tol 2.5
+      --min-lag-margin 8 --min-channel-margin 3)
+
+make_source("${W}/src_2_22050.wav" 2 22050 2)
+encode("${W}/src_2_22050.wav" "${W}/q_mpeg2.mp3" -c:a libmp3lame -b:a 128k)
+check("MP3, MPEG-2 stereo 22.05 kHz 128k" "${W}/q_mpeg2.mp3" "${W}/src_2_22050.wav"
+      --min-snr 8 --vs-rival 100 --band-limit 4000 --band-tol 2.5
+      --min-lag-margin 8 --min-channel-margin 3)
+
+make_source("${W}/src_1_44100.wav" 1 44100 2)
+encode("${W}/src_1_44100.wav" "${W}/q_mono.mp3" -c:a libmp3lame -b:a 128k)
+check("MP3, mono 44.1 kHz 128k" "${W}/q_mono.mp3" "${W}/src_1_44100.wav"
+      --min-snr 8 --vs-rival 100 --band-limit 8000 --band-tol 2.5 --min-lag-margin 8)
 
 # ----------------------------------------------------------------------- AAC
 encode("${W}/src_2_44100.wav" "${W}/q_2_256k.m4a" -c:a aac -b:a 256k)

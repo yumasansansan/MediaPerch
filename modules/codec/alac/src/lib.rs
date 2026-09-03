@@ -133,8 +133,8 @@ impl Codec for AlacCodec {
         })
     }
 
-    fn format(&self) -> Format {
-        self.format
+    fn format(&self) -> Result<Format, Error> {
+        Ok(self.format)
     }
 
     fn decode(&mut self, packet: &[u8], dst: &mut [u8]) -> Result<usize, Error> {

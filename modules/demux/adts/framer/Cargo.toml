@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# The ADTS framer, and nothing else: no ABI, no file, no dependency. It walks
+# any `Read + Seek`, so the tests and the fuzz target hand it a `Cursor` over
+# bytes and the module hands it a file. Its own crate so that
+# `#![forbid(unsafe_code)]` is a crate-level fact the compiler enforces.
+
+[package]
+name = "adts"
+version = "0.2.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "AAC's ADTS framing, read from any seekable stream, in safe Rust"
+
+[lib]
+name = "adts"
+crate-type = ["rlib"]
+
+[dependencies]

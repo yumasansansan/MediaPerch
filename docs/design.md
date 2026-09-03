@@ -1065,9 +1065,12 @@ modules/             everything that can be loaded and unloaded at runtime, sort
                      an MP3". Its `open` re-applies the probe's test with the whole
                      file in reach, because libmpg123 resynchronises into anything
                      and would otherwise claim to have opened a WAV.
-  demux/adts/        raw AAC's framing. Assembles the AudioSpecificConfig an MP4
-                     would have carried out of the first frame header, so codec/aac/
-                     cannot tell the two containers apart.
+  demux/adts/        raw AAC's framing, in Rust -- the first container module
+                     that is. The framer crate walks any Read + Seek and forbids
+                     unsafe; the module crate opens the file. Assembles the
+                     AudioSpecificConfig an MP4 would have carried out of the
+                     first frame header, so codec/aac/ cannot tell the two
+                     containers apart.
   demux/mp4/         MP4, M4A, QuickTime .mov and fragmented MP4, on Bento4. Reads
                      moov wherever it is, which is what makes "read the codec, then
                      pick the decoder" possible at all -- a probe sees four kilobytes
@@ -1105,18 +1108,23 @@ modules/             everything that can be loaded and unloaded at runtime, sort
                      build -- demux/mpa links the same target, the arrangement
                      libFLAC has. Gapless is off on purpose: the edit is the
                      container's and PacketSource applies it once.
-  codec/alac/        ALAC, written here, in Rust -- the first module that is not
+  codec/alac/        ALAC, written here, in Rust -- the first module that was not
                      C++. A config blob and packets in, the file's own samples
                      out, no dependency of any kind, and #![forbid(unsafe_code)]
                      on the decoder: every unsafe line a module needs is in
                      shared/mp-abi, once. Bit-identical to the C++ it replaced
                      on every recorded hash; docs/formats.md has the table.
   shared/mp-abi/     The C module ABI from the Rust side. repr(C) transcriptions
-                     of module.h checked by size, a Codec trait with slices
-                     where the header has pointers, and extern "C" trampolines
+                     of module.h checked by size, Codec and Demux traits with
+                     slices where the header has pointers, and extern "C" trampolines
                      that check, slice, call, and catch_unwind. The one place a
                      Rust module's unsafe lives.
-  codec/aac/         AAC-LC, written here, the same way.
+  codec/aac/         AAC-LC, written here, in Rust, the same way: the decoder
+                     crate forbids unsafe and the module crate is the glue. A
+                     translation of the C++ it replaced in the same order of
+                     floating-point operations, so every recorded hash is
+                     identical -- and faster than it, once the IMDCT's table
+                     index was masked rather than bounds-checked.
   codec/opus/        libopus driven directly. opusfile -- the container and the
                      codec in one -- is not in the tree at all: nothing was left
                      calling it, and it could open a socket. Decodes at 48 kHz

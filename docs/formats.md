@@ -56,7 +56,7 @@ is tried.
 | `demux_wav` | dr_wav | `codec_pcm` | **nothing at all** -- it is a memcpy |
 | `demux_flac` | libFLAC | `codec_flac` | libFLAC |
 | `demux_mpa` | libmpg123 | `codec_mpa` | libmpg123 |
-| `demux_adts` | **nothing** | `codec_aac` | **nothing** |
+| `demux_adts` | **nothing**, in Rust | `codec_aac` | **nothing**, in Rust |
 | `demux_mp4` | Bento4 | `codec_alac`, `codec_aac` | **nothing** |
 | `demux_ogg` | libogg | `codec_opus`, `codec_vorbis`, `codec_flac` | libopus, libvorbis, libFLAC |
 | `demux_mkv` | libmatroska | seven of them, see below | |
@@ -1176,6 +1176,31 @@ MP3 has no normative bit-exact decoder — ISO 11172-4 defines conformance as an
 RMS error bound — so two implementations are not expected to agree at all. These
 agree to float rounding.
 
+**Those three rows are dr_mp3's, and the decoder is libmpg123 now** -- the
+section above on what it replaced has the reasons. The same measurement, made
+by `cmake/DecodeQuality.cmake` against FFmpeg's own decode of the same file, on
+the four shapes the new decoder covers that the old row set did not:
+
+| File | Against the source | FFmpeg, same file | Against FFmpeg directly |
+|---|---|---|---|
+| MP3, layer III 44.1 kHz stereo 256k | 13.75 dB | 13.75 dB | **113.63 dB** |
+| MP3, MPEG-2 22.05 kHz stereo 128k | 14.72 dB | 14.72 dB | **113.56 dB** |
+| MP3, mono 44.1 kHz 128k | 14.53 dB | 14.53 dB | **113.54 dB** |
+| MP2, layer II 44.1 kHz stereo 256k | 6.44 dB | 6.44 dB | **88.17 dB** |
+
+The first two figures on every row say the encoder's loss is the encoder's: our
+decode and FFmpeg's sit at the same distance from the source to two decimals,
+start at the same sample, and put the same energy in every band to half a
+decibel. The last column is the two decoders against each other, and it is
+where layer II is different. Layer III agrees to 113 dB, a little under
+dr_mp3's 124; layer II agrees to 88. Both are far inside the RMS bound ISO
+11172-4 calls conformance, the band energies say neither decoder has a gain or
+an alignment wrong, and there is no reference outside either to say which
+layer II dequantiser is nearer -- so 88 dB is recorded as the measurement and
+the row's floor is set under it, not at it. The layer II row is also
+*untrimmed*: an MP2 carries no LAME tag, so the encoder's 481 samples of delay
+stay in, in both decoders alike.
+
 Every MPEG version and rate was checked: MPEG-1 at 44.1 and 48 kHz, MPEG-2 at
 16, 22.05 and 24 kHz, MPEG-2.5 at 11.025 and 12 kHz, CBR, VBR and dual channel.
 Lengths match FFmpeg exactly in all of them. Seeking matches the tail of a
@@ -1192,7 +1217,7 @@ found. MP3 earns a fuzzer more than the others here, because its frame parser
 resynchronises after garbage and will keep decoding through a file that is
 mostly not MP3.
 
-## AAC-LC, written here
+## AAC-LC, written here -- in Rust
 
 `decode_mp3` exists because Media Foundation got one thing wrong. `decode_aac`
 exists because every AAC decoder that could have been used got something wrong,
@@ -1207,7 +1232,9 @@ and each a different thing:
 
 So the codec is in this tree, next to ALAC, for the reason §7 of
 [the plan](plan.md) gives: write it yourself when the codec is small enough that
-you can. It is 1,599 lines, plus 368 of generated tables. **SBR and PS are not
+you can. It is `modules/codec/aac/decoder`, a Rust crate of 2,126 lines with its
+tests plus 386 of generated tables, ported from the 1,599 lines of C++ that
+preceded it; the port is written up at the end of this section. **SBR and PS are not
 here and are not planned** — they are another six thousand lines apiece, and an
 AudioSpecificConfig that asks for object type 5 or 29 is refused at the door so
 the file goes to `decode_ffmpeg`, which is what the fallback chain is for.
@@ -1303,6 +1330,67 @@ is what pointed at the answer.
 Both places the element can live are exercised: the same eight channels muxed as
 raw ADTS, where the PCE arrives inside every frame instead, decode to **135.89
 dB** as well.
+
+### What changed in the move to Rust, and what did not
+
+**Not a sample.** ALAC's port was accepted on one criterion and this one on the
+same: every hash this document records had to come out the same, and where the
+format has no reference to be exact against, every figure had to. They did.
+
+| File | Through | Recorded | From Rust |
+|---|---|---|---|
+| AAC-LC in M4A, 44.1 kHz stereo | `demux_mp4` + `codec_aac` | `7ca728d3…4baba3d6` | **identical** |
+| AAC-LC raw ADTS, 44.1 kHz | `demux_adts` + `codec_aac` | `3b261164…6d516a6b` | **identical** |
+| the quality corpus, 8 kHz to 96 kHz, mono to 7.1(wide), M4A and ADTS | `demux_mp4` / `demux_adts` + `codec_aac` | eight hashes | **all identical** |
+
+Seeks too: frames 1, 1000, 5000, 44100 and 88199 through both containers,
+identical bytes -- 25 lines of output compared with the C++ modules' and none
+differed. And the fifteen rows further down re-run with the Rust modules in the
+build: every SNR against the source, every alignment, every band and every
+figure against FFmpeg came out the same to the last decimal.
+
+**It is faster, and it was slower first.** The decoder is a translation of the
+C++, function for function and in the same order of floating-point operations
+-- which is what makes the identical hashes possible -- and the first build
+took 1.5 times as long per file. The IMDCT is a cosine sum, two million table
+reads per long window, and each read was a bounds check the compiler could not
+remove because the index wraps. Making the table an array of a power-of-two
+size and masking the index is the same arithmetic with a check the compiler
+*can* see through, and with it:
+
+| File | C++ | Rust, first | Rust, masked index |
+|---|---|---|---|
+| 2 s stereo M4A | 0.405 s | 0.592 s | **0.296 s** |
+| 2 s 7.1(wide) M4A | 1.415 s | 2.327 s | **0.897 s** |
+
+(Best of three, `mediaperch-probe decode`, the whole process.)
+
+**Where the `unsafe` went** is where ALAC's went: `modules/shared/mp-abi`,
+which grew a `Demux` trait beside `Codec` and the trampolines for
+`MpDemuxVtbl` -- 44 `unsafe` blocks, three `unsafe fn`, three `unsafe impl`,
+one file -- so that the ADTS container could be Rust too. The decoder crate and
+the framer crate carry `#![forbid(unsafe_code)]`, which the compiler enforces.
+
+**The framer.** `demux_adts` is the `adts` crate over any `Read + Seek`, and
+the one thing it does differently from the C++ is how it looks for a frame:
+where the C++ stepped through a file one `fseek` and one nine-byte `fread` per
+candidate byte, up to a quarter of a million of each, the Rust reads a window
+once and scans it. Same first confirmed offset, same packets, same seeks -- and,
+because a `Cursor` over bytes is a whole file to it, a fuzzer of its own for the
+first time, seeded with two small ADTS files in `fuzz/corpus/adts`.
+
+**The fuzzers moved with the code**, with the same input shapes and the same
+corpus, coverage-guided on stable the way ALAC's is -- and one more thing had
+to be found for the AAC one to build at all. With several codegen units LLVM's
+coverage pass died on `Associative COMDAT symbol ... does not exist`: it hangs a
+counter section off each function's COMDAT, and a generic instantiation one
+unit references and another later drops leaves a section pointing at nothing.
+Five flag combinations were tried; `-C codegen-units=1` is the one that links,
+and it is now set for every Rust fuzzer. Measured with it: 1,992 counters in
+the decoder and 264 in the framer, and five-minute campaigns of
+1,873,425 executions on the decoder (5,682 new corpus entries, 36 MB
+peak) and 10,604,778 on the framer (4,659 new, 34 MB) that found
+nothing -- which for a port is the second result that matters.
 
 ## WAV, across every axis it has
 
@@ -1464,7 +1552,7 @@ Everything above compares one decoder with another. That answers *do these
 agree* and it cannot answer *are they both wrong*, so there is now a second
 measurement that holds each decoder against the uncompressed file that went into
 the encoder -- the only reference outside every decoder. `mediaperch-probe
-compare` makes it, `cmake/DecodeQuality.cmake` drives twelve rows of it, and CI
+compare` makes it, `cmake/DecodeQuality.cmake` drives fifteen rows of it, and CI
 runs the lot on every push.
 
 **What it can prove is narrower than it sounds.** The encoder threw information
@@ -1493,7 +1581,7 @@ producing a number. The noise is there because it is what makes channels tell
 each other apart, and because noise is what drives an AAC encoder to substitute
 noise -- a sweep alone never reaches that code path at all.
 
-### The twelve rows
+### The fifteen rows
 
 | Row | Length | Start | Channels | Worst band | Against the source |
 |---|---|---|---|---|---|
@@ -1501,6 +1589,9 @@ noise -- a sweep alone never reaches that code path at all.
 | ALAC, stereo 44.1 kHz | exact | +0 | in order | 0.00 dB | **identical** |
 | ALAC, 5.1 at 48 kHz | exact | +0 | in order | 0.00 dB | **identical** |
 | MP3, stereo 44.1 kHz 256k | exact | +0 | in order | 0.07 dB | 13.75 dB |
+| MP2, layer II stereo 44.1 kHz 256k | *longer* | **+481** | in order | 0.07 dB | 6.44 dB |
+| MP3, MPEG-2 stereo 22.05 kHz 128k | exact | +0 | in order | 0.50 dB | 14.72 dB |
+| MP3, mono 44.1 kHz 128k | exact | +0 | — | 0.49 dB | 14.53 dB |
 | AAC, stereo 44.1 kHz 256k | exact | +0 | in order | 0.15 dB | 16.57 dB |
 | AAC, stereo 44.1 kHz 32k | exact | +0 | in order | — | 0.42 dB |
 | AAC, mono 48 kHz 192k | exact | +0 | — | 0.10 dB | 23.40 dB |
@@ -1517,6 +1608,10 @@ correctly still in the audio -- the decode is a whole frame late and longer than
 the source, and both are right. Every other check still applies to it, because
 the alignment is found first and the rest is measured where the audio actually
 landed. A decode that starts *early* fails whatever the format.
+
+The layer II row is the same kind of control, and it arrived with libmpg123:
+an MP2 carries no LAME tag, so its 481 samples of encoder delay stay in, and
+FFmpeg's decode of the same file starts at the same +481.
 
 ### Does the check work? Three bugs put back
 

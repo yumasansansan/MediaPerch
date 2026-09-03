@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# ADTS framing, written here. No library: the header is seven bytes and the
-# AudioSpecificConfig it implies is two.
+# Raw AAC in ADTS framing, in Rust -- the first container module that is. The
+# framing is the `adts` crate in framer/, over any seekable reader; the module
+# in src/ is the file and the ABI. See cmake/Rust.cmake for the build.
 
-mediaperch_add_module(mp_demux_adts
+mediaperch_add_rust_module(mp_demux_adts
     KIND demux
-    SOURCES demux_adts.cpp)
+    MANIFEST modules/demux/adts/Cargo.toml)

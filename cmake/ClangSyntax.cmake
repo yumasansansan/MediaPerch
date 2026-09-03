@@ -40,7 +40,6 @@ set(includes
     "-I${MEDIAPERCH_ROOT}/modules/shared/transform"
     "-I${MEDIAPERCH_ROOT}/modules/shared/biquad"
     "-I${MEDIAPERCH_ROOT}/modules/shared/convolve"
-    "-I${MEDIAPERCH_ROOT}/modules/codec/aac"
     "-I${MEDIAPERCH_ROOT}/external/dragonperch/src/core")
 
 # **Somebody else's headers go in with `-isystem`**, which is what stops their
@@ -84,12 +83,8 @@ set(sources
     modules/shared/biquad/biquad.cpp
     modules/shared/convolve/convolve.cpp
     modules/codec/pcm/codec_pcm.cpp
-    modules/codec/aac/aac.cpp
-    modules/codec/aac/aac_tables.cpp
-    modules/codec/aac/codec_aac.cpp
     modules/demux/wav/demux_wav.cpp
     modules/demux/flac/demux_flac.cpp
-    modules/demux/adts/demux_adts.cpp
     modules/demux/mp4/demux_mp4.cpp)
 
 # These need a header the build generates, so they are checked only when a build

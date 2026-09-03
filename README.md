@@ -37,11 +37,11 @@ containers are parsed by code here — the two that are a frame header rather th
 the rest are libFLAC, libogg, libmatroska, Bento4, dr_wav, and Media Foundation and FFmpeg
 as whole pipelines. Where the people who define a container ship a reader for it, that is
 what reads it. All hash-identical to each other and to the
-reference on everything they read, up to 32-bit at 1,048,575 Hz. One codec is Rust — ALAC,
-bit-identical to the C++ it replaced, with every `unsafe` the C ABI forces confined to one
-shared crate and none in the decoder. Format negotiation against real drivers; the passthrough graph on two threads;
+reference on everything they read, up to 32-bit at 1,048,575 Hz. Two codecs and a container
+are Rust — ALAC, AAC-LC and raw ADTS, bit-identical to the C++ they replaced, with every
+`unsafe` the C ABI forces confined to one shared crate and none in the decoders. Format negotiation against real drivers; the passthrough graph on two threads;
 WASAPI exclusive down to a 2 ms period; 768 kHz / 32-bit on a USB DAC; a headless engine
-with a shell that can be killed mid-track without the audio noticing. 254 tests plus
+with a shell that can be killed mid-track without the audio noticing. 247 tests plus
 libFuzzer targets, on MSVC.
 
 ## What reads what

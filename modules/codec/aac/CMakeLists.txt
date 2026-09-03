@@ -1,18 +1,14 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# AAC-LC, written here: 1,599 lines of bitstream with no file handle in sight,
-# and the vtable around it.
+# AAC-LC, written here, in Rust -- after ALAC, and for the same reasons.
 #
-# Separate library for the same reason ALAC's is: `aac_fuzzer` links it directly.
-# Four maintained libraries were measured before this was written and each
-# produced the wrong thing rather than a wrong sound -- see docs/formats.md.
+# There is no `mediaperch_aac` library beside the module any more because
+# there is no need for one: the decoder is the `aac` crate in decoder/, which
+# the tests and the fuzz target reach directly, so nothing has to be linkable.
+# See decoder/src/lib.rs for why it is written at all, src/lib.rs for the
+# module, and cmake/Rust.cmake for how a cargo build lands beside the C++
+# modules.
 
-add_library(mediaperch_aac STATIC aac.cpp aac_tables.cpp)
-target_include_directories(mediaperch_aac PUBLIC "${CMAKE_CURRENT_LIST_DIR}")
-target_link_libraries(mediaperch_aac PRIVATE mediaperch_flags)
-set_target_properties(mediaperch_aac PROPERTIES FOLDER "modules")
-
-mediaperch_add_module(mp_codec_aac
+mediaperch_add_rust_module(mp_codec_aac
     KIND codec
-    SOURCES codec_aac.cpp
-    LINK mediaperch_aac)
+    MANIFEST modules/codec/aac/Cargo.toml)
