@@ -815,6 +815,16 @@ It also does not remove the encoder's padding. That is the *container's*, and `d
 reads the LAME tag for exactly this reason -- the edit is a fact about the file, which is
 why `MpStreamInfo` carries it and a codec never sees it.
 
+Containers state the tail of that edit two different ways, and the ABI carries both because
+neither converts into the other. `play_frames` is **how long the audio is**, which is what
+MP4's `elst` and an MP3's LAME tag say. `trim_frames` is **how many frames at the end are
+padding**, which is what Matroska's `DiscardPadding` says -- and Matroska cannot state the
+first, because every timestamp in the file is scaled to the millisecond and a length taken
+from one is rounded. Rounding a lossless track's length is truncating it. So the host holds
+back `trim_frames` and drops them when the packets run out, which is exact whatever the
+scale: `docs/formats.md` has the four candidate formulas and the one that lands on the
+frame.
+
 #### Pause stops the clock
 
 Not silence into a running device — `IAudioClient::Stop`. In exclusive mode the device is

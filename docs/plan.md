@@ -281,6 +281,13 @@ its codec id, the codec's configuration blob verbatim — `ALACSpecificConfig`,
 duration, and **the gapless edit**, because that lives in the container and always did:
 `elst` in MP4, the LAME tag in an MP3's first frame, `pre_skip` in an Opus header.
 
+The edit's tail needs two fields rather than one, and Matroska is why. `play_frames` is how
+long the audio is; `trim_frames` is how many frames at the end are padding. A container
+states one or the other and neither converts into the other without the decoded length --
+which Matroska cannot give, because every timestamp in it is scaled to the millisecond and a
+rounded length applied to a lossless track truncates it. `docs/formats.md` has the four
+candidate formulas and the one that lands on the frame.
+
 A codec module never sees a file. It is handed an id, a configuration blob and packets, and
 it produces the file's own samples — which is the point worth saying plainly: **the split
 adds no conversion.** Bit-exactness is a property of the codec and the container has none of

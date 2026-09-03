@@ -175,6 +175,11 @@ private:
     std::vector<std::uint8_t> pcm_;
     std::size_t pcm_at_ = 0;
 
+    /// The last `trim_` frames decoded, held back rather than emitted, because
+    /// until another packet arrives they may be the end of the stream. Rides at
+    /// the front of `pcm_` on the next pump. Never longer than `trim_` frames.
+    std::vector<std::uint8_t> carry_;
+
     /// Where a seek asked to land, in the stream's own frames, and whether the
     /// next packet is the first one after it.
     ///
@@ -189,6 +194,9 @@ private:
     std::uint64_t skip_ = 0;
     std::uint64_t remaining_ = 0;
     bool bounded_ = false;
+    /// `MpStreamInfo::trim_frames`: how many frames at the end of the decoded
+    /// stream are the encoder's padding. Capped at one second on the way in.
+    std::uint64_t trim_ = 0;
     /// Where the caller is, in the stream's frames.
     std::uint64_t position_ = 0;
 };

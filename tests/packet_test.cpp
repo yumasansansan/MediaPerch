@@ -53,6 +53,7 @@ struct World {
     std::uint32_t packet_bytes = 8;
     std::uint64_t skip = 0;
     std::uint64_t play = 0;
+    std::uint64_t trim = 0;
     bool self_decodes = false;
     std::uint32_t stream_count = 1;
     /// How many packets before the target a seek lands on, as a codec that
@@ -101,6 +102,7 @@ MpResult MP_CALL demux_stream_info(MpDemux*, std::uint32_t index, MpStreamInfo* 
     out->total_frames = static_cast<std::uint64_t>(g.frames_per_packet) * g.packets;
     out->skip_frames = g.skip;
     out->play_frames = g.play;
+    out->trim_frames = g.trim;
     return MP_OK;
 }
 
@@ -365,6 +367,68 @@ TEST_CASE("the gapless edit is the container's, and it is applied once", "[packe
     REQUIRE(out == frames(5, 100));
 }
 
+TEST_CASE("a tail trim drops the end without shortening anything else", "[packet]")
+{
+    // **A trim is not a length**, which is why it has a field of its own.
+    // Matroska states one and cannot state the other: its timestamps are scaled
+    // to the millisecond, so a length taken from them is rounded, and rounding a
+    // lossless track's length truncates it. See MpStreamInfo::trim_frames.
+    //
+    // 8 packets of 16 frames is 128, and the last 7 are the encoder's padding.
+    g = World{};
+    g.trim = 7;
+    mp::PacketSource source;
+    std::string why;
+    REQUIRE(source.open(demux_vtbl(), "x", finds_flac(), why));
+
+    const auto out = drain(source);
+    REQUIRE(out == frames(0, 121));
+    // Every packet was still decoded: the trim holds frames back, it does not
+    // stop the demuxer early.
+    CHECK(g.decoded_packets == 8);
+}
+
+TEST_CASE("a trim and a head skip do not disturb each other", "[packet]")
+{
+    g = World{};
+    g.skip = 5;
+    g.trim = 7;
+    mp::PacketSource source;
+    std::string why;
+    REQUIRE(source.open(demux_vtbl(), "x", finds_flac(), why));
+
+    // Frames 5 through 120: the warm-up gone from the front, the padding from
+    // the back, and nothing in between touched.
+    REQUIRE(drain(source) == frames(5, 116));
+}
+
+TEST_CASE("a trim longer than the buffer still leaves the front intact", "[packet]")
+{
+    // The held-back frames outlast a single packet, so the carry has to survive
+    // being refilled -- which is the part that would silently drop audio.
+    g = World{};
+    g.trim = 40;  // two and a half packets
+    mp::PacketSource source;
+    std::string why;
+    REQUIRE(source.open(demux_vtbl(), "x", finds_flac(), why));
+
+    REQUIRE(drain(source) == frames(0, 88));
+}
+
+TEST_CASE("a trim nobody could mean is ignored rather than obeyed", "[packet]")
+{
+    // The number came out of a file. An uncapped one would decide how much the
+    // host holds in memory, so anything past a second of audio is nonsense and
+    // is dropped rather than trusted.
+    g = World{};
+    g.trim = 1u << 30;
+    mp::PacketSource source;
+    std::string why;
+    REQUIRE(source.open(demux_vtbl(), "x", finds_flac(), why));
+
+    REQUIRE(drain(source) == frames(0, 128));
+}
+
 TEST_CASE("a seek resets the codec and lands on the right sample", "[packet]")
 {
     g = World{};
@@ -381,6 +445,27 @@ TEST_CASE("a seek resets the codec and lands on the right sample", "[packet]")
 
     const auto out = drain(source);
     REQUIRE(out == frames(32, 96));
+}
+
+TEST_CASE("a seek keeps the tail trim and drops what was held back", "[packet]")
+{
+    // The held-back frames are audio from *before* the seek. Carrying them
+    // across would splice the old position onto the new one, quietly, at the
+    // first read -- so the seek clears them and the trim goes on applying.
+    g = World{};
+    g.trim = 7;
+    mp::PacketSource source;
+    std::string why;
+    REQUIRE(source.open(demux_vtbl(), "x", finds_flac(), why));
+
+    // Read enough to put frames in the holdback, then leave.
+    std::vector<std::uint8_t> scratch(64);
+    REQUIRE(source.read(scratch.data(), scratch.size()) == 64);
+    REQUIRE(source.seek(32));
+
+    // Frames 32 through 120: the seek target at the front, the padding still
+    // gone from the back, and nothing from before the seek in between.
+    REQUIRE(drain(source) == frames(32, 89));
 }
 
 TEST_CASE("a seek lands on the frame asked for, not on the packet holding it",

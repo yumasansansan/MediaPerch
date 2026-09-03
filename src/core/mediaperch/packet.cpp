@@ -309,6 +309,12 @@ bool PacketSource::open(const MpDemuxVtbl& demux, const char* path,
     skip_ = stream_.skip_frames;
     remaining_ = stream_.play_frames;
     bounded_ = stream_.play_frames != 0;
+
+    // A trim is a codec frame's worth of padding at most, so a second of it is
+    // already nonsense. Capped rather than trusted, because the number came out
+    // of a file and an uncapped one would decide how much this holds in memory:
+    // the held-back frames live here until the packets run out.
+    trim_ = stream_.trim_frames <= format_.sample_rate ? stream_.trim_frames : 0;
     seekable_ = demux.seek != nullptr;
     return true;
 }
@@ -318,20 +324,35 @@ bool PacketSource::pump()
     if (drained_) {
         return false;
     }
-    pcm_.resize(k_pcm_room);
+    // Whatever the last read held back goes in front of what is about to be
+    // decoded, so the trim below sees one continuous stream rather than the end
+    // of every packet.
+    const std::size_t carried = carry_.size();
+    pcm_.resize(carried + k_pcm_room);
+    if (carried != 0) {
+        std::memcpy(pcm_.data(), carry_.data(), carried);
+        carry_.clear();
+    }
     pcm_at_ = 0;
+    std::uint8_t* const into = pcm_.data() + carried;
+    const std::size_t room = k_pcm_room;
 
     if (self_decodes_) {
         // No packets, so nothing to discard against: such a demuxer seeks its
         // own way and the pipeline inside it lands where it was asked to.
         after_seek_ = false;
         std::size_t got = 0;
-        const MpResult r = demux_.read_frames(pcm_.data(), pcm_.size(), got);
-        pcm_.resize(got);
+        const MpResult r = demux_.read_frames(into, room, got);
+        pcm_.resize(carried + got);
         if (r != MP_OK || got == 0) {
             drained_ = true;
         }
-        return got != 0;
+        if (got == 0) {
+            // The carry is the tail, and the tail is what the trim discards.
+            pcm_.clear();
+            return false;
+        }
+        return true;
     }
 
     for (;;) {
@@ -341,10 +362,14 @@ bool PacketSource::pump()
             // The end of the packets is not the end of the audio: a codec may
             // still be holding a frame.
             std::size_t got = 0;
-            (void)codec_.flush(pcm_.data(), pcm_.size(), got);
-            pcm_.resize(got);
+            (void)codec_.flush(into, room, got);
+            pcm_.resize(carried + got);
             drained_ = true;
-            return got != 0;
+            if (got == 0) {
+                pcm_.clear();
+                return false;
+            }
+            return true;
         }
         if (r != MP_OK) {
             pcm_.clear();
@@ -352,8 +377,7 @@ bool PacketSource::pump()
             return false;
         }
         std::size_t got = 0;
-        if (codec_.decode(packet_.data(), packet.bytes, pcm_.data(), pcm_.size(), got) !=
-            MP_OK) {
+        if (codec_.decode(packet_.data(), packet.bytes, into, room, got) != MP_OK) {
             pcm_.clear();
             drained_ = true;
             return false;
@@ -379,7 +403,7 @@ bool PacketSource::pump()
                     skip_ = seek_target_ - packet.frame;
                 }
             }
-            pcm_.resize(got);
+            pcm_.resize(carried + got);
             return true;
         }
         // A packet that decoded to nothing -- a priming frame. Ask for another
@@ -419,9 +443,30 @@ std::size_t PacketSource::read(void* dst, std::size_t bytes)
             break;
         }
 
+        // **The tail trim, which is a count rather than a length.** The last
+        // `trim_` frames buffered are never emitted: until another packet
+        // arrives there is no way to know they are not the end of the stream,
+        // and if they are, they are the encoder's padding. So they are carried
+        // forward, and when the packets run out they are simply never handed
+        // over. See `MpStreamInfo::trim_frames` for why this cannot be done by
+        // shortening the length instead.
+        const std::size_t buffered = pcm_.size() - pcm_at_;
+        if (trim_ != 0 && buffered / stride <= trim_) {
+            carry_.assign(pcm_.begin() + static_cast<std::ptrdiff_t>(pcm_at_), pcm_.end());
+            pcm_.clear();
+            pcm_at_ = 0;
+            if (!pump()) {
+                break;
+            }
+            continue;
+        }
+
         std::size_t room = bytes - filled;
         room -= room % stride;
-        std::size_t take = std::min(room, pcm_.size() - pcm_at_);
+        std::size_t take = std::min(room, buffered);
+        if (trim_ != 0) {
+            take = std::min(take, buffered - static_cast<std::size_t>(trim_) * stride);
+        }
         take -= take % stride;
         if (bounded_) {
             const std::uint64_t allowed = remaining_ * stride;
@@ -451,6 +496,7 @@ void PacketSource::warm_up(std::uint64_t target)
     (void)codec_.reset();
     pcm_.clear();
     pcm_at_ = 0;
+    carry_.clear();
     drained_ = false;
     position_ = target;
 }

@@ -259,6 +259,30 @@ MpSampleType sample_type_for(std::uint32_t container, std::uint32_t valid) noexc
 }
 
 /// A Matroska track, as far as this module reads one.
+/// Nanoseconds to frames, without going through a double and without
+/// overflowing on a long file: the whole seconds first, then the remainder.
+///
+/// **Rounded to nearest, not truncated, and the difference is measured.** Every
+/// one of these numbers was a frame count before the muxer wrote it, and a whole
+/// number of frames rarely lands on a whole nanosecond: an MP3's 1105-frame
+/// delay is 25056689.34 ns and ffmpeg writes 25056689, which truncates back to
+/// 1104. Rounding returns the number the muxer started with. Vorbis's 128 and
+/// 120 in the same file are off by the same one nanosecond.
+std::uint64_t to_frames(std::uint64_t ns, std::uint32_t rate)
+{
+    // The remainder is under 10^9 and the rate under 2^21, so this stays inside
+    // 64 bits at every rate FLAC and Matroska can state.
+    const std::uint64_t rem = (ns % 1000000000ull) * rate;
+    return ns / 1000000000ull * rate + (rem + 500000000ull) / 1000000000ull;
+}
+
+/// What a track's last block says about where its audio stops. Filled by
+/// `find_tail`, which is where the two elements involved are explained.
+struct Tail {
+    std::uint64_t end_ns = 0;   ///< 0 when the last block did not say.
+    std::uint64_t trim_ns = 0;  ///< 0 when it stated no padding, which is usual.
+};
+
 struct Track {
     std::uint64_t number = 0; ///< Matroska's own number, which is not the index
     MpStreamKind kind = MP_STREAM_OTHER;
@@ -270,6 +294,10 @@ struct Track {
     /// CodecDelay in nanoseconds: the encoder's warm-up, which every container
     /// in this tree states differently and which `MpStreamInfo` states once.
     std::uint64_t codec_delay_ns = 0;
+    /// What the last block says about where the audio stops -- see `find_tail`.
+    /// Looked for once, on the first `stream_info`.
+    Tail tail{};
+    bool tail_looked_for = false;
 };
 
 } // namespace
@@ -320,6 +348,11 @@ struct MpDemux {
     /// version of this, which silently produced a block with no frames in it.
     std::unique_ptr<EbmlElement> block_owner;
     KaxInternalBlock* block = nullptr;
+    /// What the block said it lasts, in nanoseconds, and how much of the end
+    /// of it is padding. Both are 0 for a SimpleBlock, which has nowhere to say
+    /// either.
+    std::uint64_t block_duration_ns = 0;
+    std::uint64_t discard_ns = 0;
     unsigned next_lace = 0;
 
     std::uint64_t position = 0; ///< the next packet's first sample
@@ -368,7 +401,25 @@ void read_track_entry(MpDemux* d, KaxTrackEntry& entry)
         t.is_default = static_cast<std::uint64_t>(*flag) != 0;
     }
     if (auto* delay = FindChild<KaxCodecDelay>(entry)) {
-        t.codec_delay_ns = static_cast<std::uint64_t>(*delay);
+        // **Except for Vorbis, whose decoder has already applied it.**
+        //
+        // `CodecDelay` is meant to be a property of the codec, so any decoder
+        // has it and any demuxer must state it. Vorbis is where that stops being
+        // true: the format has no delay of its own -- Ogg trims the head with a
+        // granule position and nothing else -- and libvorbis returns nothing at
+        // all for the first packet, because a window with nothing to lap against
+        // produces no samples. So what it hands back already begins at zero.
+        //
+        // ffmpeg writes `CodecDelay` here anyway, describing its own decoder,
+        // which does emit those samples. Measured on the same two seconds of
+        // audio: libvorbis returns 88320 frames, the file states 128 frames of
+        // delay and 120 of padding, and 88320 - 120 is the 88200 the source WAV
+        // had. Subtracting the 128 as well cuts 128 frames of real audio off the
+        // front. The same file read as Ogg comes out at 88200 with no delay
+        // applied, which is the other half of the same measurement.
+        if (t.codec != MP_CODEC_VORBIS) {
+            t.codec_delay_ns = static_cast<std::uint64_t>(*delay);
+        }
     }
 
     std::uint32_t bits = 0;
@@ -631,6 +682,40 @@ bool next_block(MpDemux* d)
             // signed 16-bit offset from it and nothing else, so a block read
             // without its cluster has no position at all.
             block->SetParent(*static_cast<KaxCluster*>(d->cluster.get()));
+
+            // **Two elements say where the audio really ends, and both live
+            // in a BlockGroup and nowhere else.** That is why a muxer writes
+            // the last block of a track as a group rather than a SimpleBlock:
+            // an Opus stream ends on a whole 20 ms frame and a Vorbis stream on
+            // a whole block, and a file needs somewhere to say which part of
+            // that was real.
+            //
+            //  * `BlockDuration` is how long the block lasts. The spec is
+            //    explicit that padding does *not* shorten it.
+            //  * `DiscardPadding` is how much of the decoded output at the end
+            //    of the block is that padding.
+            //
+            // So the audible end is the block's timestamp plus the first minus
+            // the second. Taking only the first leaves the padding in, which is
+            // eight milliseconds of an Opus file -- measured, before this was
+            // read.
+            d->block_duration_ns = 0;
+            d->discard_ns = 0;
+            if (id == EBML_ID(KaxBlockGroup)) {
+                auto& group = static_cast<EbmlMaster&>(*child);
+                if (auto* how_long = FindChild<KaxBlockDuration>(group)) {
+                    d->block_duration_ns =
+                        static_cast<std::uint64_t>(*how_long) * d->timestamp_scale;
+                }
+                if (auto* discard = FindChild<KaxDiscardPadding>(group)) {
+                    // Signed, because it may be negative -- a gap rather than
+                    // padding. A negative one asks for silence to be inserted,
+                    // which nothing here does, so it is treated as none.
+                    const std::int64_t value = static_cast<std::int64_t>(*discard);
+                    d->discard_ns = value > 0 ? static_cast<std::uint64_t>(value) : 0;
+                }
+            }
+
             d->block_owner = std::move(child);
             d->block = block;
             d->next_lace = 0;
@@ -639,6 +724,68 @@ bool next_block(MpDemux* d)
         child->SkipData(*d->stream, EBML_CONTEXT(child.get()));
     }
     return false;
+}
+
+/// What the selected track's last block says about where the audio stops.
+///
+/// **The segment's `Duration` is not that, and neither is either of these on its
+/// own.** Duration is the length of the file, which for a lossy track is the
+/// encoded length: an Opus stream ends on a whole 20 ms frame whatever the audio
+/// did. The last block says more, in two elements that live in a BlockGroup and
+/// nowhere else -- which is why a muxer writes the final block of a track as a
+/// group rather than a SimpleBlock:
+///
+///  * `BlockDuration`, how long the block lasts, which gives an end timestamp.
+///  * `DiscardPadding`, how much of the *decoded output* at the end of it is
+///    the encoder's padding.
+///
+/// They answer different questions and only the second is exact. Measured on an
+/// Opus file whose last block is at 2001 ms with a 7 ms duration and 13.5 ms of
+/// padding: the timestamps are scaled to milliseconds, so an end taken from them
+/// lands 72 frames from the truth however the two are combined, while 13.5 ms of
+/// padding is 648 frames of 48 kHz exactly and 96960 - 312 - 648 is the 96000
+/// frames FFmpeg produces, to the sample. So the end timestamp becomes
+/// `total_frames`, which is a duration to display, and the padding becomes
+/// `trim_frames`, which is arithmetic.
+///
+/// Costs one walk from the last cue to the end of the file, which is a cluster
+/// or two -- not a pass over the whole thing.
+Tail find_tail(MpDemux* d)
+{
+    const std::uint64_t from = d->cues.empty() ? d->first_cluster : d->cues.back().at;
+    if (!restart_at(d, from)) {
+        return {};
+    }
+    Tail tail{};
+    for (int guard = 0; guard < (1 << 20); ++guard) {
+        if (!next_block(d)) {
+            break;
+        }
+        if (d->block_duration_ns != 0) {
+            tail.end_ns = d->block->GlobalTimestamp() + d->block_duration_ns;
+        } else {
+            // A block with no stated duration after one that had it means the
+            // stated one was not the last: forget it rather than trim early.
+            tail.end_ns = 0;
+        }
+        // The padding, unlike the duration, is not confined to the last block --
+        // a gapless join states it mid-file too. Only the final one is a tail.
+        tail.trim_ns = d->discard_ns;
+    }
+    return tail;
+}
+
+/// The tail for `track`, worked out once and remembered.
+const Tail& tail_of(MpDemux* d, std::size_t track)
+{
+    if (!d->tracks[track].tail_looked_for) {
+        const std::size_t was = d->selected;
+        d->selected = track;
+        d->tracks[track].tail = find_tail(d);
+        d->tracks[track].tail_looked_for = true;
+        d->selected = was;
+    }
+    return d->tracks[track].tail;
 }
 
 bool peek_mpeg_header(MpDemux* d, std::size_t track, std::vector<std::uint8_t>& out)
@@ -782,7 +929,7 @@ MpResult MP_CALL demux_stream_count(MpDemux* d, std::uint32_t* out_count) noexce
 }
 
 MpResult MP_CALL demux_stream_info(MpDemux* d, std::uint32_t index, MpStreamInfo* out) noexcept
-{
+try {
     if (d == nullptr || out == nullptr || index >= d->tracks.size()) {
         return MP_ERR_INVALID;
     }
@@ -804,30 +951,36 @@ MpResult MP_CALL demux_stream_info(MpDemux* d, std::uint32_t index, MpStreamInfo
     // an Opus header, spelled a third way, which is exactly why MpStreamInfo
     // carries it and a codec never sees it.
     //
-    // The tail is the segment's Duration. Matroska states no per-track length,
-    // so this is the file's, and it is what says where the audio stops rather
-    // than where the last packet does -- an Opus stream ends on a whole 20 ms
-    // frame and a Vorbis stream on a whole block, and playing the difference is
-    // a click at the end of every track. Measured: the three lossless codecs in
-    // the corpus come out byte-identical to their source WAV with this applied,
-    // so the trim is not costing a sample it should have kept.
+    // The tail is `DiscardPadding`, and it goes in `trim_frames` rather than in
+    // `play_frames` -- **`play_frames` stays 0, because Matroska cannot state
+    // it.** Every timestamp in the file is scaled to the millisecond, so a
+    // length derived from one is rounded, and a rounded length applied to a
+    // lossless track truncates it. The padding is exact whatever the scale, so
+    // that is the number worth having. `find_tail` has the measurement.
     if (t.format.sample_rate != 0) {
         if (t.codec_delay_ns != 0) {
-            out->skip_frames =
-                t.codec_delay_ns / 1000000000ull * t.format.sample_rate +
-                (t.codec_delay_ns % 1000000000ull) * t.format.sample_rate / 1000000000ull;
+            out->skip_frames = to_frames(t.codec_delay_ns, t.format.sample_rate);
         }
-        if (d->duration_scaled > 0.0) {
-            const auto ns = static_cast<std::uint64_t>(
-                d->duration_scaled * static_cast<double>(d->timestamp_scale));
-            const std::uint64_t frames =
-                ns / 1000000000ull * t.format.sample_rate +
-                (ns % 1000000000ull) * t.format.sample_rate / 1000000000ull;
-            out->total_frames = frames;
-            out->play_frames = frames;
+        const Tail& tail = tail_of(d, index);
+        out->trim_frames = to_frames(tail.trim_ns, t.format.sample_rate);
+
+        // A duration for the display, from the last block's own end where it
+        // gave one and the segment's Duration where it did not. Approximate by
+        // a millisecond, which is what it is for, and never used as a bound.
+        std::uint64_t ns = tail.end_ns;
+        if (ns == 0 && d->duration_scaled > 0.0) {
+            ns = static_cast<std::uint64_t>(d->duration_scaled *
+                                            static_cast<double>(d->timestamp_scale));
+        }
+        if (ns != 0) {
+            const std::uint64_t frames = to_frames(ns, t.format.sample_rate);
+            const std::uint64_t gone = out->skip_frames + out->trim_frames;
+            out->total_frames = frames > gone ? frames - gone : 0;
         }
     }
     return MP_OK;
+} catch (...) {
+    return MP_ERR_NO_MEMORY;
 }
 
 MpResult MP_CALL demux_stream_config(MpDemux* d, std::uint32_t index, std::uint8_t* out,

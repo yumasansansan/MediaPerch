@@ -322,7 +322,29 @@ typedef struct MpStreamInfo {
      * video where the audio clock is what matters (§9). 0 when not stated. */
     uint64_t duration_ms;
 
-    uint32_t reserved[4];
+    /* **Frames to drop from the end of the decoded stream, which is not the
+     * same fact as `play_frames` and cannot be converted into it.**
+     *
+     * A container that knows the audible length states it, and `play_frames` is
+     * where that goes: MP4's `elst` is a sample count, and an MP3's LAME tag is
+     * a frame count. A container that knows only how much of the last frame was
+     * padding states *that*, and it is this field: Matroska's `DiscardPadding`
+     * and an Opus stream's final granule position both work that way.
+     *
+     * The two are not interchangeable, because turning a trim into a length
+     * needs the decoded length, and a container that states a trim generally
+     * cannot state that. Matroska is the case in point: its block timestamps
+     * are scaled to milliseconds, so a length computed from the last block is
+     * rounded, and rounding a lossless track's length is truncating it. The
+     * trim, by contrast, is exact -- 13.5 ms of padding on a 48 kHz stream is
+     * 648 frames however the timestamps were scaled.
+     *
+     * A host holds back this many frames and drops them when the stream ends.
+     * Almost always 0. Where both this and `play_frames` are stated, the length
+     * has already accounted for the padding and this is 0. */
+    uint64_t trim_frames;
+
+    uint32_t reserved[2];
 } MpStreamInfo;
 
 /* One packet, as it sits in the container. Whose memory it is is stated on

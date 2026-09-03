@@ -118,10 +118,40 @@ the table above.
 
 **If fragmented MP4 should play without FFmpeg, that is a real piece of work and
 a decision rather than an oversight** -- either parsing `moof`/`trun` here, which
-is a fair amount of new parser over a stranger's bytes, or linking Bento4 as a
-submodule and making `demux_mp4` a wrapper the way `demux_mkv` wraps libmatroska.
-The second is the smaller change and the one consistent with what this document
-says about FLAC above.
+is a fair amount of new parser over a stranger's bytes, or linking one of them as
+a submodule and making `demux_mp4` a wrapper the way `demux_mkv` wraps
+libmatroska. The second is the smaller change and the one consistent with what
+this document says about FLAC above.
+
+**Which one, if it comes to that: Bento4.** Checked against both checkouts:
+
+| | Bento4 | GPAC |
+|---|---|---|
+| Licence | GPL-2.0-**or-later**, dual-licensed (commercial available) | LGPL-2.1-or-later |
+| Compatible with this tree | yes -- "or any later version" is what makes it so | yes |
+| Lines of source | ~80,600 | ~964,800 |
+| Scope | ISOBMFF, and only that | a whole multimedia framework: filter graph, streaming server, DASH packager, 25 more container formats |
+| Build system | **CMake** | `./configure` + Makefile, or hand-kept MSVC projects |
+| Reader API | `AP4_Track` / `AP4_SampleTable`, C++ | `gf_isom_open` / `gf_isom_get_sample`, C |
+
+The licence question resolves the other way from what it looks like at a glance:
+Bento4 being "GPL" reads as a problem for a GPL-3.0-or-later tree, and it would
+be if it were GPLv2-**only**. Its file headers say *"either version 2, or (at your
+option) any later version"*, so it may be taken as GPLv3 and linked here. GPAC's
+LGPL-2.1-or-later is looser still, and would matter to anyone wanting to link
+this ABI's modules into something non-free; nothing in this tree does.
+
+What decides it is the other two rows. **GPAC has no CMake build**, and every
+other dependency here is a submodule that `add_subdirectory` picks up and builds
+with the same compiler and flags as everything else -- `docs/building.md` is most
+of a page on why that is not negotiable. And GPAC is a framework twelve times the
+size, of which `src/isomedia` is the part wanted; taking it means taking its
+configure script, its platform layer and its build assumptions to reach one
+directory. Bento4 is an ISOBMFF library with a CMakeLists.txt, which is the shape
+of every submodule already here.
+
+None of this is scheduled. It is written down so that the next person to look at
+fragmented MP4 does not have to measure it again.
 
 ### Where the reference implementation is used, and where it is not
 
@@ -162,31 +192,110 @@ that could hold any of them.
 
 Measured against FFmpeg on the same files:
 
-| File | Through | Frames | Against FFmpeg |
-|---|---|---|---|
-| FLAC in Matroska | `demux_mkv` + `codec_flac` | 88200 | **byte-identical**, and identical to the source WAV |
-| ALAC in Matroska | `demux_mkv` + `codec_alac` | 88200 | **byte-identical**, and identical to the source WAV |
-| PCM in Matroska | `demux_mkv` + `codec_pcm` | 88200 | **byte-identical**, and identical to the source WAV |
-| AAC in Matroska | `demux_mkv` + `codec_aac` | 89088 | same length; two AAC decoders, so not the same bytes |
-| Vorbis in Matroska | `demux_mkv` + `codec_vorbis` | 88332 | 132 frames longer -- see below |
-| Opus in WebM | `demux_mkv` + `codec_opus` | 96384 | 384 frames longer -- see below |
-| MP3 in Matroska | `demux_mkv` + `codec_mp3` | 88752 | 552 frames longer -- see below |
+Measured against FFmpeg on two seconds of the same audio, every file made from
+one 88200-frame WAV:
+
+| File | Through | Frames | FFmpeg | Against FFmpeg |
+|---|---|---|---|---|
+| FLAC in Matroska | `demux_mkv` + `codec_flac` | 88200 | 88200 | **byte-identical**, and identical to the source WAV |
+| ALAC in Matroska | `demux_mkv` + `codec_alac` | 88200 | 88200 | **byte-identical**, and identical to the source WAV |
+| PCM in Matroska | `demux_mkv` + `codec_pcm` | 88200 | 88200 | **byte-identical**, and identical to the source WAV |
+| AAC in Matroska | `demux_mkv` + `codec_aac` | 89088 | 89088 | same length; two AAC decoders, so not the same bytes |
+| Vorbis in Matroska | `demux_mkv` + `codec_vorbis` | 88200 | 88200 | same length, and the source's |
+| MP3 in Matroska | `demux_mkv` + `codec_mp3` | 88200 | 88200 | same length, and the source's |
+| Opus in WebM | `demux_mkv` + `codec_opus` | 96000 | 96000 | same length -- 2.000 s at Opus's 48 kHz |
 
 **The three lossless rows being byte-identical is the result that matters**: a
 container reader that changed a sample would be a container reader that was
 wrong, and Matroska is by some distance the most complicated container this tree
-reads.
+reads. **The four lossy rows landing on the exact frame is the second result**,
+and it took an ABI field to get there.
 
-**Where the lossy lengths come from, and what is not implemented.** Matroska
-states the encoder's head padding per track, as `CodecDelay`, and this module
-converts it to `MpStreamInfo::skip_frames` -- the same fact `elst` carries in MP4
-and `pre_skip` carries in an Opus header, spelled a third way, and the reason
-that field is the container's rather than the codec's. For the *tail* Matroska
-states only the segment's `Duration`, which is what `play_frames` is set from,
-and which for these files is the encoded length rather than the audible one. The
-exact tail is in the last block's `BlockDuration`, which this module does not yet
-read. Until it does, a lossy track plays its encoder's final padding: 384 frames
-of an Opus file, 8 ms.
+### Where a lossy track ends, and why `play_frames` could not say it
+
+Matroska states the encoder's head padding per track, as `CodecDelay`, and this
+module converts it to `MpStreamInfo::skip_frames` -- the same fact `elst` carries
+in MP4 and `pre_skip` carries in an Opus header, spelled a third way, and the
+reason that field is the container's rather than the codec's.
+
+The tail took longer, and the reason is worth writing down. Matroska states it in
+`DiscardPadding`, which lives in a `BlockGroup` beside the last block -- which is
+why a muxer writes the final block of a track as a group rather than a
+SimpleBlock. But `DiscardPadding` is **how many frames at the end are padding**,
+and `play_frames` is **how long the audio is**, and turning the first into the
+second needs the decoded length, which Matroska cannot state: every timestamp in
+the file is scaled to the millisecond. Measured on the Opus file, whose last
+block is at 2001 ms with a 7 ms `BlockDuration` and 13.5 ms of padding:
+
+| From the file | Frames | Against FFmpeg's 96000 |
+|---|---|---|
+| `Duration`, the segment's own length | 96648 | 648 too many -- the padding, played |
+| block timestamp + `BlockDuration` | 96384 | 384 too many |
+| the same, minus `DiscardPadding` | 95736 | 264 **too few** -- real audio cut |
+| decoded length - `CodecDelay` - `DiscardPadding` | 96000 | **exact** |
+
+The last row is exact because it never divides: 13.5 ms of padding is 648 frames
+of 48 kHz however the timestamps were scaled, and 6.5 ms of delay is 312. The
+three rows above it all pass through a millisecond-rounded timestamp. So the
+padding is stated as itself, in `MpStreamInfo::trim_frames`, and the host holds
+back that many frames and drops them when the packets run out. `play_frames`
+stays 0 for Matroska, which is the honest answer: the file does not say.
+
+Two smaller things came out of the same measurement.
+
+**Nanoseconds convert by rounding, not truncation.** Every one of these numbers
+was a frame count before the muxer wrote it, and a whole number of frames rarely
+lands on a whole nanosecond -- an MP3's 1105-frame delay is 25056689.34 ns, and
+ffmpeg writes 25056689, which truncates back to 1104. One frame, on every file,
+until `to_frames` rounded.
+
+**Vorbis states a `CodecDelay` that libvorbis has already applied**, and this
+module ignores it for that codec alone. Vorbis has no delay of its own -- Ogg
+trims its head with a granule position and nothing else -- and libvorbis returns
+nothing at all for the first packet, because a window with nothing to lap against
+produces no samples. ffmpeg writes `CodecDelay: 2902494` anyway, describing its
+own decoder, which does emit them. Measured: libvorbis returns 88320 frames for
+this file, the padding is 120, and 88320 - 120 is the source's 88200 exactly;
+subtracting the stated 128 as well cuts 128 frames of real audio off the front.
+The same Vorbis read as Ogg comes out at 88200 with no delay applied, which is
+the other half of the measurement.
+
+### libmatroska or libwebm, and why this one
+
+Google's [libwebm](https://github.com/webmproject/libwebm) reads the same bytes,
+and the choice between them is closer than the names suggest. Checked against
+both checkouts rather than from memory:
+
+| | libmatroska (+ libebml) | libwebm |
+|---|---|---|
+| Licence | LGPL-2.1-or-later | BSD-3-Clause |
+| Lines of source | ~12,600 | ~35,800, of which `mkvparser` is a fraction |
+| Scope | the whole Matroska schema: **258 element classes** | the WebM subset: 22 parser classes |
+| Also writes files | yes | yes (`mkvmuxer`) |
+| What this module needs | all present | all present: `GetCodecDelay`, `GetDiscardPadding`, `GetDuration`, lacing, `CodecPrivate`, Cues |
+| Fuzzed upstream | no in-tree target | two: `mkvparser_fuzzer`, `webm_fuzzer` |
+
+**libwebm would have worked.** Its `mkvparser` does not gate on `DocType` -- it
+requires one to be present and the versions to be sane, and nothing more -- so it
+reads a plain `.mka` as readily as a `.webm`, and every element this module reads
+has an accessor on it. On two counts it is the better-behaved dependency: BSD
+rather than LGPL, and two fuzz targets maintained upstream against libmatroska's
+none.
+
+It was not chosen for one reason, and it is the reason recorded at the top of
+this document for FLAC: **libmatroska is the format's own implementation.** It is
+written by the people who define Matroska, it is what the specification is
+checked against, and its 258 element classes are the schema itself rather than a
+profile of it -- Chapters, Attachments, Tags, `ContentEncoding`, the lot. libwebm
+is Google's reader for the subset Chrome plays, and its 22 classes are exactly
+that subset. This tree already reads Matroska with FLAC, ALAC, MP3 and AAC in it,
+none of which appears in a WebM file, and §9's video path will want more of the
+schema rather than less.
+
+The trade is honest and worth stating rather than hiding: this tree took the
+complete schema and gave up a permissive licence and upstream fuzzing for it.
+LGPL-2.1-or-later is compatible here -- it may be taken as LGPLv3, which GPLv3
+links -- and `docs/plan.md` records that check beside every other submodule's.
 
 **A file is genuinely several streams, and this is where that stops being
 theory.** Given a Matroska with H.264 video, a FLAC track and an Opus track,
