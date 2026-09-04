@@ -40,10 +40,12 @@ struct YuvMatrix {
     float g_u = 0.0f;
     float g_v = 0.0f;
     float b_u = 0.0f;
-    /// **What a sample has to be multiplied by to mean what it says.** NV12 in
-    /// an `R8_UNORM` texture samples to exactly its value over 255, so this is
+    /// **What a sample has to be multiplied by to mean what it says**, passed
+    /// in rather than worked out here: it is a property of how the bits were
+    /// stored and `mp_pixel_sample_scale` derives it from the layout. NV12 in
+    /// an `R8_UNORM` texture samples to exactly its value over 255, so it is
     /// 1. P010 puts ten bits in the *top* of each sixteen, so an `R16_UNORM`
-    /// sample is `(v << 6) / 65535` and this is `65535 / (1023 * 64)` -- a
+    /// sample is `(v << 6) / 65535` and it is `65535 / (1023 * 64)` -- a
     /// factor of 1.00098, which is small, is not one, and is the difference
     /// between white and one part in a thousand under it.
     float sample_scale = 1.0f;
@@ -56,7 +58,7 @@ struct YuvMatrix {
 /// treated it as full range would crush the blacks and clip the whites -- which
 /// looks like a contrast setting rather than like a bug.
 [[nodiscard]] YuvMatrix yuv_matrix_for(std::uint32_t matrix_code_point, bool full_range,
-                                       bool ten_bit) noexcept;
+                                       double sample_scale) noexcept;
 
 } // namespace mp::video
 

@@ -36,6 +36,11 @@
 
 namespace {
 
+/// The layouts these tests hand over, spelled by the ABI's own macros so that
+/// a test states the same thing a decoder would.
+constexpr MpPixelLayout k_bgra8 = MP_LAYOUT_BGRA8;
+constexpr MpPixelLayout k_nv12 = MP_LAYOUT_NV12;
+
 /// The module, loaded the way the engine loads it.
 struct Module {
     Module()
@@ -165,7 +170,7 @@ public:
     {
         MpVideoFrame frame{};
         frame.size = sizeof(frame);
-        frame.format = MP_PIXEL_BGRA8;
+        frame.layout = k_bgra8;
         frame.width = width;
         frame.height = height;
         frame.plane[0] = bgra.data();
@@ -185,29 +190,36 @@ public:
     {
         std::uint32_t w = 0;
         std::uint32_t h = 0;
-        MpPixelFormat format = MP_PIXEL_NONE;
+        MpPixelLayout layout{};
+        layout.size = sizeof(layout);
         // The same grow-and-ask-again shape read_packet has: nothing is lost
         // by asking with no room first.
-        const MpResult sized = vtbl_->read_back(handle_, nullptr, 0, &w, &h, &format);
+        const MpResult sized = vtbl_->read_back(handle_, nullptr, 0, &w, &h, &layout);
         if (sized != MP_ERR_NO_MEMORY || w == 0 || h == 0) {
             return {};
         }
         const std::size_t pixels = static_cast<std::size_t>(w) * h * 4u;
         std::vector<float> out(pixels);
 
-        if (format == MP_PIXEL_RGBA32F) {
+        // Asked of the layout rather than matched against a name: single and
+        // half precision differ in one field, which is the shape v4 exists to
+        // have.
+        if ((layout.flags & MP_PIXEL_FLOAT) == 0u) {
+            return {};
+        }
+        if (layout.container_bits == 32u) {
             if (vtbl_->read_back(handle_, out.data(), out.size() * sizeof(float), &w, &h,
-                                 &format) != MP_OK) {
+                                 &layout) != MP_OK) {
                 return {};
             }
             return out;
         }
-        if (format != MP_PIXEL_RGBA16F) {
+        if (layout.container_bits != 16u) {
             return {};
         }
         std::vector<std::uint16_t> halves(pixels);
         if (vtbl_->read_back(handle_, halves.data(), halves.size() * sizeof(std::uint16_t),
-                             &w, &h, &format) != MP_OK) {
+                             &w, &h, &layout) != MP_OK) {
             return {};
         }
         for (std::size_t i = 0; i < pixels; ++i) {
@@ -375,7 +387,7 @@ TEST_CASE("a presenter refuses what it cannot do, and says so", "[video][d3d11]"
     std::vector<std::uint8_t> planes(16u * 16u * 3u / 2u, 0x80);
     MpVideoFrame frame{};
     frame.size = sizeof(frame);
-    frame.format = MP_PIXEL_NV12;
+    frame.layout = k_nv12;
     frame.width = 16;
     frame.height = 16;
     frame.plane[0] = planes.data();
@@ -514,7 +526,7 @@ TEST_CASE("NV12 becomes RGB by the matrix the container named", "[video][d3d11][
 
     MpVideoFrame frame{};
     frame.size = sizeof(frame);
-    frame.format = MP_PIXEL_NV12;
+    frame.layout = k_nv12;
     frame.width = 32;
     frame.height = 32;
     frame.plane[0] = luma.data();
@@ -579,7 +591,7 @@ TEST_CASE("studio range and full range are not the same picture", "[video][d3d11
         std::vector<std::uint8_t> chroma(8u * 8u * 2u, 128);
         MpVideoFrame frame{};
         frame.size = sizeof(frame);
-        frame.format = MP_PIXEL_NV12;
+        frame.layout = k_nv12;
         frame.width = 16;
         frame.height = 16;
         frame.plane[0] = luma.data();
@@ -701,7 +713,7 @@ TEST_CASE("a decoder's own texture is viewed rather than copied", "[video][d3d11
 
     MpVideoFrame frame{};
     frame.size = sizeof(frame);
-    frame.format = MP_PIXEL_NV12;
+    frame.layout = k_nv12;
     frame.width = 32;
     frame.height = 32;
     frame.texture = texture;

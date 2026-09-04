@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /*
- * MediaPerch module ABI, version 2.
+ * MediaPerch module ABI, version 4.
  *
  * The only file a third-party module has to read, and the only place where two
  * languages meet. Everything here is deliberately restricted to the C11 common
@@ -54,6 +54,13 @@ extern "C" {
 #  define MP_EXPORT __attribute__((visibility("default")))
 #endif
 
+/* Pure arithmetic over the fields of a struct in this header: no allocation,
+ * nothing that can unwind, no linkage. That is the whole of what is allowed to
+ * be a function in this file, and each one states its formula in the comment
+ * beside it so that a module in a language which cannot see the function
+ * derives the same number rather than guessing at it. */
+#define MP_INLINE static inline
+
 #if defined(__cplusplus)
 #  define MP_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
 #elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
@@ -62,11 +69,20 @@ extern "C" {
 #  define MP_STATIC_ASSERT(cond, msg) /* pre-C11: layout is checked by the host */
 #endif
 
-/* 2: containers and codecs are separate kinds. v1 had one MP_KIND_DECODER that
- * was both, and asked every one of them whether it could read a file; it is
- * gone, and so is every module that used it. See docs/plan.md §4, *ABI v2: the
- * container decides*. */
-#define MP_ABI_VERSION 3u
+/* The versions, and what each one could not reach by appending:
+ *
+ *   2  containers and codecs are separate kinds. v1 had one MP_KIND_DECODER
+ *      that was both and asked every one of them whether it could read a file.
+ *   3  several streams out of one file. `select` named one and `seek(frame)`
+ *      meant "the selected one", which has no answer once a player wants audio
+ *      and video out of the same container.
+ *   4  a frame describes its pixels rather than naming them. v3's
+ *      MpPixelFormat was six DXGI names and could not say 4:2:2, 4:4:4 or
+ *      twelve bits at all -- and naming the combinations would have taken
+ *      seventy-five enumerators. See MpPixelLayout below.
+ *
+ * docs/plan.md §4 has the argument for each. */
+#define MP_ABI_VERSION 4u
 
 /* ------------------------------------------------------------------ */
 /* Results                                                             */
@@ -684,44 +700,227 @@ typedef struct MpGraphicsDevice {
 
 typedef struct MpVideo MpVideo; /* opaque, module-owned */
 
-typedef uint32_t MpPixelFormat;
-enum {
-    MP_PIXEL_NONE = 0u,
-    /* 8-bit 4:2:0: a full-size Y plane, then a half-size interleaved UV plane.
-     * What every hardware decoder on Windows produces. */
-    MP_PIXEL_NV12 = 1u,
-    /* The same two planes with 10 bits in the top of each 16, which is what
-     * HDR content decodes to. */
-    MP_PIXEL_P010 = 2u,
-    /* One plane, 8 bits each of B, G, R and A. Not a codec's output -- it is
-     * what a test pattern and a software decoder have, and what makes a
-     * presenter checkable before there is anything to decode. */
-    MP_PIXEL_BGRA8 = 3u,
+/* **Pixels are described here, not named**, and v3's MpPixelFormat is what
+ * this replaces.
+ *
+ * That enum had six values -- NV12, P010, BGRA8 and three render targets --
+ * which is DXGI's vocabulary sitting in the one header meant to outlive
+ * Direct3D, and it could not say 4:2:2, 4:4:4, 4:0:0 or twelve bits at all.
+ * Naming the combinations instead would take five chroma layouts by five
+ * depths by three packings: seventy-five enumerators before alpha and float,
+ * and a switch nobody writes correctly twice.
+ *
+ * So a frame says what it *is* and every consumer derives the rest. How many
+ * planes there are, how large the chroma planes are, and what a stored sample
+ * must be scaled by are all arithmetic over these fields; the inline helpers
+ * below are that arithmetic written once, and their comments are its
+ * specification.
+ *
+ * **The ABI names fourteen and sixteen bits before anything here produces
+ * them, on purpose.** An ABI that cannot say a depth is an ABI that truncates
+ * it, and naming one costs nothing. Writing the *path* still waits for a
+ * producer, which is the same rule everything else in this tree follows:
+ * HEVC's range extensions reach sixteen bits, AV1 stops at twelve, and this
+ * tree decodes neither yet. */
 
-    /* The three a presenter renders *into*, and hands back from `read_back`.
-     * All are one plane, RGBA order, tightly packed.
-     *
-     * `RGBA16F` is scRGB as a display gets it: linear half-float, and **the
-     * most precise format a flip-model swap chain accepts** -- DXGI offers
-     * 8-bit UNORM, 10-bit UNORM and this, and nothing above it, so presenting
-     * through the desktop is capped here by the platform rather than by a
-     * choice. It is not a *sufficient* format: half's relative step is
-     * 1/1024 at worst, and a 12-bit output needs 1/1706 at white. See
-     * plan.md §9.10, and note that a presenter on a dedicated video output
-     * would quantise from RGBA32F straight to the card's own integer format
-     * and never touch half.
-     *
-     * `RGB10A2` is HDR10: PQ-encoded, ten bits a channel packed into a u32
-     * with R in the low bits.
-     *
-     * `RGBA32F` is linear single precision, which a swap chain will not take
-     * and an off-screen target will. It is what a *measurement* renders into,
-     * so that what a test hashes is the pipeline's arithmetic and not the
-     * presentation format's rounding. */
-    MP_PIXEL_RGBA16F = 4u,
-    MP_PIXEL_RGB10A2 = 5u,
-    MP_PIXEL_RGBA32F = 6u
+typedef uint32_t MpChroma;
+enum {
+    /* 4:0:0. One plane and no chroma at all -- HEVC has monochrome profiles
+     * and AV1 has I400, and a grey picture through a colour path is a bug
+     * that looks like a decision. */
+    MP_CHROMA_MONO = 0u,
+    MP_CHROMA_420 = 1u,
+    MP_CHROMA_422 = 2u,
+    MP_CHROMA_444 = 3u,
+    /* Not a subsampling: the value that turns the YUV matrix off. RGB frames
+     * are what a presenter renders into and what a test pattern is. */
+    MP_CHROMA_RGB = 4u
 };
+
+typedef uint32_t MpPacking;
+enum {
+    /* One plane per component. What every software decoder produces. */
+    MP_PACK_PLANAR = 0u,
+    /* Luma in one plane, the two chroma components interleaved in a second.
+     * NV12 and P010 are this, and it is what the fixed-function video block
+     * writes because that is what it was built to write. */
+    MP_PACK_SEMI_PLANAR = 1u,
+    /* One plane with the components adjacent. BGRA8 and every render target. */
+    MP_PACK_INTERLEAVED = 2u
+};
+
+/* MpPixelLayout::flags */
+#define MP_PIXEL_FLOAT 0x1u     /* IEEE floats; `bits` is then 16 or 32 */
+#define MP_PIXEL_ALPHA 0x2u     /* interleaved RGB carries a fourth component */
+#define MP_PIXEL_BGR_ORDER 0x4u /* B before R, which is what Direct3D calls BGRA */
+/* One container holds the whole pixel rather than one component, and `bits` is
+ * then the widest field in it. **HDR10's R10G10B10A2 is why this exists**: ten
+ * bits a channel and two of alpha packed into a single u32, which is a shape
+ * no per-component container can describe. Everything else in this header has
+ * one container per component. */
+#define MP_PIXEL_PACKED 0x8u
+
+typedef struct MpPixelLayout {
+    uint32_t size;
+    MpChroma chroma;
+    MpPacking packing;
+    /* Significant bits in one component: 8, 10, 12, 14 or 16 -- or, with
+     * MP_PIXEL_FLOAT, 16 or 32. Zero means there is no picture, which is what
+     * a zeroed frame says. */
+    uint32_t bits;
+    /* What one component occupies in memory: 8, 16 or 32, and never less than
+     * `bits`. Ten-bit video is `bits` 10 in `container_bits` 16. */
+    uint32_t container_bits;
+    /* How far the significant bits sit above the bottom of the container.
+     *
+     * **This is the field that stops a silent 64x error**, and it exists
+     * because two producers of the same depth disagree: P010 puts ten bits at
+     * the TOP of sixteen, so `shift` is 6, while dav1d hands ten bits back at
+     * the bottom, so `shift` is 0. Same depth, same container, same chroma,
+     * and a consumer that assumes either one is wrong about the other by a
+     * factor of sixty-four -- as brightness, not as an error. */
+    uint32_t shift;
+    uint32_t flags;
+    uint32_t reserved;
+} MpPixelLayout;
+
+/* How many components a pixel has: three, plus alpha where RGB carries it,
+ * and one for monochrome. */
+MP_INLINE uint32_t mp_pixel_components(const MpPixelLayout *l)
+{
+    if (l->chroma == MP_CHROMA_MONO) {
+        return 1u;
+    }
+    if (l->chroma == MP_CHROMA_RGB && (l->flags & MP_PIXEL_ALPHA) != 0u) {
+        return 4u;
+    }
+    return 3u;
+}
+
+/* What one component occupies. */
+MP_INLINE uint32_t mp_pixel_component_bytes(const MpPixelLayout *l)
+{
+    return l->container_bits / 8u;
+}
+
+/* What one pixel occupies -- **for MP_PACK_INTERLEAVED**, where that is a
+ * question with an answer. A planar or semi-planar layout has a different
+ * answer per plane and is asked per plane instead. */
+MP_INLINE uint32_t mp_pixel_bytes(const MpPixelLayout *l)
+{
+    if ((l->flags & MP_PIXEL_PACKED) != 0u) {
+        return l->container_bits / 8u;
+    }
+    return mp_pixel_components(l) * mp_pixel_component_bytes(l);
+}
+
+/* How many planes `l` uses: 3 planar, 2 semi-planar, 1 interleaved -- and 1
+ * for monochrome whatever the packing says, because there is no chroma to
+ * put anywhere. */
+MP_INLINE uint32_t mp_pixel_planes(const MpPixelLayout *l)
+{
+    if (l->chroma == MP_CHROMA_MONO || l->packing == MP_PACK_INTERLEAVED) {
+        return 1u;
+    }
+    return l->packing == MP_PACK_SEMI_PLANAR ? 2u : 3u;
+}
+
+/* log2 of the horizontal and vertical chroma subsampling: 4:2:0 halves both,
+ * 4:2:2 halves the width only, 4:4:4 and RGB halve neither. */
+MP_INLINE uint32_t mp_pixel_shift_x(const MpPixelLayout *l)
+{
+    return (l->chroma == MP_CHROMA_420 || l->chroma == MP_CHROMA_422) ? 1u : 0u;
+}
+MP_INLINE uint32_t mp_pixel_shift_y(const MpPixelLayout *l)
+{
+    return l->chroma == MP_CHROMA_420 ? 1u : 0u;
+}
+
+/* A chroma plane's dimensions, **rounded up**: an odd width still has a chroma
+ * column for its last pixel and rounding down loses it.
+ *
+ *     chroma = (size + (1 << shift) - 1) >> shift
+ */
+MP_INLINE uint32_t mp_pixel_chroma_width(const MpPixelLayout *l, uint32_t width)
+{
+    const uint32_t sh = mp_pixel_shift_x(l);
+    return (width + (1u << sh) - 1u) >> sh;
+}
+MP_INLINE uint32_t mp_pixel_chroma_height(const MpPixelLayout *l, uint32_t height)
+{
+    const uint32_t sh = mp_pixel_shift_y(l);
+    return (height + (1u << sh) - 1u) >> sh;
+}
+
+/* What a sample must be multiplied by, **after a read that normalised the
+ * whole container to [0,1]**, to mean what it says:
+ *
+ *     scale = (2^container_bits - 1) / ((2^bits - 1) << shift)
+ *
+ * Eight bits in eight is 255/255, which is 1. P010 is 65535 / (1023 * 64),
+ * because a container-normalised read of ten bits sitting at the top of
+ * sixteen gives the value times sixty-four. The same ten bits at the bottom
+ * is 65535 / 1023. Float carries its own value and is 1. */
+MP_INLINE double mp_pixel_sample_scale(const MpPixelLayout *l)
+{
+    double full;
+    double used;
+    if ((l->flags & MP_PIXEL_FLOAT) != 0u || l->bits == 0u ||
+        l->container_bits == 0u) {
+        return 1.0;
+    }
+    full = (double)((((uint64_t)1) << l->container_bits) - 1u);
+    used = (double)(((((uint64_t)1) << l->bits) - 1u) << l->shift);
+    return used != 0.0 ? full / used : 1.0;
+}
+
+/* The well-known layouts, so that a producer states one rather than filling in
+ * seven fields and a consumer can compare against something with a name. They
+ * are shorthand and not a second vocabulary: each is exactly the fields it
+ * expands to, and nothing branches on which one was used. */
+#define MP_LAYOUT_NV12                                                                   \
+    { sizeof(MpPixelLayout), MP_CHROMA_420, MP_PACK_SEMI_PLANAR, 8u, 8u, 0u, 0u, 0u }
+#define MP_LAYOUT_P010                                                                   \
+    { sizeof(MpPixelLayout), MP_CHROMA_420, MP_PACK_SEMI_PLANAR, 10u, 16u, 6u, 0u, 0u }
+#define MP_LAYOUT_BGRA8                                                                  \
+    {                                                                                    \
+        sizeof(MpPixelLayout), MP_CHROMA_RGB, MP_PACK_INTERLEAVED, 8u, 8u, 0u,           \
+            MP_PIXEL_ALPHA | MP_PIXEL_BGR_ORDER, 0u                                      \
+    }
+/* The three a presenter renders *into* and hands back from `read_back`.
+ *
+ * RGBA16F is scRGB as a display gets it: linear half-float, and **the most
+ * precise format a flip-model swap chain accepts** -- DXGI offers 8-bit UNORM,
+ * 10-bit UNORM and this and nothing above, so presenting through the desktop
+ * is capped here by the platform rather than by a choice. It is not a
+ * *sufficient* format: half's relative step is 1/1024 at worst and a 12-bit
+ * output needs 1/1706 at white. See plan.md §9.10, and note that a presenter
+ * on a dedicated video output would quantise from RGBA32F straight into the
+ * card's own integer format and never touch half.
+ *
+ * RGB10A2 is HDR10: PQ-encoded, ten bits a channel packed into a u32 with R in
+ * the low bits -- which is why it is `bits` 10 in `container_bits` 32 rather
+ * than a container of its own.
+ *
+ * RGBA32F is linear single precision, which a swap chain will not take and an
+ * off-screen target will. It is what a *measurement* renders into, so that
+ * what a test hashes is the pipeline's arithmetic and not the presentation
+ * format's rounding. */
+#define MP_LAYOUT_RGBA16F                                                                \
+    {                                                                                    \
+        sizeof(MpPixelLayout), MP_CHROMA_RGB, MP_PACK_INTERLEAVED, 16u, 16u, 0u,         \
+            MP_PIXEL_FLOAT | MP_PIXEL_ALPHA, 0u                                          \
+    }
+#define MP_LAYOUT_RGB10A2                                                                \
+    {                                                                                    \
+        sizeof(MpPixelLayout), MP_CHROMA_RGB, MP_PACK_INTERLEAVED, 10u, 32u, 0u,         \
+            MP_PIXEL_ALPHA | MP_PIXEL_PACKED, 0u                                         \
+    }
+#define MP_LAYOUT_RGBA32F                                                                \
+    {                                                                                    \
+        sizeof(MpPixelLayout), MP_CHROMA_RGB, MP_PACK_INTERLEAVED, 32u, 32u, 0u,         \
+            MP_PIXEL_FLOAT | MP_PIXEL_ALPHA, 0u                                          \
+    }
 
 /* One frame, in the pixels a decoder produced.
  *
@@ -730,14 +929,16 @@ enum {
  * duplicates against that, never the other way round. */
 typedef struct MpVideoFrame {
     uint32_t size;
-    MpPixelFormat format;
     uint32_t width;
     uint32_t height;
-    /* NULL past what the format uses, and NULL for all three when `texture`
-     * carries the frame instead. */
+    uint32_t reserved;
+    /* What the planes hold. `layout.size` is set by whoever fills the frame. */
+    MpPixelLayout layout;
+    /* NULL past `mp_pixel_planes(&layout)`, and NULL for all of them when
+     * `texture` carries the frame instead. */
     const void *plane[3];
     uint32_t stride[3];
-    uint32_t reserved;
+    uint32_t reserved2;
     uint64_t pts;
 
     /* **When this is set the planes are unused and the frame never left the
@@ -751,7 +952,7 @@ typedef struct MpVideoFrame {
      * wants it for longer copies it. */
     void *texture;
     uint32_t texture_index;
-    uint32_t reserved2;
+    uint32_t reserved3;
 } MpVideoFrame;
 
 /* A video decoder.
@@ -849,11 +1050,12 @@ typedef struct MpVideoVtbl {
      * no device to share. */
     MpResult(MP_CALL *get_device)(MpVideo *v, MpGraphicsDevice *out);
 
-    /* MP_ANY. The pixels last presented, **in the format they were rendered
-     * in**, tightly packed. `out_format` says which -- MP_PIXEL_RGBA16F for
-     * the scRGB path, MP_PIXEL_RGB10A2 for HDR10. Call with `dst` NULL to be
-     * told the geometry and the format; the result is MP_ERR_NO_MEMORY and
-     * nothing is written, the same shape `read_packet` uses.
+    /* MP_ANY. The pixels last presented, **in the layout they were rendered
+     * in**, tightly packed. `out_layout` says which -- MP_LAYOUT_RGBA16F for
+     * the scRGB path, MP_LAYOUT_RGB10A2 for HDR10 -- and the caller sets
+     * `out_layout->size` before the call. Call with `dst` NULL to be told the
+     * geometry and the layout; the result is MP_ERR_NO_MEMORY and nothing is
+     * written, the same shape `read_packet` uses.
      *
      * **This is the measuring apparatus, in the ABI on purpose.** A screenshot
      * is a feature people want; a rendered frame a test can hash is the only
@@ -868,7 +1070,7 @@ typedef struct MpVideoVtbl {
      * what it wants them for. */
     MpResult(MP_CALL *read_back)(MpVideo *v, void *dst, size_t dst_bytes,
                                  uint32_t *out_width, uint32_t *out_height,
-                                 MpPixelFormat *out_format);
+                                 MpPixelLayout *out_layout);
 } MpVideoVtbl;
 
 /* ------------------------------------------------------------------ */
@@ -1217,6 +1419,15 @@ MP_STATIC_ASSERT(offsetof(MpPacket, stream) == 12, "MpPacket::stream took reserv
 MP_STATIC_ASSERT(sizeof(MpPacket) == 24, "MpPacket layout is ABI");
 MP_STATIC_ASSERT(offsetof(MpVideoInfo, size) == 0, "size must lead");
 MP_STATIC_ASSERT(offsetof(MpVideoFrame, size) == 0, "size must lead");
+MP_STATIC_ASSERT(offsetof(MpPixelLayout, size) == 0, "size must lead");
+MP_STATIC_ASSERT(sizeof(MpPixelLayout) == 32, "MpPixelLayout layout is ABI");
+MP_STATIC_ASSERT(sizeof(MpChroma) == 4, "MpChroma is a u32 field");
+MP_STATIC_ASSERT(sizeof(MpPacking) == 4, "MpPacking is a u32 field");
+/* No implicit padding: eight u32 then a 32-byte struct then the pointers, so
+ * every producer in every language agrees without being told twice. */
+MP_STATIC_ASSERT(offsetof(MpVideoFrame, layout) == 16, "MpVideoFrame layout is ABI");
+MP_STATIC_ASSERT(offsetof(MpVideoFrame, plane) == 48, "MpVideoFrame layout is ABI");
+MP_STATIC_ASSERT(sizeof(MpVideoFrame) == 112, "MpVideoFrame layout is ABI");
 MP_STATIC_ASSERT(offsetof(MpGraphicsDevice, size) == 0, "size must lead");
 MP_STATIC_ASSERT(offsetof(MpVideoCodecVtbl, size) == 0, "size must lead");
 MP_STATIC_ASSERT(offsetof(MpVideoVtbl, size) == 0, "size must lead");

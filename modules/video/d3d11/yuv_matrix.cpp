@@ -42,7 +42,7 @@ Weights weights_for(std::uint32_t matrix) noexcept
 } // namespace
 
 YuvMatrix yuv_matrix_for(std::uint32_t matrix_code_point, bool full_range,
-                         bool ten_bit) noexcept
+                         double sample_scale) noexcept
 {
     const Weights w = weights_for(matrix_code_point);
     const double kr = w.kr;
@@ -71,8 +71,10 @@ YuvMatrix yuv_matrix_for(std::uint32_t matrix_code_point, bool full_range,
     }
 
     // See the header: ten bits sitting in the top of sixteen do not sample to
-    // the value they name.
-    out.sample_scale = ten_bit ? static_cast<float>(65535.0 / (1023.0 * 64.0)) : 1.0f;
+    // the value they name. Worked out from the layout by the caller, because
+    // where a sample sits in its container is not this file's subject -- and
+    // because two producers of the same depth put it in different places.
+    out.sample_scale = static_cast<float>(sample_scale);
     return out;
 }
 

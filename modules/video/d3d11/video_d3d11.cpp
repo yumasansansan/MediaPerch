@@ -351,7 +351,7 @@ struct MpVideo {
     Com<ID3D11ShaderResourceView> chroma_view;
     std::uint32_t source_width = 0;
     std::uint32_t source_height = 0;
-    MpPixelFormat source_format = MP_PIXEL_NONE;
+    MpPixelLayout source_layout{};
 
     HWND window = nullptr;
     bool warp = false;
@@ -574,28 +574,90 @@ DXGI_FORMAT target_format_of(const MpVideo* v) noexcept
     return dxgi_format_of(v->plan);
 }
 
-MpPixelFormat pixel_format_of(DXGI_FORMAT f) noexcept
+/// What a render target is, said in the ABI's words rather than DXGI's.
+///
+/// **This function and `dxgi_format_of` are the whole of the translation**, and
+/// keeping it to two places is the point of v4: a layout crosses the boundary
+/// and a DXGI enumerator never does.
+MpPixelLayout layout_of(DXGI_FORMAT f) noexcept
 {
     switch (f) {
-    case DXGI_FORMAT_R32G32B32A32_FLOAT:
-        return MP_PIXEL_RGBA32F;
-    case DXGI_FORMAT_R10G10B10A2_UNORM:
-        return MP_PIXEL_RGB10A2;
-    default:
-        return MP_PIXEL_RGBA16F;
+    case DXGI_FORMAT_R32G32B32A32_FLOAT: {
+        constexpr MpPixelLayout out = MP_LAYOUT_RGBA32F;
+        return out;
+    }
+    case DXGI_FORMAT_R10G10B10A2_UNORM: {
+        constexpr MpPixelLayout out = MP_LAYOUT_RGB10A2;
+        return out;
+    }
+    default: {
+        constexpr MpPixelLayout out = MP_LAYOUT_RGBA16F;
+        return out;
+    }
     }
 }
 
-std::size_t pixel_bytes_of(MpPixelFormat f) noexcept
+/// The texture format for one plane of `components` samples at
+/// `container_bits` each. Two components is the interleaved chroma of a
+/// semi-planar layout; one is a luma plane or a plane of a planar one.
+DXGI_FORMAT plane_format_of(std::uint32_t components, std::uint32_t container_bits) noexcept
 {
-    switch (f) {
-    case MP_PIXEL_RGBA32F:
-        return 16u;
-    case MP_PIXEL_RGBA16F:
-        return 8u;
-    default:
-        return 4u;
+    if (container_bits == 16u) {
+        return components == 2u ? DXGI_FORMAT_R16G16_UNORM : DXGI_FORMAT_R16_UNORM;
     }
+    return components == 2u ? DXGI_FORMAT_R8G8_UNORM : DXGI_FORMAT_R8_UNORM;
+}
+
+bool same_layout(const MpPixelLayout& a, const MpPixelLayout& b) noexcept
+{
+    return a.chroma == b.chroma && a.packing == b.packing && a.bits == b.bits &&
+           a.container_bits == b.container_bits && a.shift == b.shift &&
+           a.flags == b.flags;
+}
+
+/// **What this presenter can draw, said once and in the layout's own terms.**
+///
+/// v3 asked "is it NV12, P010 or BGRA8", which named three combinations and
+/// could not describe the fourth. This asks about the properties the shader
+/// actually depends on, so what is refused is refused for a reason a person
+/// can act on -- and so that the cases which cost nothing to allow are
+/// allowed. A 4:2:2 or 4:4:4 semi-planar frame is one of those: the chroma
+/// plane's size comes out of `mp_pixel_chroma_width`, the shader samples it
+/// with normalised coordinates, and neither knows the difference.
+bool presentable(const MpPixelLayout& l, std::string& why)
+{
+    if (l.bits == 0u || l.container_bits == 0u) {
+        why = "a frame that does not say what its pixels are";
+        return false;
+    }
+    if (l.chroma == MP_CHROMA_RGB) {
+        constexpr MpPixelLayout bgra8 = MP_LAYOUT_BGRA8;
+        if (!same_layout(l, bgra8)) {
+            why = "the only RGB frame this presenter takes is 8-bit BGRA";
+            return false;
+        }
+        return true;
+    }
+    if (l.packing != MP_PACK_SEMI_PLANAR) {
+        // Three planes want a third shader resource and a third sampler read,
+        // which is real work and has no producer here yet -- every decoder in
+        // this tree hands back semi-planar. See plan.md §9.8.2.
+        why = "this presenter takes semi-planar chroma; planar is not built yet";
+        return false;
+    }
+    if (l.container_bits != 8u && l.container_bits != 16u) {
+        why = "a semi-planar frame must store its samples in 8 or 16 bits";
+        return false;
+    }
+    if (l.container_bits == 8u && l.bits != 8u) {
+        why = "8-bit samples cannot hold more than 8 bits";
+        return false;
+    }
+    if (l.bits + l.shift > l.container_bits) {
+        why = "the frame's significant bits do not fit in the container it names";
+        return false;
+    }
+    return true;
 }
 
 DXGI_COLOR_SPACE_TYPE colour_space_of(const mp::video::Plan& plan) noexcept
@@ -769,6 +831,10 @@ bool adopt(MpVideo* v, const MpVideoFrame& frame, std::string& why)
         why = "the decoder texture is neither NV12 nor P010";
         return false;
     }
+    // **The texture is the authority, not the frame.** A decoder states a
+    // layout as well, and where the two disagree the resource is what will
+    // actually be sampled -- so this reads the resource and the mismatch, if
+    // there is one, shows up as a refusal rather than as a wrong picture.
     if (frame.texture_index >= desc.ArraySize) {
         why = "the frame names a slice past the end of the decoder's array";
         return false;
@@ -784,7 +850,10 @@ bool adopt(MpVideo* v, const MpVideoFrame& frame, std::string& why)
         return false;
     }
 
-    const bool ten_bit = desc.Format == DXGI_FORMAT_P010;
+    constexpr MpPixelLayout k_nv12 = MP_LAYOUT_NV12;
+    constexpr MpPixelLayout k_p010 = MP_LAYOUT_P010;
+    const MpPixelLayout adopted = desc.Format == DXGI_FORMAT_P010 ? k_p010 : k_nv12;
+    const bool ten_bit = adopted.container_bits == 16u;
     v->source_view.reset();
     v->source.reset();
 
@@ -812,20 +881,25 @@ bool adopt(MpVideo* v, const MpVideoFrame& frame, std::string& why)
     v->chroma.reset();
     v->source_width = frame.width != 0 ? frame.width : desc.Width;
     v->source_height = frame.height != 0 ? frame.height : desc.Height;
-    v->source_format = ten_bit ? MP_PIXEL_P010 : MP_PIXEL_NV12;
+    v->source_layout = adopted;
     return true;
 }
 
-/// The frame, in whichever of the three shapes it arrived in.
+/// The frame, however it arrived.
+///
+/// **Every dimension here is derived from the layout rather than switched on.**
+/// The chroma planes' size, the bytes in a sample, the texture format: three
+/// pieces of arithmetic that used to be a pair of ternaries reading
+/// `format == MP_PIXEL_P010`, and that now say what they mean for a layout
+/// nobody wrote a branch for.
 bool upload(MpVideo* v, const MpVideoFrame& frame, std::string& why)
 {
-    const bool planar = frame.format == MP_PIXEL_NV12 || frame.format == MP_PIXEL_P010;
-    if (!planar && frame.format != MP_PIXEL_BGRA8) {
-        why = "this presenter takes BGRA8, NV12 and P010";
-        return false;
-    }
     if (frame.texture != nullptr) {
         return adopt(v, frame, why);
+    }
+    const MpPixelLayout& in = frame.layout;
+    if (!presentable(in, why)) {
+        return false;
     }
     if (frame.width == 0 || frame.height == 0) {
         why = "a frame with no pixels in it";
@@ -834,7 +908,7 @@ bool upload(MpVideo* v, const MpVideoFrame& frame, std::string& why)
 
     const bool changed = v->source_width != frame.width ||
                          v->source_height != frame.height ||
-                         v->source_format != frame.format;
+                         !same_layout(v->source_layout, in);
     if (changed) {
         v->source_view.reset();
         v->source.reset();
@@ -844,11 +918,12 @@ bool upload(MpVideo* v, const MpVideoFrame& frame, std::string& why)
         v->chroma.reset();
         v->source_width = frame.width;
         v->source_height = frame.height;
-        v->source_format = frame.format;
+        v->source_layout = in;
     }
 
-    if (!planar) {
-        if (frame.plane[0] == nullptr || frame.stride[0] < frame.width * 4u) {
+    if (in.chroma == MP_CHROMA_RGB) {
+        const std::uint32_t row = frame.width * mp_pixel_bytes(&in);
+        if (frame.plane[0] == nullptr || frame.stride[0] < row) {
             why = "the frame has no pixels, or a stride too short for its width";
             return false;
         }
@@ -857,37 +932,38 @@ bool upload(MpVideo* v, const MpVideoFrame& frame, std::string& why)
                         v->source, v->source_view, why)) {
             return false;
         }
-        return write_plane(v, v->source.get(), frame.plane[0], frame.stride[0],
-                           frame.width * 4u, frame.height, why);
+        return write_plane(v, v->source.get(), frame.plane[0], frame.stride[0], row,
+                           frame.height, why);
     }
 
-    // 4:2:0, so the chroma plane is half in each direction -- rounded up,
-    // because an odd width still has a chroma column for its last pixel.
-    const std::uint32_t chroma_width = (frame.width + 1u) / 2u;
-    const std::uint32_t chroma_height = (frame.height + 1u) / 2u;
-    const bool ten_bit = frame.format == MP_PIXEL_P010;
-    const std::uint32_t luma_bytes = ten_bit ? 2u : 1u;
+    // Rounded up by `mp_pixel_chroma_width`, because an odd width still has a
+    // chroma column for its last pixel -- and the same call answers for 4:2:2
+    // and 4:4:4 without being told which.
+    const std::uint32_t chroma_width = mp_pixel_chroma_width(&in, frame.width);
+    const std::uint32_t chroma_height = mp_pixel_chroma_height(&in, frame.height);
+    const std::uint32_t sample_bytes = mp_pixel_component_bytes(&in);
+    const std::uint32_t luma_row = frame.width * sample_bytes;
+    const std::uint32_t chroma_row = chroma_width * sample_bytes * 2u;
 
     if (frame.plane[0] == nullptr || frame.plane[1] == nullptr ||
-        frame.stride[0] < frame.width * luma_bytes ||
-        frame.stride[1] < chroma_width * luma_bytes * 2u) {
+        frame.stride[0] < luma_row || frame.stride[1] < chroma_row) {
         why = "a planar frame with a missing plane, or a stride too short for its width";
         return false;
     }
 
     if (!v->luma &&
         (!make_plane(v, frame.width, frame.height,
-                     ten_bit ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R8_UNORM, v->luma,
-                     v->luma_view, why) ||
+                     plane_format_of(1u, in.container_bits), v->luma, v->luma_view,
+                     why) ||
          !make_plane(v, chroma_width, chroma_height,
-                     ten_bit ? DXGI_FORMAT_R16G16_UNORM : DXGI_FORMAT_R8G8_UNORM,
-                     v->chroma, v->chroma_view, why))) {
+                     plane_format_of(2u, in.container_bits), v->chroma, v->chroma_view,
+                     why))) {
         return false;
     }
-    return write_plane(v, v->luma.get(), frame.plane[0], frame.stride[0],
-                       frame.width * luma_bytes, frame.height, why) &&
-           write_plane(v, v->chroma.get(), frame.plane[1], frame.stride[1],
-                       chroma_width * luma_bytes * 2u, chroma_height, why);
+    return write_plane(v, v->luma.get(), frame.plane[0], frame.stride[0], luma_row,
+                       frame.height, why) &&
+           write_plane(v, v->chroma.get(), frame.plane[1], frame.stride[1], chroma_row,
+                       chroma_height, why);
 }
 
 // --------------------------------------------------------------------------
@@ -964,8 +1040,7 @@ try {
         return MP_ERR_UNSUPPORTED;
     }
 
-    const bool planar = v->source_format == MP_PIXEL_NV12 ||
-                        v->source_format == MP_PIXEL_P010;
+    const bool planar = v->source_layout.chroma != MP_CHROMA_RGB;
 
     Constants constants{};
     constants.sdr_scale = v->plan.sdr_scale;
@@ -983,8 +1058,12 @@ try {
         // Derived in double and rounded once, which is §9.10's rule and this
         // is where it pays: eight coefficients per matrix, all of them ratios
         // of the luma weights.
+        // **The scale comes from where the bits sit, not from how many.**
+        // Ten bits at the top of sixteen and ten at the bottom are the same
+        // depth and a factor of sixty-four apart; `shift` is what separates
+        // them and `mp_pixel_sample_scale` is that arithmetic.
         const mp::video::YuvMatrix m = mp::video::yuv_matrix_for(
-            v->stream.matrix, v->full_range, v->source_format == MP_PIXEL_P010);
+            v->stream.matrix, v->full_range, mp_pixel_sample_scale(&v->source_layout));
         constants.luma_offset = m.luma_offset;
         constants.luma_scale = m.luma_scale;
         constants.chroma_scale = m.chroma_scale;
@@ -1066,17 +1145,19 @@ MpResult MP_CALL video_get_device(MpVideo* v, MpGraphicsDevice* out) noexcept
 
 MpResult MP_CALL video_read_back(MpVideo* v, void* dst, std::size_t dst_bytes,
                                  std::uint32_t* out_width, std::uint32_t* out_height,
-                                 MpPixelFormat* out_format) noexcept
+                                 MpPixelLayout* out_layout) noexcept
 try {
     if (v == nullptr || out_width == nullptr || out_height == nullptr ||
-        out_format == nullptr) {
+        out_layout == nullptr || out_layout->size < sizeof(MpPixelLayout)) {
         return MP_ERR_INVALID;
     }
     *out_width = v->width;
     *out_height = v->height;
-    *out_format = pixel_format_of(target_format_of(v));
+    const std::uint32_t caller_size = out_layout->size;
+    *out_layout = layout_of(target_format_of(v));
+    out_layout->size = caller_size;
 
-    const std::size_t pixel_bytes = pixel_bytes_of(*out_format);
+    const std::size_t pixel_bytes = mp_pixel_bytes(out_layout);
     const std::size_t needed =
         static_cast<std::size_t>(v->width) * v->height * pixel_bytes;
     if (dst == nullptr || dst_bytes < needed) {

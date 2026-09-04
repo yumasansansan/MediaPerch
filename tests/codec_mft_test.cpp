@@ -411,16 +411,20 @@ TEST_CASE("a decoded frame reaches the presenter and comes back as pixels",
     // The last frame, in linear light at single precision.
     std::uint32_t width = 0;
     std::uint32_t height = 0;
-    MpPixelFormat format = MP_PIXEL_NONE;
-    REQUIRE(video->read_back(presenter, nullptr, 0, &width, &height, &format) ==
+    MpPixelLayout layout{};
+    layout.size = sizeof(layout);
+    REQUIRE(video->read_back(presenter, nullptr, 0, &width, &height, &layout) ==
             MP_ERR_NO_MEMORY);
     CHECK(width == 128u);
     CHECK(height == 96u);
-    REQUIRE(format == MP_PIXEL_RGBA32F);
+    CHECK(layout.chroma == MP_CHROMA_RGB);
+    CHECK(layout.packing == MP_PACK_INTERLEAVED);
+    CHECK((layout.flags & MP_PIXEL_FLOAT) != 0u);
+    REQUIRE(layout.container_bits == 32u);
 
     std::vector<float> pixels(static_cast<std::size_t>(width) * height * 4u);
     REQUIRE(video->read_back(presenter, pixels.data(), pixels.size() * sizeof(float),
-                             &width, &height, &format) == MP_OK);
+                             &width, &height, &layout) == MP_OK);
 
     // **A picture, and this is what says so.** testsrc2 is bars and shapes, so
     // a frame of it has a spread of luminance and more than one hue -- neither
@@ -639,16 +643,20 @@ TEST_CASE("a hardware decoder decodes into a texture the presenter samples in pl
     // hue, and a stuck decoder or a dropped chroma plane has neither.
     std::uint32_t width = 0;
     std::uint32_t height = 0;
-    MpPixelFormat format = MP_PIXEL_NONE;
-    REQUIRE(video->read_back(presenter, nullptr, 0, &width, &height, &format) ==
+    MpPixelLayout layout{};
+    layout.size = sizeof(layout);
+    REQUIRE(video->read_back(presenter, nullptr, 0, &width, &height, &layout) ==
             MP_ERR_NO_MEMORY);
     CHECK(width == 128u);
     CHECK(height == 96u);
-    REQUIRE(format == MP_PIXEL_RGBA32F);
+    CHECK(layout.chroma == MP_CHROMA_RGB);
+    CHECK(layout.packing == MP_PACK_INTERLEAVED);
+    CHECK((layout.flags & MP_PIXEL_FLOAT) != 0u);
+    REQUIRE(layout.container_bits == 32u);
 
     std::vector<float> pixels(static_cast<std::size_t>(width) * height * 4u);
     REQUIRE(video->read_back(presenter, pixels.data(), pixels.size() * sizeof(float),
-                             &width, &height, &format) == MP_OK);
+                             &width, &height, &layout) == MP_OK);
 
     float darkest = 2.0f;
     float brightest = -1.0f;

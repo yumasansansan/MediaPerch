@@ -24,6 +24,9 @@ add_executable(mediaperch_tests
     graph_test.cpp
     negotiation_test.cpp
     packet_test.cpp
+    # ABI v4's arithmetic: no GPU, no decoder, no file -- which is what makes
+    # it a check on the ABI rather than on this machine.
+    pixel_layout_test.cpp
     player_test.cpp
     property_test.cpp
     protocol_test.cpp

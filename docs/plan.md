@@ -661,6 +661,58 @@ identical vtable over shared memory and a pipe, so a decoder that dies on a malf
 takes a helper process down and not the audio. The ABI is shaped now so that this needs no
 redesign later; it is not built in v1.
 
+### ABI v4: a frame describes its pixels rather than naming them
+
+**Done.** `MP_ABI_VERSION` is 4, `MpPixelFormat` is gone, and `MpPixelLayout` is what a frame
+and `read_back` carry.
+
+v3 named six formats -- NV12, P010, BGRA8 and three render targets -- and every one of those
+names is DXGI's, sitting in the one header meant to outlive Direct3D. It could not say 4:2:2,
+4:4:4, 4:0:0 or twelve bits **at all**, which mattered the moment the question was asked out
+loud: H.265's range extensions reach sixteen bits and 4:4:4, dav1d produces 4:2:0, 4:2:2 and
+4:4:4 at eight, ten and twelve, and openh264 produces exactly one of those and refuses the
+rest. An ABI that cannot name a format is an ABI that truncates it, and truncation was
+precisely what this had to be checked for.
+
+Naming the combinations instead was the alternative, and it is not one: five chroma layouts
+by five depths by three packings is **seventy-five enumerators** before alpha and float, and
+a switch of that size is a switch nobody writes correctly twice.
+
+So six fields -- chroma, packing, significant bits, container bits, shift, flags -- and
+everything else is arithmetic over them. How many planes, how large a chroma plane is, how
+many bytes a pixel takes, and what a sample must be scaled by are `mp_pixel_*` inline
+functions in the header, with their formulae in the comments beside them so a module in a
+language that cannot see the functions derives the same numbers rather than guessing.
+
+**`shift` is the field that earned the break**, and it is not a tidiness argument. Ten bits
+in a sixteen-bit container is not one thing: P010 puts them at the top and dav1d hands them
+back at the bottom. Same depth, same container, same chroma -- and a consumer that assumes
+either is wrong about the other **by a factor of sixty-four, as brightness rather than as an
+error**. v3 chose between them with a `bool ten_bit`, which had no way to be right about
+both. The general formula is
+
+    scale = (2^container_bits - 1) / ((2^bits - 1) << shift)
+
+and P010 falls out of it as `65535 / (1023 * 64)` -- character for character the constant
+`yuv_matrix.cpp` carried before, which is how a refactor gets to be a refactor rather than a
+rewrite. `tests/pixel_layout_test.cpp` holds it there, along with twelve, fourteen and
+sixteen bits, and it needs no GPU, no decoder and no file.
+
+Two things fell out of doing it now rather than after a decoder that produces 4:4:4:
+
+- **A latent bug in `codec_mft`.** Its system-memory path labelled every frame NV12 while
+  `set_output_type` accepts NV12 *or* P010 -- a ten-bit picture reported as eight. The
+  subtype was already being read and thrown away; it is kept now.
+- **4:2:2 and 4:4:4 semi-planar cost nothing.** The presenter's plane sizes come out of
+  `mp_pixel_chroma_width` and the shader samples with normalised coordinates, so writing the
+  general form was *less* code than writing the 4:2:0 special case. Planar is still refused,
+  with a sentence, because three planes want a third sampler read and no decoder here
+  produces them yet.
+
+This was the cheapest moment for it: one producer (`codec_mft`) and one consumer
+(`video_d3d11`). After `codec_dav1d` it would have meant writing a three-plane path in the
+old vocabulary and then rewriting it.
+
 ---
 
 ## 5. The audio engine
@@ -2098,6 +2150,7 @@ HDR state.
 | M5.9 | The structural cut: `src/engine` and `src/player` | **done.** The portable half was one library holding both the audio engine and the thing that decides what to play. §4 answers yes to "could this ABI carry a DAW's engine", and a DAW taking it would have taken the transport, the playlist, the INI schema and the IPC wire format with it. They are `src/player` now, and `src/engine` has no route to them: the include path is what enforces it, so reaching across is a compile error rather than a review comment. CI builds `mediaperch_engine` alone, which checks both cuts at once |
 | M5.75 | Path B is hashable, and a VST3 can be a stage in it | **done.** `mp::Processor` is `ProcessedGraph`'s arithmetic without the device, the ring or the threads, so `decode --path processed --gain --dsp` runs the chain and prints its SHA-256 -- the flags had been accepted and silently ignored, which is why nothing in this tree had ever compared the resampler between two builds. It found three bugs on the first run: `use_processed` could not see a gain, `Processor::reset` returned `MP_END` on success, and a seek left the noise shaper feeding back error from wherever the stream used to be. The baseline and AVX2 builds agree over 144 runs. `modules/dsp/vst3` hosts somebody else's plugin on `pluginterfaces` alone, with a VST3 written in `tests/` so the host is tested without one installed |
 | M5.95 | ABI v3: several streams from one file | **done.** `select` named one stream and `seek(frame)` meant "the selected one", which has no answer once a player wants audio and video out of one file -- and appending would have left both meaning something narrower than their names. So `select_streams`, `seek(stream, frame)`, `MpPacket::reserved` becoming `stream`, and `stream_video_info` appended for the three colour code points §9.1 turns on. Checked against `demux_mp4` reading a real MP4 with two tracks in it, which is the first test here that drives a module rather than a fake. `demux_mkv` serves several tracks too, which is what makes v3 an interface rather than one module's habit -- and clearing MP_PACKET_TIMED on a video packet that never had a position is what that second container found |
+| M5.98 | ABI v4: a frame describes its pixels | **done.** MpPixelFormat was six DXGI names in a header meant to outlive Direct3D, and could not say 4:2:2, 4:4:4 or twelve bits at all -- while naming the combinations would have taken seventy-five enumerators. MpPixelLayout is six fields and the arithmetic over them, and `shift` is what earned the break: ten bits at the top of sixteen and ten at the bottom are the same depth and a factor of sixty-four apart, which v3's `bool ten_bit` had no way to be right about. The general formula reproduces the constant `yuv_matrix.cpp` carried, exactly, which is what makes it a refactor. Doing it before `codec_dav1d` rather than after cost one producer and one consumer, and turned up a ten-bit frame `codec_mft` had been labelling eight |
 | M5.97 | Section 9.9: a video packet says what its timestamp is counted in | **done.** MpVideoInfo::timescale, appended -- the first time the size prefix earned its keep, and a test asks for the older size to check it. Answering it turned up three more: MP4 was reporting decode timestamps where Matroska reports presentation ones, MP_PACKET_SYNC was claimed on every packet including video, and the edit list was read for audio tracks only -- sixty milliseconds of A/V offset in the fixture. A video seek landed one frame late, so it subtracts the track's largest composition offset before a lookup that indexes decode time -- with a guard for Bento4 reading that offset unsigned |
 | M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse. **Started**: MP_KIND_VIDEO has a vtable, `video_d3d11` renders BGRA8 into a flip-model scRGB target or an off-screen one, and `read_back` makes the result a hash rather than a screenshot somebody looks at. §9's colour decisions are a separate testable header. NV12, P010 and the tone mappers wait for the decoder that produces frames for them |
 | M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled |

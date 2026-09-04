@@ -66,6 +66,13 @@ namespace {
 
 const MpHost* g_host = nullptr;
 
+/// The two this module produces, spelled once. **They differ in `shift` and
+/// that is the whole of it**: both are 4:2:0 semi-planar, and P010's ten bits
+/// sit at the top of each sixteen rather than at the bottom, which is a factor
+/// of sixty-four for anyone who reads the container and stops there.
+constexpr MpPixelLayout k_nv12 = MP_LAYOUT_NV12;
+constexpr MpPixelLayout k_p010 = MP_LAYOUT_P010;
+
 void log_line(MpLogLevel level, const char* msg) noexcept
 {
     if (g_host != nullptr && g_host->log != nullptr) {
@@ -161,6 +168,11 @@ struct MpVideoCodec {
 
     MpVideoInfo info{};
     bool have_format = false;
+    /// Which of the two output subtypes was accepted. **Read from the media
+    /// type rather than assumed**: `set_output_type` takes NV12 or P010 and
+    /// the system-memory path used to label every frame NV12, which would have
+    /// been a ten-bit picture reported as eight.
+    bool ten_bit = false;
 
     /// The sample being handed out, and whatever it is holding, kept alive
     /// until the next call because that is what `next_frame` promises.
@@ -261,7 +273,7 @@ bool read_output_format(MpVideoCodec* c)
             ? static_cast<LONG>(static_cast<INT32>(stride))
             : static_cast<LONG>(width);
     c->have_format = true;
-    (void)subtype;
+    c->ten_bit = subtype == MFVideoFormat_P010;
     return true;
 }
 
@@ -677,7 +689,7 @@ try {
             (void)dxgi->GetSubresourceIndex(&slice);
             D3D11_TEXTURE2D_DESC desc{};
             c->out_texture->GetDesc(&desc);
-            out->format = desc.Format == DXGI_FORMAT_P010 ? MP_PIXEL_P010 : MP_PIXEL_NV12;
+            out->layout = desc.Format == DXGI_FORMAT_P010 ? k_p010 : k_nv12;
             out->texture = c->out_texture.get();
             out->texture_index = slice;
             return MP_OK;
@@ -722,8 +734,10 @@ try {
     c->out_pitch = pitch;
 
     // NV12 and P010 are both a full-size luma plane followed by a half-height
-    // interleaved chroma plane at the same stride.
-    out->format = MP_PIXEL_NV12;
+    // interleaved chroma plane at the same stride -- 4:2:0 semi-planar, and
+    // the only thing that separates them is the depth and where in each
+    // sixteen bits it sits. Which is what MP_LAYOUT_P010's `shift` of 6 says.
+    out->layout = c->ten_bit ? k_p010 : k_nv12;
     out->plane[0] = scanline0;
     out->stride[0] = static_cast<std::uint32_t>(pitch < 0 ? -pitch : pitch);
     out->plane[1] = scanline0 + static_cast<std::ptrdiff_t>(pitch) * c->info.height;
