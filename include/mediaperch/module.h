@@ -241,13 +241,20 @@ enum {
     MP_CODEC_WMA = 40u,         /* reserved */
     MP_CODEC_AC3 = 41u,         /* reserved */
     MP_CODEC_EAC3 = 42u,        /* reserved */
-    MP_CODEC_DTS = 43u          /* reserved */
+    MP_CODEC_DTS = 43u,         /* reserved */
+
+    /* Video, decoded by an MP_KIND_VCODEC module. Numbered from 64 so that the
+     * audio range has somewhere to grow that is not next to a video codec. */
+    MP_CODEC_H264 = 64u,
+    MP_CODEC_HEVC = 65u
 };
 
 /* **What the configuration blob is, per codec.** A codec module is handed the
  * container's blob verbatim, so the two have to agree about what it contains,
  * and an ABI that left that to be discovered would not be one.
  *
+ *   MP_CODEC_H264    the AVCDecoderConfigurationRecord -- an `avcC` body.
+ *   MP_CODEC_HEVC    the HEVCDecoderConfigurationRecord -- an `hvcC` body.
  *   MP_CODEC_ALAC    the ALACSpecificConfig, 24 bytes big-endian.
  *   MP_CODEC_AAC_LC  the AudioSpecificConfig.
  *   MP_CODEC_OPUS    the OpusHead identification header, from its magic on.
@@ -637,6 +644,44 @@ typedef struct MpCodecVtbl {
  * here decodes video yet, and a field no module fills is a field no test
  * checks. It appends when `codec_mft` arrives. */
 
+/* Which graphics API a device belongs to.
+ *
+ * **This exists because a video decoder cannot be API-agnostic.** Media
+ * Foundation's `IMFDXGIDeviceManager` wraps an `ID3D11Device` and there is no
+ * D3D12 equivalent for an MFT; D3D12 video decoding is
+ * `ID3D12VideoDevice::CreateVideoDecoder` and a different command list. So a
+ * decoder is written against one of them, and which one is decided by the
+ * presenter -- because the presenter is what made the device the frames have
+ * to live on. A host that loads a D3D12 presenter and a D3D11 decoder has two
+ * devices and a copy between them, which is the whole cost hardware decoding
+ * exists to avoid. */
+typedef uint32_t MpGraphicsApi;
+enum {
+    /* No device: frames come back in system memory. Every decoder can do this
+     * and it is what a machine with no usable adapter falls back to. */
+    MP_GRAPHICS_NONE = 0u,
+    MP_GRAPHICS_D3D11 = 1u,
+    MP_GRAPHICS_D3D12 = 2u,
+    MP_GRAPHICS_VULKAN = 3u,
+    MP_GRAPHICS_METAL = 4u
+};
+
+/* A device one module made and another is handed.
+ *
+ * The presenter creates it and the decoder receives it, because a presenter is
+ * made once and outlives every decoder a playlist goes through -- see
+ * plan.md §9.7.1. Nothing here owns it: the pointers are borrowed for as long
+ * as the presenter lives. */
+typedef struct MpGraphicsDevice {
+    uint32_t size;
+    MpGraphicsApi api;
+    /* `ID3D11Device*`, `ID3D12Device*`, a `VkDevice`, an `id<MTLDevice>`. */
+    void *device;
+    /* D3D12 needs the queue that owns the work as well; Vulkan needs the
+     * queue family. NULL where the API has nothing to put here. */
+    void *queue;
+} MpGraphicsDevice;
+
 typedef struct MpVideo MpVideo; /* opaque, module-owned */
 
 typedef uint32_t MpPixelFormat;
@@ -688,12 +733,86 @@ typedef struct MpVideoFrame {
     MpPixelFormat format;
     uint32_t width;
     uint32_t height;
-    /* NULL past what the format uses. */
+    /* NULL past what the format uses, and NULL for all three when `texture`
+     * carries the frame instead. */
     const void *plane[3];
     uint32_t stride[3];
     uint32_t reserved;
     uint64_t pts;
+
+    /* **When this is set the planes are unused and the frame never left the
+     * GPU**, which is the entire reason for decoding on it. It is a resource
+     * on the device the codec was opened with -- an `ID3D11Texture2D*` for
+     * MP_GRAPHICS_D3D11 -- and `texture_index` is the slice, because a
+     * hardware decoder hands out one array texture and an index into it
+     * rather than a texture per frame.
+     *
+     * Valid until the next `next_frame` on the same codec. A presenter that
+     * wants it for longer copies it. */
+    void *texture;
+    uint32_t texture_index;
+    uint32_t reserved2;
 } MpVideoFrame;
+
+/* A video decoder.
+ *
+ * **A separate kind rather than a wider MpCodecVtbl**, and the reason is the
+ * output rather than tidiness. `MpCodecVtbl::decode` writes PCM into a buffer
+ * the caller owns; a hardware video decoder produces a texture it owns, in a
+ * pool, and copying a 4K frame out of it at 60 fps is 750 MB/s spent undoing
+ * the reason for decoding on the GPU. A second `decode` in the same vtable
+ * would make a codec module implement one of two output models, which is the
+ * shape with two meanings §15 warns about.
+ *
+ * The other difference is arity. One audio packet decodes to some audio, every
+ * time. One video packet decodes to **zero or more frames, in a different
+ * order**, because a decoder holds frames back to reorder them -- so `decode`
+ * takes a packet and `next_frame` gives back what the decoder is willing to
+ * part with, and the two are not paired. */
+typedef struct MpVideoCodec MpVideoCodec; /* opaque, module-owned */
+
+typedef struct MpVideoCodecVtbl {
+    uint32_t size;
+    uint32_t reserved;
+
+    /* MP_ANY. Whether this module decodes `codec` on `api`, and how well.
+     * **`api` is part of the question**: a module written against D3D12 scores
+     * 0 for a D3D11 device, and saying so is what lets a host pick the decoder
+     * that matches the presenter instead of discovering the mismatch as a
+     * copy. MP_GRAPHICS_NONE asks for system memory, which every decoder can
+     * do and which is what a machine with no usable adapter gets. */
+    MpResult(MP_CALL *probe)(MpCodec codec, MpGraphicsApi api, const uint8_t *config,
+                             uint32_t config_bytes, uint32_t *out_score);
+
+    /* MP_IO. `device` may be NULL, which asks for system memory. `config` is
+     * the container's blob, verbatim -- `avcC` for H.264 in MP4. */
+    MpResult(MP_CALL *open)(MpCodec codec, const MpGraphicsDevice *device,
+                            const uint8_t *config, uint32_t config_bytes,
+                            MpVideoCodec **out);
+    void(MP_CALL *close)(MpVideoCodec *c);
+
+    /* MP_ANY. What it produces. Known after the first frame for a decoder that
+     * learns its geometry from the bitstream, which is most of them. */
+    MpResult(MP_CALL *get_format)(MpVideoCodec *c, MpVideoInfo *out);
+
+    /* MP_IO. One packet in. Nothing necessarily comes out: see `next_frame`.
+     * `pts` is the packet's, in `MpVideoInfo::timescale` ticks. */
+    MpResult(MP_CALL *decode)(MpVideoCodec *c, const void *packet, size_t bytes,
+                              uint64_t pts);
+
+    /* MP_IO. The next frame the decoder will part with, or MP_END when it is
+     * holding none. **The frame is valid until the next call on this codec**,
+     * because a hardware decoder is handing out a slice of a pool it owns and
+     * a caller that wanted it for longer would have to say so by copying. */
+    MpResult(MP_CALL *next_frame)(MpVideoCodec *c, MpVideoFrame *out);
+
+    /* MP_IO. No more packets are coming: give back what is held. `next_frame`
+     * then drains until MP_END. */
+    MpResult(MP_CALL *flush)(MpVideoCodec *c);
+
+    /* MP_IO. Forget everything, for a seek. */
+    MpResult(MP_CALL *reset)(MpVideoCodec *c);
+} MpVideoCodecVtbl;
 
 typedef struct MpVideoVtbl {
     uint32_t size;
@@ -723,6 +842,12 @@ typedef struct MpVideoVtbl {
     /* MP_ANY. One `key\tcurrent\tdescription` per index, MP_END past the last. */
     MpResult(MP_CALL *describe)(MpVideo *v, uint32_t index, char *out,
                                 uint32_t out_bytes);
+
+    /* MP_ANY. The device this presenter made, for whatever decodes into it.
+     * `out->size` is set by the caller. MP_ERR_UNSUPPORTED before `configure`,
+     * because that is where the device is created, and on a presenter that has
+     * no device to share. */
+    MpResult(MP_CALL *get_device)(MpVideo *v, MpGraphicsDevice *out);
 
     /* MP_ANY. The pixels last presented, **in the format they were rendered
      * in**, tightly packed. `out_format` says which -- MP_PIXEL_RGBA16F for
@@ -981,7 +1106,8 @@ enum {
     MP_KIND_VIDEO = 4u, /* MpVideoVtbl */
     MP_KIND_META = 5u,  /* reserved */
     MP_KIND_DEMUX = 6u, /* MpDemuxVtbl */
-    MP_KIND_CODEC = 7u  /* MpCodecVtbl */
+    MP_KIND_CODEC = 7u, /* MpCodecVtbl -- audio */
+    MP_KIND_VCODEC = 8u /* MpVideoCodecVtbl */
 };
 
 enum {
@@ -1091,6 +1217,8 @@ MP_STATIC_ASSERT(offsetof(MpPacket, stream) == 12, "MpPacket::stream took reserv
 MP_STATIC_ASSERT(sizeof(MpPacket) == 24, "MpPacket layout is ABI");
 MP_STATIC_ASSERT(offsetof(MpVideoInfo, size) == 0, "size must lead");
 MP_STATIC_ASSERT(offsetof(MpVideoFrame, size) == 0, "size must lead");
+MP_STATIC_ASSERT(offsetof(MpGraphicsDevice, size) == 0, "size must lead");
+MP_STATIC_ASSERT(offsetof(MpVideoCodecVtbl, size) == 0, "size must lead");
 MP_STATIC_ASSERT(offsetof(MpVideoVtbl, size) == 0, "size must lead");
 MP_STATIC_ASSERT(sizeof(MpVideoInfo) == 48, "MpVideoInfo layout is ABI");
 MP_STATIC_ASSERT(offsetof(MpVideoInfo, flags) < offsetof(MpVideoInfo, timescale),

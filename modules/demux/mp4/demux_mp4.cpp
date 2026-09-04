@@ -349,6 +349,29 @@ MpCodec codec_for(AP4_SampleDescription* desc, std::vector<std::uint8_t>& config
         return MP_CODEC_AAC_LC;
     }
 
+    // **The video ones, whose configuration record is the whole of what a
+    // decoder needs from the container.** Bento4 parses `avcC` and `hvcC` into
+    // objects and also keeps their bytes, and it is the bytes that go across:
+    // the ABI says a codec gets the container's blob verbatim, and a decoder
+    // that re-parsed a struct this module had already interpreted would be
+    // trusting two parsers where one will do.
+    if (auto* avc = AP4_DYNAMIC_CAST(AP4_AvcSampleDescription, desc)) {
+        const AP4_DataBuffer& raw = avc->GetRawBytes();
+        if (raw.GetDataSize() == 0) {
+            return MP_CODEC_UNKNOWN;
+        }
+        config.assign(raw.GetData(), raw.GetData() + raw.GetDataSize());
+        return MP_CODEC_H264;
+    }
+    if (auto* hevc = AP4_DYNAMIC_CAST(AP4_HevcSampleDescription, desc)) {
+        const AP4_DataBuffer& raw = hevc->GetRawBytes();
+        if (raw.GetDataSize() == 0) {
+            return MP_CODEC_UNKNOWN;
+        }
+        config.assign(raw.GetData(), raw.GetData() + raw.GetDataSize());
+        return MP_CODEC_HEVC;
+    }
+
     // Read perfectly, and carrying something nothing here names. That is a
     // sentence a host can act on, unlike "this demuxer declines".
     return MP_CODEC_UNKNOWN;

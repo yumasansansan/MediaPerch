@@ -1734,6 +1734,47 @@ which is precisely the work an MFT already does, correctly, for every codec the 
 supports. Sitting on the MFT layer is not a compromise; sitting on the SourceReader layer
 would be.
 
+### 9.8.1 One device, and why the decoder is per-API
+
+**A decoder cannot be graphics-API-agnostic, and finding out where that bites decided the
+module boundary.** Media Foundation binds a transform to a GPU through
+`IMFDXGIDeviceManager`, which wraps an `ID3D11Device` -- **there is no D3D12 form of it.**
+D3D12 video decoding is `ID3D12VideoDevice::CreateVideoDecoder` and a different command list
+entirely. So a host that loaded a D3D12 presenter and `codec_mft` would have two devices and
+a copy between them, which is the whole cost hardware decoding exists to avoid.
+
+The ABI asks rather than assumes. `MpVideoCodecVtbl::probe` takes an `MpGraphicsApi`
+alongside the codec, and `codec_mft` scores **0 for `MP_GRAPHICS_D3D12`** -- so a host picks
+the decoder that matches the presenter's device instead of discovering the mismatch as a
+frame rate. A D3D12 decoder is a sibling module, not a flag in this one.
+
+`MpGraphicsDevice` is how the device travels: an api, a device pointer, and a queue for the
+APIs that have one. **The presenter creates it and the decoder receives it**, through
+`MpVideoVtbl::get_device`, because a presenter is made once and outlives every decoder a
+playlist goes through.
+
+**And the software path is not a consolation.** With no device, Microsoft's software H.264
+transform produces NV12 in system memory -- which works on a machine with no usable adapter,
+on a CI runner, and deterministically, so a decoded frame is something a test can hash rather
+than look at. That is the path every test here runs.
+
+Three things the first run of that test found:
+
+- **The software transform does not implement `IMF2DBuffer2`.** It has the older
+  `IMF2DBuffer`, and a decoder that only knew the newer one refused every frame. There are
+  three ways to reach a buffer's rows and a decoder implements one of them; the pitch is what
+  makes it worth asking, because NV12 out of a decoder is padded to a width the hardware
+  liked and rows are contiguous only by luck.
+- **`avcC` to Annex B is a container question wearing a codec's clothes.** MP4 stores H.264
+  as length-prefixed NAL units with the parameter sets out of band and every decoder wants
+  start codes with the parameter sets in the stream. The conversion is this module's, because
+  `demux_mp4` hands over the container's bytes verbatim and that promise is what makes it
+  checkable -- and it is a header of its own, tested over bytes, with no Media Foundation and
+  no GPU in sight.
+- **The parameter sets go back in front after a reset**, not only at the start. A flushed
+  decoder has forgotten them and the first packet after a seek is a keyframe whose SPS and
+  PPS live in the container.
+
 ### 9.9 What a video packet's timestamp is counted in
 
 **Answered, and it took three more answers with it.** `MpPacket::frame` was documented as

@@ -100,6 +100,18 @@ if(TARGET mediaperch_win)
     target_link_libraries(mediaperch_tests PRIVATE MediaPerch::win)
 endif()
 
+# The video decoder, and the bitstream conversion it needs first. Driven
+# against the same fixture demux_v3_test uses, through demux_mp4, so it checks
+# the split §9.8 argues for rather than one module in isolation.
+if(TARGET mp_codec_mft AND TARGET mp_demux_mp4)
+    target_sources(mediaperch_tests PRIVATE codec_mft_test.cpp
+                   ../modules/codec/mft/avcc.cpp)
+    target_include_directories(mediaperch_tests PRIVATE ../modules/codec/mft)
+    target_compile_definitions(mediaperch_tests PRIVATE
+        "MEDIAPERCH_CODEC_MFT=\"$<TARGET_FILE:mp_codec_mft>\"")
+    add_dependencies(mediaperch_tests mp_codec_mft)
+endif()
+
 # The presenter, rendered off-screen on WARP and read back. Not a screenshot
 # somebody looks at: pixels, hashed, on the same path a display gets.
 if(TARGET mp_video_d3d11)

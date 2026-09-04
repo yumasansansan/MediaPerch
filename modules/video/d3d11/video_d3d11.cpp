@@ -748,6 +748,27 @@ try {
     return MP_ERR_NO_MEMORY;
 }
 
+MpResult MP_CALL video_get_device(MpVideo* v, MpGraphicsDevice* out) noexcept
+{
+    if (v == nullptr || out == nullptr || out->size < sizeof(MpGraphicsDevice::size)) {
+        return MP_ERR_INVALID;
+    }
+    if (!v->device) {
+        // Made by `configure`, so before that there is nothing to share -- and
+        // saying so is what stops a decoder opening on a null device and
+        // quietly falling back to system memory.
+        return MP_ERR_UNSUPPORTED;
+    }
+
+    MpGraphicsDevice device{};
+    device.size = out->size;
+    device.api = MP_GRAPHICS_D3D11;
+    device.device = v->device.get();
+    device.queue = nullptr; // D3D11 has no queue object; D3D12 fills this in
+    std::memcpy(out, &device, std::min<std::size_t>(device.size, sizeof(device)));
+    return MP_OK;
+}
+
 MpResult MP_CALL video_read_back(MpVideo* v, void* dst, std::size_t dst_bytes,
                                  std::uint32_t* out_width, std::uint32_t* out_height,
                                  MpPixelFormat* out_format) noexcept
@@ -930,9 +951,10 @@ const MpVideoVtbl g_vtbl = {
     /* close     */ &video_close,
     /* configure */ &video_configure,
     /* present   */ &video_present,
-    /* set       */ &video_set,
-    /* describe  */ &video_describe,
-    /* read_back */ &video_read_back,
+    /* set        */ &video_set,
+    /* describe   */ &video_describe,
+    /* get_device */ &video_get_device,
+    /* read_back  */ &video_read_back,
 };
 
 MpResult MP_CALL module_init(const MpHost* host) noexcept

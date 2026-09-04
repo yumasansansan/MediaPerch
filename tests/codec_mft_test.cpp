@@ -1,0 +1,317 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// The video decoder, and the bitstream conversion it needs first.
+//
+// Two halves, and only one of them needs Windows to have a decoder. `avcC` to
+// Annex B is a container question wearing a codec's clothes -- MP4 stores H.264
+// as length-prefixed NAL units with the parameter sets out of band, and every
+// decoder wants start codes and the parameter sets in the stream -- so it is
+// arithmetic over bytes and is tested as such. The decoder itself is driven
+// against the H.264 track of the same fixture `demux_v3_test.cpp` uses, through
+// `demux_mp4`, which is what makes it an end-to-end check of the split plan.md
+// §9.8 argues for rather than of one module in isolation.
+
+#include "avcc.hpp"
+#include "mediaperch/packet.hpp"
+
+#include <mediaperch/module.h>
+
+#include <catch2/catch_test_macros.hpp>
+
+#include <cstdint>
+#include <cstring>
+#include <string>
+#include <vector>
+
+#ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
+namespace {
+
+/// A module, loaded the way the engine loads one.
+struct Module {
+    Module(const char* path, MpKind kind)
+    {
+        auto* dll = ::LoadLibraryA(path);
+        if (dll == nullptr) {
+            return;
+        }
+        library = dll;
+        using Entry = const MpModuleDesc*(MP_CALL*)(std::uint32_t);
+        auto* entry = reinterpret_cast<Entry>(
+            reinterpret_cast<void*>(::GetProcAddress(dll, "mp_module_entry")));
+        if (entry == nullptr) {
+            return;
+        }
+        const MpModuleDesc* desc = entry(MP_ABI_VERSION);
+        if (desc == nullptr || desc->kind != kind) {
+            return;
+        }
+        vtbl = desc->vtbl;
+    }
+    ~Module()
+    {
+        if (library != nullptr) {
+            ::FreeLibrary(static_cast<HMODULE>(library));
+        }
+    }
+    Module(const Module&) = delete;
+    Module& operator=(const Module&) = delete;
+
+    void* library = nullptr;
+    const void* vtbl = nullptr;
+};
+
+/// A minimal but real `avcC`: version 1, a profile, one SPS and one PPS, and a
+/// `lengthSizeMinusOne` of 3 meaning four-byte lengths.
+std::vector<std::uint8_t> made_up_avcc(std::uint8_t length_size_minus_one = 3)
+{
+    return {
+        0x01,                          // configurationVersion
+        0x64, 0x00, 0x1F,              // profile, compatibility, level
+        static_cast<std::uint8_t>(0xFCu | length_size_minus_one),
+        0xE1,                          // three reserved bits, then one SPS
+        0x00, 0x04, 0x67, 0x64, 0x00, 0x1F, // its length, then four bytes
+        0x01,                          // one PPS
+        0x00, 0x03, 0x68, 0xEB, 0xE3,  // its length, then three bytes
+    };
+}
+
+} // namespace
+
+TEST_CASE("an avcC is read, or refused, and never guessed at", "[video][avcc]")
+{
+    using namespace mp::mft;
+
+    const std::vector<std::uint8_t> raw = made_up_avcc();
+    const AvcConfig config = parse_avcc(raw.data(), raw.size());
+    REQUIRE(config.valid);
+
+    // **lengthSizeMinusOne, plus one.** The field is named for the value it is
+    // one less than, which is the sort of thing that reads correctly and is
+    // wrong by one for a year.
+    CHECK(config.length_size == 4);
+    REQUIRE(config.parameter_sets.size() == 2);
+    CHECK(config.parameter_sets[0].size() == 4); // the SPS
+    CHECK(config.parameter_sets[1].size() == 3); // the PPS
+
+    SECTION("a truncated record is refused rather than half-read")
+    {
+        for (std::size_t cut = 0; cut < raw.size(); ++cut) {
+            const AvcConfig partial = parse_avcc(raw.data(), cut);
+            CHECK_FALSE(partial.valid);
+        }
+    }
+
+    SECTION("and so is a length size the spec forbids")
+    {
+        // lengthSizeMinusOne of 2, meaning three-byte lengths, which ISO/IEC
+        // 14496-15 does not allow. A file that says it is a file to decline.
+        const std::vector<std::uint8_t> bad = made_up_avcc(2);
+        CHECK_FALSE(parse_avcc(bad.data(), bad.size()).valid);
+    }
+
+    SECTION("a record with no parameter sets is not usable")
+    {
+        std::vector<std::uint8_t> empty = {0x01, 0x64, 0x00, 0x1F, 0xFF, 0xE0, 0x00};
+        CHECK_FALSE(parse_avcc(empty.data(), empty.size()).valid);
+    }
+}
+
+TEST_CASE("AVCC samples become Annex B, with the parameter sets in front",
+          "[video][avcc]")
+{
+    using namespace mp::mft;
+
+    const std::vector<std::uint8_t> raw = made_up_avcc();
+    const AvcConfig config = parse_avcc(raw.data(), raw.size());
+    REQUIRE(config.valid);
+
+    // Two NAL units, four-byte lengths, as MP4 stores them.
+    const std::vector<std::uint8_t> sample = {
+        0x00, 0x00, 0x00, 0x02, 0x41, 0x9A,             // a two-byte slice
+        0x00, 0x00, 0x00, 0x03, 0x41, 0x9B, 0x9C,       // a three-byte one
+    };
+
+    std::vector<std::uint8_t> out;
+    REQUIRE(to_annex_b(config, sample.data(), sample.size(), true, out));
+
+    // SPS, PPS, then the two slices, each behind a four-byte start code.
+    const std::vector<std::uint8_t> expected = {
+        0x00, 0x00, 0x00, 0x01, 0x67, 0x64, 0x00, 0x1F,
+        0x00, 0x00, 0x00, 0x01, 0x68, 0xEB, 0xE3,
+        0x00, 0x00, 0x00, 0x01, 0x41, 0x9A,
+        0x00, 0x00, 0x00, 0x01, 0x41, 0x9B, 0x9C,
+    };
+    CHECK(out == expected);
+
+    SECTION("and without them when the decoder already has them")
+    {
+        std::vector<std::uint8_t> bare;
+        REQUIRE(to_annex_b(config, sample.data(), sample.size(), false, bare));
+        CHECK(bare.size() == expected.size() - 15u); // the two parameter sets
+        CHECK(bare[4] == 0x41);
+    }
+
+    SECTION("a length that runs past the end is a truncated sample, not a frame")
+    {
+        // **The check that matters**, because the alternative is handing a
+        // decoder a NAL unit that stops in the middle of a slice.
+        std::vector<std::uint8_t> broken = sample;
+        broken[3] = 0x40; // says 64 bytes, has 2
+        std::vector<std::uint8_t> ignored;
+        CHECK_FALSE(to_annex_b(config, broken.data(), broken.size(), true, ignored));
+
+        // And a sample whose last length header does not even fit.
+        CHECK_FALSE(to_annex_b(config, sample.data(), sample.size() - 4, true, ignored));
+    }
+
+    SECTION("an empty NAL unit is dropped rather than given a start code")
+    {
+        const std::vector<std::uint8_t> with_empty = {0x00, 0x00, 0x00, 0x00,
+                                                      0x00, 0x00, 0x00, 0x01, 0x41};
+        std::vector<std::uint8_t> got;
+        REQUIRE(to_annex_b(config, with_empty.data(), with_empty.size(), false, got));
+        CHECK(got == std::vector<std::uint8_t>{0x00, 0x00, 0x00, 0x01, 0x41});
+    }
+}
+
+TEST_CASE("the H.264 track of a real MP4 decodes to frames", "[video][mft]")
+{
+    // **End to end, through the split §9.8 argues for**: `demux_mp4` reads the
+    // container and hands over the sample bytes and the `avcC` verbatim;
+    // `codec_mft` converts the bitstream and decodes it. Media Foundation never
+    // sees the file, never seeks, and never says what is in it.
+    Module demux_module{MEDIAPERCH_DEMUX_MP4, MP_KIND_DEMUX};
+    REQUIRE(demux_module.vtbl != nullptr);
+    Module codec_module{MEDIAPERCH_CODEC_MFT, MP_KIND_VCODEC};
+    REQUIRE(codec_module.vtbl != nullptr);
+    const auto* codec = static_cast<const MpVideoCodecVtbl*>(codec_module.vtbl);
+
+    mp::Demux demux;
+    REQUIRE(demux.open(*static_cast<const MpDemuxVtbl*>(demux_module.vtbl),
+                       MEDIAPERCH_TEST_AV) == MP_OK);
+
+    std::uint32_t video = 0;
+    bool found = false;
+    MpStreamInfo info{};
+    for (std::uint32_t i = 0; i < demux.stream_count(); ++i) {
+        if (demux.stream_info(i, info) && info.kind == MP_STREAM_VIDEO) {
+            video = i;
+            found = true;
+            break;
+        }
+    }
+    REQUIRE(found);
+
+    // The container names the codec now, where it used to say "unknown".
+    CHECK(info.codec == MP_CODEC_H264);
+    std::vector<std::uint8_t> config;
+    REQUIRE(demux.stream_config(video, config));
+    CHECK(config.size() > 7); // an avcC with something in it
+
+    // **No device: system memory, deterministic, and available on a machine
+    // with no GPU at all.** The hardware path takes the presenter's device and
+    // hands back a texture; this is the one a test can run anywhere.
+    std::uint32_t score = 0;
+    REQUIRE(codec->probe(MP_CODEC_H264, MP_GRAPHICS_NONE, config.data(),
+                         static_cast<std::uint32_t>(config.size()), &score) == MP_OK);
+    CHECK(score != 0);
+
+    // And it declines a device it cannot decode onto, which is the whole
+    // reason `probe` asks: Media Foundation binds to an ID3D11Device and has
+    // no D3D12 form, so a D3D12 presenter needs a different module.
+    std::uint32_t d3d12_score = 0;
+    REQUIRE(codec->probe(MP_CODEC_H264, MP_GRAPHICS_D3D12, config.data(),
+                         static_cast<std::uint32_t>(config.size()),
+                         &d3d12_score) == MP_OK);
+    CHECK(d3d12_score == 0);
+
+    MpVideoCodec* decoder = nullptr;
+    REQUIRE(codec->open(MP_CODEC_H264, nullptr, config.data(),
+                        static_cast<std::uint32_t>(config.size()), &decoder) == MP_OK);
+    REQUIRE(decoder != nullptr);
+
+    const std::uint32_t only_video[] = {video};
+    REQUIRE(demux.select_streams(only_video) == MP_OK);
+
+    std::vector<std::uint8_t> buffer;
+    MpPacket packet{};
+    std::uint32_t packets = 0;
+    std::uint32_t frames = 0;
+    std::uint32_t widest = 0;
+    bool any_content = false;
+
+    const auto drain = [&] {
+        for (int guard = 0; guard < 64; ++guard) {
+            MpVideoFrame frame{};
+            frame.size = sizeof(frame);
+            const MpResult r = codec->next_frame(decoder, &frame);
+            if (r == MP_END) {
+                return;
+            }
+            if (r == MP_ERR_BUSY) {
+                continue; // the stream changed; ask again
+            }
+            REQUIRE(r == MP_OK);
+            ++frames;
+            widest = std::max(widest, frame.width);
+            CHECK(frame.height == 96u);
+            // System memory, so planes rather than a texture.
+            REQUIRE(frame.texture == nullptr);
+            REQUIRE(frame.plane[0] != nullptr);
+            REQUIRE(frame.stride[0] >= frame.width);
+            // testsrc2 is not a flat colour, so the luma plane is not one
+            // value repeated -- which is the cheapest evidence that something
+            // was actually decoded rather than a buffer handed back cleared.
+            const auto* luma = static_cast<const std::uint8_t*>(frame.plane[0]);
+            for (std::uint32_t x = 1; x < frame.width; ++x) {
+                if (luma[x] != luma[0]) {
+                    any_content = true;
+                    break;
+                }
+            }
+        }
+    };
+
+    for (int guard = 0; guard < 500; ++guard) {
+        const MpResult r = demux.read_packet(buffer, packet);
+        if (r == MP_END) {
+            break;
+        }
+        REQUIRE(r == MP_OK);
+        ++packets;
+        const MpResult fed = codec->decode(decoder, buffer.data(), packet.bytes, packet.frame);
+        if (fed == MP_ERR_BUSY) {
+            drain();
+            REQUIRE(codec->decode(decoder, buffer.data(), packet.bytes, packet.frame) ==
+                    MP_OK);
+        } else {
+            REQUIRE(fed == MP_OK);
+        }
+        drain();
+    }
+    CHECK(packets == 24);
+
+    // What is still inside. A decoder holds frames back to reorder them, so a
+    // caller that stopped at the last packet would lose the tail of every file.
+    REQUIRE(codec->flush(decoder) == MP_OK);
+    drain();
+
+    CHECK(frames == 24);
+    CHECK(widest == 128u);
+    CHECK(any_content);
+
+    MpVideoInfo produced{};
+    produced.size = sizeof(produced);
+    REQUIRE(codec->get_format(decoder, &produced) == MP_OK);
+    CHECK(produced.width == 128u);
+    CHECK(produced.height == 96u);
+    // **Hundred-nanosecond units, stated rather than assumed**, which is §9.9's
+    // whole point: a timestamp with no stated unit is a number nobody can read.
+    CHECK(produced.timescale == 10000000u);
+
+    codec->close(decoder);
+}
