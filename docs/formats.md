@@ -57,13 +57,17 @@ is tried.
 | `demux_flac` | libFLAC | `codec_flac` | libFLAC |
 | `demux_mpa` | libmpg123 | `codec_mpa` | libmpg123 |
 | `demux_adts` | **nothing**, in Rust | `codec_aac` | **nothing**, in Rust |
+| `demux_dsd` | **nothing**, in Rust | `codec_dsd` | **nothing**, in Rust |
+| `demux_wavpack` | libwavpack | `codec_pcm`, `codec_dsd` | see those rows |
 | `demux_mp4` | Bento4 | `codec_alac`, `codec_aac` | **nothing** |
 | `demux_ogg` | libogg | `codec_opus`, `codec_vorbis`, `codec_flac` | libopus, libvorbis, libFLAC |
 | `demux_mkv` | libmatroska | seven of them, see below | |
 | `demux_ffmpeg` | `ffmpeg`, `ffprobe` | *itself* -- `SELF_DECODES` | |
 | `demux_mf` | Media Foundation | *itself* -- `SELF_DECODES` | |
 
-The `codec_flac` row is the one worth reading twice. It is the codec half of the
+The `demux_wavpack` row is the one that had a decision in it, and
+[*WavPack, and the library with no seam in it*](#wavpack-and-the-library-with-no-seam-in-it)
+below is where it is argued. The `codec_flac` row is the one worth reading twice. It is the codec half of the
 native FLAC reader, what `demux_ogg` hands an OggFLAC to, *and* what `demux_mkv`
 hands a FLAC-in-Matroska to -- and none of the three containers knows the others
 exist. That is the whole argument for the split in one line of a table.
@@ -1098,6 +1102,187 @@ where the answer means something.
 input. That harness is the point: a new decoder is only better than an
 unmaintained one if somebody is actually looking.
 
+## DSD, which is not decoded at all
+
+DSD is the one format here where **nothing decodes anything**. The file holds a
+one-bit stream at 2.8224 MHz and up; that stream *is* the waveform, and a DAC
+low-passes it into analogue. Any arithmetic performed on it in this process
+would be damage. So the whole of the work is getting those bits to a device
+unaltered, and the whole of the difficulty is that Windows has no wire format
+for a bitstream.
+
+**Today, without this, a `.dsf` plays and is converted where nobody can see it.**
+`demux_ffmpeg` opens it and hands back `F32`, because FFmpeg decimates DSD by
+eight into PCM inside the library. That is the same objection this document
+makes to libxaac's integer-only AAC and to Media Foundation's resampling, and it
+is not better for being convenient.
+
+### DoP, and why the packing is a codec
+
+DoP is the answer the industry settled on: two DSD bytes ride inside each 24-bit
+PCM frame, under a marker byte that alternates `0x05` and `0xFA`. A DAC that
+understands it sees the alternation and switches to DSD; one that does not sees
+PCM whose top byte never settles, which is quiet noise rather than full-scale
+noise -- and that is why those two values were chosen. **Nothing is lost**: every
+DSD bit arrives, in order, in the low sixteen.
+
+The arithmetic, once: DSD64 is 2822400 samples a second, which is 352800 bytes,
+which is **176400 DoP frames**. DSD256 is 705600, which §5 of [the plan](plan.md)
+records a FiiO KA5 accepting. DSD512 would be 1411200, which it does not.
+
+So where does the packing go? Not in the graph. **A repack here keeps the frame
+count and changes the container** -- that is what `Fidelity::repacked` means and
+what Path A does on the decode thread -- and DoP turns two source bytes into one
+frame. A stage that changed the frame rate would be the one thing Path A is
+defined not to be. Turning a container's units into the graph's units is what a
+codec is for, so `codec_dsd` is where it goes, and it reports the DoP form from
+`get_format` the way every codec reports what it produces.
+
+That also settles a question the ABI could not have settled on its own. When a
+native-DSD sink exists -- ASIO, someday, for DSD512 -- it will want the bytes
+rather than the frames, and the shape of *that* is a decision to make against a
+sink that exists. There is no `MP_ENCODING_DSD` in the header for the same
+reason §15 gives: **an interface added before its second implementation is a
+guess.** `MP_ENCODING_DOP` was already there and now has its first user.
+
+### DSF and DSDIFF, which are one format in two headers
+
+| | DSF (Sony) | DSDIFF (Philips) |
+|---|---|---|
+| Header | little-endian, fixed 92 bytes | big-endian, IFF-shaped, 64-bit chunk sizes |
+| Bit order | **LSB first**, usually; the `bits per sample` field says which | **MSB first**, always |
+| Channels | **blocked**: 4096 bytes of one channel, then the next | **interleaved**: one byte each, round-robin |
+| Length | a sample count, in DSD bits | the size of the audio chunk |
+| Compression | none | `DSD ` uncompressed, or `DST `, which goes to FFmpeg |
+
+They are one module because past those five rows they are the same file. The
+reader normalises both to byte-interleaved MSB-first DSD -- the blocking is
+framing, and the bit order is a container's statement about its own bytes -- so
+`codec_dsd` is handed the same bytes whichever wrapper it came from, which is the
+arrangement `demux_adts` and `demux_mp4` have with `codec_aac`.
+
+### The measurement, which is exact
+
+DSD has no PCM it should equal, so the usual lossless check does not apply. What
+does is stronger: **the DSD in the file must be the DSD in the DoP**, bit for
+bit, under the right marker. `tools/make_dsd.py --check` takes the markers off
+and compares, and it is reproducible from a checkout because that same script
+writes the corpus -- **nothing encodes DSD**, not FFmpeg and not anything else to
+hand, so the files come from a second-order sigma-delta modulator written for
+the purpose and are committed under `tests/data/dsd`.
+
+Four containers, one audio, and the same twelve hex digits out of all of them:
+
+| File | Reported | Frames | SHA-256 |
+|---|---|---|---|
+| DSD64 in DSF, LSB first | `176400 Hz / 2 ch / S24_PACKED / DoP` | 17640 | `114b25cc…5333b6e` |
+| DSD64 in DSF, MSB first | " | 17640 | **identical** |
+| DSD64 in DSDIFF | " | 17640 | **identical** |
+| DSD64 in WavPack | " | 17640 | **identical** |
+| DSD128 mono in DSF | `352800 Hz / 1 ch / S24_PACKED / DoP` | 17640 | `05195e3b…e013c35` |
+| DSD64 5.1 in DSF | `176400 Hz / 6 ch / … / mask 0x3f` | 3528 | `2a9c23c9…0b27c24d` |
+| DSD64 5.1 in DSDIFF | " | 3528 | **identical** |
+
+Every one of them passes the bit check as well: 70560 DSD bytes for the stereo
+files, 42336 for the 5.1, every byte in order under the marker it should have.
+
+**FFmpeg reads all six too, and disagrees about one thing.** It reports the byte
+rate as the sample rate, as this does; it reads the bit-order field correctly
+(`dsd_lsbf_planar` against `dsd_msbf_planar`); and it says a DSF is 0.104490 s
+where this says 0.100000. The difference is the block padding: DSF pads its last
+block group with zeros, and FFmpeg takes the length from the data chunk while
+this takes it from the sample count the header states. The padding is not audio.
+The DSDIFF of the same audio, which has no blocking to pad, measures 0.100000 in
+both.
+
+### What the fuzzer found in five minutes
+
+`dsd_fuzzer` was written alongside the reader, for the reason the header
+formats earn one: **DSDIFF's chunk sizes are 64-bit and its chunks nest**, and
+every one of them is a length the reader has to decide whether to believe. It
+found an overflow in the first campaign.
+
+The audio chunk is deliberately exempt from the bounds check the other chunks
+get -- a file still being written states a length it has not reached yet, and
+refusing that would refuse a file that plays. So a DSDIFF whose `DSD ` chunk
+claims 2^64 bytes reaches the walk's arithmetic with it, and
+`at = body + size + (size & 1)` wrapped.
+
+**The interesting half is what that would have been in a release build.** The
+fuzz target builds with overflow checks on, so the wrap was a panic and
+libFuzzer called it a crash. Without them it would have been silent: the walk
+would have restarted at a small offset *inside the audio*, read whatever DSD
+bytes happened to look like a chunk header, and gone on. Every offset the two
+readers compute from a claimed length is `saturating_add` now, and the shape has
+a test of its own. Re-run afterwards, seeded with everything the first campaign
+had grown: **60,737,917 executions in five minutes, 1,133 new corpus entries,
+38 MB peak, nothing found.** libwavpack, which is on OSS-Fuzz already, took
+1,489,637 in the same time and found nothing either -- which is what a target
+against a well-fuzzed library is expected to do, and is why it is here for the
+corpus and the machinery rather than for the finding.
+
+### Seeking, and the one frame it rounds down by
+
+Seeks are byte-identical to the tail of a straight decode at frames 1, 2, 3,
+1000, 2047, 2048, 2049, 8191 and 17639 -- and they were not, at first, in a way
+worth writing down. **Odd targets differed and even ones did not.** The marker
+alternates per frame, so which one a frame carries is decided by its parity; the
+codec is reset before a seek and starts on `0x05`; landing on an odd frame gave
+every frame after it the wrong marker. `demux_dsd::seek` rounds down to an even
+frame, the host discards the one frame that puts it past the target, and the
+parity is right by construction. It is the same shape as the pre-roll AAC needs,
+for a different reason and a thousand times smaller.
+
+## WavPack, and the library with no seam in it
+
+WavPack already played, bit-exactly, through `demux_ffmpeg`. What a first-class
+reader buys is three things: it works with no FFmpeg installed, it reaches the
+hybrid and correction-file modes FFmpeg handles unevenly, and -- the reason it
+was worth doing now -- **`OPEN_DSD_NATIVE`**. libwavpack compresses DSD as well
+as PCM, and it will hand back either the bitstream or 24-bit PCM decimated by
+eight. The second is a conversion performed inside a library, so this takes the
+first, and a DSD WavPack file reaches a DAC through the same `codec_dsd` a `.dsf`
+does.
+
+**It is one module, and that took a decision.** `demux_flac` splits the container
+from the codec because libFLAC documents `skip_single_frame` and
+`get_decode_position` for exactly that. libwavpack has no equivalent: there is no
+way to ask where a block begins, to skip one, or to decode one on its own. The
+public API abstracts blocks away and hands back samples. So the two honest shapes
+were:
+
+- flag the stream `MP_STREAM_SELF_DECODES` and answer `read_frames`, which is
+  what `demux_mf` and `demux_ffmpeg` do -- and which §7 of the plan calls the
+  floor, because it is a second path through the host that bypasses the codec
+  resolution the whole of v2 was built for;
+- **name the codec the payload actually is**, which is what `demux_wav` does.
+  After libwavpack has read it the payload is PCM, so the codec is `codec_pcm`
+  and the decode is the memcpy it always was; and when the file is a DSD one the
+  payload is DSD, so the codec is `codec_dsd`.
+
+The second costs one buffer and keeps every host path the same -- seeking,
+gapless, the position, Path A's repack -- and it is what makes the DSD case one
+line rather than a second implementation.
+
+| File | Through | Reported | Against the source WAV |
+|---|---|---|---|
+| WavPack, 16-bit 44.1 kHz stereo | `demux_wavpack` + `codec_pcm` | `44100 Hz / 2 ch / S16` | **identical** |
+| WavPack, 24-bit 96 kHz stereo | " | `96000 Hz / 2 ch / S24_PACKED` | **identical** |
+| WavPack, 16-bit 5.1 at 48 kHz | " | `48000 Hz / 6 ch / S16 / mask 0x3f` | **identical** |
+| WavPack hybrid, 384 kbps + `.wvc` | " | `44100 Hz / 2 ch / S16` | lossy by design |
+| DSD64 in WavPack | `demux_wavpack` + `codec_dsd` | `176400 Hz / 2 ch / … / DoP` | **the same bytes as the DSF** |
+
+The three lossless hashes are `b38bebc6…`, `f434a906…` and `5c449afc…`, which are
+the hashes this document already records for **ALAC** of the same audio. Three
+unrelated lossless codecs, three unrelated containers, one set of bytes.
+
+libwavpack is BSD-3-Clause, in OSS-Fuzz, and pinned at 5.9.0. It gets a fuzz
+target here anyway, for the reason libFLAC and libmpg123 do: the corpus needs
+somewhere to live and the machinery is the part that rots. `OPEN_WVC` is
+deliberately not set -- a `.wvc` sits beside the `.wv` and turns a hybrid file
+lossless, and finding it would mean this module opening a path the host never
+gave it, which is the host's business.
+
 ## When the best decoder says no
 
 Probing reads four kilobytes. Opening reads the whole header, and under v2 it
@@ -1837,10 +2022,12 @@ than a campaign, and somewhere for a regression corpus to live.
 | `flac_fuzzer` | libFLAC | " |
 | `mpa_fuzzer` | libmpg123, both halves | " |
 | `mp4_fuzzer` | Bento4 | " |
+| `wavpack_fuzzer` | libwavpack | " |
 | `settings_fuzzer` | DragonPerch's INI parser | " |
 | `alac_fuzzer` | the ALAC decoder | Rust, coverage-guided on the stable toolchain |
 | `aac_fuzzer` | the AAC-LC decoder | " |
 | `adts_fuzzer` | the ADTS framer | " |
+| `dsd_fuzzer` | the DSF and DSDIFF readers | " |
 
 The Rust three have no sanitizer and do not need one: an index past a slice is a
 panic, which libFuzzer reports as a crash, so the bounds checks *are* the
@@ -1868,7 +2055,16 @@ worth 147 MB. Each of those is written up where the format is.
   measured above, channel by channel, and the generated matrix carries 5.1 rows
   for WAV, FLAC and ALAC. Left visible rather than deleted because the reason it
   went stale is the point of generating the table.
-- DSD in any form: DoP is designed for and not implemented.
+- ~~DSD in any form: DoP is designed for and not implemented.~~ Stale:
+  `demux_dsd` reads DSF and DSDIFF, `demux_wavpack` reads DSD in WavPack, and
+  `codec_dsd` frames all three as DoP -- measured above, bit for bit. What is
+  still untested is **DoP on a device**: §14 records a FiiO KA5 accepting DoP at
+  DSD256 as PCM, which is the same wire format, but nothing here has yet played
+  a DSD file through one.
+- **Native DSD, and DSD512.** DoP tops out where a DAC stops accepting 1411.2 kHz
+  PCM, so DSD512 needs a sink that speaks DSD -- ASIO, whose SDK Steinberg
+  relicensed under GPLv3 in October 2025. The KA5 has an ASIO driver and stops at
+  DSD256, so the sink is testable on it and the format it would unlock is not.
 - Shorten, TAK and OptimFROG. `decode_ffmpeg` claims them on their documented
   magic bytes and nothing here can encode one, so the claim is unmeasured.
 - Monkey's Audio and Musepack, for the same reason: claimed, no encoder to hand.

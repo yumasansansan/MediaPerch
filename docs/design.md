@@ -1071,6 +1071,16 @@ modules/             everything that can be loaded and unloaded at runtime, sort
                      AudioSpecificConfig an MP4 would have carried out of the
                      first frame header, so codec/aac/ cannot tell the two
                      containers apart.
+  demux/dsd/         DSF and DSDIFF, in Rust -- one module because past the
+                     header they are one format. Normalises both to
+                     byte-interleaved MSB-first DSD, so codec/dsd/ cannot tell
+                     which wrapper it came from. Counts in DoP frames, because
+                     everything the host counts is in the codec's frames.
+  demux/wavpack/     WavPack, on libwavpack. One module, not two: the library
+                     has no block-level API to split a container from a codec
+                     with, so it names the codec its payload is -- PCM, or DSD
+                     for a DSD file -- and hands packets to the module that
+                     already reads it. OPEN_DSD_NATIVE, never OPEN_DSD_AS_PCM.
   demux/mp4/         MP4, M4A, QuickTime .mov and fragmented MP4, on Bento4. Reads
                      moov wherever it is, which is what makes "read the codec, then
                      pick the decoder" possible at all -- a probe sees four kilobytes
@@ -1125,6 +1135,11 @@ modules/             everything that can be loaded and unloaded at runtime, sort
                      floating-point operations, so every recorded hash is
                      identical -- and faster than it, once the IMDCT's table
                      index was masked rather than bounds-checked.
+  codec/dsd/         DSD as DoP, in Rust, and nothing here decodes: the
+                     file's bits are the waveform. Two DSD bytes into each
+                     24-bit frame under an alternating 0x05/0xFA marker, which
+                     is a codec rather than a repack because the frame count
+                     changes and Path A's repack may not change it.
   codec/opus/        libopus driven directly. opusfile -- the container and the
                      codec in one -- is not in the tree at all: nothing was left
                      calling it, and it could open a socket. Decodes at 48 kHz

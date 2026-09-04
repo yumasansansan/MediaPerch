@@ -47,6 +47,7 @@ set(includes
 # this tree would not write and is not going to fix; what matters is the
 # diagnostics in the file being checked.
 set(system_includes
+    "-isystem" "${MEDIAPERCH_ROOT}/external/wavpack/include"
     "-isystem" "${MEDIAPERCH_ROOT}/external/dr_libs"
     "-isystem" "${MEDIAPERCH_ROOT}/external/flac/include"
     "-isystem" "${MEDIAPERCH_ROOT}/external/libebml"
@@ -85,7 +86,8 @@ set(sources
     modules/codec/pcm/codec_pcm.cpp
     modules/demux/wav/demux_wav.cpp
     modules/demux/flac/demux_flac.cpp
-    modules/demux/mp4/demux_mp4.cpp)
+    modules/demux/mp4/demux_mp4.cpp
+    modules/demux/wavpack/demux_wavpack.cpp)
 
 # These need a header the build generates, so they are checked only when a build
 # directory is named.

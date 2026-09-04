@@ -35,3 +35,7 @@ timeout-*
 abi/probe_rust/target/
 /modules/target/
 /modules/codec/alac/fuzz/target/
+
+# Python leaves these beside tools/ when a script imports another.
+__pycache__/
+*.pyc

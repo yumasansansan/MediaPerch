@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# DSD files as a container module. See reader/src/lib.rs for the two wrappers
+# and src/lib.rs for why everything here is counted in DoP frames.
+
+[package]
+name = "mp_demux_dsd"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "DSF and DSDIFF for MediaPerch: raw DSD out, counted in the frames codec_dsd produces"
+
+[lib]
+name = "mp_demux_dsd"
+crate-type = ["cdylib"]
+
+[dependencies]
+mp-abi = { path = "../../shared/mp-abi" }
+dsdfile = { path = "reader" }

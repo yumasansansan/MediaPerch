@@ -31,3 +31,6 @@
 [submodule "external/mpg123"]
 	path = external/mpg123
 	url = https://github.com/madebr/mpg123.git
+[submodule "external/wavpack"]
+	path = external/wavpack
+	url = https://github.com/dbry/WavPack.git

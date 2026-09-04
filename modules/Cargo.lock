@@ -15,6 +15,14 @@ name = "alac"
 version = "0.2.0"
 
 [[package]]
+name = "dop"
+version = "0.1.0"
+
+[[package]]
+name = "dsdfile"
+version = "0.1.0"
+
+[[package]]
 name = "mp-abi"
 version = "0.1.0"
 
@@ -35,9 +43,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "mp_codec_dsd"
+version = "0.1.0"
+dependencies = [
+ "dop",
+ "mp-abi",
+]
+
+[[package]]
 name = "mp_demux_adts"
 version = "0.2.0"
 dependencies = [
  "adts",
+ "mp-abi",
+]
+
+[[package]]
+name = "mp_demux_dsd"
+version = "0.1.0"
+dependencies = [
+ "dsdfile",
  "mp-abi",
 ]

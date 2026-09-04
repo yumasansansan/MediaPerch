@@ -18,9 +18,14 @@ members = [
     "shared/mp-abi",
     "codec/alac/decoder", "codec/alac",
     "codec/aac/decoder", "codec/aac",
+    "codec/dsd/packer", "codec/dsd",
     "demux/adts/framer", "demux/adts",
+    "demux/dsd/reader", "demux/dsd",
 ]
-exclude = ["codec/alac/fuzz", "codec/aac/fuzz", "demux/adts/fuzz"]
+exclude = [
+    "codec/alac/fuzz", "codec/aac/fuzz",
+    "demux/adts/fuzz", "demux/dsd/fuzz",
+]
 
 [workspace.package]
 edition = "2021"

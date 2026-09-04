@@ -67,6 +67,9 @@ pub mod kind {
 /// `MpCodec` values. Only the ones a Rust module names so far.
 pub mod codec {
     pub const UNKNOWN: u32 = 0;
+    /// Not a compression: the file's bits are the waveform. `codec_dsd`
+    /// frames them as DoP, which is what a Windows endpoint can carry.
+    pub const DSD: u32 = 2;
     pub const ALAC: u32 = 17;
     pub const AAC_LC: u32 = 35;
 }
@@ -84,6 +87,8 @@ pub mod sample {
 /// `MpEncoding`.
 pub mod encoding {
     pub const PCM: u32 = 0;
+    /// DSD carried in 24-bit PCM frames under a 0x05/0xFA marker.
+    pub const DOP: u32 = 1;
 }
 
 /// `MpStreamKind`.

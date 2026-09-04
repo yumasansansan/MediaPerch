@@ -86,7 +86,7 @@ endfunction()
 # MP_KIND_DECODER is gone and so are the eight modules that used it.
 #
 # The heading drops the `demux_` that all of them share.
-set(decoders demux_wav demux_flac demux_mpa demux_adts demux_mp4 demux_ogg
+set(decoders demux_wav demux_flac demux_mpa demux_adts demux_dsd demux_wavpack demux_mp4 demux_ogg
              demux_mkv demux_ffmpeg demux_mf)
 
 set(rows "")      # "label|file|reference-file-or-NONE"
@@ -159,6 +159,29 @@ set(SOURCE "${W}/s16_48000_6.wav")
 add_row("FLAC, 16-bit 5.1 at 48 kHz" "${W}/d.flac" "${SOURCE}" -c:a flac)
 add_row("ALAC, 16-bit 5.1 at 48 kHz" "${W}/d_alac.m4a" "${SOURCE}" -c:a alac)
 
+# ---- DSD, which is the one format here whose corpus is committed rather than
+# generated. **Nothing encodes DSD** -- FFmpeg reads DSF and DSDIFF and cannot
+# write either, and there is no reference encoder anywhere -- so the two files
+# come from `tools/make_dsd.py`, a sigma-delta modulator, and live in the tree.
+# Their provenance is that script and the check it also carries.
+#
+# The reference is NONE, and that is not a shrug. `exact` in this table means
+# the PCM equals the audio that went into the encoder, and DSD had no PCM go
+# into it: the file's bits *are* the waveform. What must be true instead is
+# that those bits come out of DoP unaltered, which no column here could show
+# and which `tools/make_dsd.py --check` measures directly.
+set(DSD_DATA "${CMAKE_CURRENT_LIST_DIR}/../tests/data/dsd")
+if(EXISTS "${DSD_DATA}/stereo_dsd64.dsf")
+    list(APPEND rows "DSD64 in DSF, stereo|${DSD_DATA}/stereo_dsd64.dsf|NONE")
+    list(APPEND rows "DSD64 in DSDIFF, stereo|${DSD_DATA}/stereo_dsd64.dff|NONE")
+    # The same DSD compressed by WavPack's own encoder -- the reference one,
+    # the way the ALAC rows in docs/formats.md come from Apple's. What makes
+    # this row worth a line of its own is that it must produce the *same bytes*
+    # as the two above: three containers, one audio, and the compression in the
+    # third is lossless or it is not WavPack.
+    list(APPEND rows "DSD64 in WavPack, stereo|${DSD_DATA}/stereo_dsd64.wv|NONE")
+endif()
+
 # ---------------------------------------------------------------- the asking
 
 # Which modules claim a file, by the same probe the resolution rules use.
@@ -195,6 +218,13 @@ function(ask out_cell file decoder reference)
     endif()
     string(REGEX MATCH "format +[0-9]+ Hz / [0-9]+ ch / ([A-Za-z0-9_]+)" _ "${said}")
     set(type "${CMAKE_MATCH_1}")
+    # A DoP stream is 24-bit frames and is not PCM, and a cell that said
+    # `S24_PACKED` would be naming the container while hiding the thing that
+    # matters about it. The encoding is what a reader of this table wants.
+    if(said MATCHES "format +[0-9]+ Hz / [0-9]+ ch / [A-Za-z0-9_]+[^
+]* / (DoP|IEC61937)")
+        set(type "${CMAKE_MATCH_1}")
+    endif()
     string(REGEX MATCH "sha256 +([0-9a-f]+)" _ "${said}")
     set(hash "${CMAKE_MATCH_1}")
     # A decoder that opened the file but was forced past its own judgement can

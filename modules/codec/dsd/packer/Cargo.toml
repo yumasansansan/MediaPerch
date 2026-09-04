@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# DSD over PCM: the packing, and nothing else. Its own crate for the reason
+# every decoder here has one -- `#![forbid(unsafe_code)]` at crate level, and
+# tests that reach the arithmetic without building the .dll around it.
+#
+# No fuzz target, and that is a decision rather than an omission: the operation
+# is total. Every byte sequence is a valid input, there is no header to parse
+# and no length to believe, and the one bound -- the destination buffer -- is
+# checked before anything is written. There is nothing for a fuzzer to find
+# that the tests do not already state.
+
+[package]
+name = "dop"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "DSD over PCM: two DSD bytes into each 24-bit frame under a 0x05/0xFA marker, losing nothing"
+
+[lib]
+name = "dop"
+crate-type = ["rlib"]
+
+[dependencies]

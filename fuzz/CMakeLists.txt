@@ -213,8 +213,35 @@ if(MEDIAPERCH_CARGO)
     mediaperch_add_rust_fuzzer(adts_fuzzer
         "${CMAKE_SOURCE_DIR}/modules/demux/adts/fuzz/Cargo.toml"
         "${CMAKE_CURRENT_LIST_DIR}/corpus/adts")
+    mediaperch_add_rust_fuzzer(dsd_fuzzer
+        "${CMAKE_SOURCE_DIR}/modules/demux/dsd/fuzz/Cargo.toml"
+        "${CMAKE_CURRENT_LIST_DIR}/corpus/dsd")
 else()
     message(WARNING "cargo is not on PATH -- the Rust fuzzers are skipped")
+endif()
+
+# WavPack, which demux_wavpack is built on. It is on OSS-Fuzz upstream, which
+# is why this is expected to find nothing -- and is not a reason to leave it
+# out, for the reasons wavpack_fuzzer.cpp gives.
+if(NOT TARGET wavpack AND EXISTS "${CMAKE_SOURCE_DIR}/external/wavpack/CMakeLists.txt")
+    set(WAVPACK_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+    set(WAVPACK_INSTALL_CMAKE_MODULE OFF CACHE BOOL "" FORCE)
+    set(WAVPACK_INSTALL_PKGCONFIG_MODULE OFF CACHE BOOL "" FORCE)
+    set(WAVPACK_INSTALL_DOCS OFF CACHE BOOL "" FORCE)
+    set(WAVPACK_ENABLE_DSD ON CACHE BOOL "" FORCE)
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(CMAKE_SKIP_INSTALL_RULES ON)
+    add_subdirectory("${CMAKE_SOURCE_DIR}/external/wavpack"
+                     "${CMAKE_BINARY_DIR}/external/wavpack" EXCLUDE_FROM_ALL)
+endif()
+if(TARGET wavpack)
+    target_compile_options(wavpack PRIVATE -fsanitize=fuzzer-no-link,address -w)
+    target_compile_definitions(wavpack PRIVATE
+        _DISABLE_VECTOR_ANNOTATION _DISABLE_STRING_ANNOTATION)
+    set_target_properties(wavpack PROPERTIES FOLDER "external")
+    mediaperch_add_fuzzer(wavpack_fuzzer wavpack_fuzzer.cpp wavpack)
+    target_link_libraries(wavpack_fuzzer PRIVATE wavpack)
 endif()
 
 # The container, which is Bento4 rather than a parser here since demux_mp4 was
