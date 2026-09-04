@@ -608,6 +608,26 @@ the rate and the channel count all reachable, **the only thing that can still ma
 refuse a file is a device that refuses everything** -- and every one of them is asked for
 rather than inserted, which is what keeps §6's refusal meaning something.
 
+**Path B can be hashed without a device, and until recently could not.** The arithmetic
+lived inside `ProcessedGraph`, which needs a sound card, a ring and two threads, so
+`mediaperch-probe decode` took `--path processed`, `--gain` and `--dsp`, printed them back,
+and ignored them -- a -6 dB gain and a resample to 192 kHz both left the SHA-256 where it
+started. Every claim in this document about the resampler, the dither and the shapers rested
+on listening to them. `mp::Processor` is that arithmetic with the device, the ring and the
+threads taken out; `ProcessedGraph` holds one and does nothing else with the samples, so
+what `decode` measures is the play path rather than a second copy of it. What it found on
+the first run, and what the two instruction-set baselines turned out to agree on, are in
+[formats.md](formats.md) under *Path B, hashed*.
+
+`modules/dsp/vst3` is the stage that is not like the others: it loads a DLL somebody else
+wrote. **It changes what this project can promise** -- a chain with a VST3 in it is exactly
+as reproducible as the plugin is -- which is why it is a module a person asks for by name
+and never something that appears on its own, the same rule §6 applies to the resampler. It
+became possible in October 2025, when Steinberg relicensed the VST3 SDK to MIT; before that
+the licence was incompatible with GPLv3 in both directions. It takes `pluginterfaces` and
+writes the host, which is eight hundred lines against `public.sdk`'s forty thousand, and it
+hands a plugin this tree's f64 bus untouched when the plugin says it can take doubles.
+
 ### Switching between them
 
 At a **graph rebuild point** only: track change, device change, format change, or an
@@ -1314,6 +1334,7 @@ HDR state.
 | M5 | `decode_mf` and `decode_ffmpeg`, and the resolution table | **done.** `ctest -R format_matrix` builds one file per format, shows it to every decoder, and rewrites the matrix in the README -- and fails when the README stops matching. `mediaperch-probe claims` shows every decoder's probe score for a file, so a cell can say whether a decoder *claimed* the file or was forced to try. The lossless corpus comes from the reference encoders rather than FFmpeg, whose FLAC encoder writes 24 bits when asked for 32. Generating it found two claims in [formats.md](formats.md) that had gone stale and one real gap: nothing but Media Foundation claimed WMA |
 | M4.5 | ABI v2: the container decides (§12) | **done.** Every format this tree reads resolves container-first: eight demuxers and seven codecs, and each one decodes to the hash its v1 decoder produced. Two formats gained a first-class reader on the way -- MPEG layer II, which had gone to FFmpeg, and OggFLAC, which `demux_ogg` had been naming since step 4 with nothing to hand it to. Seeking became the host's, once, rather than each decoder's separately: a seek to an arbitrary sample lands byte-identically in WAV, native FLAC, OggFLAC and ALAC-in-MP4, which are four unrelated framings. Modules are laid out and installed by kind -- `modules/<kind>/<name>` in the tree, `bin/<config>/modules/<kind>/` out of it. Step 7 deleted `MP_KIND_DECODER`, the eight modules that used it, `mp::Decoder`, the registry's second resolution path, and one submodule that had no caller left |
 | M5.5 | Every parser is a library or is Rust | **done.** What this tree writes and what it links were both re-decided against measurement, and both moved: `demux_mp4` to Bento4, `demux_mkv` to libmatroska, `demux_flac`/`codec_flac` to libFLAC, `demux_mpa`/`codec_mpa` to libmpg123 -- and what was left, the parsers no library reads better, went to Rust: `codec_alac`, `codec_aac`, `demux_adts`. Every one of them bit-identical to the C++ it replaced, which is what made each move checkable rather than a judgement. [formats.md](formats.md) has every measurement, including the two upstream bugs a fuzzer found in Bento4 and the four things libmpg123's API did not say |
+| M5.75 | Path B is hashable, and a VST3 can be a stage in it | **done.** `mp::Processor` is `ProcessedGraph`'s arithmetic without the device, the ring or the threads, so `decode --path processed --gain --dsp` runs the chain and prints its SHA-256 -- the flags had been accepted and silently ignored, which is why nothing in this tree had ever compared the resampler between two builds. It found three bugs on the first run: `use_processed` could not see a gain, `Processor::reset` returned `MP_END` on success, and a seek left the noise shaper feeding back error from wherever the stream used to be. The baseline and AVX2 builds agree over 144 runs. `modules/dsp/vst3` hosts somebody else's plugin on `pluginterfaces` alone, with a VST3 written in `tests/` so the host is tested without one installed |
 | M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse |
 | M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled |
 | M8 | WinUI 3 shell | killing it mid-track changes nothing audible |

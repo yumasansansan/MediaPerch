@@ -126,12 +126,20 @@ enum class PathPolicy : std::uint32_t {
 /// Not the same question as `classify`, and the difference is worth stating.
 /// `classify` describes the *format* relationship: whether the device's wire
 /// format holds the source's samples unaltered. Path B runs whenever the format
-/// says it must -- and also whenever the user asked for it, because a gain is a
-/// change the format cannot see. A 16-bit file, a 16-bit device and a volume of
-/// 0.5 is `Fidelity::exact` and is emphatically Path B.
-[[nodiscard]] constexpr bool use_processed(PathPolicy policy, Fidelity fidelity) noexcept
+/// says it must, whenever the user asked for it, and whenever something in the
+/// run is going to change the samples for a reason no format can show.
+///
+/// **`altering` is that third thing, and it was missing.** A 16-bit file, a
+/// 16-bit device and a volume of 0.5 is `Fidelity::exact`, so without it the
+/// gain was read, printed, and then not applied; a `--dsp` chain in front of a
+/// device that took the source format exactly was built, opened, configured and
+/// never run. Both are the caller's facts -- a gain that is not exactly one, or
+/// a chain that is not empty -- which is why it is a parameter here and not a
+/// default: a new caller has to answer the question.
+[[nodiscard]] constexpr bool use_processed(PathPolicy policy, Fidelity fidelity,
+                                           bool altering) noexcept
 {
-    return policy == PathPolicy::processed || fidelity == Fidelity::converted;
+    return policy == PathPolicy::processed || fidelity == Fidelity::converted || altering;
 }
 
 /// True when a stream at this fidelity cannot reach the device unaltered.

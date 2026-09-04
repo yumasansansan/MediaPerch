@@ -112,6 +112,7 @@ if(MEDIAPERCH_TOOLCHAIN STREQUAL msvc)
     target_compile_options(mediaperch_flags INTERFACE
         /W4
         /permissive-
+        /analyze
         /utf-8
         /Zc:__cplusplus
         /Zc:inline

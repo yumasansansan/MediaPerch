@@ -13,12 +13,14 @@
 #include "mediaperch/dsp.hpp"
 #include "mediaperch/negotiation.hpp"
 #include "mediaperch/processed.hpp"
+#include "mediaperch/processor.hpp"
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <thread>
 #include <vector>
@@ -193,6 +195,38 @@ const MpDspVtbl& fake_vtbl()
     return vtbl;
 }
 
+MpResult MP_CALL fake_reset(MpDsp* d)
+{
+    if (d == nullptr) {
+        return MP_ERR_INVALID;
+    }
+    for (std::vector<double>& channel : d->line) {
+        std::fill(channel.begin(), channel.end(), 0.0);
+    }
+    d->at = 0;
+    d->held = 0;
+    return MP_OK;
+}
+
+/// The same stages, built against a header that has `reset`. A seek is the only
+/// caller, and a stage that cannot forget is one whose first block after a seek
+/// is the audio from wherever the stream used to be.
+template <MpDsp::Kind K>
+const MpDspVtbl& resetting_vtbl()
+{
+    static const MpDspVtbl vtbl{sizeof(MpDspVtbl),
+                                0,
+                                &fake_open<K>,
+                                &fake_close,
+                                &fake_configure,
+                                &fake_process,
+                                &fake_flush,
+                                &fake_set,
+                                &fake_describe,
+                                &fake_reset};
+    return vtbl;
+}
+
 /// How many frames the next `delaying_vtbl` will claim. A file-scope knob
 /// rather than per-instance state, because the fake stages have none.
 std::uint32_t g_fake_latency = 0;
@@ -242,6 +276,70 @@ std::vector<double> ramp(std::uint32_t frames, std::uint32_t channels)
         for (std::uint32_t c = 0; c < channels; ++c) {
             out[static_cast<std::size_t>(n) * channels + c] =
                 0.25 * static_cast<double>(n % 17) + 0.01 * static_cast<double>(c);
+        }
+    }
+    return out;
+}
+
+/// s16 CD audio, which is what a `Processor` is usually handed and handed back.
+mp::Format cd_audio_s16()
+{
+    return mp::Format{.sample_rate = 44100,
+                      .channels = 2,
+                      .channel_mask = 0,
+                      .sample_type = mp::SampleType::s16,
+                      .encoding = mp::Encoding::pcm,
+                      .valid_bits = 0};
+}
+
+/// Interleaved s16, not a ramp: a ramp survives an off-by-one shift unnoticed.
+std::vector<std::uint8_t> s16_pattern(std::uint32_t frames, std::uint32_t channels)
+{
+    std::vector<std::uint8_t> out(static_cast<std::size_t>(frames) * channels * 2);
+    for (std::size_t i = 0; i < out.size() / 2; ++i) {
+        const auto v = static_cast<std::int16_t>((i * 4093u + 977u) & 0xFFFFu);
+        out[2 * i] = static_cast<std::uint8_t>(v & 0xFF);
+        out[2 * i + 1] = static_cast<std::uint8_t>((v >> 8) & 0xFF);
+    }
+    return out;
+}
+
+/// Everything a `Processor` produces for a whole stream, in `block` at a time,
+/// including whatever the chain was still holding at the end.
+///
+/// The block is a parameter because it must not matter. A stage whose answer
+/// changes with the size of the piece it is handed is a broken stage, and
+/// nothing else in this tree would notice.
+std::vector<std::uint8_t> processor_run(const mp::Format& source, const mp::Format& wire,
+                                        const std::vector<std::uint8_t>& in,
+                                        std::uint32_t block, mp::ConvertConfig convert = {},
+                                        mp::DspChain* chain = nullptr)
+{
+    mp::Processor proc{source, wire, block, convert, chain};
+    REQUIRE(proc.possible());
+
+    std::vector<std::uint8_t> out;
+    std::vector<std::uint8_t> got(proc.output_bytes());
+    const std::size_t stride = proc.source_frame_bytes();
+    const std::size_t total = in.size() / stride;
+
+    for (std::size_t at = 0; at < total;) {
+        const auto frames = static_cast<std::uint32_t>(std::min<std::size_t>(block, total - at));
+        std::uint32_t produced = 0;
+        REQUIRE(proc.run(in.data() + at * stride, frames, got.data(), produced));
+        out.insert(out.end(), got.begin(),
+                   got.begin() + static_cast<std::ptrdiff_t>(
+                                     produced * proc.wire_frame_bytes()));
+        at += frames;
+    }
+    while (!proc.flush_done()) {
+        std::uint32_t produced = 0;
+        const bool again = proc.flush(got.data(), produced);
+        out.insert(out.end(), got.begin(),
+                   got.begin() + static_cast<std::ptrdiff_t>(
+                                     produced * proc.wire_frame_bytes()));
+        if (!again) {
+            break;
         }
     }
     return out;
@@ -630,4 +728,160 @@ TEST_CASE("a chain says how far behind its output is", "[dsp][latency]")
         CHECK(chain.latency_frames() == 200);
         g_fake_latency = 0;
     }
+}
+
+
+// --------------------------------------------------------------------------
+// Processor
+//
+// **Path B's arithmetic, with no device, no ring and no thread.** It was inside
+// `ProcessedGraph` until now, which meant it could only be run by playing it:
+// `mediaperch-probe decode` took `--path processed` and `--dsp` and silently
+// ignored both, so a -6 dB gain and a resample to 192 kHz left the hash exactly
+// where it started. Everything below is a property that was true and unprovable.
+// --------------------------------------------------------------------------
+
+TEST_CASE("Path B at unity is the source, byte for byte", "[processor]")
+{
+    // The claim the whole path rests on. Source format, wire format, no chain
+    // and a gain of one: whatever else Path B does, here it must do nothing.
+    // Without this there is no baseline to compare a chain's output against,
+    // and "processed" and "altered" become the same word.
+    const std::vector<std::uint8_t> in = s16_pattern(5000, 2);
+    const std::vector<std::uint8_t> out =
+        processor_run(cd_audio_s16(), cd_audio_s16(), in, 4096);
+    CHECK(out == in);
+}
+
+TEST_CASE("the block a Processor is handed does not change what comes out",
+          "[processor]")
+{
+    // A stage whose answer depends on the size of the piece it is given is
+    // broken, and nothing else in this tree would notice: the graph uses the
+    // device's period, so the bug would only appear on somebody else's hardware.
+    const std::vector<std::uint8_t> in = s16_pattern(5000, 2);
+
+    SECTION("with no chain")
+    {
+        const std::vector<std::uint8_t> a =
+            processor_run(cd_audio_s16(), cd_audio_s16(), in, 4096);
+        const std::vector<std::uint8_t> b =
+            processor_run(cd_audio_s16(), cd_audio_s16(), in, 97);
+        CHECK(a == b);
+    }
+
+    SECTION("with a stage that holds audio and one that makes more of it")
+    {
+        std::string why;
+        mp::Format wire = cd_audio_s16();
+        wire.sample_rate = 88200;
+
+        const auto build = [&](std::uint32_t block, mp::DspChain& chain) {
+            chain.add(fake_vtbl<MpDsp::Kind::delay>(), "delay");
+            chain.add(fake_vtbl<MpDsp::Kind::upsample2>(), "up");
+            REQUIRE(chain.configure(mp::dsp_bus_format(cd_audio_s16()), block, why));
+        };
+        mp::DspChain big;
+        build(4096, big);
+        mp::DspChain small;
+        build(97, small);
+
+        const std::vector<std::uint8_t> a =
+            processor_run(cd_audio_s16(), wire, in, 4096, {}, &big);
+        const std::vector<std::uint8_t> b =
+            processor_run(cd_audio_s16(), wire, in, 97, {}, &small);
+        CHECK(a == b);
+        // And the delay's 16 frames came back out rather than being dropped:
+        // 5000 in, doubled, plus the 16 the line was holding, also doubled.
+        CHECK(a.size() == (5000 + k_delay_frames) * 2 * 2 * 2);
+    }
+}
+
+TEST_CASE("a gain reaches the samples, and is the only thing that changed",
+          "[processor]")
+{
+    // The bug this pair of tests exists for: `use_processed` decided by asking
+    // the *format* relationship, and a volume of 0.5 does not change a format.
+    // The gain was read, printed, and then not applied.
+    const std::vector<std::uint8_t> in = s16_pattern(2048, 2);
+    mp::ConvertConfig half;
+    half.gain = 0.5;
+    half.dither = mp::DitherKind::none; // so the comparison is arithmetic
+
+    const std::vector<std::uint8_t> out =
+        processor_run(cd_audio_s16(), cd_audio_s16(), in, 512, half);
+    REQUIRE(out.size() == in.size());
+    CHECK(out != in);
+
+    const auto* src = reinterpret_cast<const std::int16_t*>(in.data());
+    const auto* dst = reinterpret_cast<const std::int16_t*>(out.data());
+    for (std::size_t i = 0; i < out.size() / 2; ++i) {
+        // Within one LSB of half: the quantiser rounds, and which way it rounds
+        // is its business rather than this test's.
+        CHECK(std::abs(dst[i] - src[i] / 2) <= 1);
+    }
+}
+
+TEST_CASE("a Processor that has been reset starts the stream again", "[processor]")
+{
+    // A seek. The chain's history is no longer adjacent to what comes next, and
+    // the drain has to go back or the end of the stream is never found twice.
+    const std::vector<std::uint8_t> in = s16_pattern(1000, 2);
+    std::string why;
+    mp::DspChain chain;
+    chain.add(resetting_vtbl<MpDsp::Kind::delay>(), "delay");
+    REQUIRE(chain.configure(mp::dsp_bus_format(cd_audio_s16()), 256, why));
+
+    mp::Processor proc{cd_audio_s16(), cd_audio_s16(), 256, {}, &chain};
+    REQUIRE(proc.possible());
+    std::vector<std::uint8_t> got(proc.output_bytes());
+
+    const auto whole_stream = [&] {
+        std::vector<std::uint8_t> out;
+        const std::size_t stride = proc.source_frame_bytes();
+        for (std::size_t at = 0; at < 1000;) {
+            const auto n = static_cast<std::uint32_t>(std::min<std::size_t>(256, 1000 - at));
+            std::uint32_t produced = 0;
+            REQUIRE(proc.run(in.data() + at * stride, n, got.data(), produced));
+            out.insert(out.end(), got.begin(),
+                       got.begin() + static_cast<std::ptrdiff_t>(
+                                         produced * proc.wire_frame_bytes()));
+            at += n;
+        }
+        while (!proc.flush_done()) {
+            std::uint32_t produced = 0;
+            const bool again = proc.flush(got.data(), produced);
+            out.insert(out.end(), got.begin(),
+                       got.begin() + static_cast<std::ptrdiff_t>(
+                                         produced * proc.wire_frame_bytes()));
+            if (!again) {
+                break;
+            }
+        }
+        return out;
+    };
+
+    const std::vector<std::uint8_t> first = whole_stream();
+    CHECK(proc.flush_done());
+    REQUIRE(proc.reset());
+    CHECK_FALSE(proc.flush_done());
+    const std::vector<std::uint8_t> second = whole_stream();
+    CHECK(first == second);
+}
+
+TEST_CASE("a Processor whose chain was configured for something else refuses",
+          "[processor]")
+{
+    // Not an assertion and not noise: a chain handed a bus it was not built for
+    // would produce audio, and the audio would be wrong in a way nothing prints.
+    std::string why;
+    mp::Format other = cd_audio_s16();
+    other.channels = 1;
+
+    mp::DspChain chain;
+    chain.add(fake_vtbl<MpDsp::Kind::gain>(), "gain");
+    REQUIRE(chain.configure(mp::dsp_bus_format(other), 256, why));
+
+    const mp::Processor proc{cd_audio_s16(), cd_audio_s16(), 256, {}, &chain};
+    CHECK_FALSE(proc.possible());
 }

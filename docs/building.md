@@ -36,6 +36,9 @@ git submodule update --init
 | `external/utfcpp` | header-only UTF-8, which libebml asks for by `find_package` | `demux_mkv`, through libebml |
 | `external/Bento4` | ISOBMFF: MP4, M4A, `.mov`, fragmented MP4 | `demux_mp4` |
 | `external/mpg123` | MPEG audio layers I to III, both halves | `demux_mpa`, `codec_mpa` |
+| `external/wavpack` | WavPack, lossless and lossy and DSD | `demux_wavpack` |
+| `external/asio` | the ASIO interface, headers only | `sink_asio` |
+| `external/vst3sdk/pluginterfaces` | the VST3 interfaces, and four .cpp files | `dsp_vst3` |
 
 **Each submodule sits with the one module that needs it**, which is a property of the
 container/codec split rather than a tidying. One module used to bring in four of the Xiph
@@ -331,6 +334,32 @@ one global driver pointer and the second enumerates the registry into fixed
 `char[32]` buffers. `sink_asio` reads its own registry, for the same reason every
 demuxer here opens its own files.
 
+### The VST3 SDK, of which this takes one quarter
+
+`external/vst3sdk/pluginterfaces` is `steinbergmedia/vst3_pluginterfaces` at
+`v3.8.1_build_84`, and it is **the whole of what a host needs**: 690 kilobytes of
+headers and four `.cpp` files, one of which exists to call `CoCreateGuid`.
+
+The full SDK is four repositories. `pluginterfaces` is the contract;
+`public.sdk` is a library of hosting and plugin helpers; `base` is a container
+and string library from the 1990s; `vstgui` is a widget toolkit. A host normally
+takes three of the four, for the module loader, the `HostApplication`, the
+attribute list and the process-data plumbing -- roughly forty thousand lines to
+do what `modules/dsp/vst3/vst3_host.cpp` and `vst3_hostapp.hpp` do in eight
+hundred, and it arrives with a CMake package that wants opinions about the
+build. So this tree writes those, and the one file it has to write to replace
+`public.sdk` entirely is `vst3_iids.cpp`: a VST3 header *declares*
+`static const FUID iid` and something has to define it.
+
+**The licence is MIT since October 2025**, and that is the whole reason this
+module exists. The previous VST3 licence was Steinberg's own, proprietary and
+incompatible with GPLv3 in both directions; the same month they added GPLv3 as
+an alternative to the ASIO licence, they relicensed VST3 outright. The copy here
+carries `MIT License / Copyright (c) 2026, Steinberg Media Technologies GmbH`.
+
+Unlike ASIO this pin *is* an official Steinberg repository at an official tag,
+so there is no third-party mirror to justify and nothing to diff.
+
 ### mpg123, whose upstream is SVN
 
 Every other submodule is pinned to a tag or a commit of the project's own git.
@@ -437,12 +466,14 @@ rounding where two instructions round twice, so it can. Measured across the
 whole format corpus -- 22 files, every container and codec this tree reads,
 DSD and WavPack included -- the two builds produce **identical hashes**.
 
-That covers the decoders and **not Path B**, which is the half AVX2 was raised
-for. There is no way to run the DSP chain without a device today:
-`mediaperch-probe decode` accepts `--path processed` and `--dsp` and ignores
-both -- a −6 dB gain and a resample to 192 kHz leave the hash untouched. Closing
-that is what would let the same comparison be made for the chain, and it is
-listed under *Still untested* in [formats.md](formats.md).
+That covered the decoders and not Path B, which is the half AVX2 was raised for,
+and for a while there was no way to run the DSP chain without a device at all.
+There is now -- `mp::Processor` is `ProcessedGraph`'s arithmetic with the device,
+the ring and the threads taken out, and `mediaperch-probe decode` runs it. The
+comparison is **144 runs: 12 files through 12 chains, including the resampler at
+`quality=extreme`, both FFT modes of the equaliser, the channel matrix and two
+noise shapers. Every one identical.** It is written out, with what it does and
+does not say, under *Path B, hashed* in [formats.md](formats.md).
 
 ## Two assemblers, and what they were doing by accident
 

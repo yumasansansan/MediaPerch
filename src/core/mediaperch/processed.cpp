@@ -18,15 +18,6 @@ std::size_t ring_bytes(std::uint32_t period_frames, std::uint32_t frame_bytes,
     return std::max({bytes, 2 * pump_bytes, std::size_t{4096}});
 }
 
-/// What one `pump_once` can produce, in wire bytes.
-std::uint32_t pump_bytes_for(const DspChain* chain, std::uint32_t chunk_frames,
-                             std::uint32_t wire_frame_bytes)
-{
-    const std::uint32_t frames =
-        chain != nullptr ? std::max(chain->output_capacity(), chunk_frames) : chunk_frames;
-    return frames * wire_frame_bytes;
-}
-
 } // namespace
 
 ProcessedGraph::ProcessedGraph(ISource& source, Sink& sink, const Format& wire,
@@ -34,24 +25,14 @@ ProcessedGraph::ProcessedGraph(ISource& source, Sink& sink, const Format& wire,
                                IRenderThreadHooks* hooks, PassthroughConfig config,
                                DspChain* chain)
     : source_(&source), sink_(&sink), wire_(wire), source_format_(source.format()),
-      // The quantiser reads whatever reaches it: the source itself, or the
-      // chain's output, which may be at a rate the source never had.
-      converter_(chain != nullptr ? chain->output_format() : source.format(), wire, convert),
-      chain_(chain), bus_(dsp_bus_format(source.format())),
-      // Widening only: exact by construction, and nothing to dither because
-      // nothing is being thrown away.
-      to_bus_(source.format(), dsp_bus_format(source.format()), ConvertConfig{}),
-      hooks_(hooks), config_(config),
-      period_frames_(period_frames), wire_frame_bytes_(frame_bytes(wire)),
+      proc_(source.format(), wire, period_frames, convert, chain), hooks_(hooks),
+      config_(config), period_frames_(period_frames), wire_frame_bytes_(frame_bytes(wire)),
       source_frame_bytes_(frame_bytes(source.format())), chunk_frames_(period_frames),
-      pump_bytes_(pump_bytes_for(chain, period_frames, frame_bytes(wire))),
+      pump_bytes_(proc_.output_bytes()),
       ring_(ring_bytes(period_frames, frame_bytes(wire), config.ring_periods, pump_bytes_))
 {
-    source_chunk_.resize(static_cast<std::size_t>(chunk_frames_) * source_frame_bytes_);
+    source_chunk_.resize(proc_.input_bytes());
     converted_chunk_.resize(pump_bytes_);
-    if (chain_ != nullptr) {
-        bus_chunk_.resize(static_cast<std::size_t>(chunk_frames_) * frame_bytes(bus_));
-    }
 }
 
 ProcessedGraph::~ProcessedGraph()
@@ -70,64 +51,32 @@ bool ProcessedGraph::pump_once()
 {
     const std::size_t got = source_->read(source_chunk_.data(), source_chunk_.size());
     const std::size_t frames = got / source_frame_bytes_;
+    std::uint32_t produced = 0;
+
     if (frames == 0) {
-        // The source is finished. What the chain still holds is not.
-        return chain_ != nullptr && flush_chain();
+        // The source is finished. What the chain still holds is not: a
+        // resampler keeps a filter's worth of the last audio and it is as much
+        // the file as the rest.
+        const bool again = proc_.flush(converted_chunk_.data(), produced);
+        if (produced != 0) {
+            ring_.write(converted_chunk_.data(),
+                        static_cast<std::size_t>(produced) * wire_frame_bytes_);
+        }
+        return again;
     }
+
     frames_decoded_.fetch_add(frames, std::memory_order_relaxed);
-
-    if (chain_ == nullptr) {
-        // The common case: one conversion, on the decode thread.
-        converter_.run(source_chunk_.data(), converted_chunk_.data(), frames);
-        ring_.write(converted_chunk_.data(), frames * wire_frame_bytes_);
-        return true;
-    }
-
-    // source -> the f64 bus -> the chain -> the wire format. The first step is
-    // a widening and therefore exact; the last is the only quantiser in Path B,
-    // which is what lets the dither and the shaping sit in one place.
-    to_bus_.run(source_chunk_.data(), bus_chunk_.data(), frames);
-    std::uint32_t produced = 0;
-    if (!chain_->run(reinterpret_cast<const double*>(bus_chunk_.data()),
-                     static_cast<std::uint32_t>(frames), chain_out_, produced)) {
+    if (!proc_.run(source_chunk_.data(), static_cast<std::uint32_t>(frames),
+                   converted_chunk_.data(), produced)) {
         fail(MP_ERR_INTERNAL);
         return false;
     }
-    emit(produced); // 0 is normal: a stage may still be filling its history
+    // 0 is normal: a stage may still be filling its history.
+    if (produced != 0) {
+        ring_.write(converted_chunk_.data(),
+                    static_cast<std::size_t>(produced) * wire_frame_bytes_);
+    }
     return true;
-}
-
-void ProcessedGraph::emit(std::uint32_t frames)
-{
-    if (frames == 0) {
-        return;
-    }
-    const std::size_t bytes = static_cast<std::size_t>(frames) * wire_frame_bytes_;
-    if (converted_chunk_.size() < bytes) {
-        converted_chunk_.resize(bytes);
-    }
-    converter_.run(chain_out_.data(), converted_chunk_.data(), frames);
-    ring_.write(converted_chunk_.data(), bytes);
-}
-
-/// One round of the drain, because the ABI says a stage is flushed until it
-/// says it is empty and because each round has to fit in the room the ring has.
-bool ProcessedGraph::flush_chain()
-{
-    if (flushed_) {
-        return false;
-    }
-    std::uint32_t produced = 0;
-    if (!chain_->flush(chain_out_, produced)) {
-        flushed_ = true;
-        fail(MP_ERR_INTERNAL);
-        return false;
-    }
-    emit(produced);
-    flushed_ = chain_->flush_done();
-    // Coming back for another round counts as having done something, even when
-    // this round produced nothing: the stage behind this one may still be full.
-    return !flushed_ || produced != 0;
 }
 
 MpResult ProcessedGraph::start()
@@ -135,16 +84,11 @@ MpResult ProcessedGraph::start()
     if (running_.load(std::memory_order_acquire)) {
         return MP_ERR_BUSY;
     }
-    if (!converter_.possible() || wire_frame_bytes_ == 0 || source_frame_bytes_ == 0 ||
-        period_frames_ == 0) {
-        return MP_ERR_INVALID;
-    }
-    if (chain_ != nullptr &&
-        (!to_bus_.possible() || chain_->input_format() != bus_ ||
-         chain_->output_capacity() == 0)) {
-        // A chain configured for something other than what it is about to be
-        // handed is a bug in the caller, and one that would otherwise show up
-        // as noise rather than as an error.
+    // A chain configured for something other than what it is about to be
+    // handed is a bug in the caller, and one that would otherwise show up as
+    // noise rather than as an error. `Processor::possible` is where that and
+    // every other shape check now lives.
+    if (!proc_.possible() || period_frames_ == 0) {
         return MP_ERR_INVALID;
     }
     if (!*sink_) {
@@ -152,7 +96,9 @@ MpResult ProcessedGraph::start()
     }
 
     ring_.reset();
-    flushed_ = false;
+    // Put the drain back, so a graph started a second time finds the end of the
+    // stream again rather than believing it has already been there.
+    (void)proc_.reset();
     drained_.store(false, std::memory_order_release);
     error_.store(MP_OK, std::memory_order_relaxed);
 
@@ -424,12 +370,10 @@ void ProcessedGraph::perform_seek(std::uint64_t frame)
 
     ring_.reset();
     const bool moved = source_->seek(frame);
-    if (chain_ != nullptr) {
-        // Every filter in the chain is holding samples from where the stream
-        // used to be, and those are no longer adjacent to what comes next.
-        (void)chain_->reset();
-    }
-    flushed_ = false;
+    // Every filter in the chain is holding samples from where the stream used
+    // to be, and those are no longer adjacent to what comes next. This also
+    // puts the drain back, so the end of the stream is found again.
+    (void)proc_.reset();
     drained_.store(false, std::memory_order_release);
     if (moved) {
         played_base_.store(frame, std::memory_order_relaxed);

@@ -26,6 +26,7 @@
 #include "mediaperch/convert.hpp"
 #include "mediaperch/dsp.hpp"
 #include "mediaperch/passthrough.hpp"
+#include "mediaperch/processor.hpp"
 #include "mediaperch/ring.hpp"
 #include "mediaperch/sink.hpp"
 #include "mediaperch/source.hpp"
@@ -121,31 +122,23 @@ public:
     /// What the conversion is doing, for whoever has to tell the user. A graph
     /// that is not lossy is one where the only change was a gain of exactly one
     /// -- worth saying, because "processed" and "altered" are not the same word.
-    [[nodiscard]] bool lossy() const noexcept { return converter_.lossy(); }
+    [[nodiscard]] bool lossy() const noexcept { return proc_.lossy(); }
 
 private:
     void decode_loop();
     void render_loop() noexcept;
     void fail(MpResult r) noexcept;
     bool pump_once();
-    /// Converts `frames` from `chain_out_` and puts them in the ring.
-    void emit(std::uint32_t frames);
-    /// Drains the chain once, at the end of the stream. A resampler holds a
-    /// filter's worth of the last audio and it is as much the file as the rest.
-    bool flush_chain();
 
     ISource* source_;
     Sink* sink_;
     Format wire_;
     Format source_format_;
-    /// Without a chain: source straight to the wire format.
-    /// With one: source to the bus, and the bus to the wire format.
-    Converter converter_;
-    DspChain* chain_;
-    Format bus_{};
-    Converter to_bus_;
-    std::vector<std::uint8_t> bus_chunk_;
-    std::vector<double> chain_out_;
+    /// **The arithmetic, which is not this class's**: source to the bus, the
+    /// chain, and the one quantiser at the end. It lives in `Processor` so that
+    /// something without a sound card can run it -- see processor.hpp for what
+    /// went unmeasured while it could not.
+    Processor proc_;
     IRenderThreadHooks* hooks_;
     PassthroughConfig config_;
 
@@ -189,7 +182,6 @@ private:
     std::thread render_thread_;
     std::atomic<bool> running_{false};
     std::atomic<bool> drained_{false};
-    bool flushed_ = false;
     std::atomic<MpResult> error_{MP_OK};
 
     std::atomic<std::uint64_t> frames_rendered_{0};

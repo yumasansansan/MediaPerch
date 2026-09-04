@@ -43,6 +43,7 @@ add_library(mediaperch_core STATIC
     # that meant different things in each would be worse than sharing a file.
     "${CMAKE_SOURCE_DIR}/external/dragonperch/src/core/dragonperch/ini.cpp"
     mediaperch/processed.cpp
+    mediaperch/processor.cpp
     mediaperch/processed.hpp
     mediaperch/repack.cpp
     mediaperch/repack.hpp

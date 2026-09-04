@@ -100,6 +100,31 @@ if(TARGET mediaperch_win)
     target_link_libraries(mediaperch_tests PRIVATE MediaPerch::win)
 endif()
 
+# The VST3 host, with a VST3 this repository writes so that the test does not
+# depend on what happens to be installed. `vst3_host.cpp` is compiled into the
+# test binary the same way autoeq.cpp is above: a module's source is not a
+# library, and the alternative is a static library that exists for one caller.
+if(TARGET mp_dsp_vst3)
+    add_subdirectory(vst3_plugin)
+    target_sources(mediaperch_tests PRIVATE vst3_test.cpp
+                   ../modules/dsp/vst3/vst3_host.cpp
+                   ../modules/dsp/vst3/vst3_iids.cpp
+                   ../external/vst3sdk/pluginterfaces/base/funknown.cpp
+                   ../external/vst3sdk/pluginterfaces/base/coreiids.cpp
+                   ../external/vst3sdk/pluginterfaces/base/ustring.cpp
+                   ../external/vst3sdk/pluginterfaces/base/conststringtable.cpp)
+    target_include_directories(mediaperch_tests PRIVATE ../modules/dsp/vst3)
+    target_include_directories(mediaperch_tests SYSTEM PRIVATE ../external/vst3sdk)
+    target_link_libraries(mediaperch_tests PRIVATE ole32)
+    target_compile_definitions(mediaperch_tests PRIVATE
+        "$<IF:$<CONFIG:Debug>,DEVELOPMENT=1,RELEASE=1>"
+        # Passed in rather than searched for: the path differs between single-
+        # and multi-config generators, and a test that went looking would be
+        # testing the search.
+        "MEDIAPERCH_TEST_VST3=\"$<TARGET_FILE:mediaperch_test_effect>\"")
+    add_dependencies(mediaperch_tests mediaperch_test_effect)
+endif()
+
 target_link_libraries(mediaperch_tests
     PRIVATE MediaPerch::core Catch2::Catch2WithMain mediaperch_flags)
 

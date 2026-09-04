@@ -79,6 +79,17 @@ public:
     /// destination format. The buffers may not overlap.
     void run(const void* src, void* dst, std::size_t frames) noexcept;
 
+    /// Puts the dither generator back to its seed and empties the shaper.
+    ///
+    /// **For a seek.** A noise shaper is a feedback loop over the error it
+    /// made on the samples before this one, and after a seek those samples are
+    /// from somewhere else in the file; the loop would spend its settling time
+    /// shaping against history that no longer means anything. Rewinding the
+    /// generator is the other half: `seed` exists so that two runs of a file
+    /// produce the same bytes, and a run that seeked would otherwise not agree
+    /// with one that did not.
+    void reset() noexcept;
+
     [[nodiscard]] const Format& from() const noexcept { return from_; }
     [[nodiscard]] const Format& to() const noexcept { return to_; }
 

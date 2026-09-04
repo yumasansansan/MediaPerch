@@ -22,6 +22,7 @@
 #include "mediaperch/negotiation.hpp"
 #include "mediaperch/passthrough.hpp"
 #include "mediaperch/processed.hpp"
+#include "mediaperch/processor.hpp"
 #include "mediaperch/shaper_tables.hpp"
 #include "mediaperch/repack.hpp"
 #include "mediaperch/sine.hpp"
@@ -60,6 +61,10 @@ struct Options {
     std::string device_name;
     std::uint32_t rate = 44100;
     std::uint32_t bits = 16;
+    /// Whether `--bits` was actually given. `decode` quantises to the source's
+    /// own container unless somebody named another one; `tone` has no source
+    /// and needs the default.
+    bool bits_given = false;
     std::uint32_t channels = 2;
     double hz = 1000.0;
     double amplitude = 0.5;
@@ -90,6 +95,11 @@ struct Options {
     /// `name` or `name:key=value,key=value`, in the order given, which is the
     /// order they run in.
     std::vector<std::string> dsp;
+    /// `decode` only: the block the chain is handed, standing in for the period
+    /// a device would have named. A setting because the answer must not depend
+    /// on it -- two runs at different blocks that hash differently mean a stage
+    /// is carrying something it should not.
+    std::uint32_t block = 4096;
     bool float_source = false;
     std::string source;          // `compare`: the audio that was encoded
     std::string rival_id = "demux_ffmpeg"; // and a second decoder to sit beside
@@ -211,6 +221,10 @@ void usage()
               each stream
   decode      decode a file and print SHA-256 of the PCM it produced. Touches no
               device. Compare it with a reference decoder to check this one.
+              With --path processed, --gain or --dsp it runs Path B instead --
+              the same arithmetic a device would have got, hashed rather than
+              played, which is the only way the resampler, the dither and the
+              shapers can be held to anything without a sound card.
   compare     decode a file and hold the result against the audio that was
               encoded: length, alignment, channel order, fidelity and band
               energies. Touches no device. Exits non-zero if a requirement is
@@ -274,7 +288,13 @@ Options
                                 if it will not. Says loudly when it converts
                       processed Path B whether or not Path A was available
   --gain G          Path B only: linear gain, 1.0 is unity. A volume control has
-                    nowhere else to live on an exclusive-mode stream
+                    nowhere else to live on an exclusive-mode stream. Asking for
+                    one that is not unity implies --path processed, because a
+                    gain is a change no format relationship can show
+  --block N         `decode` only: frames per block through the chain, standing
+                    in for the period a device would have named. Default 4096.
+                    Two runs at different blocks that hash differently mean a
+                    stage is carrying something across a boundary it should not
   --dsp STAGE       Path B only: add a stage to the chain, in the order given,
                     as `name` or `name:key=value,key=value`. Repeatable.
                     `--dsp list` prints every stage that is loaded, with every
@@ -416,6 +436,8 @@ bool parse(int argc, char** argv, Options& out)
             out.recover = false;
         } else if (arg == "--recover-timeout") {
             value(out.recover_timeout);
+        } else if (arg == "--block") {
+            value(out.block);
         } else if (arg == "--dsp") {
             if (i + 1 >= argc) {
                 std::fprintf(stderr, "--dsp takes a stage name, or `list`\n");
@@ -513,6 +535,7 @@ bool parse(int argc, char** argv, Options& out)
             value(out.rate);
         } else if (arg == "--bits") {
             value(out.bits);
+            out.bits_given = true;
         } else if (arg == "--channels") {
             value(out.channels);
         } else if (arg == "--hz") {
@@ -1565,7 +1588,10 @@ RunOutcome play_run(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& regis
     std::printf("device     %s\n", device_id.empty() ? "(default endpoint)" : device_id.c_str());
     std::printf("mode       %s\n", options.shared ? "shared" : "exclusive");
     std::printf("format     %s\n", mp::describe(negotiated.accepted).c_str());
-    const bool processing = mp::use_processed(policy, negotiated.fidelity);
+    // A gain changes the samples whatever the formats say; a chain does too,
+    // and is already the reason `policy` was forced above.
+    const bool processing =
+        mp::use_processed(policy, negotiated.fidelity, options.gain != 1.0);
     std::printf("path       %s%s  [--path %s]\n",
                 processing                                    ? "PROCESSED -- the samples are changed"
                 : negotiated.fidelity == mp::Fidelity::exact  ? "passthrough, memcpy"
@@ -1681,13 +1707,167 @@ RunOutcome play_run(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& regis
 
 
 
+/// What `decode` writes to, when it is asked to run Path B.
+///
+/// There is no device to negotiate with, so nothing gets to refuse: the wire
+/// format is what the chain produced, quantised into the source's own container
+/// unless `--bits` named another. That default is the point -- it makes a
+/// chainless `--path processed` run comparable byte for byte with a bit-exact
+/// one, which is how the gain, the dither and the shapers get held to anything.
+mp::Format decode_wire_format(const mp::Format& source, const mp::DspChain& chain,
+                              const Options& options)
+{
+    mp::Format wire = chain.empty() ? source : chain.output_format();
+    wire.sample_type = source.sample_type;
+    wire.valid_bits = source.valid_bits;
+    wire.encoding = mp::Encoding::pcm;
+    if (options.bits_given || options.float_source) {
+        const mp::Format asked = requested_format(options);
+        wire.sample_type = asked.sample_type;
+        wire.valid_bits = asked.valid_bits;
+    }
+    return wire;
+}
+
+/// Path B without a device: source -> the f64 bus -> the chain -> the wire.
+///
+/// **This is the arithmetic the whole tree is about, and until now nothing
+/// could hash it.** `--path processed` and `--dsp` were accepted here and then
+/// ignored: a -6 dB gain and a resample to 192 kHz left the SHA-256 exactly
+/// where it started, so every claim about the resampler, the dither and the
+/// shapers rested on listening rather than on bytes, and a build that changed
+/// one of them by an LSB would have passed every test in the tree.
+int decode_processed(mp::ISource& source, mp::DspChain& chain, const Options& options,
+                     std::FILE* raw)
+{
+    const mp::Format source_format = source.format();
+    // The block the chain is sized for. A device would say how big a period is;
+    // here nothing does, so `--block` says, and what it is set to must not
+    // change a single byte of the output: a stage whose answer depends on the
+    // size of the piece it was handed is a broken stage, and on a real device
+    // that bug would only appear on somebody else's hardware.
+    //
+    // It comes before the wire format because a chain says nothing about its
+    // output until it has been configured, and the wire is read off that.
+    const std::uint32_t block = options.block;
+    if (block == 0) {
+        std::fprintf(stderr, "--block must be at least 1 frame\n");
+        return 1;
+    }
+    std::string why;
+    if (!chain.empty() && !chain.configure(mp::dsp_bus_format(source_format), block, why)) {
+        std::fprintf(stderr, "%s\n", why.c_str());
+        return 1;
+    }
+    const mp::Format wire = decode_wire_format(source_format, chain, options);
+
+    mp::ConvertConfig conversion;
+    conversion.gain = options.gain;
+    conversion.dither = options.dither;
+    conversion.shaping = options.shaping;
+    conversion.seed = options.dither_seed;
+    mp::Processor proc{source_format, wire, block, conversion,
+                       chain.empty() ? nullptr : &chain};
+    if (!proc.possible()) {
+        std::fprintf(stderr, "nothing here converts %s to %s\n",
+                     mp::describe(source_format).c_str(), mp::describe(wire).c_str());
+        return 1;
+    }
+
+    mp::win::Sha256 hash;
+    std::vector<std::uint8_t> in(proc.input_bytes());
+    std::vector<std::uint8_t> out(proc.output_bytes());
+    std::uint64_t total = 0;
+    std::uint64_t read_frames = 0;
+
+    const auto keep = [&](std::uint32_t frames) {
+        if (frames == 0) {
+            return;
+        }
+        const std::size_t bytes = static_cast<std::size_t>(frames) * proc.wire_frame_bytes();
+        hash.update(out.data(), bytes);
+        if (raw != nullptr) {
+            std::fwrite(out.data(), 1, bytes, raw);
+        }
+        total += bytes;
+    };
+
+    for (;;) {
+        const std::size_t got = source.read(in.data(), in.size());
+        const auto frames = static_cast<std::uint32_t>(got / proc.source_frame_bytes());
+        if (frames == 0) {
+            break;
+        }
+        read_frames += frames;
+        std::uint32_t produced = 0;
+        if (!proc.run(in.data(), frames, out.data(), produced)) {
+            std::fprintf(stderr, "the chain failed at frame %llu\n",
+                         static_cast<unsigned long long>(read_frames));
+            return 1;
+        }
+        keep(produced); // 0 is normal: a stage may still be filling its history
+    }
+
+    // A resampler holds a filter's worth of the last audio and it is as much
+    // the file as the rest. A decode that stopped at the last input frame would
+    // hash a truncated file and call it the answer.
+    while (!proc.flush_done()) {
+        std::uint32_t produced = 0;
+        const bool again = proc.flush(out.data(), produced);
+        keep(produced);
+        if (!again) {
+            break;
+        }
+    }
+
+    const std::uint32_t stride = proc.wire_frame_bytes();
+    std::printf("file       %s\n", options.file.c_str());
+    // Said out loud, because a chain or a gain overrides the policy: somebody
+    // who typed `--path exact --dsp eq` asked for two things that contradict
+    // each other, and a stage exists in order to change the samples.
+    std::printf("path       PROCESSED -- the samples are changed  [--path %s]\n",
+                mp::path_policy_name(options.path));
+    std::printf("source     %s\n", mp::describe(source_format).c_str());
+    std::printf("wire       %s%s\n", mp::describe(wire).c_str(),
+                proc.lossy() ? "" : "  [nothing thrown away]");
+    if (!chain.empty()) {
+        std::printf("chain      ");
+        for (std::size_t i = 0; i < chain.size(); ++i) {
+            std::printf("%s%s", i == 0 ? "" : " -> ", chain.at(i).name().c_str());
+        }
+        std::printf("\n");
+        if (const std::uint32_t delay = chain.latency_frames(); delay != 0) {
+            std::printf("latency    %u frames the chain adds\n", delay);
+        }
+    }
+    std::printf("block      %u frames\n", block);
+    std::printf("gain       %.6f\n", options.gain);
+    std::printf("dither     %s%s\n", mp::dither_kind_name(options.dither),
+                proc.lossy() ? "" : "  [not reached -- the conversion is exact]");
+    std::printf("frames     %llu in, %llu out (%.3f s)\n",
+                static_cast<unsigned long long>(read_frames),
+                static_cast<unsigned long long>(total / stride),
+                static_cast<double>(total / stride) / wire.sample_rate);
+    std::printf("bytes      %llu\n", static_cast<unsigned long long>(total));
+    std::printf("sha256     %s\n", hash.hex().c_str());
+    if (options.verbose) {
+        for (std::size_t i = 0; i < chain.size(); ++i) {
+            for (const std::string& line : chain.at(i).describe()) {
+                std::printf("%-10s %s\n", chain.at(i).name().c_str(), line.c_str());
+            }
+        }
+    }
+    return 0;
+}
+
 /// Hashes whatever the resolution rules opened.
 ///
 /// **A source rather than a decoder vtable**, so this measures what actually
 /// plays. A container and a codec are two modules now, and a `decode` that could
 /// only reach the one-module kind would be a measurement of the half being
 /// retired.
-int decode(mp::ISource& source, const Options& options)
+int decode(mp::ISource& source, const mp::win::ModuleRegistry& registry,
+           const Options& options)
 {
     if (options.seek != 0 && !source.seek(options.seek)) {
         std::fprintf(stderr, "cannot seek %s to frame %llu\n", options.file.c_str(),
@@ -1702,6 +1882,15 @@ int decode(mp::ISource& source, const Options& options)
     const mp::Format format = source.format();
     const std::size_t stride = mp::frame_bytes(format);
 
+    mp::DspChain chain;
+    std::string why;
+    for (const std::string& spec : options.dsp) {
+        if (!add_dsp_stage(registry, spec, chain, why)) {
+            std::fprintf(stderr, "%s\n", why.c_str());
+            return 1;
+        }
+    }
+
     // mp::win::open_utf8 rather than fopen: the path arrives as UTF-8, and a
     // narrow CRT call cannot open half the files on this machine. Rather than
     // std::ofstream either, which brings iostreams and the locale facets behind
@@ -1713,6 +1902,18 @@ int decode(mp::ISource& source, const Options& options)
             std::fprintf(stderr, "cannot write %s\n", options.raw.c_str());
             return 1;
         }
+    }
+
+    // The same question `play` asks, with the file standing in for the device.
+    // Nothing here can refuse a format, so the only fidelity on offer is exact
+    // and what decides is the policy and whether anything alters the samples.
+    if (mp::use_processed(options.path, mp::Fidelity::exact,
+                          !chain.empty() || options.gain != 1.0)) {
+        const int rc = decode_processed(source, chain, options, raw);
+        if (raw != nullptr) {
+            std::fclose(raw);
+        }
+        return rc;
     }
 
     mp::win::Sha256 hash;
@@ -1735,6 +1936,7 @@ int decode(mp::ISource& source, const Options& options)
 
     std::printf("file       %s\n", options.file.c_str());
     std::printf("format     %s\n", mp::describe(format).c_str());
+    std::printf("path       bit-exact -- these are the decoder's own bytes\n");
     std::printf("frames     %llu (%.3f s)\n",
                 static_cast<unsigned long long>(total / stride),
                 static_cast<double>(total / stride) / format.sample_rate);
@@ -2606,7 +2808,7 @@ int main(int argc, char** argv)
                     options.decoder_id.empty() ? "" : "  [forced]");
 
         if (options.command == "decode") {
-            return decode(*source, options);
+            return decode(*source, registry, options);
         }
 #if MEDIAPERCH_HAS_LOUDNESS
         if (options.command == "loudness") {

@@ -181,6 +181,13 @@ Converter::Converter(const Format& from, const Format& to, ConvertConfig config)
     }
 }
 
+void Converter::reset() noexcept
+{
+    for (Dither& noise : dither_) {
+        noise.reset();
+    }
+}
+
 void Converter::run(const void* src, void* dst, std::size_t frames) noexcept
 {
     if (!possible_ || src == nullptr || dst == nullptr) {

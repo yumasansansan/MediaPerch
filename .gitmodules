@@ -37,3 +37,6 @@
 [submodule "external/asio"]
 	path = external/asio
 	url = https://github.com/audiosdk/asio.git
+[submodule "external/vst3sdk/pluginterfaces"]
+	path = external/vst3sdk/pluginterfaces
+	url = https://github.com/steinbergmedia/vst3_pluginterfaces.git

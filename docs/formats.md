@@ -2139,6 +2139,258 @@ denial-of-service bugs in Bento4 in ten minutes, both reported upstream. And
 `aac_fuzzer` found the ID3v2 allocation in libmpg123 that made a ten-byte header
 worth 147 MB. Each of those is written up where the format is.
 
+## Path B, hashed
+
+**Everything above this line is Path A.** A decoder hands over bytes, they are
+hashed, and the hash is held against a reference decoder. That is the whole of
+what this file measured for its first two years, and it is half of what the
+program does.
+
+The other half was unmeasurable, and not for a subtle reason. `decode` took
+`--path processed`, `--gain` and `--dsp`, printed them back, and then ignored
+them: a −6 dB gain and a resample to 192 kHz both left the SHA-256 exactly where
+it started. The arithmetic lived inside `ProcessedGraph`, which needs a sound
+card, a ring and two threads, so **every claim this project makes about the
+resampler, the dither and the noise shapers rested on listening to them.** A
+build that changed one of them by a least-significant bit would have passed
+every test in the tree.
+
+What was in the way was one class. `mp::Processor` is the half of
+`ProcessedGraph` that touches samples -- source to the f64 bus, the chain, and
+the one quantiser at the end -- with no device, no ring and no thread.
+`ProcessedGraph` holds one and does nothing else with the audio, so what `decode`
+measures is not a reimplementation of the play path; it is the play path.
+
+```
+mediaperch-probe decode --file X.flac --path processed          # Path B, unity
+mediaperch-probe decode --file X.flac --gain 0.5011872336       # −6 dB
+mediaperch-probe decode --file X.flac --dsp resample:rate=192000
+mediaperch-probe decode --file X.flac --dsp eq:band=peak:1000:-3:1.0,mode=linear
+```
+
+### Path B at unity is Path A, byte for byte
+
+The first thing it measured, and the property everything else is compared
+against. A file whose wire format is its own, no chain, gain of one:
+
+| File | Path A | Path B, unity |
+|---|---|---|
+| WAV, 16-bit 44.1 kHz stereo | `b38bebc6…1af5b059` | **identical** |
+| WAV, 24-bit 96 kHz stereo | `f434a906…ef3abf1a` | **identical** |
+| WAV, 32-bit float 48 kHz | `b2290d59…f19597ce` | **identical** |
+| WAV, 16-bit 5.1 at 48 kHz | `5c449afc…621c8a91` | **identical** |
+| FLAC, MP3, AAC, ALAC, Vorbis, Opus, WavPack | as the table above | **identical** |
+
+Path B widens to f64, does nothing, and quantises back. That it comes out the
+same is not obvious -- it is a round trip through a different container and a
+dither that has to decide it has nothing to do -- and it is what makes every row
+below mean something, because a difference can now only have come from the stage
+that was asked for.
+
+### The block does not change the answer
+
+A device names the period; nothing does here, so `--block` does, and **what it is
+set to must not change a byte**. A stage whose output depends on the size of the
+piece it was handed is broken in a way that would only ever appear on somebody
+else's hardware, at somebody else's buffer size.
+
+Over `s16_44100_2.wav` at blocks of 4096, 1024, 997, 601, 511, 333 and 64:
+
+| Chain | Same hash at every block |
+|---|---|
+| nothing (unity) | yes |
+| `--gain 0.5011872336` | yes |
+| `--gain` with `--shape 0`, `3`, `9`, `shibata` | yes, and each shaper differs from the others |
+| `dsp_resample` to 192000 | yes |
+| `dsp_resample` to 44100 from 96 kHz | yes |
+| `dsp_eq`, `mode=iir` | yes |
+| `dsp_eq`, `mode=linear` (FFT) | yes |
+| `dsp_eq`, `mode=minimum` (FFT) | yes |
+| `dsp_mix`, 5.1 to stereo | yes |
+| `dsp_replaygain` | yes |
+| `dsp_resample` then `dsp_eq` | yes |
+
+The same property is asserted against fake stages in `dsp_test.cpp`, including
+one that holds sixteen frames and one that produces twice what it is given, so
+a regression fails a test rather than waiting to be noticed.
+
+### The two baselines produce the same Path B
+
+The measurement [docs/building.md](building.md) was waiting on. `MEDIAPERCH_ARCH`
+builds the tree twice -- x86-64 with SSE2, and x86-64-v3 with AVX2 and FMA -- and
+FMA is the reason this is a real question: it computes a multiply and an add with
+one rounding where two instructions round twice, so a resampler's inner loop has
+every opportunity to disagree with itself.
+
+**144 comparisons: 12 files x 12 chains, every one identical.**
+
+| Chain | Files | Baseline vs AVX2 |
+|---|---|---|
+| unity | 12 | identical |
+| `--gain 0.5011872336` | 12 | identical |
+| gain with `--shape 9` | 12 | identical |
+| gain with `--shape shibata` | 12 | identical |
+| `dsp_resample` to 192000 | 12 | identical |
+| `dsp_resample` to 44100, `quality=extreme` | 12 | identical |
+| `dsp_eq`, `mode=iir` | 12 | identical |
+| `dsp_eq`, `mode=linear` (FFT) | 12 | identical |
+| `dsp_eq`, `mode=minimum` (FFT) | 12 | identical |
+| `dsp_replaygain` | 12 | identical |
+| `dsp_mix` to stereo | 12 | identical |
+| `dsp_resample` then `dsp_eq` | 12 | identical |
+
+The files are the four PCM WAVs plus FLAC, MP3, AAC in M4A, ALAC, Vorbis, Opus,
+raw ADTS and WavPack. The MP3 row is `69dca145…` on both, which is the AVX
+synthesis: libmpg123 dispatches on the CPU internally and both builds run on a
+machine that has it, so the compiler's baseline never got to matter there.
+
+**What this does not say** is that the two builds are interchangeable in general.
+It says that on this machine, over these files, through these stages, nothing
+rounded differently. FMA contraction is the compiler's choice and a different
+version may make it elsewhere; the answer is measured rather than argued, which
+is why the measurement is written down with the files it was taken over.
+
+### Three bugs it found on the first run
+
+The gap was worth closing for what fell out of it immediately.
+
+**`use_processed` could not see a gain.** It decided by asking the *format*
+relationship -- `Fidelity::converted` means the wire cannot hold the source -- and
+a volume of 0.5 does not change a format. Its own documentation said so: "a
+16-bit file, a 16-bit device and a volume of 0.5 is `Fidelity::exact` and is
+emphatically Path B". The function did not implement its comment. `--gain 0.5`
+on a device that took the file's own format was read, printed, and never applied.
+It takes a third argument now, and it is not defaulted, so a new caller has to
+answer the question.
+
+**`Processor::reset` returned `MP_END` on success.** `DspChain::reset` returns a
+`bool`; the new class declared `MpResult` and returned it directly, so `true`
+became `1`, which is `MP_END`. Nothing noticed because both callers discard the
+result. A test that checked it failed on the first run.
+
+**A seek left the noise shaper's history where it was.** `Dither::reset` existed,
+correct and complete -- rewind the generator to its seed, clear the shaper's
+taps -- and **nothing called it**. `Converter` had no `reset` at all, so after a
+seek the shaper spent its settling time feeding back error from samples that were
+somewhere else in the file, and two runs of one file that seeked differently did
+not agree, which is precisely what `--dither-seed` exists to prevent.
+
+## A VST3 in the chain
+
+Everything else in `modules/dsp` is a filter with its coefficients in the
+source. `dsp_vst3` loads an arbitrary DLL somebody else wrote and hands it the
+bus, which changes what can be promised: **a chain with a VST3 in it is exactly
+as reproducible as the plugin is**, and no claim this tree makes about
+bit-exactness survives contact with a binary it cannot read.
+
+What it can promise is the shape, and the shape is measurable.
+
+```
+mediaperch-probe decode --file X.flac \
+    --dsp vst3:file=C:\Program Files\Common Files\VST3\Thing.vst3,param=Mix=0.5
+```
+
+### What was written, and what was taken
+
+`pluginterfaces` and nothing else: 690 KB of headers and four `.cpp` files, one
+of which exists to call `CoCreateGuid`. Everything a host needs beyond that is
+in `modules/dsp/vst3`, about eight hundred lines --
+
+| Written here | Because |
+|---|---|
+| the loader | a `.vst3` is a DLL *or* a directory with the DLL at `Contents/x86_64-win/` inside it, and `LoadLibrary` on the second fails with a message about a bad image |
+| `IHostApplication` | a plugin's two halves allocate messages *through the host*; one that answers `kNotImplemented` here crashes plugins rather than failing them |
+| `IAttributeList`, `IMessage` | what those messages are made of. Nothing in them is interpreted -- that is the whole design of the interface |
+| `IParameterChanges` | a plugin is told a parameter twice: the controller, which is what an editor would show, and this queue, which is what the samples go through. A host that did only the first has a plugin whose display and its audio disagree |
+| `IComponentHandler` | nothing here has an editor, but a controller handed a null handler may refuse to initialise |
+| `vst3_iids.cpp` | a VST3 header *declares* `static const FUID iid` and something must define it. In the SDK that something is one file inside `public.sdk` |
+
+### f64, when the plugin can take it
+
+VST3 declares `canProcessSampleSize (kSample64)`, and **this tree's bus is
+already deinterleaved f64** -- so a plugin that says yes is handed the bus with
+no conversion at all, which is a thing almost no host can offer because almost
+no host carries doubles. One that says no gets f32 scratch and the samples are
+narrowed and widened around it.
+
+`describe` says which happened, in a line called `precision`, because it is the
+difference between a stage that could be exact and one that cannot.
+
+### What it does with what is installed here
+
+Six real plugins, every one of which loaded:
+
+| Plugin | Loaded | Then |
+|---|---|---|
+| Dexed | yes | refused: 0 audio inputs, 1 output |
+| Vital | yes | refused: 0 audio inputs, 1 output |
+| Kontakt 8 | yes | refused: 0 audio inputs, **32** outputs |
+| PianoOne | yes | refused: 0 audio inputs, 1 output |
+| Primer 2 | yes | refused: 0 audio inputs, 1 output |
+| BFD Player | yes | **processed**: 88200 frames in, 264600 out |
+
+"Loaded" is not nothing: the bundle path resolving, `GetPluginFactory`,
+`setHostContext`, the class walk, `createInstance`, `initialize` against the real
+`IHostApplication`, the controller created from `getControllerClassId`, and
+`IConnectionPoint::connect` between the two halves -- all of it against binaries
+this project did not build, and none of it crashing.
+
+**BFD Player is the one that ran.** It calls itself `Instrument|Synth` and has an
+audio input anyway, so the host takes it, and the whole cycle runs: 44.1 kHz
+stereo, blocks of 4096, `setBusArrangements`, `setActive`, `setProcessing`,
+88200 frames of `process`, and then a tail it declared as **176400 frames** --
+four seconds -- drained by `flush` a block at a time.
+
+And it output **silence**, exactly: with `--dither none` the whole 1,058,400
+bytes are zero. That is a drum sampler with nothing triggered doing the correct
+thing with an input it has no use for, and it is the honest way to describe the
+measurement -- the host's side of the boundary ran end to end against a
+stranger's binary, and what came back was the plugin's own answer rather than
+the audio surviving a round trip. With dither on, the output is one LSB of noise
+and nothing else, which is the quantiser doing its job on a silent bus.
+
+### The plugin the tests build
+
+A host is only tested by running a plugin, and a test that ran an *installed*
+plugin would pass or fail depending on what was installed. So
+`tests/vst3_plugin/test_effect.cpp` is a real VST3 written here, in the same
+spirit as the fake DSP stages in `dsp_test.cpp`, and deliberately awkward in the
+three ways a real plugin is: **two objects** with an `IConnectionPoint` between
+them, which is the documented shape and the one that makes the host allocate a
+message; **f32 only**, so the conversion path is what runs by default; and a
+**non-zero latency and tail**, so the numbers the host reports have somewhere to
+come from.
+
+Through it, end to end:
+
+| | |
+|---|---|
+| 88200 frames in | 88328 out -- the extra 128 is the tail, drained by `flush` |
+| latency | 64 frames, reported through `get_latency` and compensated by nothing yet |
+| `param=Gain=0.5` and `param=42=0.5` | the same hash: by name and by id are the same parameter |
+| two `dsp_vst3` stages in one chain | 128 frames of latency, 256 of tail, and each keeps its own parameter queue |
+| `--block 4096`, `997`, `128` | the same hash |
+
+That last row is the one that found a bug. The parameter queue was a
+function-local `static`, which is invisible with one plugin in the chain and
+gives each of two the other's parameter changes.
+
+### Three things a stranger's plugin will find
+
+Written down because they are limits rather than bugs, and because the next
+person to hit one should not have to read the source to know it was deliberate.
+
+- **Latency is reported and not compensated.** A plugin that declares 64 frames
+  delays the stream by 64 frames, and nothing shifts it back. `get_latency`
+  exists so that something can, and for one chain into one device there is
+  nothing to line it up against yet.
+- **An infinite tail becomes one second.** `kInfiniteTail` is a delay line with
+  feedback at unity, or a plugin that did not think about the question. Silence
+  is not an answer that ever arrives, so `flush` takes a second and stops.
+- **No editor, no transport, no automation.** `IPlugInterfaceSupport` says so
+  before the plugin asks, which is the polite form: a plugin that adapts to a
+  host with no `IPlugView` is behaving better than one that assumes.
+
 ## Still untested
 
 - 8-bit WAV, which is unsigned and would need a conversion to reach any of our
@@ -2159,13 +2411,18 @@ worth 147 MB. Each of those is written up where the format is.
 - **`kAsioResetRequest`.** The driver may ask to be torn down and rebuilt; this
   module says yes and relies on the host noticing the position stop, which is the
   path a lost WASAPI device already takes. It has not been provoked.
-- **Path B under `/arch:AVX2`.** The AVX2 build produces byte-identical output to
-  the baseline one on all 22 files of the format corpus -- but `decode` runs the
-  decoders and not the chain, so the resampler, the convolver and the equaliser
-  are uncompared between the two builds. **`decode` accepts `--path processed`
-  and `--dsp` and silently ignores them**: a −6 dB gain and a resample to 192 kHz
-  both leave the hash exactly where it was. Making those flags do what they say
-  is what this measurement is waiting on.
+- ~~**Path B under `/arch:AVX2`.**~~ Stale: `decode` runs the chain now, and
+  the two builds are compared over it in *Path B, hashed* above.
+- **A VST3 effect that does something audible.** Every plugin installed on this
+  machine is an instrument. Five have no audio input and `dsp_vst3` refuses them
+  for the right reason; the sixth, BFD Player, has one and runs the whole cycle
+  -- and returns silence, because it is a sampler with nothing triggered. So the
+  loading, the callbacks, the bus negotiation, the process loop and the tail
+  drain are all measured against a real third-party binary, and **audio coming
+  back changed is measured only against the plugin this repository writes.**
+  What that leaves open is what a particular plugin does rather than what the
+  host does: one that reports its latency wrongly, one that needs `IPlugView` to
+  exist before it will process, one that writes into its input buffer.
 - Shorten, TAK and OptimFROG. `decode_ffmpeg` claims them on their documented
   magic bytes and nothing here can encode one, so the claim is unmeasured.
 - Monkey's Audio and Musepack, for the same reason: claimed, no encoder to hand.

@@ -205,6 +205,23 @@ bool DspChain::configure(const Format& input, std::uint32_t max_frames, std::str
             // Naming the stage matters: a chain of four that will not configure
             // is four things to look at, and three of them are innocent.
             why = stage->name() + " refused " + describe(running);
+            // And a stage that knows more than `MP_ERR_FORMAT` gets to say it.
+            // The ABI has no error string -- a vtable that returned one would
+            // have to own it -- so the convention is a `trouble` line in
+            // `describe`, which a stage already has somewhere to put. Without
+            // it, `dsp_vst3` refusing because a file is not there reads as a
+            // format it did not like.
+            for (const std::string& line : stage->describe()) {
+                if (line.rfind("trouble\t", 0) != 0) {
+                    continue;
+                }
+                const std::size_t from = line.find('\t') + 1;
+                const std::size_t to = line.find('\t', from);
+                const std::string what = line.substr(from, to - from);
+                if (!what.empty() && what != "nothing") {
+                    why += ": " + what;
+                }
+            }
             return false;
         }
         running = produced;

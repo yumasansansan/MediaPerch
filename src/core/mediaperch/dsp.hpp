@@ -57,6 +57,12 @@ public:
     /// `key=value`, the form a command line and a settings tree both produce.
     [[nodiscard]] MpResult set(const std::string& key, const std::string& value) noexcept;
     /// Every setting this stage has, one `key\tcurrent\tdescription` per entry.
+    ///
+    /// One key is a convention rather than a setting: **`trouble`**, whose
+    /// value is why the last thing that failed, failed, or `nothing`. The ABI
+    /// has no error string -- a vtable that returned one would have to own it --
+    /// so a stage that knows more than `MP_ERR_FORMAT` says it here, and
+    /// `DspChain::configure` puts it in the message a person reads.
     [[nodiscard]] std::vector<std::string> describe() const;
 
     /// What this stage produces from `in`, and how much room its output needs.

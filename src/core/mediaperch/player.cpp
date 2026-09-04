@@ -722,7 +722,11 @@ Player::RunEnd Player::play_run(Queue& queue, Playlist& playlist, std::uint64_t&
         return RunEnd::failed;
     }
 
-    const bool processing = use_processed(policy, negotiated.fidelity);
+    // A gain changes the samples whatever the formats say, so it counts towards
+    // the answer; see use_processed. A chain does too, and is already the
+    // reason `policy` was forced above.
+    const bool processing =
+        use_processed(policy, negotiated.fidelity, config.conversion.gain != 1.0);
     {
         const std::lock_guard lock{mutex_};
         // It negotiated, so this configuration is one the device will take.

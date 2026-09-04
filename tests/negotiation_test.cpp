@@ -362,11 +362,18 @@ TEST_CASE("asking for the processed graph still offers the source's own format",
     CHECK(only_b.front().format == cd_audio());
 
     // And Path B is what runs, whatever the format relationship turns out to be.
-    CHECK(mp::use_processed(mp::PathPolicy::processed, mp::Fidelity::exact));
-    CHECK(mp::use_processed(mp::PathPolicy::processed, mp::Fidelity::converted));
-    CHECK_FALSE(mp::use_processed(mp::PathPolicy::bit_exact, mp::Fidelity::exact));
-    CHECK_FALSE(mp::use_processed(mp::PathPolicy::automatic, mp::Fidelity::repacked));
-    CHECK(mp::use_processed(mp::PathPolicy::automatic, mp::Fidelity::converted));
+    CHECK(mp::use_processed(mp::PathPolicy::processed, mp::Fidelity::exact, false));
+    CHECK(mp::use_processed(mp::PathPolicy::processed, mp::Fidelity::converted, false));
+    CHECK_FALSE(mp::use_processed(mp::PathPolicy::bit_exact, mp::Fidelity::exact, false));
+    CHECK_FALSE(mp::use_processed(mp::PathPolicy::automatic, mp::Fidelity::repacked, false));
+    CHECK(mp::use_processed(mp::PathPolicy::automatic, mp::Fidelity::converted, false));
+
+    // The third answer, and the one whose absence meant a gain could be read,
+    // printed and then not applied: a change no format relationship can show.
+    // 16-bit file, 16-bit device, volume 0.5 -- exact, and emphatically Path B.
+    CHECK(mp::use_processed(mp::PathPolicy::bit_exact, mp::Fidelity::exact, true));
+    CHECK(mp::use_processed(mp::PathPolicy::exact_only, mp::Fidelity::exact, true));
+    CHECK(mp::use_processed(mp::PathPolicy::automatic, mp::Fidelity::repacked, true));
 }
 
 TEST_CASE("the default is bit-exact, which is the option that can refuse",

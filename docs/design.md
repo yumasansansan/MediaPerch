@@ -1171,6 +1171,14 @@ modules/             everything that can be loaded and unloaded at runtime, sort
                      person chose and the loudness meter is one BS.1770 chose.
   dsp/eq/            the equaliser, anywhere on the axis.
   dsp/replaygain/    the loudness meter, and the gain a previous scan found.
+  dsp/vst3/          somebody else's plugin, hosted. The first module here that
+                     runs code this project did not write, and the one place
+                     where nothing about the samples can be promised. Takes
+                     `pluginterfaces` and writes the host: the loader, the
+                     IHostApplication, the attribute list and the message it
+                     hands out, and the parameter queue. f64 straight through
+                     when the plugin says it can, f32 both ways when it cannot,
+                     and `describe` says which.
   dsp/*/             crossfeed, and whatever else. Never present in passthrough.
   video/d3d11/       presentation, and the three tone-map providers.
 shell/windows/       the WinUI 3 window. C#, Native AOT, **optional**: the engine runs
