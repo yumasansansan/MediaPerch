@@ -40,7 +40,8 @@ what reads it. All hash-identical to each other and to the
 reference on everything they read, up to 32-bit at 1,048,575 Hz. Two codecs and a container
 are Rust — ALAC, AAC-LC and raw ADTS, bit-identical to the C++ they replaced, with every
 `unsafe` the C ABI forces confined to one shared crate and none in the decoders. Format negotiation against real drivers; the passthrough graph on two threads;
-WASAPI exclusive down to a 2 ms period; 768 kHz / 32-bit on a USB DAC; a headless engine
+WASAPI exclusive down to a 2 ms period, and ASIO beside it for the one thing Windows has no
+wire format for — DSD512 native, on a DAC that refuses it as DoP; 768 kHz / 32-bit on a USB DAC; a headless engine
 with a shell that can be killed mid-track without the audio noticing. 247 tests plus
 libFuzzer targets, on MSVC.
 

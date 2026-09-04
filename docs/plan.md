@@ -683,9 +683,28 @@ nothing else is.
 That became practical while this was being planned: **Steinberg relicensed the ASIO SDK under
 GPLv3 in October 2025**, alongside VST3. Before that it could not be redistributed, which is
 why Audacity shipped without it for two decades and foobar2000 keeps it in a separate
-component. For a `GPL-3.0-or-later` project it is now simply a module — `sink_asio`, someday,
-behind the same vtable as `sink_wasapi`, chosen by the user and absent from the default
-install.
+component. For a `GPL-3.0-or-later` project it is now simply a module — `sink_asio`, behind
+the same vtable as `sink_wasapi`, chosen by the user and absent from the default install.
+
+**Built, and the prediction above held exactly**, on the same FiiO KA5 §14 measured DoP on:
+
+| File | DoP over WASAPI | Native over ASIO |
+|---|---|---|
+| DSD64 | 176400 Hz | 2822400 Hz |
+| DSD128 | 352800 Hz | 5644800 Hz |
+| DSD256 | 705600 Hz | 11289600 Hz |
+| **DSD512** | **refused** — 1411200 Hz is past what it takes as PCM | **22579200 Hz**, and the DAC's own display read `DSD512` |
+
+That last row is the whole argument for this module, measured rather than reasoned. It also
+corrects an expectation: the device is documented at DSD256 and it *is* DSD256 over DoP,
+because DoP spends 24 bits carrying 16 and the PCM link runs out first. The native link has
+no such overhead and the same hardware reaches twice as far.
+
+**What it cost was one finding about this ABI and one about COM**, both in
+[formats.md](formats.md): the sink vtable turned out to be a sink's rather than WASAPI's,
+with one adaptation and one extra copy; and an ASIO driver is registered `Apartment` while
+this engine is `COINIT_MULTITHREADED`, so `CoCreateInstance` hands back a proxy for an
+interface that has never had a marshaller. `sink_asio` loads the driver DLL itself.
 
 ---
 

@@ -41,10 +41,13 @@ mediaperch_add_module(mp_demux_wavpack
 
 # Not ours, and not held to our warning set.
 if(TARGET wavpack)
+    # Guarded by language for the reason cmake/CompilerOptions.cmake gives at
+    # length: libwavpack has MASM in it, and a warning level is not a thing an
+    # assembler has.
     if(MSVC)
-        target_compile_options(wavpack PRIVATE /W0)
+        target_compile_options(wavpack PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:/W0>")
     else()
-        target_compile_options(wavpack PRIVATE -w)
+        target_compile_options(wavpack PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:-w>")
     endif()
     set_target_properties(wavpack PROPERTIES FOLDER "external")
 endif()

@@ -236,7 +236,9 @@ if(NOT TARGET wavpack AND EXISTS "${CMAKE_SOURCE_DIR}/external/wavpack/CMakeList
                      "${CMAKE_BINARY_DIR}/external/wavpack" EXCLUDE_FROM_ALL)
 endif()
 if(TARGET wavpack)
-    target_compile_options(wavpack PRIVATE -fsanitize=fuzzer-no-link,address -w)
+    target_compile_options(wavpack PRIVATE
+        "$<$<COMPILE_LANGUAGE:C,CXX>:-fsanitize=fuzzer-no-link,address>"
+        "$<$<COMPILE_LANGUAGE:C,CXX>:-w>")
     target_compile_definitions(wavpack PRIVATE
         _DISABLE_VECTOR_ANNOTATION _DISABLE_STRING_ANNOTATION)
     set_target_properties(wavpack PROPERTIES FOLDER "external")

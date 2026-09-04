@@ -51,7 +51,7 @@ set_target_properties(mediaperch_probe PROPERTIES
 # Named one by one rather than globbed, because a module that quietly stopped
 # building would otherwise show up as a format that quietly stopped playing.
 set(mediaperch_modules
-    mp_sink_wasapi
+    mp_sink_wasapi mp_sink_asio
     mp_demux_wav mp_demux_flac mp_demux_mpa mp_demux_adts mp_demux_dsd mp_demux_wavpack mp_demux_mp4 mp_demux_ogg mp_demux_mkv
     mp_demux_mf mp_demux_ffmpeg
     mp_codec_pcm mp_codec_flac mp_codec_mpa mp_codec_alac mp_codec_aac mp_codec_dsd

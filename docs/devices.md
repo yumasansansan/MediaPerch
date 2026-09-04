@@ -156,3 +156,31 @@ needs a second audio interface recording a digital output, not more software.
 - **No run longer than twelve seconds.** M1's criterion is an hour at the minimum period
   with zero underruns, and that has not been done.
 - HDMI, Bluetooth, and anything that is not this machine.
+
+## ASIO, on the one device that has a driver
+
+`sink_asio` is the second implementation of `MpSinkVtbl` and the only route to
+native DSD. It was measured on the FiiO KA5, whose ASIO driver is
+`ctasio64.dll`, registered `ThreadingModel = Apartment`.
+
+| Asked for | Accepted as | Period |
+|---|---|---|
+| 44100 / 24 | `Int32LSB`, the driver's only type | 1024 frames, 23.22 ms |
+| DSD64 | `DSDInt8MSB1` at 2822400 Hz | 32768 DSD samples, 2048 DoP frames |
+| DSD128 | `DSDInt8MSB1` at 5644800 Hz | " |
+| DSD256 | `DSDInt8MSB1` at 11289600 Hz | " |
+| DSD512 | `DSDInt8MSB1` at 22579200 Hz | " |
+
+Zero underruns and zero timeouts on all five. **The DSD512 row is the one worth
+recording**: the same device refuses DSD512 as DoP, because that asks a PCM link
+for 1411.2 kHz, and its own display reads `DSD512` when the native link is used.
+
+The driver reports one sample type, `Int32LSB`, and there is no asking for
+another -- which is the difference between negotiating with WASAPI and being told
+by ASIO. A 24-bit source reaches it as `S24_IN_32`, which is the same four bytes,
+and this is where comparing sample-type *enums* rather than containers refused
+every format the device can play.
+
+**Only one process may hold an ASIO driver.** Nothing here works around that and
+nothing should: it is the same property WASAPI exclusive has, stated by a
+different mechanism.

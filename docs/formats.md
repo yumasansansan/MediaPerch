@@ -1221,6 +1221,36 @@ had grown: **60,737,917 executions in five minutes, 1,133 new corpus entries,
 against a well-fuzzed library is expected to do, and is why it is here for the
 corpus and the machinery rather than for the finding.
 
+### Two links, and the one that goes further
+
+A DSD file reaches a DAC by one of two links, and `sink_asio` is the second one.
+Both were measured on a FiiO KA5, which is the device §14 already records DoP
+working on:
+
+| File | DoP over WASAPI exclusive | Native DSD over ASIO |
+|---|---|---|
+| DSD64 | 176400 Hz | 2822400 Hz |
+| DSD128 | 352800 Hz | 5644800 Hz |
+| DSD256 | 705600 Hz | 11289600 Hz |
+| **DSD512** | **refused** | **22579200 Hz** |
+
+Zero underruns and zero timeouts on every row that played. The DSD512 row is the
+point: DoP spends 24 bits to carry 16, so a DSD512 stream asks a PCM link for
+1411.2 kHz and this device says no -- while the same device, over the native
+link, takes it and **displays `DSD512` on its own screen**. The hardware is
+documented at DSD256 and that is true of what it accepts as PCM; the limit was
+the wrapper rather than the DAC.
+
+**Nothing in the graph knows which link it is.** `codec_dsd` produces DoP either
+way, because a codec's format is fixed before a sink is chosen and it cannot
+know. `MP_ENCODING_DOP` means *DSD, in the frames a PCM link carries*, and a
+sink whose link is not PCM takes the frames back off -- three lines, in
+`modules/sink/asio/dop_unpack.hpp`, held against the layout `codec_dsd` writes
+by `tests/dop_test.cpp`. That is the one part of an ASIO sink a test can reach
+without a driver, and it is the part where a mistake would be inaudible on a
+bench: swapping the two DSD bytes of a frame delays every sample by half a byte,
+which is not silence and not noise but the same music slightly wrong.
+
 ### Seeking, and the one frame it rounds down by
 
 Seeks are byte-identical to the tail of a straight decode at frames 1, 2, 3,
@@ -1232,6 +1262,58 @@ every frame after it the wrong marker. `demux_dsd::seek` rounds down to an even
 frame, the host discards the one frame that puts it past the target, and the
 parity is right by construction. It is the same shape as the pre-roll AAC needs,
 for a different reason and a thousand times smaller.
+
+## Is `MpSinkVtbl` a sink's abstraction, or WASAPI's shape written down?
+
+§15 of [the plan](plan.md) says not to add an interface until its second
+implementation exists. `MpSinkVtbl` had one for a year. `sink_asio` is the
+second, and the answer is **mostly yes, with one sentence in the header that was
+WASAPI's and one cost that is real**.
+
+| | WASAPI | ASIO | What it cost |
+|---|---|---|---|
+| Direction | pull: the host asks for a buffer | **push**: the driver calls the host on its own thread | one staging buffer, one event, one atomic. `wait` blocks on the event the callback sets |
+| Layout | interleaved | **one buffer per channel** | a copy, and a de-interleave, that WASAPI does not need |
+| Format | negotiated -- `IsFormatSupported` is a question | **declared** -- `getChannelInfo` is an answer | nothing. `negotiate` becomes a comparison, and the host offering candidates in order is exactly what that wants |
+| Apartment | any | **`Apartment`, and this engine is `COINIT_MULTITHREADED`** | the driver DLL is loaded directly; see below |
+
+The sentence that was WASAPI's is `acquire`'s: *"Hands out the device buffer to
+write into."* There is no single ASIO buffer to hand out, so `sink_asio` hands
+out a staging buffer and copies in the callback. Everything the host does is
+unchanged, and the contract that matters -- write frames, commit them -- holds.
+**The extra copy is unavoidable rather than a consequence of the ABI**: ASIO's
+buffers are per-channel, the graph's are interleaved, and something has to
+de-interleave. A host that wrote deinterleaved would move the copy rather than
+remove it, and Path A exists precisely so that nothing touches the samples.
+
+### `CoCreateInstance` returns `E_NOINTERFACE` on a driver that is right there
+
+Every ASIO driver is registered `ThreadingModel = Apartment`. This engine
+initialises COM as `COINIT_MULTITHREADED`, because that is what WASAPI wants.
+COM's answer to an STA object asked for from an MTA thread is to create it in a
+single-threaded apartment and hand back a **proxy** -- and a proxy needs a
+marshaller, which an ASIO interface has never had. So the call fails with
+`E_NOINTERFACE` on a device that enumerates, loads and plays.
+
+The three ways out are to make the whole engine STA, which is a sink choosing an
+apartment for the program; to marshal by hand, which needs the proxy that does
+not exist; or to skip the apartment machinery. `sink_asio` does the third:
+`LoadLibrary`, `DllGetClassObject`, `IClassFactory::CreateInstance`. **That is
+correct rather than a cheat** -- an ASIO driver is in-process by definition, its
+interface is never marshalled, and it runs its own thread regardless of anybody's
+apartment. It is what `CoCreateInstance` would have done had the apartments
+matched.
+
+### Comparing enums where the tree compares containers
+
+The first negotiation refused all four candidates on a device that plays all
+four. The driver is `Int32LSB`; a 24-bit source is offered as `S24_IN_32`; those
+are the same four bytes, and `classify` in `negotiation.cpp` says so in as many
+words -- *"a four-byte container holding 24 valid bits is the same wire format
+whether it is spelled `s24_in_32` or `s32` with `valid_bits = 24`"*. The sink was
+comparing the enum. It compares containers now, with float compared exactly
+because `Float32LSB` and `Int32LSB` are both four bytes and are not the same
+bytes.
 
 ## WavPack, and the library with no seam in it
 
@@ -2056,15 +2138,17 @@ worth 147 MB. Each of those is written up where the format is.
   for WAV, FLAC and ALAC. Left visible rather than deleted because the reason it
   went stale is the point of generating the table.
 - ~~DSD in any form: DoP is designed for and not implemented.~~ Stale:
-  `demux_dsd` reads DSF and DSDIFF, `demux_wavpack` reads DSD in WavPack, and
-  `codec_dsd` frames all three as DoP -- measured above, bit for bit. What is
-  still untested is **DoP on a device**: §14 records a FiiO KA5 accepting DoP at
-  DSD256 as PCM, which is the same wire format, but nothing here has yet played
-  a DSD file through one.
-- **Native DSD, and DSD512.** DoP tops out where a DAC stops accepting 1411.2 kHz
-  PCM, so DSD512 needs a sink that speaks DSD -- ASIO, whose SDK Steinberg
-  relicensed under GPLv3 in October 2025. The KA5 has an ASIO driver and stops at
-  DSD256, so the sink is testable on it and the format it would unlock is not.
+  `demux_dsd` reads DSF and DSDIFF, `demux_wavpack` reads DSD in WavPack,
+  `codec_dsd` frames all three as DoP, and both links have been played to a DAC
+  -- DoP to DSD256 and native ASIO to DSD512, above.
+- **DSD over anything but the one DAC.** Two links on one FiiO KA5 is one device,
+  and §12's device matrix exists because that is not a population. What a second
+  ASIO driver does with `kAsioSetIoFormat`, and whether one that reports
+  `DSDInt8LSB1` has its bits reversed the way this module assumes, are both
+  unmeasured -- the reversal is written and tested and has never run on hardware.
+- **`kAsioResetRequest`.** The driver may ask to be torn down and rebuilt; this
+  module says yes and relies on the host noticing the position stop, which is the
+  path a lost WASAPI device already takes. It has not been provoked.
 - Shorten, TAK and OptimFROG. `decode_ffmpeg` claims them on their documented
   magic bytes and nothing here can encode one, so the claim is unmeasured.
 - Monkey's Audio and Musepack, for the same reason: claimed, no encoder to hand.

@@ -105,18 +105,34 @@ if(MEDIAPERCH_TOOLCHAIN STREQUAL msvc)
     # object of libFLAC, a pure C library, because MSVC emits compound EH
     # metadata for C objects too. "C has no exceptions" was reasoning where a
     # build was available, and it cost two links to find out.
-    add_compile_options(/GS /guard:cf /guard:ehcont)
+# **Every global option below is guarded by language, and the reason is an
+# assembler.**
+#
+# `add_compile_options` reaches every target in the directory *and every
+# language they compile*, which for a tree of C and C++ was a distinction
+# without a difference until libwavpack arrived with hand-written MASM in it.
+# `ml64.exe` was then handed `/GS /guard:cf /guard:ehcont /Oi /Ot /Gy /Gw /Ob3`,
+# understood none of them, and failed with `A1004: out of memory` -- which is
+# what that assembler says when it cannot parse its command line, and is as
+# unhelpful a message as this build has produced.
+#
+# So each of these says `$<COMPILE_LANGUAGE:C,CXX>`. None of them was ever meant
+# for anything else; the guard states what was always true.
+    add_compile_options(
+        "$<$<COMPILE_LANGUAGE:C,CXX>:/GS>"
+        "$<$<COMPILE_LANGUAGE:C,CXX>:/guard:cf>"
+        "$<$<COMPILE_LANGUAGE:C,CXX>:/guard:ehcont>")
     add_link_options(/GUARD:CF /CETCOMPAT /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA)
 
     # -- optimisation, global, Release -------------------------------------—-
     add_compile_options(
-        "$<$<CONFIG:Release>:/Oi>"  # intrinsics rather than calls to memcpy and friends
-        "$<$<CONFIG:Release>:/Ot>"  # favour speed where speed and size disagree
+        "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:/Oi>"  # intrinsics rather than calls to memcpy
+        "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:/Ot>"  # speed where speed and size disagree
         # /Gy and /Gw are what let /OPT:REF and /OPT:ICF do anything at all:
         # without them the linker cannot see a function or a datum as a separate
         # thing to discard or to fold.
-        "$<$<CONFIG:Release>:/Gy>"
-        "$<$<CONFIG:Release>:/Gw>"
+        "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:/Gy>"
+        "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:/Gw>"
         # Inline anything the compiler thinks is worth it. Here rather than
         # rewritten into CMAKE_<LANG>_FLAGS_RELEASE because add_compile_options
         # lands *after* those, so /Ob3 wins wherever it meets an /Ob2 -- and it
@@ -127,7 +143,7 @@ if(MEDIAPERCH_TOOLCHAIN STREQUAL msvc)
         # and the warning is correct and expected: /Ob3 is precisely what is
         # wanted, and the only way to silence it is to patch a submodule or to
         # inline less. This project would rather have the noise.
-        "$<$<CONFIG:Release>:/Ob3>"
+        "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:/Ob3>"
     )
     add_link_options(
         "$<$<CONFIG:Release>:/OPT:REF>"        # drop what nothing calls
@@ -164,7 +180,7 @@ else()
     )
 
     # -- hardening, global ---------------------------------------------------
-    add_compile_options(-fstack-protector-strong)
+    add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-fstack-protector-strong>")
     if(MEDIAPERCH_ELF)
         add_link_options(LINKER:-z,relro LINKER:-z,now LINKER:-z,noexecstack)
     else()
@@ -177,11 +193,11 @@ else()
 
     # -- optimisation, global, Release ---------------------------------------
     add_compile_options(
-        "$<$<CONFIG:Release>:-O3>"
+        "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:-O3>"
         # One section per function and per datum, so --gc-sections has something
         # to work with: the same trade as /Gy and /Gw on the other two.
-        "$<$<CONFIG:Release>:-ffunction-sections>"
-        "$<$<CONFIG:Release>:-fdata-sections>"
+        "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:-ffunction-sections>"
+        "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:-fdata-sections>"
     )
     if(MEDIAPERCH_ELF)
         add_link_options("$<$<CONFIG:Release>:LINKER:--gc-sections>")
@@ -199,9 +215,11 @@ option(MEDIAPERCH_SANITIZE "Build with the address and undefined-behaviour sanit
 
 if(MEDIAPERCH_SANITIZE)
     if(MSVC)
-        add_compile_options(/fsanitize=address)
+        add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:/fsanitize=address>")
     else()
-        add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+        add_compile_options(
+            "$<$<COMPILE_LANGUAGE:C,CXX>:-fsanitize=address,undefined>"
+            "$<$<COMPILE_LANGUAGE:C,CXX>:-fno-omit-frame-pointer>")
         add_link_options(-fsanitize=address,undefined)
     endif()
 endif()

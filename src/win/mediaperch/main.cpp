@@ -103,6 +103,10 @@ struct Options {
     int lag_window = 2048;
     bool exact_length = true;
     bool shared = false;
+    /// Which sink module, by id. Empty means the highest-priority one, which is
+    /// `sink_wasapi`. `sink_asio` is asked for by name because it takes a whole
+    /// device, needs a driver, and buys nothing for PCM.
+    std::string sink_id;
     bool loopback = false;
     bool verbose = false;
 };
@@ -336,6 +340,9 @@ Options
                     between the bit-exact path and the processed one, q stops.
                     Pausing stops the device rather than feeding it silence, so
                     resuming lands on the sample it left
+  --sink ID         which sink module: sink_wasapi (the default) or sink_asio.
+                    ASIO needs a driver and takes the whole device, and is worth
+                    asking for only for native DSD -- docs/plan.md section 5
   --shared          shared mode instead of exclusive
   --loopback        `verify` also records from a capture endpoint and reports
                     whether the loopback returned the bytes unchanged. Read
@@ -531,6 +538,15 @@ bool parse(int argc, char** argv, Options& out)
             std::uint32_t s = 0;
             value(s);
             out.seconds = s;
+        } else if (arg == "--sink") {
+            if (i + 1 < argc) {
+                out.sink_id = argv[++i];
+                // A short name means a sink, the way `--decoder ogg` means a
+                // demuxer: `--sink asio` is `sink_asio`.
+                if (out.sink_id.rfind("sink_", 0) != 0) {
+                    out.sink_id = "sink_" + out.sink_id;
+                }
+            }
         } else if (arg == "--shared") {
             out.shared = true;
         } else if (arg == "--loopback") {
@@ -2463,9 +2479,11 @@ int main(int argc, char** argv)
         }
     }
 
-    const MpSinkVtbl* sink_vtbl = registry.sink();
+    const MpSinkVtbl* sink_vtbl = registry.sink(options.sink_id);
     if (sink_vtbl == nullptr) {
-        std::fprintf(stderr, "no sink module beside the executable\n");
+        std::fprintf(stderr, "no sink module%s%s beside the executable\n",
+                     options.sink_id.empty() ? "" : " called ",
+                     options.sink_id.c_str());
         return 1;
     }
     const MpSinkVtbl& sink = *sink_vtbl;

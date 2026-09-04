@@ -148,6 +148,7 @@ if(MEDIAPERCH_BUILD_PLATFORM AND WIN32)
     add_subdirectory(modules/demux/ffmpeg)
     add_subdirectory(modules/demux/mf)
     add_subdirectory(modules/sink/wasapi)
+    add_subdirectory(modules/sink/asio)
     add_subdirectory(src/win)
 endif()
 

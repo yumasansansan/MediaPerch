@@ -1147,9 +1147,15 @@ modules/             everything that can be loaded and unloaded at runtime, sort
   codec/vorbis/      libvorbis, likewise, rather than vorbisfile.
 
   sink/wasapi/       exclusive and shared, event-driven, both.
-  sink/asio/         someday. Not for accuracy -- exclusive mode is already exact --
-                     but for native DSD above what DoP can carry. Practical since
-                     Steinberg relicensed the ASIO SDK under GPLv3 in October 2025.
+  sink/asio/         the second implementation of MpSinkVtbl, which is most of
+                     why it exists. Not for accuracy -- exclusive mode is already
+                     exact -- but for native DSD above what DoP can carry: a FiiO
+                     KA5 refuses DSD512 as DoP and plays it natively. ASIO is push
+                     where the ABI is pull, per-channel where it is interleaved,
+                     and declares its format where WASAPI negotiates one; each of
+                     those cost an adaptation and none of them cost a change to
+                     the ABI. Loads the driver DLL itself, because an ASIO driver
+                     is registered Apartment and this engine is multithreaded.
   dsp/gain/          the first MpDspVtbl module: a gain, and the peak it saw.
   dsp/resample/      polyphase, designed at configure by one of three methods. The
                      stage that answers with a rate it was not given.

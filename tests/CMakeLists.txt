@@ -34,6 +34,15 @@ add_executable(mediaperch_tests
     transport_test.cpp
 )
 
+# `sink_asio`'s DoP unpack is in a header with no Windows in it, so the one part
+# of an ASIO sink that can be checked without a driver is checked here. See
+# dop_test.cpp for what would be wrong if it were wrong.
+if(EXISTS "${CMAKE_SOURCE_DIR}/modules/sink/asio/dop_unpack.hpp")
+    target_sources(mediaperch_tests PRIVATE dop_test.cpp)
+    target_include_directories(mediaperch_tests PRIVATE
+        "${CMAKE_SOURCE_DIR}/modules/sink/asio")
+endif()
+
 # The ALAC and AAC decoders and the ADTS framer are ours and are Rust, so their
 # unit tests are in their crates: `cargo test` over the workspace, registered
 # here as rust_modules because this directory is added after enable_testing()

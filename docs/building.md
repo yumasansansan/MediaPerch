@@ -303,6 +303,34 @@ AddressSanitizer is what stable cannot do; for safe Rust that is the smaller
 loss, because the bounds checks are the sanitizer and a missed one is a panic
 libFuzzer reports as a crash.
 
+### The ASIO SDK, whose upstream is a ZIP
+
+`external/asio` is the second submodule pinned to somebody else's copy, for the
+same reason as mpg123 and with less to fall back on: **Steinberg publishes the
+ASIO SDK as a download from their site and has no git repository at all.** They
+put VST3 on GitHub and did not put ASIO there.
+
+The pin is `audiosdk/asio`, at its only commit, which carries SDK 2.3.4 and the
+licence file that matters. That file is the reason this is possible: *"This
+Software Development Kit is licensed under the terms of the Steinberg ASIO
+License, or alternatively under the terms of the General Public License (GPL)
+Version 3"*, which Steinberg added in October 2025 and which a
+`GPL-3.0-or-later` program may take.
+
+Unlike the mpg123 pin, this one has **not** been diffed against the official
+distribution, because the official distribution is behind a click-through and
+nothing here can accept a licence on anybody's behalf. What can be said instead
+is narrower and worth saying: **only headers are compiled**, and they are an
+interface definition rather than an implementation -- `iasiodrv.h` is twenty-one
+pure virtual functions and `asio.h` is enums and structs. There is no ASIO
+library to link. If a header had been altered, what it would alter is a vtable
+layout, and a wrong one does not play a tone through a real driver.
+
+`asio.cpp` and `host/asiolist.cpp` are deliberately not compiled: the first keeps
+one global driver pointer and the second enumerates the registry into fixed
+`char[32]` buffers. `sink_asio` reads its own registry, for the same reason every
+demuxer here opens its own files.
+
 ### mpg123, whose upstream is SVN
 
 Every other submodule is pinned to a tag or a commit of the project's own git.
