@@ -1901,6 +1901,19 @@ when there is one.
 different module, and the audio side is already this shape: `codec_flac` is libFLAC,
 `codec_mpa` is libmpg123, `codec_aac` is this tree's own Rust. Video will be the same.
 
+**And once they are here, `codec_mft` is the hardware decoder and nothing else.** That is a
+decision rather than an observation, and it has an order to it: `codec_mft` currently claims
+`MP_GRAPHICS_NONE` at 80 and falls back to Microsoft's software transform when no hardware
+one takes the device, which is what every video test in this tree rides today. Demoting it
+before there is another software decoder would leave a machine with no GPU unable to decode
+at all -- so the software module lands first, the score comes down second, and the fallback
+inside `activate` goes with it. Then `open` returning MP_ERR_UNSUPPORTED on a machine with
+no video device is the registry working as designed rather than a failure.
+
+What that buys is the thing §7 says about audio, arriving for video: the deterministic
+decoder is one in the tree, checkable the way `codec_alac` is, rather than a black box that
+a Windows update can change under a hash.
+
 Four reasons one would be wanted beside `codec_mft`:
 
 - **Codecs Windows does not have.** AV1 needs Windows 11 and a Store extension; VVC has

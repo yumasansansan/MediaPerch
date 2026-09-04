@@ -65,12 +65,14 @@
 // a compatibility option here; they are a different pipeline that cannot do the
 // thing this module exists to do.
 //
-// What is not here yet, and why: NV12 and P010 are declared by the ABI and
-// refused by this module, because nothing in this tree decodes video and a
-// conversion path with no producer is a path no test can check. The tone
-// mappers are chosen and reported and not yet applied, for the same reason --
-// §9.3's `driver` provider drives the GPU's video processor over a decoded
-// surface, and there are no decoded surfaces. Both arrive with the decoder.
+// What is not here yet, and why. NV12 and P010 arrive now -- as planes and,
+// from a hardware decoder, as a texture this module views in place -- so the
+// half of this paragraph that said otherwise is gone with the decoder that
+// made it true. What is left is the colour work §9 turns on: the transfer
+// functions here are sRGB and BT.1886, so a PQ or an HLG source is decoded
+// with the wrong curve rather than refused, and the tone mappers are chosen
+// and reported and not applied. §9.9.1 says HLG goes on the linear path in
+// every case, which is the shape that work takes.
 
 #include "colour_plan.hpp"
 #include "yuv_matrix.hpp"
