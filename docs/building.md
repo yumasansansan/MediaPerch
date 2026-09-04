@@ -401,6 +401,105 @@ syntax and the ON/OFF values they pass mean the same under either. Seventeen
 warnings per configure before; none after; every hash in the corpus the same
 with LTO on.
 
+## Two instruction-set baselines, both shipped
+
+Everything this tree links already dispatches on the CPU: libFLAC, libmpg123,
+libopus and libwavpack each compile several paths and pick one at run time. What
+none of that covers is the code *here* -- the resampler, the convolver, the FFT,
+the equaliser, the channel matrix, the dither -- which is Path B's inner loops
+and compiles to the **x86-64 baseline, meaning SSE2 and 2003.**
+
+Raising it is one flag and unshippable on its own: a binary built for AVX2 does
+not start without AVX2. The usual answer is to compile the hot loops twice and
+dispatch, which buys a dispatcher, a second copy of every stage, and a CPU check
+on a path that must not branch. The answer here is to **build the whole tree
+twice and upload both**, which costs a CI job and no code:
+
+| | `MEDIAPERCH_ARCH` | Preset | Runs on |
+|---|---|---|---|
+| baseline | `baseline` | `ninja-msvc` | anything x86-64 |
+| AVX2 | `avx2` | `ninja-msvc-avx2` | Haswell, Zen, and later |
+
+`avx2` is x86-64-v3 -- AVX2, FMA, BMI1 and BMI2, LZCNT, MOVBE, F16C. MSVC spells
+the set `/arch:AVX2` and Clang spells it `-march=x86-64-v3`.
+
+**In the AVX2 build, libopus is told to stop checking.** It compiles an SSE, an
+SSE2, an SSE4.1 and an AVX2 path and asks the CPU which to use; in a binary that
+already refuses to start without AVX2 that question has one answer, and asking
+it costs a branch and keeps three unreachable paths alive.
+`OPUS_X86_PRESUME_SSE`, `_SSE2`, `_SSE4_1` and `_AVX2` are all on there and off
+in the baseline. libFLAC and libmpg123 dispatch too and offer nothing to turn it
+off with -- FLAC's is not an option and mpg123's `OPT_MULTI` is a local `set()`
+in its own list file -- so their checks stay.
+
+**Does it change the bytes?** FMA computes a multiply and an add with one
+rounding where two instructions round twice, so it can. Measured across the
+whole format corpus -- 22 files, every container and codec this tree reads,
+DSD and WavPack included -- the two builds produce **identical hashes**.
+
+That covers the decoders and **not Path B**, which is the half AVX2 was raised
+for. There is no way to run the DSP chain without a device today:
+`mediaperch-probe decode` accepts `--path processed` and `--dsp` and ignores
+both -- a −6 dB gain and a resample to 192 kHz leave the hash untouched. Closing
+that is what would let the same comparison be made for the chain, and it is
+listed under *Still untested* in [formats.md](formats.md).
+
+## Two assemblers, and what they were doing by accident
+
+Both hand-written assembly paths in this tree were being taken or skipped for
+reasons nobody chose, and a CI log is what showed it.
+
+**libmpg123 needs `yasm` and does not say so.** Its CMake looks for one on PATH;
+without it `MACHINE` silently becomes `generic` and the library loses OPT_MULTI,
+OPT_X86_64 and OPT_AVX. Both machines this has run on found one -- `yasm.exe`
+ships inside **Strawberry Perl**, which is on PATH here and pre-installed on
+GitHub's Windows runners. Nobody asked for Perl and nothing declared it.
+
+That would be a curiosity if the two decoders agreed. They do not: the same
+2-second MP3 hashes `69dca145…` with the AVX synthesis and `f6c8a8e4…` with the
+generic one. They agree to **127.84 dB**, maximum difference 1.5e-7, 10% of
+samples identical -- float rounding between two implementations of one synthesis
+filter, both correct by the RMS bound ISO 11172-4 calls conformance. But only one
+is the hash [formats.md](formats.md) records. So `modules/codec/mpa/CMakeLists.txt`
+looks for yasm itself and **warns, naming what a build without it will differ
+by**, rather than letting a hash find it out later.
+
+**libwavpack's assembly was decided by how many times you had configured.** Its
+CMakeLists calls `enable_language(ASM_MASM)` guarded by `WavPack_CPU_X64` and
+sets that variable ninety lines later, in the CPU detection -- which caches it.
+So the first configure has the guard false and the assembly off, and the second
+has it true and the assembly on, from identical source. Measured both ways.
+`modules/demux/wavpack/CMakeLists.txt` enables the language itself before adding
+the subdirectory, so the first configure is the same as the fiftieth.
+
+There is **no reproducibility cost** to that one: WavPack is lossless, so its two
+paths must agree or one is broken, and five files including a lossy hybrid one
+hash identically with and without. The gain is 13%, and mpg123's is 9%.
+
+**And MASM was being handed C++ flags.** `add_compile_options` reaches every
+language in the directory, which for a tree of C and C++ was a distinction
+without a difference until libwavpack arrived with `.asm` in it. `ml64.exe` was
+given `/GS /guard:cf /guard:ehcont /Oi /Ot /Gy /Gw /Ob3` and failed with
+`A1004: out of memory`, which is what that assembler says when it cannot parse
+its command line and is as unhelpful a message as this build has produced. Every
+global option in `cmake/CompilerOptions.cmake` now says
+`$<COMPILE_LANGUAGE:C,CXX>`, which is what each of them always meant.
+
+### `CMP0194`, and a Perl distribution holding up a configure
+
+mpg123's `project(... LANGUAGES C ASM)` makes CMake look for an assembler, and
+on Windows it settles for `cl.exe` and warns that MSVC is not one. It is right,
+and it does not matter: nothing is assembled with `CMAKE_ASM_COMPILER` --
+mpg123 spells `${CMAKE_C_COMPILER}` out where it preprocesses a `.S`, and yasm
+does the assembling.
+
+`NEW` is the worse answer and that took trying. With it CMake declines `cl.exe`
+and keeps looking -- and on this machine it found `C:/Strawberry/c/bin/gcc.exe`
+and was satisfied, which is a Perl distribution being load-bearing for a
+configure a second time. On a machine with neither, `project(... ASM)` would
+fail outright. `CMAKE_POLICY_DEFAULT_CMP0194 OLD` keeps the behaviour that works
+anywhere and states the reason where the policy is set.
+
 ## What makes a binary big
 
 The flags are settled and there is nothing left to tune there. What is left is

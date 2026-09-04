@@ -25,6 +25,30 @@ set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
 set(OPUS_INSTALL_PKG_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
 set(OPUS_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+
+# **In the AVX2 build, opus is told to stop checking.**
+#
+# libopus compiles an SSE, an SSE2, an SSE4.1 and an AVX2 path and picks one per
+# call site by asking the CPU. In a binary that already refuses to start without
+# AVX2 that question has one answer, and asking it costs a branch on a hot path
+# and keeps three code paths alive that can never run. `PRESUME` is opus's own
+# word for "stop asking": the dispatch goes, and so do the paths it chose
+# between.
+#
+# The two below `SSE4_1` are already presumed by opus's own defaults on x86-64;
+# they are named anyway so that all four read as one decision rather than two
+# defaults and two overrides.
+#
+# libFLAC and libmpg123 dispatch internally too and offer nothing to turn it off
+# with -- FLAC's is not an option and mpg123's `OPT_MULTI` is a local `set()` in
+# its own list file. Their checks stay, and are a branch each.
+if(MEDIAPERCH_ARCH STREQUAL "avx2")
+    set(OPUS_X86_PRESUME_SSE ON CACHE BOOL "" FORCE)
+    set(OPUS_X86_PRESUME_SSE2 ON CACHE BOOL "" FORCE)
+    set(OPUS_X86_PRESUME_SSE4_1 ON CACHE BOOL "" FORCE)
+    set(OPUS_X86_PRESUME_AVX2 ON CACHE BOOL "" FORCE)
+endif()
+
 add_subdirectory("${CMAKE_SOURCE_DIR}/external/opus"
                  "${CMAKE_BINARY_DIR}/external/opus" EXCLUDE_FROM_ALL)
 

@@ -61,6 +61,15 @@ jobs:
 
   # The ABI header is compiled as C here as well as C++ (tests/abi_header_c.c),
   # so a C++-ism creeping into it fails the build rather than a third party's.
+  # **Two instruction-set baselines, both shipped.**
+  #
+  # Nothing this tree links needs help -- libFLAC, libmpg123, libopus and
+  # libwavpack each dispatch on the CPU internally. The code *here* does: the
+  # resampler, the convolver, the FFT, the equaliser, the channel matrix and the
+  # dither are Path B's inner loops and compile to the x86-64 baseline, which is
+  # SSE2 and 2003. `avx2` is x86-64-v3 -- Haswell and Zen and later -- and a
+  # binary built that way does not start without it, which is why both are built
+  # and both are uploaded rather than one being chosen for everybody.
   msvc:
     name: MSVC, build and test
     runs-on: windows-2025-vs2026
@@ -68,6 +77,12 @@ jobs:
       fail-fast: false
       matrix:
         configuration: [Debug, RelWithDebInfo, Release]
+        arch: [baseline, avx2]
+        include:
+          - arch: baseline
+            preset: ninja-msvc
+          - arch: avx2
+            preset: ninja-msvc-avx2
     steps:
       - uses: actions/checkout@v7
         with:
@@ -78,20 +93,32 @@ jobs:
         run: ${{ env.VS_DEV_ENV }}
 
       - name: Configure
-        run: cmake --preset ninja-msvc
+        run: cmake --preset ${{ matrix.preset }}
 
-      - name: Report which compiler was actually used
+      - name: Report which compiler and which baseline were actually used
         run: >
-          cmake -N -L build/ninja-msvc |
-          Select-String -Pattern 'CMAKE_CXX_COMPILER|MEDIAPERCH_EXPECT_TOOLSET'
+          cmake -N -L build/${{ matrix.preset }} |
+          Select-String -Pattern
+          'CMAKE_CXX_COMPILER|MEDIAPERCH_EXPECT_TOOLSET|MEDIAPERCH_ARCH'
 
       - name: Build
-        run: cmake --build --preset ninja-msvc --config ${{ matrix.configuration }}
+        run: cmake --build --preset ${{ matrix.preset }} --config ${{ matrix.configuration }}
 
       - name: Test
         run: >
-          ctest --preset ninja-msvc --build-config ${{ matrix.configuration }}
+          ctest --preset ${{ matrix.preset }} --build-config ${{ matrix.configuration }}
           --output-on-failure --no-tests=error
+
+      # The Release build of each baseline, so a person can take the one their
+      # machine runs. The AVX2 one refuses to start on anything before Haswell,
+      # which is the whole reason there are two.
+      - name: Keep the Release build
+        if: matrix.configuration == 'Release'
+        uses: actions/upload-artifact@v7
+        with:
+          name: mediaperch-${{ matrix.arch }}
+          path: build/${{ matrix.preset }}/bin/Release
+          if-no-files-found: error
 
   # Every parser that reads a file somebody else wrote, given bytes nobody wrote.
   #

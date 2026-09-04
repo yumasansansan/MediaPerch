@@ -92,6 +92,21 @@ add_subdirectory(src/core)
 set(CMAKE_POLICY_VERSION_MINIMUM 3.10)
 set(CMAKE_POLICY_DEFAULT_CMP0183 NEW)
 
+# **CMP0194: MSVC is not an assembler, and CMake 4.4 is right about that.**
+#
+# mpg123's `project(... LANGUAGES C ASM)` makes CMake look for one, and on
+# Windows it settles for `cl.exe` and warns. Nothing is ever assembled with it:
+# mpg123 spells `${CMAKE_C_COMPILER}` out in the one place it preprocesses a
+# `.S` file, and the assembling is a separate tool. So the warning is about a
+# variable with no reader.
+#
+# NEW is worse here, and that took measuring. With it CMake declines `cl.exe`
+# and looks further -- and on this machine it found `C:/Strawberry/c/bin/gcc.exe`
+# and was happy, which is a *Perl distribution* being load-bearing for a
+# configure. On a machine without one, `project(... ASM)` would fail outright.
+# OLD keeps the behaviour that works everywhere and says so out loud.
+set(CMAKE_POLICY_DEFAULT_CMP0194 OLD)
+
 # Portable modules build wherever the core does.
 if(MEDIAPERCH_BUILD_PLATFORM)
     # **Containers, then codecs, then everything else.** One ordering

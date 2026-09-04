@@ -25,6 +25,15 @@
       }
     },
     {
+      "name": "ninja-msvc-avx2",
+      "inherits": "ninja-msvc",
+      "displayName": "Ninja + MSVC, AVX2",
+      "description": "The same build raised to x86-64-v3. Needs a Haswell or Zen and refuses to start without one; CI ships this beside the baseline so a person can pick.",
+      "cacheVariables": {
+        "MEDIAPERCH_ARCH": "avx2"
+      }
+    },
+    {
       "name": "core-only",
       "inherits": "ninja-msvc",
       "displayName": "Core alone",
@@ -80,6 +89,10 @@
       "configurePreset": "ninja-msvc"
     },
     {
+      "name": "ninja-msvc-avx2",
+      "configurePreset": "ninja-msvc-avx2"
+    },
+    {
       "name": "ninja-msvc-debug",
       "configurePreset": "ninja-msvc",
       "configuration": "Debug"
@@ -129,6 +142,13 @@
       },
       "execution": {
         "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "ninja-msvc-avx2",
+      "configurePreset": "ninja-msvc-avx2",
+      "output": {
+        "outputOnFailure": true
       }
     },
     {

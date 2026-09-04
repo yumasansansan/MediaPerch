@@ -18,6 +18,36 @@ if(NOT EXISTS "${CMAKE_SOURCE_DIR}/external/mpg123/ports/cmake/CMakeLists.txt")
     return()
 endif()
 
+# **mpg123's optimised decoders are wanted, and they need `yasm`.**
+#
+# `ports/cmake` looks for it on PATH; without it `MACHINE` silently falls back
+# to `generic` and libmpg123 is built with none of OPT_MULTI, OPT_X86_64 or
+# OPT_AVX. It is a fork in the build that was taken by accident on both machines
+# this has run on -- `yasm.exe` ships inside Strawberry Perl, which is on PATH
+# here and pre-installed on GitHub's Windows runners -- and nobody asked for it.
+#
+# **The two decoders do not produce the same bytes.** Measured on the same
+# 2-second MP3: `69dca145…` with the AVX synthesis and `f6c8a8e4…` with the
+# generic one, agreeing to 127.84 dB with a maximum difference of 1.5e-7 and
+# 10% of samples identical. That is float rounding between two implementations
+# of one synthesis filter, and both are correct by the RMS bound ISO 11172-4
+# calls conformance -- but only one of them is the hash docs/formats.md records.
+#
+# So the fork is *named* rather than left silent. The optimised path is the one
+# this tree wants: 60 seconds of 320 kbps MP3 in 0.179 s against 0.196 s, and
+# an engine that spends less time decoding has more left for the render thread.
+# What a build without yasm gets is a working decoder whose bytes are not the
+# recorded ones, and it now says so instead of being found out by a hash.
+find_program(MEDIAPERCH_YASM yasm)
+if(NOT MEDIAPERCH_YASM)
+    message(WARNING
+        "yasm is not on PATH, so libmpg123 falls back to its generic decoders. "
+        "MP3 still plays and is still correct -- but about 9% slower, and its "
+        "bytes differ from the hash docs/formats.md records by 128 dB of float "
+        "rounding. Install yasm (it ships with Strawberry Perl) for the build "
+        "this project measures.")
+endif()
+
 # libout123 is mpg123's *output* layer -- ALSA, WASAPI, a WAV writer. This tree
 # has its own sink and wants none of it, and turning it off takes the command
 # line programs with it.

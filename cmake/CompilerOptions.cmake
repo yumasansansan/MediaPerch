@@ -32,6 +32,41 @@
 add_library(mediaperch_flags INTERFACE)
 
 # ---------------------------------------------------------------------------
+# Which instruction set
+# ---------------------------------------------------------------------------
+#
+# **Two builds, not one binary that decides at run time.**
+#
+# Everything this tree links already dispatches internally: libFLAC, libmpg123,
+# libopus and libwavpack each check the CPU and pick a path. What none of them
+# covers is the code *here* -- the resampler, the convolver, the FFT, the
+# equaliser, the channel matrix, the dither -- which is Path B's inner loops and
+# is compiled to the x86-64 baseline, meaning SSE2 and nothing after 2003.
+#
+# Raising that baseline is a one-line change and an unshippable one: a binary
+# built with AVX2 does not start on a CPU without it. The usual answer is to
+# compile the hot loops twice and dispatch, which means a dispatcher, a second
+# copy of every stage, and a CPU check on a path that must not branch. The
+# answer taken here is to **build the whole tree twice and ship both**, which
+# costs a CI job and no code at all. A person picks the one their machine runs;
+# `baseline` is the default and the one that runs anywhere.
+#
+# `avx2` is x86-64-v3: AVX2, FMA, BMI1 and BMI2, LZCNT, MOVBE, F16C -- Haswell
+# and Zen and later, which is 2013 onwards. MSVC spells the whole set `/arch:AVX2`
+# and Clang spells it `-march=x86-64-v3`.
+#
+# **This can change floating-point results**, because FMA computes a multiply
+# and an add with one rounding where two instructions round twice. Whether it
+# does for this tree is a question about bytes rather than about speed, and
+# docs/building.md records the answer.
+set(MEDIAPERCH_ARCH "baseline" CACHE STRING
+    "Instruction-set baseline: baseline (x86-64, SSE2) or avx2 (x86-64-v3)")
+set_property(CACHE MEDIAPERCH_ARCH PROPERTY STRINGS baseline avx2)
+if(NOT MEDIAPERCH_ARCH MATCHES "^(baseline|avx2)$")
+    message(FATAL_ERROR "MEDIAPERCH_ARCH must be baseline or avx2, not ${MEDIAPERCH_ARCH}")
+endif()
+
+# ---------------------------------------------------------------------------
 # Which toolchain
 # ---------------------------------------------------------------------------
 #
@@ -145,6 +180,13 @@ if(MEDIAPERCH_TOOLCHAIN STREQUAL msvc)
         # inline less. This project would rather have the noise.
         "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:/Ob3>"
     )
+    # The instruction set, for the whole build including the submodules. A
+    # library that dispatches internally still works: its baseline path simply
+    # becomes AVX2 too, and this binary requires AVX2 regardless.
+    if(MEDIAPERCH_ARCH STREQUAL "avx2")
+        add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:/arch:AVX2>")
+    endif()
+
     add_link_options(
         "$<$<CONFIG:Release>:/OPT:REF>"        # drop what nothing calls
         "$<$<CONFIG:Release>:/OPT:ICF>"        # fold what is identical
@@ -189,6 +231,12 @@ else()
         # which is what broke the fuzz job. These are the COFF spellings of the
         # same three ideas, and they are already the defaults for this linker.
         add_link_options(LINKER:/DYNAMICBASE LINKER:/NXCOMPAT LINKER:/HIGHENTROPYVA)
+    endif()
+
+    # The instruction set; see MEDIAPERCH_ARCH above. `x86-64-v3` is the same
+    # set MSVC calls /arch:AVX2, named rather than enumerated.
+    if(MEDIAPERCH_ARCH STREQUAL "avx2")
+        add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-march=x86-64-v3>")
     endif()
 
     # -- optimisation, global, Release ---------------------------------------
