@@ -1416,26 +1416,58 @@ would be.
 
 ### 9.9 What a video packet's timestamp is counted in
 
-**Not answered, and named here so it is not discovered in the middle of a renderer.**
-`MpPacket::frame` is documented as "in the stream's own frames", which an audio stream has
-and a video stream does not. The two demuxers that read video answer differently today:
-`demux_mkv` declines to timestamp a video packet at all, and `demux_mp4` hands back the
-sample's decode timestamp in the track's media timescale -- a number a host cannot interpret,
-because nothing tells it what the timescale is.
+**Answered, and it took three more answers with it.** `MpPacket::frame` was documented as
+"in the stream's own frames", which an audio stream has and a video stream does not --
+24000/1001 of a second is not a unit anything divides evenly. The two demuxers that read
+video answered differently and neither could be checked: `demux_mkv` declined to timestamp a
+video packet at all, and `demux_mp4` handed back a number in a timescale nothing revealed.
 
-Three ways out, and the choice belongs with the first thing that has to draw a frame:
+`MpVideoInfo::timescale` is the answer: **ticks per second, for this stream**. An MP4 track
+states it in `mdhd` and it is typically the frame rate's numerator, so 24000 here; Matroska
+stores a scale and libmatroska hands back nanoseconds, so a Matroska stream reports
+1000000000. Ticks per second rather than a rational seconds-per-tick because that is the form
+both containers store, and an integer cannot round it. It is an **append** to a struct added
+one commit earlier, which is what the size prefix is for -- and a test now asks for the older
+size and checks the bytes past it are untouched, because that promise had never been
+exercised.
 
-- **A time base per stream**, appended to `MpVideoInfo` -- the units `frame` is counted in,
-  which is `GetMediaTimeScale()` in MP4 and the timestamp scale in Matroska. Smallest, and
-  matches what both containers actually store.
-- **Nanoseconds everywhere**, converted by the demuxer. Uniform, and throws away the exact
-  rational the container stated, which is how a player drifts.
-- **The frame index**, which only exists for constant frame rate and is a lie for the rest.
+Nanoseconds everywhere was the alternative, and it throws away the exact rational the
+container stated, which is how a player drifts. A frame index was the other, and it only
+exists for constant frame rate.
 
-The first is what this plan expects to take. It is an append, so it costs nothing to defer --
-but a renderer written against `frame` before it is answered would be written against a
-number that means something different in each container, which is the kind of bug that is
-found by watching lips move.
+#### Three things that fell out of answering it
+
+**Presentation, not decode.** MP4 was reporting `GetDts` and Matroska reports the
+presentation timestamp, so the same field meant two things. A stream with B-frames is stored
+in an order that is not the order it is shown in -- both fixtures here are, at `-g 6` -- so
+the two numbers differ per packet and only one can be compared against §8's audio clock.
+`demux_mp4` reports `GetCts` now. For audio the two are the same number, so nothing on the
+measured path moved.
+
+**`MP_PACKET_SYNC` was claimed unconditionally.** True of every audio codec here and of no
+video one. It was harmless while only audio came through and would have made a video seek
+land on a frame that cannot be decoded from. `demux_mp4` reports what the sample says, and
+its seek walks back to the nearest sync sample at or before the target -- which for audio is
+the same sample, so again nothing measured moved.
+
+**The edit list was read for audio tracks only.** `read_edit` sat inside
+`if (kind == MP_STREAM_AUDIO)`, so a video track's `skip_frames` was zero. Two tracks state
+different edits: in the fixture, 1024 of 44100 for the audio and 2002 of 24000 for the video
+-- **sixty milliseconds of difference**, which is an A/V desync that would have been blamed
+on the clock. Timestamps stay container-relative and the edit stays in `MpStreamInfo`, which
+is where audio already had it, so the host subtracts it in one place rather than each
+demuxer folding it in differently. That is also why these numbers are 2002 ticks higher than
+ffprobe's, which folds it in.
+
+#### What is left
+
+**Seeking a video stream lands up to one frame late.** The sample table indexes decode time
+and the target is a presentation time, so a frame whose composition offset pushes it past its
+own decode slot can be the earliest one the seek delivers -- measured at exactly one frame on
+the fixture, and asserted at that bound rather than papered over. Closing it means
+subtracting the track's largest composition offset before the lookup. It belongs with the
+first thing that draws a frame, because that is what can tell whether the remaining frame
+matters. The audio path is unaffected: no audio codec here has a composition offset at all.
 
 ---
 
@@ -1520,6 +1552,7 @@ HDR state.
 | M5.9 | The structural cut: `src/engine` and `src/player` | **done.** The portable half was one library holding both the audio engine and the thing that decides what to play. §4 answers yes to "could this ABI carry a DAW's engine", and a DAW taking it would have taken the transport, the playlist, the INI schema and the IPC wire format with it. They are `src/player` now, and `src/engine` has no route to them: the include path is what enforces it, so reaching across is a compile error rather than a review comment. CI builds `mediaperch_engine` alone, which checks both cuts at once |
 | M5.75 | Path B is hashable, and a VST3 can be a stage in it | **done.** `mp::Processor` is `ProcessedGraph`'s arithmetic without the device, the ring or the threads, so `decode --path processed --gain --dsp` runs the chain and prints its SHA-256 -- the flags had been accepted and silently ignored, which is why nothing in this tree had ever compared the resampler between two builds. It found three bugs on the first run: `use_processed` could not see a gain, `Processor::reset` returned `MP_END` on success, and a seek left the noise shaper feeding back error from wherever the stream used to be. The baseline and AVX2 builds agree over 144 runs. `modules/dsp/vst3` hosts somebody else's plugin on `pluginterfaces` alone, with a VST3 written in `tests/` so the host is tested without one installed |
 | M5.95 | ABI v3: several streams from one file | **done.** `select` named one stream and `seek(frame)` meant "the selected one", which has no answer once a player wants audio and video out of one file -- and appending would have left both meaning something narrower than their names. So `select_streams`, `seek(stream, frame)`, `MpPacket::reserved` becoming `stream`, and `stream_video_info` appended for the three colour code points §9.1 turns on. Checked against `demux_mp4` reading a real MP4 with two tracks in it, which is the first test here that drives a module rather than a fake. `demux_mkv` serves several tracks too, which is what makes v3 an interface rather than one module's habit -- and clearing MP_PACKET_TIMED on a video packet that never had a position is what that second container found |
+| M5.97 | Section 9.9: a video packet says what its timestamp is counted in | **done.** MpVideoInfo::timescale, appended -- the first time the size prefix earned its keep, and a test asks for the older size to check it. Answering it turned up three more: MP4 was reporting decode timestamps where Matroska reports presentation ones, MP_PACKET_SYNC was claimed on every packet including video, and the edit list was read for audio tracks only -- sixty milliseconds of A/V offset in the fixture. What is left is a video seek that lands one frame late, measured and bounded rather than hidden |
 | M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse |
 | M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled |
 | M8 | WinUI 3 shell | killing it mid-track changes nothing audible |

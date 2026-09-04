@@ -35,6 +35,7 @@
 #include <Ap4.h>
 #include <Ap4ColrAtom.h>
 
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -398,7 +399,7 @@ void read_edit(Stream& s)
         s.play_frames = (duration != 0 && movie != 0 && media != 0 && movie != media)
                             ? AP4_ConvertTime(duration, movie, media)
                             : duration;
-        return; // the first real edit is the one that describes the audio
+        return; // the first real edit is the one that describes the stream
     }
 }
 
@@ -425,6 +426,7 @@ struct MpDemux {
     bool have_pending = false;
     std::uint64_t pending_frame = 0;
     std::uint32_t pending_stream = 0;
+    bool pending_sync = true;
 };
 
 namespace {
@@ -582,8 +584,14 @@ try {
         if (s.kind == MP_STREAM_AUDIO) {
             s.format.sample_rate = track->GetMediaTimeScale();
             s.format.encoding = MP_ENCODING_PCM;
-            read_edit(s);
         }
+        // **Every track, not only the audio one.** The edit is where a track
+        // states the offset between its own timeline and the movie's, and two
+        // tracks state different offsets: in the fixture this tree tests with,
+        // 1024 of 44100 for the audio and 2002 of 24000 for the video, which is
+        // sixty milliseconds of difference. Reading it for one of them and not
+        // the other is an A/V desync that would have been blamed on the clock.
+        read_edit(s);
         d->streams.push_back(std::move(s));
     }
     if (d->streams.empty()) {
@@ -682,7 +690,8 @@ std::uint32_t gcd_of(std::uint64_t a, std::uint64_t b)
 MpResult MP_CALL demux_stream_video_info(MpDemux* d, std::uint32_t index,
                                          MpVideoInfo* out) noexcept
 try {
-    if (d == nullptr || out == nullptr || index >= d->streams.size()) {
+    if (d == nullptr || out == nullptr || index >= d->streams.size() ||
+        out->size < sizeof(MpVideoInfo::size)) {
         return MP_ERR_INVALID;
     }
     if (d->streams[index].kind != MP_STREAM_VIDEO) {
@@ -695,21 +704,32 @@ try {
         return MP_ERR_UNSUPPORTED;
     }
 
-    const std::uint32_t size = out->size;
-    *out = MpVideoInfo{};
-    out->size = size;
-    out->width = video->GetWidth();
-    out->height = video->GetHeight();
+    // **Filled in locally and copied out under the caller's `size`.** The
+    // struct grew once already -- `timescale` was appended for §9.9 -- and a
+    // host built against the older header passes the older size. Writing the
+    // whole struct into its buffer regardless is how a compatible-by-design
+    // header stops being one.
+    MpVideoInfo info{};
+    info.size = out->size;
+    info.width = video->GetWidth();
+    info.height = video->GetHeight();
 
     // **`tkhd` is the display size and the sample entry is the coded one**, and
     // they differ whenever the pixels are not square -- anamorphic DVD-era
     // content, and anything a phone rotated. Both are 16.16 fixed point here.
-    out->display_width = track->GetWidth() >> 16;
-    out->display_height = track->GetHeight() >> 16;
-    if (out->display_width == 0 || out->display_height == 0) {
-        out->display_width = out->width;
-        out->display_height = out->height;
+    info.display_width = track->GetWidth() >> 16;
+    info.display_height = track->GetHeight() >> 16;
+    if (info.display_width == 0 || info.display_height == 0) {
+        info.display_width = info.width;
+        info.display_height = info.height;
     }
+
+    // **The units this track's packets are timestamped in.** `mdhd` states it,
+    // `AP4_Sample::GetCts` counts in it, and until §9.9 nothing told a host
+    // what it was -- so a video packet came back with a number and no way to
+    // read it. For a video track it is usually the frame rate's numerator,
+    // which is 24000 for 24000/1001 content.
+    info.timescale = track->GetMediaTimeScale();
 
     // The average, as a ratio, from the two numbers the container states
     // exactly: 24000/1001 comes back as 24000/1001 rather than as 23.976.
@@ -720,8 +740,8 @@ try {
         const std::uint64_t num = frames * scale;
         const std::uint32_t g = gcd_of(num, duration);
         if (g != 0 && num / g <= 0xFFFFFFFFull && duration / g <= 0xFFFFFFFFull) {
-            out->fps_num = static_cast<std::uint32_t>(num / g);
-            out->fps_den = static_cast<std::uint32_t>(duration / g);
+            info.fps_num = static_cast<std::uint32_t>(num / g);
+            info.fps_den = static_cast<std::uint32_t>(duration / g);
         }
     }
 
@@ -730,9 +750,9 @@ try {
     // or PQ, and a renderer that guesses produces a picture that is merely
     // plausible. 2 is "unspecified" in all three, which is what a file with no
     // `colr` leaves and what MpVideoInfo starts at.
-    out->primaries = 2;
-    out->transfer = 2;
-    out->matrix = 2;
+    info.primaries = 2;
+    info.transfer = 2;
+    info.matrix = 2;
     if (desc != nullptr) {
         const AP4_AtomParent& details = desc->GetDetails();
         if (auto* colr = AP4_DYNAMIC_CAST(AP4_ColrAtom,
@@ -742,15 +762,17 @@ try {
             const AP4_UI32 kind = colr->GetColourParameterType();
             if (kind == AP4_ATOM_TYPE('n', 'c', 'l', 'x') ||
                 kind == AP4_ATOM_TYPE('n', 'c', 'l', 'c')) {
-                out->primaries = colr->GetPrimariesIndex();
-                out->transfer = colr->GetTransferFunctionIndex();
-                out->matrix = colr->GetMatrixIndex();
+                info.primaries = colr->GetPrimariesIndex();
+                info.transfer = colr->GetTransferFunctionIndex();
+                info.matrix = colr->GetMatrixIndex();
                 if (colr->GetFullRangeFlag() != 0) {
-                    out->flags |= MP_VIDEO_FULL_RANGE;
+                    info.flags |= MP_VIDEO_FULL_RANGE;
                 }
             }
         }
     }
+
+    std::memcpy(out, &info, std::min<std::size_t>(info.size, sizeof(info)));
     return MP_OK;
 } catch (...) {
     return MP_ERR_NO_MEMORY;
@@ -818,11 +840,17 @@ try {
             return MP_ERR_INTERNAL; // a track this module never enabled
         }
         d->pending_stream = static_cast<std::uint32_t>(from);
-        // **The decode timestamp is the frame number.** For audio it is stated
-        // in the media timescale, which is the sample rate, so nothing stands
-        // between the file and `MpPacket::frame` -- and no assumption that
-        // every packet is the same length, which the last one of a track is not.
-        d->pending_frame = sample.GetDts();
+        // **The timestamp is the frame number.** For audio it is stated in the
+        // media timescale, which is the sample rate, so nothing stands between
+        // the file and `MpPacket::frame` -- and no assumption that every packet
+        // is the same length, which the last one of a track is not.
+        // **CTS and not DTS.** They are the same number for audio, where
+        // nothing is reordered, and differ for every B-frame in a video track
+        // -- and the presentation one is the only one §8's clock can be
+        // compared against. Storage order is unchanged; what changes is which
+        // timestamp the packet carries.
+        d->pending_frame = sample.GetCts();
+        d->pending_sync = sample.IsSync();
         d->have_pending = true;
     }
 
@@ -838,7 +866,11 @@ try {
         std::memcpy(dst, d->sample_data.GetData(), bytes);
     }
     out->bytes = bytes;
-    out->flags = MP_PACKET_SYNC | MP_PACKET_TIMED;
+    // **Not every sample is a sync sample**, which is true of no audio codec
+    // this tree reads and true of every video one. Saying so unconditionally
+    // was harmless while only audio came through here and would have made a
+    // video seek land on a frame that cannot be decoded from.
+    out->flags = MP_PACKET_TIMED | (d->pending_sync ? MP_PACKET_SYNC : 0u);
     out->frame = d->pending_frame;
     out->stream = d->pending_stream;
     d->have_pending = false;
@@ -869,6 +901,15 @@ try {
     AP4_Ordinal index = 0;
     if (table != nullptr &&
         AP4_SUCCEEDED(table->GetSampleIndexForTimeStamp(frame, index))) {
+        // **Back to the nearest sync sample, which for audio is this one.**
+        // Every sample of every audio codec here is one, so this changes
+        // nothing on the path that is measured -- and it is the whole of
+        // seeking a video track, where most samples cannot be decoded from and
+        // the table indexes decode time while `frame` is a presentation time.
+        // Landing early costs the host a discard it already does; landing late
+        // is audio, or a picture, that cannot be recovered.
+        index = table->GetNearestSyncSampleIndex(index, true);
+
         // Only the named track is placed. The others come from wherever
         // `SetSampleIndex` left the file, which is what an interleaved
         // container can do -- each arrives from its own nearest point and the

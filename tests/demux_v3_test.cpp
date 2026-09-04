@@ -461,19 +461,34 @@ TEST_CASE("Matroska serves two tracks out of one pass as well", "[abi][v3][demux
         CHECK(last_audio > audio_info.format.sample_rate / 2);
         CHECK(last_audio < audio_info.format.sample_rate * 11 / 10);
 
-        // And the video's packets say they are not timestamped, rather than
-        // claiming position 0 and meaning it.
+        // And the video's packets are timestamped too, in the units its own
+        // MpVideoInfo states -- nanoseconds here. Before §9.9 was answered this
+        // module declined to timestamp video at all, because the number had no
+        // stated unit and MP_PACKET_TIMED on it would have been a claim nobody
+        // could check.
+        MpVideoInfo video{};
+        REQUIRE(demux.video_info(at.video, video));
+        REQUIRE(video.timescale == 1000000000u);
+
         REQUIRE(demux.seek(at.audio, 0) == MP_OK);
-        bool video_claims_a_position = false;
+        std::uint64_t highest_video = 0;
+        std::uint32_t timed_video = 0;
         for (int guard = 0; guard < 500; ++guard) {
             if (demux.read_packet(buffer, packet) != MP_OK) {
                 break;
             }
-            if (packet.stream == at.video && (packet.flags & MP_PACKET_TIMED) != 0) {
-                video_claims_a_position = true;
+            if (packet.stream != at.video || (packet.flags & MP_PACKET_TIMED) == 0) {
+                continue;
             }
+            highest_video = std::max(highest_video, packet.frame);
+            ++timed_video;
         }
-        CHECK_FALSE(video_claims_a_position);
+        CHECK(timed_video == 24);
+        // One second of video, in nanoseconds. A number in the *audio's* units
+        // would be forty-eight thousand rather than a billion, which is the
+        // confusion the timescale exists to prevent.
+        CHECK(highest_video > 900000000ull);
+        CHECK(highest_video < 1100000000ull);
     }
 
     SECTION("a seek moves both, and is counted in the named track's rate")
@@ -509,5 +524,214 @@ TEST_CASE("Matroska serves two tracks out of one pass as well", "[abi][v3][demux
         const std::uint32_t twice[] = {at.video, at.video};
         CHECK(demux.select_streams(twice) == MP_ERR_INVALID);
         CHECK(demux.select_streams({}) == MP_ERR_INVALID);
+    }
+}
+
+TEST_CASE("a video packet says what its timestamp is counted in", "[abi][v3][video]")
+{
+    // §9.9. `MpPacket::frame` used to be documented as the stream's own frames,
+    // which an audio stream has and a video stream does not -- 24000/1001 of a
+    // second is not a unit anything divides evenly. The two demuxers that read
+    // video answered differently and neither could be checked: one declined to
+    // timestamp video at all, the other handed back a number in a timescale
+    // nothing revealed.
+    SECTION("MP4 counts in the track's own timescale, which mdhd states")
+    {
+        Module module{mp4_module()};
+        REQUIRE(module.vtbl != nullptr);
+        mp::Demux demux;
+        REQUIRE(demux.open(*module.vtbl, av_path()) == MP_OK);
+        const Streams at = find(demux);
+        REQUIRE(at.both);
+
+        MpVideoInfo info{};
+        REQUIRE(demux.video_info(at.video, info));
+        // ffprobe reports this track's time_base as 1/24000, which is the same
+        // fact from the other side: 24000 ticks a second.
+        CHECK(info.timescale == 24000u);
+
+        const std::uint32_t only_video[] = {at.video};
+        REQUIRE(demux.select_streams(only_video) == MP_OK);
+
+        std::vector<std::uint8_t> buffer;
+        MpPacket packet{};
+        std::uint64_t highest = 0;
+        std::uint32_t packets = 0;
+        std::uint32_t sync_packets = 0;
+        bool reordered = false;
+        std::uint64_t previous = 0;
+        while (demux.read_packet(buffer, packet) == MP_OK) {
+            REQUIRE((packet.flags & MP_PACKET_TIMED) != 0);
+            // **Presentation order, arriving in storage order.** This file has
+            // B-frames, so a packet whose timestamp is behind the one before it
+            // is the file being correct rather than the demuxer being wrong --
+            // and it is how the test knows a presentation timestamp is what
+            // came back. A decode timestamp would climb.
+            if (packets != 0 && packet.frame < previous) {
+                reordered = true;
+            }
+            previous = packet.frame;
+            highest = std::max(highest, packet.frame);
+            if ((packet.flags & MP_PACKET_SYNC) != 0) {
+                ++sync_packets;
+            }
+            ++packets;
+        }
+        CHECK(packets == 24);
+        CHECK(reordered);
+
+        // Not every video sample is one to start decoding from, which was
+        // claimed unconditionally while only audio came through here.
+        CHECK(sync_packets != 0);
+        CHECK(sync_packets < packets);
+
+        // **The number means a duration now, and this is the sum that says so
+        // -- once the edit is taken off it.** A timestamp is container-relative
+        // and `MpStreamInfo::skip_frames` is where the `elst` shift is stated,
+        // exactly as it is for audio, so the host subtracts it in one place
+        // rather than every demuxer folding it in differently. ffprobe folds it
+        // in, which is why its numbers are 2002 ticks lower than these.
+        MpStreamInfo video_stream{};
+        REQUIRE(demux.stream_info(at.video, video_stream));
+        REQUIRE(highest >= video_stream.skip_frames);
+        const double seconds =
+            static_cast<double>(highest - video_stream.skip_frames) / info.timescale;
+        // 24 frames at 24000/1001, so the last one is presented at 23 of them.
+        CHECK(seconds > 0.9);
+        CHECK(seconds < 1.01);
+
+        // And a seek is in the same units, which is what makes them a unit
+        // rather than a decoration.
+        //
+        // **The bound is on the earliest of what comes back, not the first.**
+        // A reordered stream arrives in storage order, so the packet after a
+        // seek is not the earliest one the seek delivered -- and MP4 indexes
+        // its seek by decode time while `frame` is a presentation time, so
+        // landing exactly is a walk this module does not do yet. §9.9.
+        const std::uint64_t target = video_stream.skip_frames + info.timescale / 2;
+        REQUIRE(demux.seek(at.video, target) == MP_OK);
+        std::uint64_t earliest = UINT64_MAX;
+        for (int i = 0; i < 8 && demux.read_packet(buffer, packet) == MP_OK; ++i) {
+            earliest = std::min(earliest, packet.frame);
+        }
+        REQUIRE(earliest != UINT64_MAX);
+
+        // **Within one frame, and one frame late rather than exact.** The
+        // sample table indexes decode time and `target` is a presentation
+        // time, so a frame whose composition offset pushes it past its own
+        // decode slot can be the earliest one the seek delivers. Closing that
+        // means subtracting the track's largest composition offset before the
+        // lookup, which is §9.9's remaining item and belongs with the first
+        // thing that draws a frame. The audio path is unaffected: no audio
+        // codec here has a composition offset at all.
+        const std::uint64_t one_frame =
+            static_cast<std::uint64_t>(info.timescale) * info.fps_den / info.fps_num;
+        REQUIRE(one_frame != 0);
+        CHECK(earliest <= target + one_frame);
+        CHECK(earliest + 4 * one_frame > target);
+    }
+
+    SECTION("Matroska counts in nanoseconds, because that is what it hands back")
+    {
+        Module module{mkv_module()};
+        REQUIRE(module.vtbl != nullptr);
+        mp::Demux demux;
+        REQUIRE(demux.open(*module.vtbl, mkv_path()) == MP_OK);
+        const Streams at = find(demux);
+        REQUIRE(at.both);
+
+        MpVideoInfo info{};
+        REQUIRE(demux.video_info(at.video, info));
+        CHECK(info.timescale == 1000000000u);
+        CHECK(info.width == 128);
+        CHECK(info.height == 96);
+        // Not stated separately, so the pixels are square and the coded size is
+        // the display size.
+        CHECK(info.display_width == 128);
+        CHECK(info.display_height == 96);
+
+        // **Matroska states a duration per frame rather than a rate**, so the
+        // ratio is the reciprocal of a rounded nanosecond count: 24000/1001 was
+        // written as 41708333 ns and does not come back out as 24000/1001. It
+        // is what the container says, which is the only thing a demuxer may
+        // report.
+        REQUIRE(info.fps_den != 0);
+        const double fps = static_cast<double>(info.fps_num) / info.fps_den;
+        CHECK(fps > 23.9);
+        CHECK(fps < 24.0);
+
+        const std::uint32_t only_video[] = {at.video};
+        REQUIRE(demux.select_streams(only_video) == MP_OK);
+        std::vector<std::uint8_t> buffer;
+        MpPacket packet{};
+        std::uint64_t highest = 0;
+        std::uint64_t previous = 0;
+        std::uint32_t packets = 0;
+        bool reordered = false;
+        while (demux.read_packet(buffer, packet) == MP_OK) {
+            if ((packet.flags & MP_PACKET_TIMED) == 0) {
+                continue;
+            }
+            if (packets != 0 && packet.frame < previous) {
+                reordered = true;
+            }
+            previous = packet.frame;
+            highest = std::max(highest, packet.frame);
+            ++packets;
+        }
+        // The same reordering as the MP4, which is what makes the two
+        // containers agree about what the field means rather than merely both
+        // filling it in.
+        CHECK(reordered);
+        const double seconds = static_cast<double>(highest) / info.timescale;
+        CHECK(seconds > 0.9);
+        CHECK(seconds < 1.01);
+
+        // Half a second, in the nanoseconds this stream counts in. Same
+        // bound as the MP4 and for the same reason: the earliest of what came
+        // back, because storage order is not presentation order.
+        REQUIRE(demux.seek(at.video, 500000000ull) == MP_OK);
+        std::uint64_t earliest = UINT64_MAX;
+        for (int i = 0; i < 8 && demux.read_packet(buffer, packet) == MP_OK; ++i) {
+            earliest = std::min(earliest, packet.frame);
+        }
+        REQUIRE(earliest != UINT64_MAX);
+        CHECK(earliest <= 500000000ull);
+    }
+
+    SECTION("an older host asks for a smaller struct and gets one")
+    {
+        // MpVideoInfo grew once, for exactly this field. A module that wrote
+        // the whole struct into a buffer sized by the older header would be
+        // scribbling past it -- which is the failure a size-prefixed struct
+        // exists to prevent and the one nothing would otherwise have caught.
+        // Driven through the vtable rather than through mp::Demux, because
+        // mp::Demux always asks for the size it was compiled with.
+        Module module{mp4_module()};
+        REQUIRE(module.vtbl != nullptr);
+        REQUIRE(module.vtbl->stream_video_info != nullptr);
+
+        MpDemux* handle = nullptr;
+        REQUIRE(module.vtbl->open(av_path(), &handle) == MP_OK);
+        REQUIRE(handle != nullptr);
+
+        struct Guarded {
+            MpVideoInfo info;
+            std::uint32_t canary;
+        };
+        Guarded guarded{};
+        guarded.canary = 0xFEEDFACEu;
+        // The size the header had before `timescale` was appended.
+        guarded.info.size = sizeof(MpVideoInfo) - sizeof(std::uint32_t);
+
+        // Stream 0 is the video track in this file, which the sections above
+        // establish; asking the vtable directly means saying so here.
+        REQUIRE(module.vtbl->stream_video_info(handle, 0, &guarded.info) == MP_OK);
+        CHECK(guarded.info.width == 128);
+        // Not written, because the caller said its struct stops before it.
+        CHECK(guarded.info.timescale == 0u);
+        CHECK(guarded.canary == 0xFEEDFACEu);
+
+        module.vtbl->close(handle);
     }
 }

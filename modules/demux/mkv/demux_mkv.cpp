@@ -298,6 +298,26 @@ struct Track {
     /// Looked for once, on the first `stream_info`.
     Tail tail{};
     bool tail_looked_for = false;
+
+    /// What a video track states about itself. Zeroed for an audio track, and
+    /// `MpFormat` is zeroed for a video one -- a track is one or the other and
+    /// the two vocabularies do not overlap.
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::uint32_t display_width = 0;
+    std::uint32_t display_height = 0;
+    /// Nanoseconds one frame lasts, from DefaultDuration. **Matroska states a
+    /// duration per frame rather than a rate**, so the ratio this becomes is
+    /// the reciprocal of a rounded nanosecond count and not the encoder's
+    /// original rational: 24000/1001 was written as 41708333 ns and cannot come
+    /// back out as 24000/1001.
+    std::uint64_t frame_duration_ns = 0;
+    /// ISO/IEC 23091-2 code points; 2 is unspecified, which is what a file that
+    /// says nothing leaves.
+    std::uint32_t primaries = 2;
+    std::uint32_t transfer = 2;
+    std::uint32_t matrix = 2;
+    bool full_range = false;
 };
 
 } // namespace
@@ -451,6 +471,46 @@ void read_track_entry(MpDemux* d, KaxTrackEntry& entry)
     }
 
     std::uint32_t bits = 0;
+    if (auto* duration = FindChild<KaxTrackDefaultDuration>(entry)) {
+        t.frame_duration_ns = static_cast<std::uint64_t>(*duration);
+    }
+    if (auto* video = FindChild<KaxTrackVideo>(entry)) {
+        if (auto* w = FindChild<KaxVideoPixelWidth>(*video)) {
+            t.width = static_cast<std::uint32_t>(static_cast<std::uint64_t>(*w));
+        }
+        if (auto* h = FindChild<KaxVideoPixelHeight>(*video)) {
+            t.height = static_cast<std::uint32_t>(static_cast<std::uint64_t>(*h));
+        }
+        // **Matroska states the display size separately and often omits it**,
+        // which means the pixels are square and the coded size is the display
+        // size. Saying so is better than reporting a zero nobody can use.
+        if (auto* w = FindChild<KaxVideoDisplayWidth>(*video)) {
+            t.display_width = static_cast<std::uint32_t>(static_cast<std::uint64_t>(*w));
+        }
+        if (auto* h = FindChild<KaxVideoDisplayHeight>(*video)) {
+            t.display_height = static_cast<std::uint32_t>(static_cast<std::uint64_t>(*h));
+        }
+        if (t.display_width == 0 || t.display_height == 0) {
+            t.display_width = t.width;
+            t.display_height = t.height;
+        }
+        if (auto* colour = FindChild<KaxVideoColour>(*video)) {
+            if (auto* v = FindChild<KaxVideoColourPrimaries>(*colour)) {
+                t.primaries = static_cast<std::uint32_t>(static_cast<std::uint64_t>(*v));
+            }
+            if (auto* v = FindChild<KaxVideoColourTransferCharacter>(*colour)) {
+                t.transfer = static_cast<std::uint32_t>(static_cast<std::uint64_t>(*v));
+            }
+            if (auto* v = FindChild<KaxVideoColourMatrix>(*colour)) {
+                t.matrix = static_cast<std::uint32_t>(static_cast<std::uint64_t>(*v));
+            }
+            // Matroska spells the range 0 unspecified, 1 broadcast, 2 full,
+            // 3 defined by the transfer function -- not the flag MP4 uses.
+            if (auto* v = FindChild<KaxVideoColourRange>(*colour)) {
+                t.full_range = static_cast<std::uint64_t>(*v) == 2;
+            }
+        }
+    }
     if (auto* audio = FindChild<KaxTrackAudio>(entry)) {
         if (auto* rate = FindChild<KaxAudioSamplingFreq>(*audio)) {
             t.format.sample_rate = static_cast<std::uint32_t>(static_cast<double>(*rate));
@@ -1060,6 +1120,60 @@ MpResult MP_CALL demux_stream_config(MpDemux* d, std::uint32_t index, std::uint8
     return MP_OK;
 }
 
+/// The greatest common divisor, so a frame rate is the ratio it is.
+std::uint64_t gcd_of(std::uint64_t a, std::uint64_t b) noexcept
+{
+    while (b != 0) {
+        const std::uint64_t t = a % b;
+        a = b;
+        b = t;
+    }
+    return a;
+}
+
+MpResult MP_CALL demux_stream_video_info(MpDemux* d, std::uint32_t index,
+                                         MpVideoInfo* out) noexcept
+try {
+    if (d == nullptr || out == nullptr || index >= d->tracks.size() ||
+        out->size < sizeof(MpVideoInfo::size)) {
+        return MP_ERR_INVALID;
+    }
+    const Track& t = d->tracks[index];
+    if (t.kind != MP_STREAM_VIDEO) {
+        return MP_ERR_UNSUPPORTED;
+    }
+
+    MpVideoInfo info{};
+    info.size = out->size;
+    info.width = t.width;
+    info.height = t.height;
+    info.display_width = t.display_width;
+    info.display_height = t.display_height;
+    info.primaries = t.primaries;
+    info.transfer = t.transfer;
+    info.matrix = t.matrix;
+    info.flags = t.full_range ? MP_VIDEO_FULL_RANGE : 0u;
+
+    // **Nanoseconds**, because that is what libmatroska hands back from
+    // `GlobalTimestamp` -- it has already applied the segment's TimestampScale,
+    // so the module never sees the container's own tick and reporting it would
+    // be reporting a unit these packets are not counted in.
+    info.timescale = 1000000000u;
+
+    if (t.frame_duration_ns != 0) {
+        const std::uint64_t g = gcd_of(1000000000ull, t.frame_duration_ns);
+        if (g != 0) {
+            info.fps_num = static_cast<std::uint32_t>(1000000000ull / g);
+            info.fps_den = static_cast<std::uint32_t>(t.frame_duration_ns / g);
+        }
+    }
+
+    std::memcpy(out, &info, std::min<std::size_t>(info.size, sizeof(info)));
+    return MP_OK;
+} catch (...) {
+    return MP_ERR_NO_MEMORY;
+}
+
 MpResult MP_CALL demux_select_streams(MpDemux* d, const std::uint32_t* indices,
                                       std::uint32_t count) noexcept
 try {
@@ -1130,18 +1244,16 @@ try {
     // known points, and saying so is what MP_PACKET_TIMED is for -- a demuxer
     // that guessed would put every seek in a laced file wrong by up to a lace.
     //
-    // **And only a track with a sample rate has a position at all.**
-    // `MpPacket::frame` is counted in frames, which a video track does not
-    // have; `frames_of` answers 0 for one, and flagging that MP_PACKET_TIMED
-    // would say "position 0, and I mean it" for every frame of the video. A
-    // demuxer that cannot say must say 0 *without* the flag, which is the
-    // difference the flag exists to carry. What a video packet's timestamp
-    // should be counted in is a question the ABI has not answered yet -- see
-    // plan.md §9.9.
-    const bool countable = d->track().format.sample_rate != 0;
-    if (d->next_lace == 0 && countable) {
+    // **Each stream in its own units**, which §9.9 answered: an audio track
+    // counts frames at its sample rate, and a video track counts the ticks
+    // `stream_video_info` reports a timescale for -- nanoseconds here, because
+    // that is what libmatroska hands back. Before that answer this module
+    // declined to timestamp video at all, which was the honest thing to do with
+    // a number nobody could read.
+    if (d->next_lace == 0) {
         const std::uint64_t ns = d->block->GlobalTimestamp();
-        out->frame = frames_of(d, d->reading, ns);
+        out->frame = d->track().kind == MP_STREAM_VIDEO ? ns
+                                                        : frames_of(d, d->reading, ns);
         out->flags = MP_PACKET_TIMED;
     } else {
         out->frame = 0;
@@ -1169,7 +1281,12 @@ try {
     // `frame` is in the named stream's own rate, which is not necessarily a
     // selected one's -- a host seeking by the audio clock names the audio
     // stream whether or not it is among the streams it is reading.
-    const std::uint64_t rate = d->tracks[stream].format.sample_rate;
+    // `frame` is in the named stream's own units, so the conversion to the
+    // nanoseconds a Cue is indexed by depends on which stream it is: an audio
+    // track's rate, or a video track's ticks, which are already nanoseconds.
+    const std::uint64_t rate = d->tracks[stream].kind == MP_STREAM_VIDEO
+                                   ? 1000000000ull
+                                   : d->tracks[stream].format.sample_rate;
     if (rate == 0) {
         return MP_ERR_UNSUPPORTED;
     }
@@ -1220,7 +1337,7 @@ const MpDemuxVtbl g_vtbl = {
     /* seek          */ &demux_seek,
     /* read_frames   */ nullptr, // it splits properly; there is nothing to decode
     /* close         */ &demux_close,
-    /* stream_video_info */ nullptr, // not until this module reads two streams
+    /* stream_video_info */ &demux_stream_video_info,
 };
 
 /// Everything this module can name. A codec on the list that no module here

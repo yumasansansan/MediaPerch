@@ -360,8 +360,38 @@ typedef struct MpPacket {
      * where it came from would be a packet a host could only guess at. With one
      * selected it is that stream's index, every time. */
     uint32_t stream;
-    /* In the stream's own frames, or 0 where the container does not timestamp.
-     * A demuxer that cannot say must say 0 rather than guess. */
+    /* Where this packet sits in its stream, **in that stream's own units and
+     * in presentation order**, or 0 where the container does not timestamp --
+     * a demuxer that cannot say must say 0 rather than guess, and clear
+     * MP_PACKET_TIMED to mean it.
+     *
+     * **Presentation and not decode**, which matters only for video and
+     * matters absolutely there: a stream with B-frames is stored in an order
+     * that is not the order it is shown in, so the two numbers differ per
+     * packet and only one of them can be compared against §8's audio clock.
+     * Packets still arrive in storage order -- that is what a decoder wants
+     * fed to it -- so `frame` is not monotonic for such a stream, and a host
+     * that assumed it was would reorder a file that was already correct.
+     *
+     * The two containers that carry video here disagreed about this until it
+     * was noticed: Matroska hands back a presentation timestamp and MP4 was
+     * reporting a decode one, which is the same field meaning two things. See
+     * plan.md §9.9.
+     *
+     * The units differ by what kind of stream it is, and each stream states
+     * its own:
+     *
+     *  - **audio**: frames, at `MpStreamInfo::format.sample_rate` per second.
+     *  - **video**: ticks, at `MpVideoInfo::timescale` per second. A video
+     *    stream has no frames to count -- 24000/1001 of a second is not a unit
+     *    anything divides evenly -- so the container's own tick is what it
+     *    counts in, and `stream_video_info` is where it says how long one is.
+     *
+     * This used to say only "the stream's own frames", which an audio stream
+     * has and a video stream does not, and the two demuxers that read video
+     * answered differently: one declined to timestamp video at all and the
+     * other handed back a number in a timescale nothing revealed. See
+     * plan.md §9.9. */
     uint64_t frame;
 } MpPacket;
 
@@ -432,6 +462,21 @@ typedef struct MpVideoInfo {
     uint32_t matrix;
 
     uint32_t flags; /* MP_VIDEO_FULL_RANGE */
+
+    /* Ticks per second of `MpPacket::frame` and of `seek`'s `frame`, for this
+     * stream. **The unit the timestamps are in**, which is the container's own:
+     * an MP4 track states it in `mdhd` and it is typically the frame rate's
+     * numerator; Matroska stores a scale and libmatroska hands back
+     * nanoseconds, so a Matroska stream reports 1000000000.
+     *
+     * 0 means the demuxer does not timestamp this stream, and every packet of
+     * it comes back with MP_PACKET_TIMED clear.
+     *
+     * Ticks per second rather than a rational seconds-per-tick, because that is
+     * the form both containers store and an integer cannot round it. It is the
+     * reciprocal of what FFmpeg calls a time base, whose numerator is 1 for
+     * both of them. */
+    uint32_t timescale;
 } MpVideoInfo;
 
 enum {
@@ -503,7 +548,9 @@ typedef struct MpDemuxVtbl {
      * sync point before it. The host feeds what comes back to a codec that has
      * been reset, and discards what precedes `frame`.
      *
-     * **v3 names the stream, and `frame` is in that stream's own rate.** v2's
+     * **v3 names the stream, and `frame` is in that stream's own units** --
+     * the same ones `MpPacket::frame` uses, which are frames for an audio
+     * stream and `MpVideoInfo::timescale` ticks for a video one. v2's
      * `seek(frame)` meant "the selected stream" and had no answer once two were
      * selected. `stream` need not be one of the selected ones: a host seeking by
      * the audio clock names the audio stream whether or not it is reading it.
@@ -918,7 +965,9 @@ MP_STATIC_ASSERT(offsetof(MpPacket, size) == 0, "size must lead");
 MP_STATIC_ASSERT(offsetof(MpPacket, stream) == 12, "MpPacket::stream took reserved's slot");
 MP_STATIC_ASSERT(sizeof(MpPacket) == 24, "MpPacket layout is ABI");
 MP_STATIC_ASSERT(offsetof(MpVideoInfo, size) == 0, "size must lead");
-MP_STATIC_ASSERT(sizeof(MpVideoInfo) == 44, "MpVideoInfo layout is ABI");
+MP_STATIC_ASSERT(sizeof(MpVideoInfo) == 48, "MpVideoInfo layout is ABI");
+MP_STATIC_ASSERT(offsetof(MpVideoInfo, flags) < offsetof(MpVideoInfo, timescale),
+                 "MpVideoInfo only ever grows at the end");
 
 /* v3 broke two members of MpDemuxVtbl in place and appended one after them.
  * `select_streams` and `seek` kept their slots, so the diff a reader has to
