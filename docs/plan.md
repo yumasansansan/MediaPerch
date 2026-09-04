@@ -1459,15 +1459,36 @@ is where audio already had it, so the host subtracts it in one place rather than
 demuxer folding it in differently. That is also why these numbers are 2002 ticks higher than
 ffprobe's, which folds it in.
 
-#### What is left
+#### And the seek that landed one frame late
 
-**Seeking a video stream lands up to one frame late.** The sample table indexes decode time
-and the target is a presentation time, so a frame whose composition offset pushes it past its
-own decode slot can be the earliest one the seek delivers -- measured at exactly one frame on
-the fixture, and asserted at that bound rather than papered over. Closing it means
-subtracting the track's largest composition offset before the lookup. It belongs with the
-first thing that draws a frame, because that is what can tell whether the remaining frame
-matters. The audio path is unaffected: no audio codec here has a composition offset at all.
+Measured at exactly one frame on the fixture, which is what made it worth closing rather than
+noting: the sample table indexes **decode** time and the target is a **presentation** time,
+so a frame whose composition offset pushes it past its own decode slot was the earliest one
+the seek delivered. For video that is the direction that cannot be recovered -- a frame
+arrived after the point somebody asked to start at.
+
+The fix is to move the target back by the track's largest composition offset before the
+lookup, and the reasoning is a two-line one worth writing down. Any sample worth keeping has
+`cts >= target`; `dts = cts - delta >= target - reach`; so the sample containing
+`target - reach` is at or before every sample the seek must deliver. Starting earlier than
+that only costs frames the host discards anyway.
+
+Finding the reach is a walk, because `AP4_CttsAtom` keeps its run-length entries private and
+offers only a per-sample lookup -- but that lookup caches its cursor, so a forward pass is
+amortised constant per sample, and it happens **once per track, on the first seek** rather
+than at open, because most files are never seeked at all.
+
+One guard, for a reason that is Bento4's rather than this tree's: **it reads the composition
+offset unsigned**, and the branch that would handle a version-1 `ctts` with negative offsets
+is commented out upstream. Such a file yields a reach near 2^32, which would turn every seek
+into a seek to zero -- a second failure stacked on the first, since `AP4_Sample::GetCts` is
+already wrong for it. A composition offset longer than the whole track cannot be one, so that
+is where the guard sits.
+
+The audio path is untouched throughout: no audio codec here has a composition offset, so the
+reach is zero and the arithmetic is a subtraction of nothing. A fragmented file states its
+offsets in `trun` and has no `ctts` in `stbl`, so it answers zero too -- which is honest,
+because its seek is the millisecond-granularity one that already rounds down.
 
 ---
 
@@ -1552,7 +1573,7 @@ HDR state.
 | M5.9 | The structural cut: `src/engine` and `src/player` | **done.** The portable half was one library holding both the audio engine and the thing that decides what to play. §4 answers yes to "could this ABI carry a DAW's engine", and a DAW taking it would have taken the transport, the playlist, the INI schema and the IPC wire format with it. They are `src/player` now, and `src/engine` has no route to them: the include path is what enforces it, so reaching across is a compile error rather than a review comment. CI builds `mediaperch_engine` alone, which checks both cuts at once |
 | M5.75 | Path B is hashable, and a VST3 can be a stage in it | **done.** `mp::Processor` is `ProcessedGraph`'s arithmetic without the device, the ring or the threads, so `decode --path processed --gain --dsp` runs the chain and prints its SHA-256 -- the flags had been accepted and silently ignored, which is why nothing in this tree had ever compared the resampler between two builds. It found three bugs on the first run: `use_processed` could not see a gain, `Processor::reset` returned `MP_END` on success, and a seek left the noise shaper feeding back error from wherever the stream used to be. The baseline and AVX2 builds agree over 144 runs. `modules/dsp/vst3` hosts somebody else's plugin on `pluginterfaces` alone, with a VST3 written in `tests/` so the host is tested without one installed |
 | M5.95 | ABI v3: several streams from one file | **done.** `select` named one stream and `seek(frame)` meant "the selected one", which has no answer once a player wants audio and video out of one file -- and appending would have left both meaning something narrower than their names. So `select_streams`, `seek(stream, frame)`, `MpPacket::reserved` becoming `stream`, and `stream_video_info` appended for the three colour code points §9.1 turns on. Checked against `demux_mp4` reading a real MP4 with two tracks in it, which is the first test here that drives a module rather than a fake. `demux_mkv` serves several tracks too, which is what makes v3 an interface rather than one module's habit -- and clearing MP_PACKET_TIMED on a video packet that never had a position is what that second container found |
-| M5.97 | Section 9.9: a video packet says what its timestamp is counted in | **done.** MpVideoInfo::timescale, appended -- the first time the size prefix earned its keep, and a test asks for the older size to check it. Answering it turned up three more: MP4 was reporting decode timestamps where Matroska reports presentation ones, MP_PACKET_SYNC was claimed on every packet including video, and the edit list was read for audio tracks only -- sixty milliseconds of A/V offset in the fixture. What is left is a video seek that lands one frame late, measured and bounded rather than hidden |
+| M5.97 | Section 9.9: a video packet says what its timestamp is counted in | **done.** MpVideoInfo::timescale, appended -- the first time the size prefix earned its keep, and a test asks for the older size to check it. Answering it turned up three more: MP4 was reporting decode timestamps where Matroska reports presentation ones, MP_PACKET_SYNC was claimed on every packet including video, and the edit list was read for audio tracks only -- sixty milliseconds of A/V offset in the fixture. A video seek landed one frame late, so it subtracts the track's largest composition offset before a lookup that indexes decode time -- with a guard for Bento4 reading that offset unsigned |
 | M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse |
 | M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled |
 | M8 | WinUI 3 shell | killing it mid-track changes nothing audible |

@@ -34,6 +34,7 @@
 
 #include <Ap4.h>
 #include <Ap4ColrAtom.h>
+#include <Ap4CttsAtom.h>
 
 #include <algorithm>
 #include <cstdarg>
@@ -364,7 +365,80 @@ struct Stream {
     std::uint64_t skip_frames = 0;
     std::uint64_t play_frames = 0;
     bool is_default = false;
+
+    /// **How far ahead of its decode time a frame of this track can be shown**,
+    /// in the media timescale, and whether that has been worked out yet. Zero
+    /// for every audio track and for video with no reordering; a few frames for
+    /// anything with B-frames. Worked out on the first seek rather than at
+    /// open, because it costs a walk and most files are never seeked.
+    std::uint64_t composition_reach = 0;
+    bool reach_known = false;
 };
+
+/// The largest composition offset in a track: how far ahead of its decode time
+/// a frame can be presented.
+///
+/// **This is what makes a seek by presentation time land where it was asked
+/// to.** `AP4_SampleTable::GetSampleIndexForTimeStamp` indexes decode time, and
+/// `MpPacket::frame` is a presentation time -- so a target has to be moved back
+/// by this much before the lookup, or the seek starts after a frame it was
+/// supposed to deliver. Measured at exactly one frame on the file the tests use.
+///
+/// Any sample worth keeping has `cts >= target`, and `dts = cts - delta >=
+/// target - reach`, so starting from the sample containing `target - reach`
+/// cannot skip one. Starting earlier only costs the host frames it already
+/// discards.
+///
+/// The walk is over samples rather than over the run-length entries, because
+/// `AP4_CttsAtom` keeps those private -- but its lookup cache makes a forward
+/// walk amortised constant per sample, so it is one cheap pass and it happens
+/// once.
+std::uint64_t composition_reach(Stream& s)
+{
+    if (s.reach_known) {
+        return s.composition_reach;
+    }
+    s.reach_known = true;
+    s.composition_reach = 0;
+    if (s.track == nullptr) {
+        return 0;
+    }
+    auto* trak = const_cast<AP4_TrakAtom*>(s.track->GetTrakAtom());
+    if (trak == nullptr) {
+        return 0;
+    }
+    // A fragmented file states its offsets in `trun` and has no `ctts` here, so
+    // this answers 0 for one -- which is right in the sense that the fragmented
+    // seek below is a millisecond-granularity one that already rounds down.
+    auto* ctts = AP4_DYNAMIC_CAST(AP4_CttsAtom, trak->FindChild("mdia/minf/stbl/ctts"));
+    if (ctts == nullptr) {
+        return 0; // no reordering: a frame is shown when it is decoded
+    }
+
+    const AP4_Cardinal samples = s.track->GetSampleCount();
+    std::uint64_t reach = 0;
+    for (AP4_Ordinal i = 1; i <= samples; ++i) { // ctts counts from 1
+        AP4_UI32 offset = 0;
+        if (AP4_FAILED(ctts->GetCtsOffset(i, offset))) {
+            break;
+        }
+        reach = std::max<std::uint64_t>(reach, offset);
+    }
+
+    // **A sanity bound, because Bento4 reads the offset unsigned.** A version-1
+    // `ctts` may state negative offsets and the signed branch that would handle
+    // them is commented out upstream, so such a file yields something near
+    // 2^32. `AP4_Sample::GetCts` is already wrong for it, and there is nothing
+    // this module can do about that -- but an absurd reach would turn every
+    // seek into a seek to zero, which is a second failure on top of the first.
+    // A composition offset longer than the whole track cannot be one.
+    const std::uint64_t duration = s.track->GetMediaDuration();
+    if (duration != 0 && reach >= duration) {
+        return 0;
+    }
+    s.composition_reach = reach;
+    return reach;
+}
 
 /// The gapless edit, from `edts`/`elst`.
 ///
@@ -897,10 +971,17 @@ try {
     // codec can be started from. `stts` says which one that is exactly, and
     // never past it -- what precedes the target inside that sample is the
     // host's to discard, and `MP_PACKET_TIMED` is what lets it.
+    // **Back by the reordering, then look up.** `frame` is a presentation time
+    // and the table indexes decode time; without this the seek lands after a
+    // frame it was asked for, which for video is the direction that cannot be
+    // recovered. Zero for every audio track, so the measured path is untouched.
+    const std::uint64_t reach = composition_reach(d->streams[stream]);
+    const std::uint64_t decode_target = frame > reach ? frame - reach : 0;
+
     AP4_SampleTable* table = track->GetSampleTable();
     AP4_Ordinal index = 0;
     if (table != nullptr &&
-        AP4_SUCCEEDED(table->GetSampleIndexForTimeStamp(frame, index))) {
+        AP4_SUCCEEDED(table->GetSampleIndexForTimeStamp(decode_target, index))) {
         // **Back to the nearest sync sample, which for audio is this one.**
         // Every sample of every audio codec here is one, so this changes
         // nothing on the path that is measured -- and it is the whole of

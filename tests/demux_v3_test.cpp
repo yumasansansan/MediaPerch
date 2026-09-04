@@ -616,19 +616,20 @@ TEST_CASE("a video packet says what its timestamp is counted in", "[abi][v3][vid
         }
         REQUIRE(earliest != UINT64_MAX);
 
-        // **Within one frame, and one frame late rather than exact.** The
-        // sample table indexes decode time and `target` is a presentation
-        // time, so a frame whose composition offset pushes it past its own
-        // decode slot can be the earliest one the seek delivers. Closing that
-        // means subtracting the track's largest composition offset before the
-        // lookup, which is §9.9's remaining item and belongs with the first
-        // thing that draws a frame. The audio path is unaffected: no audio
-        // codec here has a composition offset at all.
+        // **At or before the target, which is the whole point.** The sample
+        // table indexes decode time and `target` is a presentation time, so
+        // the module moves the target back by the track's largest composition
+        // offset before the lookup -- without that it landed exactly one frame
+        // late on this file, which for video is the direction that cannot be
+        // recovered.
+        CHECK(earliest <= target);
+
+        // And not absurdly early either: the sync-sample walk goes back to a
+        // keyframe, and this file has one every six frames.
         const std::uint64_t one_frame =
             static_cast<std::uint64_t>(info.timescale) * info.fps_den / info.fps_num;
         REQUIRE(one_frame != 0);
-        CHECK(earliest <= target + one_frame);
-        CHECK(earliest + 4 * one_frame > target);
+        CHECK(earliest + 8 * one_frame > target);
     }
 
     SECTION("Matroska counts in nanoseconds, because that is what it hands back")
