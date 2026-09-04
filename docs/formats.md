@@ -51,6 +51,12 @@ tree reads resolves container-first**. A file is identified, opened, and asked
 what is in it; each stream names its codec and the codec is looked up. Nothing
 is tried.
 
+[ABI v3](plan.md#abi-v3-what-appending-cannot-reach) then let one demuxer serve
+*several* streams out of one file, which is what a player showing video needs
+and what v2's one-at-a-time `select` had no answer for. Every hash below is
+unchanged by it: the audio path selects one stream, which is the case v2 could
+already express.
+
 | Container | Behind it | Codec it names | Behind that |
 |---|---|---|---|
 | `demux_wav` | dr_wav | `codec_pcm` | **nothing at all** -- it is a memcpy |

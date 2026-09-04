@@ -66,7 +66,7 @@ extern "C" {
  * was both, and asked every one of them whether it could read a file; it is
  * gone, and so is every module that used it. See docs/plan.md §4, *ABI v2: the
  * container decides*. */
-#define MP_ABI_VERSION 2u
+#define MP_ABI_VERSION 3u
 
 /* ------------------------------------------------------------------ */
 /* Results                                                             */
@@ -355,7 +355,11 @@ typedef struct MpPacket {
     /* Bytes actually written into the caller's buffer -- or, when the buffer
      * was too small, the bytes the packet needs. See `read_packet`. */
     uint32_t bytes;
-    uint32_t reserved;
+    /* Which stream this packet belongs to. **v3**, in the slot v2 called
+     * `reserved`: with several streams selected, a packet that could not say
+     * where it came from would be a packet a host could only guess at. With one
+     * selected it is that stream's index, every time. */
+    uint32_t stream;
     /* In the stream's own frames, or 0 where the container does not timestamp.
      * A demuxer that cannot say must say 0 rather than guess. */
     uint64_t frame;
@@ -383,6 +387,61 @@ enum {
 
 typedef struct MpDemux MpDemux; /* opaque, module-owned */
 
+/* What a container states about a video stream, for the renderer that has to
+ * put it on a display of a kind the file knows nothing about.
+ *
+ * **The three code points are the reason this struct exists.** Width and height
+ * a decoder reports anyway; `primaries`, `transfer` and `matrix` it does not,
+ * because they are not in the bitstream of every codec and, where they are, the
+ * container's copy is the one a muxer wrote deliberately. Whether a frame is
+ * BT.709 or BT.2020, and whether its transfer is sRGB or PQ, decides whether it
+ * is tone-mapped at all -- and a renderer that guesses gets a picture that is
+ * merely plausible, which is the failure nobody files a bug about.
+ *
+ * The values are the code points ISO/IEC 23091-2 assigns -- the same tables
+ * H.273, HEVC and AV1 use, and the same numbers FFmpeg's `AVColorPrimaries`
+ * carries. **2 is "unspecified" in all three**, and is what a container that
+ * says nothing leaves behind; a renderer then applies the convention for the
+ * resolution, which is BT.709 for HD and BT.601 below it.
+ *
+ * Mastering-display metadata (ST.2086) and content light level are not here
+ * yet. They are what §9.3's `driver` provider hands
+ * `VideoProcessorSetStreamHDRMetaData`, and they append to the end of this
+ * struct the day that provider is written -- a field nothing fills is a field
+ * nothing checks. */
+typedef struct MpVideoInfo {
+    uint32_t size; /* set by the caller */
+    uint32_t width;
+    uint32_t height;
+
+    /* Display size, when the container says the pixels are not square. Equal to
+     * `width` and `height` otherwise, and never zero. */
+    uint32_t display_width;
+    uint32_t display_height;
+
+    /* A ratio, because 24000/1001 is not a decimal and rounding it is how a
+     * player drifts a frame every seventeen minutes. 0/0 when the container
+     * does not say -- which is normal for a container that timestamps every
+     * frame instead. */
+    uint32_t fps_num;
+    uint32_t fps_den;
+
+    /* ISO/IEC 23091-2 code points; 2 is unspecified. */
+    uint32_t primaries;
+    uint32_t transfer;
+    uint32_t matrix;
+
+    uint32_t flags; /* MP_VIDEO_FULL_RANGE */
+} MpVideoInfo;
+
+enum {
+    /* The samples use the full range of their container rather than the studio
+     * range, which for 8-bit means 0..255 instead of 16..235. A container that
+     * does not say leaves this clear, and studio range is the convention that
+     * makes that safe. */
+    MP_VIDEO_FULL_RANGE = 1u << 0
+};
+
 typedef struct MpDemuxVtbl {
     uint32_t size;
     uint32_t reserved;
@@ -408,22 +467,53 @@ typedef struct MpDemuxVtbl {
     MpResult(MP_CALL *stream_config)(MpDemux *d, uint32_t index, uint8_t *out,
                                      uint32_t out_bytes, uint32_t *out_needed);
 
-    /* MP_IO. Which stream `read_packet` reads. One at a time in v2: the video
-     * path (§9) is what will need several, and it is not built yet. */
-    MpResult(MP_CALL *select)(MpDemux *d, uint32_t index);
+    /* MP_IO. Which streams `read_packet` may return. **v3**: v2 had
+     * `select(d, index)` and could name one, which is the whole of why this
+     * broke -- a player showing video reads audio and video out of one file,
+     * and reading them by opening the container twice means two file positions,
+     * two indexes and two seeks that have to agree.
+     *
+     * `indices` is `count` stream indexes, in any order, and selecting again
+     * replaces the set rather than adding to it. **`count` is at least 1**: a
+     * host that has stopped reading closes the demuxer, and one turning off a
+     * video track selects the audio stream rather than none, so an empty set
+     * had no caller and saying it meant something would have been five modules
+     * disagreeing with this sentence.
+     *
+     * A demuxer that cannot serve several at once answers MP_ERR_UNSUPPORTED
+     * for a `count` above one -- which is a real answer, because most
+     * containers here hold one stream and have nothing to interleave. */
+    MpResult(MP_CALL *select_streams)(MpDemux *d, const uint32_t *indices, uint32_t count);
 
-    /* MP_IO. Fills the caller's buffer with the next packet of the selected
-     * stream. MP_END with `out->bytes == 0` at the end of the stream.
+    /* MP_IO. Fills the caller's buffer with the next packet of any selected
+     * stream, **in the order the container stores them**, and says which stream
+     * it was in `out->stream`. MP_END with `out->bytes == 0` when every selected
+     * stream is finished.
+     *
+     * Storage order and not a schedule: a host that wants audio and is handed
+     * video keeps the video packet. That is the host's queue to own, and it is
+     * the only arrangement that reads a file once.
      *
      * When the packet does not fit, nothing is consumed, `out->bytes` is what it
      * needs and the result is MP_ERR_NO_MEMORY -- so a host grows its buffer and
      * asks again rather than losing a packet it cannot hold. */
     MpResult(MP_CALL *read_packet)(MpDemux *d, void *dst, size_t dst_bytes, MpPacket *out);
 
-    /* MP_IO. To the packet containing `frame` of the selected stream, or the
-     * nearest sync point before it. The host feeds what comes back to a codec
-     * that has been reset, and discards what precedes `frame`. */
-    MpResult(MP_CALL *seek)(MpDemux *d, uint64_t frame);
+    /* MP_IO. To the packet containing `frame` of stream `stream`, or the nearest
+     * sync point before it. The host feeds what comes back to a codec that has
+     * been reset, and discards what precedes `frame`.
+     *
+     * **v3 names the stream, and `frame` is in that stream's own rate.** v2's
+     * `seek(frame)` meant "the selected stream" and had no answer once two were
+     * selected. `stream` need not be one of the selected ones: a host seeking by
+     * the audio clock names the audio stream whether or not it is reading it.
+     *
+     * **One file has one position**, so this moves every selected stream, which
+     * is what an interleaved container can do and all it can do. Each stream
+     * then arrives from wherever its own nearest sync point was, and the host
+     * discards what precedes its target -- per stream, because the points are
+     * not the same point. */
+    MpResult(MP_CALL *seek)(MpDemux *d, uint32_t stream, uint64_t frame);
 
     /* MP_IO. Only for a stream flagged MP_STREAM_SELF_DECODES: PCM in the format
      * `stream_info` reported. Null on a
@@ -432,6 +522,15 @@ typedef struct MpDemuxVtbl {
                                    size_t *out_bytes);
 
     void(MP_CALL *close)(MpDemux *d);
+
+    /* --- v3, appended ------------------------------------------------- */
+
+    /* MP_ANY. What the container says about a video stream: its geometry, and
+     * the three code points a renderer cannot guess. MP_ERR_UNSUPPORTED for an
+     * audio stream, and NULL on a demuxer with no video in it -- which is most
+     * of them, and is why this is here rather than inside MpStreamInfo, whose
+     * `format` field says "for an audio stream" and should go on saying it. */
+    MpResult(MP_CALL *stream_video_info)(MpDemux *d, uint32_t index, MpVideoInfo *out);
 } MpDemuxVtbl;
 
 /* Named apart from `MpCodec`, which is an identifier rather than an object. The
@@ -816,7 +915,17 @@ MP_STATIC_ASSERT(sizeof(MpCodec) == 4, "MpCodec is a u32 field");
 MP_STATIC_ASSERT(offsetof(MpStreamInfo, size) == 0, "size must lead");
 MP_STATIC_ASSERT(offsetof(MpStreamInfo, format) == 24, "MpStreamInfo layout is ABI");
 MP_STATIC_ASSERT(offsetof(MpPacket, size) == 0, "size must lead");
+MP_STATIC_ASSERT(offsetof(MpPacket, stream) == 12, "MpPacket::stream took reserved's slot");
 MP_STATIC_ASSERT(sizeof(MpPacket) == 24, "MpPacket layout is ABI");
+MP_STATIC_ASSERT(offsetof(MpVideoInfo, size) == 0, "size must lead");
+MP_STATIC_ASSERT(sizeof(MpVideoInfo) == 44, "MpVideoInfo layout is ABI");
+
+/* v3 broke two members of MpDemuxVtbl in place and appended one after them.
+ * `select_streams` and `seek` kept their slots, so the diff a reader has to
+ * check is two signatures rather than a reordering; `stream_video_info` is
+ * after `close`, because the end is still the only place a vtable may grow. */
+MP_STATIC_ASSERT(offsetof(MpDemuxVtbl, close) < offsetof(MpDemuxVtbl, stream_video_info),
+                 "MpDemuxVtbl only ever grows at the end");
 
 
 #ifdef __cplusplus

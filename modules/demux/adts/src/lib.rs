@@ -105,13 +105,6 @@ impl Demux for AdtsDemux {
         Ok(&self.config)
     }
 
-    fn select(&mut self, index: u32) -> Result<(), Error> {
-        if index == 0 {
-            Ok(())
-        } else {
-            Err(Error::Invalid)
-        }
-    }
 
     fn read_packet(&mut self, dst: &mut [u8]) -> Result<Next, Error> {
         match self.stream.read_packet(dst) {
@@ -129,7 +122,10 @@ impl Demux for AdtsDemux {
         }
     }
 
-    fn seek(&mut self, frame: u64) -> Result<(), Error> {
+    fn seek(&mut self, stream: u32, frame: u64) -> Result<(), Error> {
+        if stream != 0 {
+            return Err(Error::Invalid); // one stream, and it is 0
+        }
         self.stream.seek(frame).map_err(|_| Error::Io)
     }
 }

@@ -116,7 +116,23 @@ MpResult MP_CALL demux_stream_config(MpDemux*, std::uint32_t, std::uint8_t* out,
     return MP_OK;
 }
 
-MpResult MP_CALL demux_select(MpDemux*, std::uint32_t) { return MP_OK; }
+/// The selected set, so a test can see what the host asked for.
+std::vector<std::uint32_t> g_selected;
+
+MpResult MP_CALL demux_select_streams(MpDemux*, const std::uint32_t* indices,
+                                      std::uint32_t count)
+{
+    if (indices == nullptr || count == 0) {
+        return MP_ERR_INVALID;
+    }
+    for (std::uint32_t i = 0; i < count; ++i) {
+        if (indices[i] >= g.stream_count) {
+            return MP_ERR_INVALID;
+        }
+    }
+    g_selected.assign(indices, indices + count);
+    return MP_OK;
+}
 
 MpResult MP_CALL demux_read_packet(MpDemux*, void* dst, std::size_t dst_bytes,
                                    MpPacket* out)
@@ -145,8 +161,11 @@ MpResult MP_CALL demux_read_packet(MpDemux*, void* dst, std::size_t dst_bytes,
     return MP_OK;
 }
 
-MpResult MP_CALL demux_seek(MpDemux*, std::uint64_t frame)
+MpResult MP_CALL demux_seek(MpDemux*, std::uint32_t stream, std::uint64_t frame)
 {
+    if (stream >= g.stream_count) {
+        return MP_ERR_INVALID;
+    }
     // To the packet containing the frame, and `g.preroll` packets before that
     // when the test is standing in for a codec that needs warming. Both leave
     // audio in front of the target for the host to discard.
@@ -181,11 +200,12 @@ const MpDemuxVtbl& demux_vtbl()
                                   &demux_stream_count,
                                   &demux_stream_info,
                                   &demux_stream_config,
-                                  &demux_select,
+                                  &demux_select_streams,
                                   &demux_read_packet,
                                   &demux_seek,
                                   &demux_read_frames,
-                                  &demux_close};
+                                  &demux_close,
+                                  nullptr /* stream_video_info: no video here */};
     return vtbl;
 }
 

@@ -466,12 +466,20 @@ MpResult MP_CALL demux_stream_config(MpDemux* d, std::uint32_t index, std::uint8
     return MP_OK;
 }
 
-MpResult MP_CALL demux_select(MpDemux* d, std::uint32_t index) noexcept
+MpResult MP_CALL demux_select_streams(MpDemux* d, const std::uint32_t* indices,
+                                      std::uint32_t count) noexcept
 {
-    if (d == nullptr) {
+    if (d == nullptr || indices == nullptr || count == 0) {
         return MP_ERR_INVALID;
     }
-    return index == 0 ? MP_OK : MP_ERR_INVALID;
+    // **One stream in this container, so there is nothing to interleave.** A
+    // set of two is a caller asking for something the file cannot hold rather
+    // than this module declining to try, and MP_ERR_UNSUPPORTED is the honest
+    // difference between the two.
+    if (count > 1) {
+        return MP_ERR_UNSUPPORTED;
+    }
+    return indices[0] == 0 ? MP_OK : MP_ERR_INVALID;
 }
 
 MpResult MP_CALL demux_read_packet(MpDemux* d, void* dst, std::size_t dst_bytes,
@@ -529,6 +537,7 @@ try {
     // **Every FLAC frame stands alone.** There is no reservoir and no overlap:
     // the format was designed so a decoder can start at any frame, which is why
     // seeking here needs no pre-roll at all.
+    out->stream = 0; // the only one this container has
     out->flags = MP_PACKET_SYNC | MP_PACKET_TIMED;
     d->position += blocksize;
     return MP_OK;
@@ -536,9 +545,10 @@ try {
     return MP_ERR_NO_MEMORY;
 }
 
-MpResult MP_CALL demux_seek(MpDemux* d, std::uint64_t frame) noexcept
+MpResult MP_CALL demux_seek(MpDemux* d, std::uint32_t stream,
+                            std::uint64_t frame) noexcept
 try {
-    if (d == nullptr) {
+    if (d == nullptr || stream != 0) {
         return MP_ERR_INVALID;
     }
     // **The nearest remembered point at or before the target**, rather than
@@ -586,11 +596,12 @@ const MpDemuxVtbl g_vtbl = {
     /* stream_count  */ &demux_stream_count,
     /* stream_info   */ &demux_stream_info,
     /* stream_config */ &demux_stream_config,
-    /* select        */ &demux_select,
+    /* select_streams*/ &demux_select_streams,
     /* read_packet   */ &demux_read_packet,
     /* seek          */ &demux_seek,
     /* read_frames   */ nullptr, // it splits properly; there is nothing to decode
     /* close         */ &demux_close,
+    /* stream_video_info */ nullptr, // FLAC is audio
 };
 
 const MpCodec g_codecs[] = {MP_CODEC_FLAC};

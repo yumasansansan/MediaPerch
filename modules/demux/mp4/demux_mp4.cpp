@@ -33,6 +33,7 @@
 #include <mediaperch/module.h>
 
 #include <Ap4.h>
+#include <Ap4ColrAtom.h>
 
 #include <cstdarg>
 #include <cstdio>
@@ -408,7 +409,11 @@ struct MpDemux {
     std::unique_ptr<AP4_File> file;
     AP4_Movie* movie = nullptr; ///< owned by `file`
     std::vector<Stream> streams;
-    std::size_t selected = 0;
+    /// The selected set, in `streams` order. **v3**: one index was enough while
+    /// nothing read two streams at once; a player showing video reads both out
+    /// of one file, and reading them by opening the container twice means two
+    /// positions and two seeks that have to agree.
+    std::vector<std::size_t> selected;
 
     /// Rebuilt on every seek, because it is a cursor and not a reader.
     std::unique_ptr<AP4_LinearReader> reader;
@@ -419,21 +424,20 @@ struct MpDemux {
     /// read from the file twice.
     bool have_pending = false;
     std::uint64_t pending_frame = 0;
+    std::uint32_t pending_stream = 0;
 };
 
 namespace {
 
-/// Points the reader at `index` within the selected track, or at the start.
-bool restart(MpDemux* d, AP4_Ordinal index)
+/// Points the reader at the start, and then at `index` within `in_track` when
+/// one is named -- a seek names the stream it is seeking, and the others follow
+/// from wherever the file position lands.
+bool restart(MpDemux* d, AP4_Track* in_track, AP4_Ordinal index)
 {
     d->reader.reset();
     d->at_end = false;
     d->have_pending = false;
-    if (d->movie == nullptr || d->streams.empty()) {
-        return false;
-    }
-    AP4_Track* track = d->streams[d->selected].track;
-    if (track == nullptr) {
+    if (d->movie == nullptr || d->streams.empty() || d->selected.empty()) {
         return false;
     }
 
@@ -457,14 +461,32 @@ bool restart(MpDemux* d, AP4_Ordinal index)
     if (reader == nullptr) {
         return false;
     }
-    if (AP4_FAILED(reader->EnableTrack(track->GetId()))) {
-        return false;
+    // Every selected track, because `ReadNextSample` walks them together in
+    // storage order and that is the whole point of selecting more than one.
+    for (const std::size_t at : d->selected) {
+        AP4_Track* track = d->streams[at].track;
+        if (track == nullptr || AP4_FAILED(reader->EnableTrack(track->GetId()))) {
+            return false;
+        }
     }
-    if (index != 0 && AP4_FAILED(reader->SetSampleIndex(track->GetId(), index))) {
+    if (in_track != nullptr && index != 0 &&
+        AP4_FAILED(reader->SetSampleIndex(in_track->GetId(), index))) {
         return false;
     }
     d->reader = std::move(reader);
     return true;
+}
+
+/// The stream index a Bento4 track id belongs to, or `npos`.
+std::size_t stream_of_track(const MpDemux* d, AP4_UI32 track_id)
+{
+    for (std::size_t at = 0; at < d->streams.size(); ++at) {
+        const AP4_Track* track = d->streams[at].track;
+        if (track != nullptr && track->GetId() == track_id) {
+            return at;
+        }
+    }
+    return static_cast<std::size_t>(-1);
 }
 
 MpResult MP_CALL demux_probe(const char* path, const std::uint8_t* head,
@@ -574,11 +596,14 @@ try {
     for (std::size_t i = 0; i < d->streams.size(); ++i) {
         if (d->streams[i].kind == MP_STREAM_AUDIO) {
             d->streams[i].is_default = true;
-            d->selected = i;
+            d->selected = {i};
             break;
         }
     }
-    if (!restart(d.get(), 0)) {
+    if (d->selected.empty() && !d->streams.empty()) {
+        d->selected = {0}; // a file with no audio at all still opens
+    }
+    if (!restart(d.get(), nullptr, 0)) {
         return MP_ERR_UNSUPPORTED;
     }
 
@@ -642,13 +667,120 @@ MpResult MP_CALL demux_stream_config(MpDemux* d, std::uint32_t index, std::uint8
     return MP_OK;
 }
 
-MpResult MP_CALL demux_select(MpDemux* d, std::uint32_t index) noexcept
+/// The greatest common divisor, so a frame rate is reported as the ratio it
+/// is rather than as two large numbers that happen to divide.
+std::uint32_t gcd_of(std::uint64_t a, std::uint64_t b)
 {
-    if (d == nullptr || index >= d->streams.size()) {
+    while (b != 0) {
+        const std::uint64_t t = a % b;
+        a = b;
+        b = t;
+    }
+    return static_cast<std::uint32_t>(a);
+}
+
+MpResult MP_CALL demux_stream_video_info(MpDemux* d, std::uint32_t index,
+                                         MpVideoInfo* out) noexcept
+try {
+    if (d == nullptr || out == nullptr || index >= d->streams.size()) {
         return MP_ERR_INVALID;
     }
-    d->selected = index;
-    return restart(d, 0) ? MP_OK : MP_ERR_UNSUPPORTED;
+    if (d->streams[index].kind != MP_STREAM_VIDEO) {
+        return MP_ERR_UNSUPPORTED;
+    }
+    AP4_Track* track = d->streams[index].track;
+    AP4_SampleDescription* desc = track != nullptr ? track->GetSampleDescription(0) : nullptr;
+    auto* video = AP4_DYNAMIC_CAST(AP4_VideoSampleDescription, desc);
+    if (video == nullptr) {
+        return MP_ERR_UNSUPPORTED;
+    }
+
+    const std::uint32_t size = out->size;
+    *out = MpVideoInfo{};
+    out->size = size;
+    out->width = video->GetWidth();
+    out->height = video->GetHeight();
+
+    // **`tkhd` is the display size and the sample entry is the coded one**, and
+    // they differ whenever the pixels are not square -- anamorphic DVD-era
+    // content, and anything a phone rotated. Both are 16.16 fixed point here.
+    out->display_width = track->GetWidth() >> 16;
+    out->display_height = track->GetHeight() >> 16;
+    if (out->display_width == 0 || out->display_height == 0) {
+        out->display_width = out->width;
+        out->display_height = out->height;
+    }
+
+    // The average, as a ratio, from the two numbers the container states
+    // exactly: 24000/1001 comes back as 24000/1001 rather than as 23.976.
+    const std::uint64_t frames = track->GetSampleCount();
+    const std::uint64_t duration = track->GetMediaDuration();
+    const std::uint64_t scale = track->GetMediaTimeScale();
+    if (frames != 0 && duration != 0 && scale != 0) {
+        const std::uint64_t num = frames * scale;
+        const std::uint32_t g = gcd_of(num, duration);
+        if (g != 0 && num / g <= 0xFFFFFFFFull && duration / g <= 0xFFFFFFFFull) {
+            out->fps_num = static_cast<std::uint32_t>(num / g);
+            out->fps_den = static_cast<std::uint32_t>(duration / g);
+        }
+    }
+
+    // **`colr`, which is the whole reason this call exists.** Nothing else says
+    // whether the frames are BT.709 or BT.2020, or whether the transfer is sRGB
+    // or PQ, and a renderer that guesses produces a picture that is merely
+    // plausible. 2 is "unspecified" in all three, which is what a file with no
+    // `colr` leaves and what MpVideoInfo starts at.
+    out->primaries = 2;
+    out->transfer = 2;
+    out->matrix = 2;
+    if (desc != nullptr) {
+        const AP4_AtomParent& details = desc->GetDetails();
+        if (auto* colr = AP4_DYNAMIC_CAST(AP4_ColrAtom,
+                                          details.GetChild(AP4_ATOM_TYPE_COLR))) {
+            // `nclx` and `nclc` carry the code points; `rICC`/`prof` carry an
+            // ICC profile instead, and this module has nowhere to put one.
+            const AP4_UI32 kind = colr->GetColourParameterType();
+            if (kind == AP4_ATOM_TYPE('n', 'c', 'l', 'x') ||
+                kind == AP4_ATOM_TYPE('n', 'c', 'l', 'c')) {
+                out->primaries = colr->GetPrimariesIndex();
+                out->transfer = colr->GetTransferFunctionIndex();
+                out->matrix = colr->GetMatrixIndex();
+                if (colr->GetFullRangeFlag() != 0) {
+                    out->flags |= MP_VIDEO_FULL_RANGE;
+                }
+            }
+        }
+    }
+    return MP_OK;
+} catch (...) {
+    return MP_ERR_NO_MEMORY;
+}
+
+MpResult MP_CALL demux_select_streams(MpDemux* d, const std::uint32_t* indices,
+                                      std::uint32_t count) noexcept
+try {
+    if (d == nullptr || indices == nullptr || count == 0) {
+        return MP_ERR_INVALID;
+    }
+    std::vector<std::size_t> chosen;
+    chosen.reserve(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        if (indices[i] >= d->streams.size()) {
+            return MP_ERR_INVALID;
+        }
+        // A stream named twice would be enabled twice and read twice, which is
+        // a caller's bug rather than a request.
+        for (const std::size_t already : chosen) {
+            if (already == indices[i]) {
+                return MP_ERR_INVALID;
+            }
+        }
+        chosen.push_back(indices[i]);
+    }
+    d->selected = std::move(chosen);
+    return restart(d, nullptr, 0) ? MP_OK : MP_ERR_UNSUPPORTED;
+} catch (...) {
+    return MP_ERR_NO_MEMORY;
 }
 
 MpResult MP_CALL demux_read_packet(MpDemux* d, void* dst, std::size_t dst_bytes,
@@ -668,8 +800,12 @@ try {
         }
         AP4_Sample sample;
         d->stream->arm(k_packet_budget);
-        const AP4_Result r = d->reader->ReadNextSample(
-            d->streams[d->selected].track->GetId(), sample, d->sample_data);
+        // **In storage order, from any enabled track**, which is the overload
+        // that makes one pass over the file serve every selected stream. The
+        // track id comes back with the sample, and is how a host is told which
+        // stream it is holding.
+        AP4_UI32 track_id = 0;
+        const AP4_Result r = d->reader->ReadNextSample(sample, d->sample_data, track_id);
         if (r == AP4_ERROR_EOS) {
             d->at_end = true;
             return MP_END;
@@ -677,6 +813,11 @@ try {
         if (AP4_FAILED(r)) {
             return MP_ERR_IO;
         }
+        const std::size_t from = stream_of_track(d, track_id);
+        if (from == static_cast<std::size_t>(-1)) {
+            return MP_ERR_INTERNAL; // a track this module never enabled
+        }
+        d->pending_stream = static_cast<std::uint32_t>(from);
         // **The decode timestamp is the frame number.** For audio it is stated
         // in the media timescale, which is the sample rate, so nothing stands
         // between the file and `MpPacket::frame` -- and no assumption that
@@ -699,18 +840,23 @@ try {
     out->bytes = bytes;
     out->flags = MP_PACKET_SYNC | MP_PACKET_TIMED;
     out->frame = d->pending_frame;
+    out->stream = d->pending_stream;
     d->have_pending = false;
     return MP_OK;
 } catch (...) {
     return MP_ERR_NO_MEMORY;
 }
 
-MpResult MP_CALL demux_seek(MpDemux* d, std::uint64_t frame) noexcept
+MpResult MP_CALL demux_seek(MpDemux* d, std::uint32_t stream,
+                            std::uint64_t frame) noexcept
 try {
-    if (d == nullptr || d->streams.empty()) {
+    if (d == nullptr || stream >= d->streams.size() || d->selected.empty()) {
         return MP_ERR_INVALID;
     }
-    AP4_Track* track = d->streams[d->selected].track;
+    // **`stream` need not be selected.** A host seeking by the audio clock
+    // names the audio stream whether or not it is reading it, and `frame` is in
+    // that stream's own rate either way.
+    AP4_Track* track = d->streams[stream].track;
     if (track == nullptr) {
         return MP_ERR_UNSUPPORTED;
     }
@@ -723,14 +869,18 @@ try {
     AP4_Ordinal index = 0;
     if (table != nullptr &&
         AP4_SUCCEEDED(table->GetSampleIndexForTimeStamp(frame, index))) {
-        return restart(d, index) ? MP_OK : MP_ERR_IO;
+        // Only the named track is placed. The others come from wherever
+        // `SetSampleIndex` left the file, which is what an interleaved
+        // container can do -- each arrives from its own nearest point and the
+        // host discards what precedes its own target.
+        return restart(d, track, index) ? MP_OK : MP_ERR_IO;
     }
 
     // A fragmented file has no sample table to ask, so the reader is asked
     // instead. It takes milliseconds, so the target is rounded *down* to one:
     // landing early costs the host a discard, landing late loses audio.
     const std::uint32_t rate = track->GetMediaTimeScale();
-    if (rate == 0 || !restart(d, 0)) {
+    if (rate == 0 || !restart(d, nullptr, 0)) {
         return MP_ERR_UNSUPPORTED;
     }
     const auto ms = static_cast<std::uint32_t>(frame * 1000ull / rate);
@@ -754,11 +904,12 @@ const MpDemuxVtbl g_vtbl = {
     /* stream_count  */ &demux_stream_count,
     /* stream_info   */ &demux_stream_info,
     /* stream_config */ &demux_stream_config,
-    /* select        */ &demux_select,
+    /* select_streams*/ &demux_select_streams,
     /* read_packet   */ &demux_read_packet,
     /* seek          */ &demux_seek,
     /* read_frames   */ nullptr, // it splits properly, so it does not decode
     /* close         */ &demux_close,
+    /* stream_video_info */ &demux_stream_video_info,
 };
 
 MpResult MP_CALL module_init(const MpHost* host) noexcept

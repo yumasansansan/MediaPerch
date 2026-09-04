@@ -437,12 +437,20 @@ MpResult MP_CALL demux_stream_config(MpDemux* d, std::uint32_t index, std::uint8
     return MP_OK;
 }
 
-MpResult MP_CALL demux_select(MpDemux* d, std::uint32_t index) noexcept
+MpResult MP_CALL demux_select_streams(MpDemux* d, const std::uint32_t* indices,
+                                      std::uint32_t count) noexcept
 {
-    if (d == nullptr) {
+    if (d == nullptr || indices == nullptr || count == 0) {
         return MP_ERR_INVALID;
     }
-    return index == 0 ? MP_OK : MP_ERR_INVALID;
+    // **An IMFSourceReader, which is a whole pipeline with no seam in it.**
+    // That is what makes this a fallback demuxer flagged MP_STREAM_SELF_DECODES
+    // rather than the video path -- see plan.md §9.8. It reports one stream and
+    // serves one.
+    if (count > 1) {
+        return MP_ERR_UNSUPPORTED;
+    }
+    return indices[0] == 0 ? MP_OK : MP_ERR_INVALID;
 }
 
 MpResult MP_CALL demux_read_packet(MpDemux* d, void* dst, std::size_t dst_bytes,
@@ -552,9 +560,10 @@ try {
     return MP_ERR_NO_MEMORY;
 }
 
-MpResult MP_CALL demux_seek(MpDemux* d, std::uint64_t frame) noexcept
+MpResult MP_CALL demux_seek(MpDemux* d, std::uint32_t stream,
+                            std::uint64_t frame) noexcept
 {
-    if (d == nullptr) {
+    if (d == nullptr || stream != 0) {
         return MP_ERR_INVALID;
     }
     PROPVARIANT position;
@@ -605,11 +614,12 @@ const MpDemuxVtbl g_vtbl = {
     /* stream_count  */ &demux_stream_count,
     /* stream_info   */ &demux_stream_info,
     /* stream_config */ &demux_stream_config,
-    /* select        */ &demux_select,
+    /* select_streams*/ &demux_select_streams,
     /* read_packet   */ &demux_read_packet,
     /* seek          */ &demux_seek,
     /* read_frames   */ &demux_read_frames,
     /* close         */ &demux_close,
+    /* stream_video_info */ nullptr, // a pipeline, not a container reader
 };
 
 /// It decodes for itself and names no codec it could be paired on.

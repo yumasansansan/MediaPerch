@@ -1005,12 +1005,26 @@ MpResult MP_CALL demux_stream_config(MpDemux* d, std::uint32_t index, std::uint8
     return MP_OK;
 }
 
-MpResult MP_CALL demux_select(MpDemux* d, std::uint32_t index) noexcept
+MpResult MP_CALL demux_select_streams(MpDemux* d, const std::uint32_t* indices,
+                                      std::uint32_t count) noexcept
 try {
-    if (d == nullptr || index >= d->tracks.size()) {
+    if (d == nullptr || indices == nullptr || count == 0) {
         return MP_ERR_INVALID;
     }
-    d->selected = index;
+    // **One at a time, for now, and that is a statement about this module
+    // rather than about Matroska.** The container interleaves at cluster
+    // granularity and could serve several; what is single here is the reader --
+    // the lace cursor, `position` and `frames_of` are all the selected track's.
+    // Making them per-track is the change this module needs the day a video
+    // path reads a Matroska, and `demux_mp4` is where v3's several-streams is
+    // proved until then.
+    if (count > 1) {
+        return MP_ERR_UNSUPPORTED;
+    }
+    if (indices[0] >= d->tracks.size()) {
+        return MP_ERR_INVALID;
+    }
+    d->selected = indices[0];
     d->position = 0;
     return restart_at(d, d->first_cluster) ? MP_OK : MP_ERR_IO;
 } catch (...) {
@@ -1063,9 +1077,11 @@ try {
         d->position = frames_of(d, ns);
         out->frame = d->position;
         out->flags = MP_PACKET_TIMED;
+        out->stream = static_cast<std::uint32_t>(d->selected);
     } else {
         out->frame = 0;
         out->flags = 0;
+        out->stream = static_cast<std::uint32_t>(d->selected);
     }
     ++d->next_lace;
     return MP_OK;
@@ -1073,9 +1089,10 @@ try {
     return MP_ERR_NO_MEMORY;
 }
 
-MpResult MP_CALL demux_seek(MpDemux* d, std::uint64_t frame) noexcept
+MpResult MP_CALL demux_seek(MpDemux* d, std::uint32_t stream,
+                            std::uint64_t frame) noexcept
 try {
-    if (d == nullptr) {
+    if (d == nullptr || stream >= d->tracks.size()) {
         return MP_ERR_INVALID;
     }
     // **To the cluster, and the host does the rest.** Matroska's Cues map a
@@ -1084,7 +1101,10 @@ try {
     // never after it, and `MP_PACKET_TIMED` on the first block is what lets the
     // host discard the difference. Landing after the target would be
     // unrecoverable; landing before it costs one cluster of decoding.
-    const std::uint64_t rate = d->track().format.sample_rate;
+    // `frame` is in the named stream's own rate, which is not necessarily the
+    // selected one's -- a host seeking by the audio clock names the audio
+    // stream whether or not it is the stream it is reading.
+    const std::uint64_t rate = d->tracks[stream].format.sample_rate;
     if (rate == 0) {
         return MP_ERR_UNSUPPORTED;
     }
@@ -1130,11 +1150,12 @@ const MpDemuxVtbl g_vtbl = {
     /* stream_count  */ &demux_stream_count,
     /* stream_info   */ &demux_stream_info,
     /* stream_config */ &demux_stream_config,
-    /* select        */ &demux_select,
+    /* select_streams*/ &demux_select_streams,
     /* read_packet   */ &demux_read_packet,
     /* seek          */ &demux_seek,
     /* read_frames   */ nullptr, // it splits properly; there is nothing to decode
     /* close         */ &demux_close,
+    /* stream_video_info */ nullptr, // not until this module reads two streams
 };
 
 /// Everything this module can name. A codec on the list that no module here

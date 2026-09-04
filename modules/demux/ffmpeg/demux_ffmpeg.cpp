@@ -633,12 +633,22 @@ MpResult MP_CALL demux_stream_config(MpDemux* d, std::uint32_t index, std::uint8
     return MP_OK;
 }
 
-MpResult MP_CALL demux_select(MpDemux* d, std::uint32_t index) noexcept
+MpResult MP_CALL demux_select_streams(MpDemux* d, const std::uint32_t* indices,
+                                      std::uint32_t count) noexcept
 {
-    if (d == nullptr || index >= d->streams.size()) {
+    if (d == nullptr || indices == nullptr || count == 0) {
         return MP_ERR_INVALID;
     }
-    d->selected = index;
+    // **This one is a child process decoding to a pipe**, so a second stream
+    // would be a second `ffmpeg` and a second pipe rather than a second track
+    // out of one read. Declining is not a limitation of the container.
+    if (count > 1) {
+        return MP_ERR_UNSUPPORTED;
+    }
+    if (indices[0] >= d->streams.size()) {
+        return MP_ERR_INVALID;
+    }
+    d->selected = indices[0];
     return start_at(d, 0) ? MP_OK : MP_ERR_IO;
 }
 
@@ -690,9 +700,10 @@ try {
     return MP_ERR_IO;
 }
 
-MpResult MP_CALL demux_seek(MpDemux* d, std::uint64_t frame) noexcept
+MpResult MP_CALL demux_seek(MpDemux* d, std::uint32_t stream,
+                            std::uint64_t frame) noexcept
 {
-    if (d == nullptr) {
+    if (d == nullptr || stream >= d->streams.size()) {
         return MP_ERR_INVALID;
     }
     // Seeking restarts the child. That is what going through the executables
@@ -740,11 +751,12 @@ const MpDemuxVtbl g_vtbl = {
     /* stream_count  */ &demux_stream_count,
     /* stream_info   */ &demux_stream_info,
     /* stream_config */ &demux_stream_config,
-    /* select        */ &demux_select,
+    /* select_streams*/ &demux_select_streams,
     /* read_packet   */ &demux_read_packet,
     /* seek          */ &demux_seek,
     /* read_frames   */ &demux_read_frames,
     /* close         */ &demux_close,
+    /* stream_video_info */ nullptr, // a pipeline, not a container reader
 };
 
 /// **The one this module will not claim to be a codec for.** Every stream it

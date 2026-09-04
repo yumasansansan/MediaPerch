@@ -545,6 +545,12 @@ Asked when the video work was about to start, and answered before it, because th
 decides whether M6's first commit is a header or a renderer. **Almost everything appends.
 Two things in the demuxer do not, and one thing is not a widening but a new kind.**
 
+**Done, except the new kind.** `MP_ABI_VERSION` is 3: `select` became `select_streams`,
+`seek` names its stream, `MpPacket::reserved` became `stream`, and `stream_video_info` was
+appended after `close`. `MP_KIND_VCODEC` is *not* in -- a kind number with no vtable and no
+module is the mistake this tree already made once with `MP_ENCODING_DSD` and reverted, so it
+lands with the decoder that implements it.
+
 | Need | Appendable? |
 |---|---|
 | Video geometry, and the primaries/transfer/matrix §9 turns on | **yes** — a `stream_video_info` call, appended. `MpStreamInfo::format` stays what it says it is |
@@ -556,22 +562,87 @@ Two things in the demuxer do not, and one thing is not a widening but a new kind
 | **Video decode** | **not a widening.** `MpCodecVtbl::decode` writes PCM into the caller's buffer. A hardware video decoder produces a texture it owns, in a pool; copying a 4K NV12 frame out at 60 fps is 750 MB/s spent to undo the reason for decoding on the GPU. A second `decode_frame` in the same vtable would make a codec module implement one of two output models, which is the shape with two meanings §15 warns about. It is a **new kind**, `MP_KIND_VCODEC`, beside the reserved `MP_KIND_VIDEO` |
 
 So the break is narrow: `MpDemuxVtbl::select` and `seek`, and `MpPacket::reserved`. Nothing
-in `MpCodecVtbl`, `MpSinkVtbl` or `MpDspVtbl` moves, and no audio module changes except to
-be recompiled.
-
-**And it should land with the first module that needs it, not before.** §15's own rule is
-"do not add an interface until the second implementation of it exists", and this ABI has
-already had one enum reverted for having no user. Multi-stream demuxing has no caller today;
-it gets one the day `demux_mp4` is asked for audio and video at once, and that is the commit
-where the shape gets checked against something rather than argued about. Deciding it now and
-writing it here is what keeps it from being discovered late; writing the code now is what
-would make it speculative.
+in `MpCodecVtbl`, `MpSinkVtbl` or `MpDspVtbl` moves, and no audio module changed except to be
+recompiled.
 
 The cost of breaking is worth stating because it is nearly nothing and will not stay that
 way: `mp_module_entry` refuses a mismatched `MP_ABI_VERSION`, so a bump makes every module
 fail to load until it is rebuilt — and **every module in the world is in this repository.**
-The same was true at v1 to v2, which deleted a whole kind. It is true today. It stops being
+The same was true at v1 to v2, which deleted a whole kind. It was true at v3. It stops being
 true the first time somebody else ships one.
+
+#### What v3 looks like
+
+`select_streams(indices, count)` replaces `select(index)`. Selecting again replaces the set
+rather than adding to it, and `count` is at least one. **A demuxer may decline `count > 1`
+with `MP_ERR_UNSUPPORTED`** — most containers here hold one stream and have nothing to
+interleave, and declining is a real answer rather than a failure to implement.
+
+The empty set nearly meant something. It was written into the header as "how a host stops
+reading", implemented in `demux_mp4`, and not implemented in the five single-stream demuxers,
+where selecting nothing left the reader where it was and `read_packet` went on returning
+packets — five modules disagreeing with the header, which is the worst kind of
+documentation. The fix was not to implement it five times: **nothing in this tree wants it.**
+A host that has stopped reading closes the demuxer, and a player turning off a video track
+selects the audio stream rather than none. §15's rule about not adding an interface before
+its second implementation applies to a *meaning* as much as to a function, and loosening
+`count == 0` later is not a break.
+
+`read_packet` returns the next packet of *any* selected stream **in the order the container
+stores them**, and `MpPacket::stream` says which. Storage order and not a schedule: a host
+that wants audio and is handed video keeps the video packet. That queue is the host's to
+own, and it is the only arrangement that reads a file once.
+
+`seek(stream, frame)` names the stream, and `frame` is in that stream's own rate. `stream`
+need not be selected — a host seeking by the audio clock names the audio stream whether or
+not it is reading it. **One file has one position**, so the seek moves every selected stream:
+each arrives from wherever its own nearest sync point was, and the host discards what
+precedes its own target, per stream, because the points are not the same point.
+
+`stream_video_info(index, MpVideoInfo*)` is appended after `close`. Geometry, the display
+size when the pixels are not square, the frame rate as a ratio — and the three code points
+§9.1 turns on, which is the reason it exists: nothing but the container says whether the
+frames are BT.709 or BT.2020, or whether the transfer is sRGB or PQ, and a renderer that
+guesses produces a picture that is merely plausible. Mastering-display metadata is not there
+yet; it appends the day §9.3's `driver` provider is written, because a field nothing fills is
+a field nothing checks.
+
+#### What it was checked against
+
+Every other test in this tree drives fakes, deliberately: a fake says exactly what the host
+is being tested against. `tests/demux_v3_test.cpp` does not, because what is under test is
+whether the *shape* works on a container somebody else's tool wrote — and a fake that
+interleaved the way I imagined MP4 interleaves would prove nothing at all. It loads
+`mp_demux_mp4.dll` through `mp_module_entry`, which is also where the version bump is
+visible, and reads a 14 KB MP4 with one H.264 track and one AAC track:
+
+- both selected, the packets come back interleaved, each saying which stream it is, and the
+  counts are the 45 and 24 that ffprobe reports;
+- one selected, only that stream's 45 arrive;
+- an empty set is refused, because it never had a caller;
+- a stream that is not there, and one named twice, are both refused;
+- a seek to audio frame 22050 moves both streams and lands at or before the target;
+- the frame rate comes back as 24000/1001 rather than as a rounded 23.976;
+- and the colour code points come back as the container states them -- 2/2/2 in one file,
+  and 9/16/9 with full range in a second that is **the same file with four bytes changed**,
+  so a difference is the `colr` box being read and nothing else.
+
+That last file is made by hand, by `tools/make_av_fixture.py`, because this FFmpeg build
+would not write the code points it was asked for: `-color_primaries bt2020 -color_trc
+smpte2084` and the equivalent x265 parameters both produced a `colr` box reading 2/2/2. The
+fixtures are committed rather than generated at test time, because multi-stream demuxing is a
+correctness property of the ABI rather than a quality measurement and belongs in the default
+test run, which must not depend on FFmpeg being on the machine.
+
+#### What still declines
+
+`demux_mkv` answers `MP_ERR_UNSUPPORTED` above one stream, and that is a statement about the
+module rather than about Matroska. The container interleaves at cluster granularity and could
+serve several; what is single is the reader — the lace cursor, `position` and `frames_of` are
+all the selected track's. Making them per-track is what that module needs the day a video
+path reads a Matroska. `demux_ffmpeg` declines for a different and permanent reason: it is a
+child process decoding to a pipe, so a second stream would be a second `ffmpeg`. `demux_mf`
+declines because an `IMFSourceReader` is a pipeline with no seam in it, which is §9.8.
 
 **Out-of-process modules use the same ABI.** A future `mp_host_ffmpeg.exe` implements the
 identical vtable over shared memory and a pipe, so a decoder that dies on a malformed file
@@ -1413,6 +1484,7 @@ HDR state.
 | M5.5 | Every parser is a library or is Rust | **done.** What this tree writes and what it links were both re-decided against measurement, and both moved: `demux_mp4` to Bento4, `demux_mkv` to libmatroska, `demux_flac`/`codec_flac` to libFLAC, `demux_mpa`/`codec_mpa` to libmpg123 -- and what was left, the parsers no library reads better, went to Rust: `codec_alac`, `codec_aac`, `demux_adts`. Every one of them bit-identical to the C++ it replaced, which is what made each move checkable rather than a judgement. [formats.md](formats.md) has every measurement, including the two upstream bugs a fuzzer found in Bento4 and the four things libmpg123's API did not say |
 | M5.9 | The structural cut: `src/engine` and `src/player` | **done.** The portable half was one library holding both the audio engine and the thing that decides what to play. §4 answers yes to "could this ABI carry a DAW's engine", and a DAW taking it would have taken the transport, the playlist, the INI schema and the IPC wire format with it. They are `src/player` now, and `src/engine` has no route to them: the include path is what enforces it, so reaching across is a compile error rather than a review comment. CI builds `mediaperch_engine` alone, which checks both cuts at once |
 | M5.75 | Path B is hashable, and a VST3 can be a stage in it | **done.** `mp::Processor` is `ProcessedGraph`'s arithmetic without the device, the ring or the threads, so `decode --path processed --gain --dsp` runs the chain and prints its SHA-256 -- the flags had been accepted and silently ignored, which is why nothing in this tree had ever compared the resampler between two builds. It found three bugs on the first run: `use_processed` could not see a gain, `Processor::reset` returned `MP_END` on success, and a seek left the noise shaper feeding back error from wherever the stream used to be. The baseline and AVX2 builds agree over 144 runs. `modules/dsp/vst3` hosts somebody else's plugin on `pluginterfaces` alone, with a VST3 written in `tests/` so the host is tested without one installed |
+| M5.95 | ABI v3: several streams from one file | **done.** `select` named one stream and `seek(frame)` meant "the selected one", which has no answer once a player wants audio and video out of one file -- and appending would have left both meaning something narrower than their names. So `select_streams`, `seek(stream, frame)`, `MpPacket::reserved` becoming `stream`, and `stream_video_info` appended for the three colour code points §9.1 turns on. Checked against `demux_mp4` reading a real MP4 with two tracks in it, which is the first test here that drives a module rather than a fake. `demux_mkv` still declines above one stream and says why |
 | M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse |
 | M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled |
 | M8 | WinUI 3 shell | killing it mid-track changes nothing audible |

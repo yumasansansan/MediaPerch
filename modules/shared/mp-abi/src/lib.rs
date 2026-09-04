@@ -56,7 +56,7 @@ pub mod result {
     pub const ERR_INTERNAL: MpResult = 10;
 }
 
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 3;
 
 pub mod kind {
     pub const DSP: u32 = 3;
@@ -170,7 +170,10 @@ pub struct Packet {
     size: u32,
     flags: u32,
     bytes: u32,
-    reserved: u32,
+    /// Which stream this packet came from. **v3**, in the slot v2 called
+    /// `reserved`. A single-stream demuxer leaves it at 0, which is its one
+    /// stream's index and therefore right rather than merely harmless.
+    stream: u32,
     frame: u64,
 }
 
@@ -245,14 +248,15 @@ pub struct DemuxVtbl {
         out_bytes: u32,
         out_needed: *mut u32,
     ) -> MpResult,
-    select: extern "C" fn(d: *mut c_void, index: u32) -> MpResult,
+    select_streams:
+        extern "C" fn(d: *mut c_void, indices: *const u32, count: u32) -> MpResult,
     read_packet: extern "C" fn(
         d: *mut c_void,
         dst: *mut c_void,
         dst_bytes: usize,
         out: *mut Packet,
     ) -> MpResult,
-    seek: extern "C" fn(d: *mut c_void, frame: u64) -> MpResult,
+    seek: extern "C" fn(d: *mut c_void, stream: u32, frame: u64) -> MpResult,
     read_frames: Option<
         extern "C" fn(
             d: *mut c_void,
@@ -262,6 +266,9 @@ pub struct DemuxVtbl {
         ) -> MpResult,
     >,
     close: extern "C" fn(d: *mut c_void),
+    /// v3, appended. No Rust demuxer here reads video, so every one of them
+    /// leaves this null and the host reads no further than `size` says.
+    stream_video_info: Option<extern "C" fn(d: *mut c_void, index: u32, out: *mut c_void) -> MpResult>,
 }
 
 /// `MpModuleDesc`, the one thing `mp_module_entry` returns.
@@ -290,7 +297,7 @@ const _: () = assert!(std::mem::size_of::<StreamInfo>() == 104);
 const _: () = assert!(std::mem::size_of::<Packet>() == 24);
 const _: () = assert!(std::mem::size_of::<Host>() == 8 + 4 * std::mem::size_of::<usize>());
 const _: () = assert!(std::mem::size_of::<CodecVtbl>() == 8 + 7 * std::mem::size_of::<usize>());
-const _: () = assert!(std::mem::size_of::<DemuxVtbl>() == 8 + 10 * std::mem::size_of::<usize>());
+const _: () = assert!(std::mem::size_of::<DemuxVtbl>() == 8 + 11 * std::mem::size_of::<usize>());
 const _: () = assert!(std::mem::size_of::<ModuleDesc>() == 32 + 6 * std::mem::size_of::<usize>());
 
 // These hold raw pointers into other statics of the same object, never written
@@ -405,13 +412,27 @@ pub trait Demux: Sized + 'static {
     /// The codec's configuration blob for stream `index`, verbatim.
     fn stream_config(&self, index: u32) -> Result<&[u8], Error>;
 
-    fn select(&mut self, index: u32) -> Result<(), Error>;
+    /// Which streams `read_packet` may return.
+    ///
+    /// **Every Rust demuxer here holds one stream**, so the default is the
+    /// whole of what they need: stream 0 and nothing else. A set of two is a
+    /// caller asking for something the container cannot hold, which is a
+    /// different answer from a bad index. A demuxer that really interleaves
+    /// overrides this.
+    fn select_streams(&mut self, indices: &[u32]) -> Result<(), Error> {
+        match indices {
+            [0] => Ok(()),
+            [_] => Err(Error::Invalid),
+            _ => Err(Error::Unsupported),
+        }
+    }
 
     fn read_packet(&mut self, dst: &mut [u8]) -> Result<Next, Error>;
 
-    /// To the packet containing `frame`, or the nearest point before it from
-    /// which a reset codec decodes correctly.
-    fn seek(&mut self, frame: u64) -> Result<(), Error>;
+    /// To the packet containing `frame` of `stream`, or the nearest point
+    /// before it from which a reset codec decodes correctly. `frame` is in that
+    /// stream's own rate.
+    fn seek(&mut self, stream: u32, frame: u64) -> Result<(), Error>;
 }
 
 // ---------------------------------------------------------------------------
@@ -736,13 +757,25 @@ extern "C" fn demux_stream_config<D: Demux>(
 }
 
 #[allow(unsafe_code)]
-extern "C" fn demux_select<D: Demux>(d: *mut c_void, index: u32) -> MpResult {
+extern "C" fn demux_select_streams<D: Demux>(
+    d: *mut c_void,
+    indices: *const u32,
+    count: u32,
+) -> MpResult {
     guard(|| {
-        if d.is_null() {
+        if d.is_null() || (count != 0 && indices.is_null()) {
             return result::ERR_INVALID;
         }
+        // The one place a slice is built from a host's pointer. `count` is the
+        // host's word for how long it is, and a host that lied would be lying
+        // to every module in the tree rather than to this one.
+        let chosen: &[u32] = if count == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(indices, count as usize) }
+        };
         let demux = unsafe { &mut *d.cast::<D>() };
-        match demux.select(index) {
+        match demux.select_streams(chosen) {
             Ok(()) => result::OK,
             Err(e) => e.code(),
         }
@@ -766,7 +799,7 @@ extern "C" fn demux_read_packet<D: Demux>(
                 size,
                 flags: 0,
                 bytes: 0,
-                reserved: 0,
+                stream: 0,
                 frame: 0,
             };
         }
@@ -796,13 +829,13 @@ extern "C" fn demux_read_packet<D: Demux>(
 }
 
 #[allow(unsafe_code)]
-extern "C" fn demux_seek<D: Demux>(d: *mut c_void, frame: u64) -> MpResult {
+extern "C" fn demux_seek<D: Demux>(d: *mut c_void, stream: u32, frame: u64) -> MpResult {
     guard(|| {
         if d.is_null() {
             return result::ERR_INVALID;
         }
         let demux = unsafe { &mut *d.cast::<D>() };
-        match demux.seek(frame) {
+        match demux.seek(stream, frame) {
             Ok(()) => result::OK,
             Err(e) => e.code(),
         }
@@ -830,11 +863,12 @@ impl DemuxVtbl {
             stream_count: demux_stream_count::<D>,
             stream_info: demux_stream_info::<D>,
             stream_config: demux_stream_config::<D>,
-            select: demux_select::<D>,
+            select_streams: demux_select_streams::<D>,
             read_packet: demux_read_packet::<D>,
             seek: demux_seek::<D>,
             read_frames: None,
             close: demux_close::<D>,
+            stream_video_info: None,
         }
     }
 }

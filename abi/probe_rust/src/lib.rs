@@ -40,7 +40,7 @@ const MP_ERR_INVALID: MpResult = 2;
 const MP_ERR_UNSUPPORTED: MpResult = 3;
 const MP_ERR_FORMAT: MpResult = 4;
 
-const MP_ABI_VERSION: u32 = 2;
+const MP_ABI_VERSION: u32 = 3;
 const MP_KIND_DSP: u32 = 3;
 const MP_SAMPLE_F64: u32 = 7;
 

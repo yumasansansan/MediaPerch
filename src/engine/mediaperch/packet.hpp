@@ -36,6 +36,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <span>
 #include <vector>
 
 namespace mp {
@@ -69,11 +70,21 @@ public:
     /// decision rather than an accident, so it is made here and named.
     [[nodiscard]] bool best_audio_stream(std::uint32_t& out) const;
 
-    MpResult select(std::uint32_t index);
+    /// Which streams `read_packet` may return. Selecting again replaces the
+    /// set, and the set is never empty -- see the ABI header for why.
+    MpResult select_streams(std::span<const std::uint32_t> indices);
+    /// The one-stream case, which is every audio graph in this tree.
+    MpResult select(std::uint32_t index) { return select_streams({&index, 1}); }
     /// Reads into `buffer`, growing it when the packet does not fit -- nothing
     /// is consumed by a read that could not deliver. MP_END at the end.
+    /// `out.stream` says which stream it came from.
     MpResult read_packet(std::vector<std::uint8_t>& buffer, MpPacket& out);
-    MpResult seek(std::uint64_t frame);
+    /// To `frame` of `stream`, in that stream's own rate. Moves every selected
+    /// stream, because one file has one position.
+    MpResult seek(std::uint32_t stream, std::uint64_t frame);
+    /// What the container says about a video stream. False for an audio stream,
+    /// and false on a demuxer with no video in it.
+    [[nodiscard]] bool video_info(std::uint32_t index, MpVideoInfo& out) const;
     /// Only for MP_STREAM_SELF_DECODES.
     MpResult read_frames(void* dst, std::size_t bytes, std::size_t& out_bytes);
 

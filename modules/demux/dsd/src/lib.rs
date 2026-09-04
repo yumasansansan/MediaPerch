@@ -143,13 +143,6 @@ impl Demux for DsdDemux {
         Ok(&self.config)
     }
 
-    fn select(&mut self, index: u32) -> Result<(), Error> {
-        if index == 0 {
-            Ok(())
-        } else {
-            Err(Error::Invalid)
-        }
-    }
 
     fn read_packet(&mut self, dst: &mut [u8]) -> Result<Next, Error> {
         // Read into the scratch first: the ABI says a packet that does not fit
@@ -187,7 +180,10 @@ impl Demux for DsdDemux {
         }
     }
 
-    fn seek(&mut self, frame: u64) -> Result<(), Error> {
+    fn seek(&mut self, stream: u32, frame: u64) -> Result<(), Error> {
+        if stream != 0 {
+            return Err(Error::Invalid); // one stream, and it is 0
+        }
         // **Down to an even frame, and the reason is the marker.**
         //
         // DoP's marker alternates 0x05, 0xFA every frame, so which one a frame

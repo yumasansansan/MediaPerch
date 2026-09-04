@@ -100,6 +100,20 @@ if(TARGET mediaperch_win)
     target_link_libraries(mediaperch_tests PRIVATE MediaPerch::win)
 endif()
 
+# ABI v3 against a real demuxer and a real file with two streams in it. Every
+# other test here drives fakes on purpose; this one cannot, because what is
+# under test is whether the shape works on a container somebody else's tool
+# wrote, and a fake that interleaved the way I imagined MP4 interleaves would
+# prove nothing.
+if(TARGET mp_demux_mp4)
+    target_sources(mediaperch_tests PRIVATE demux_v3_test.cpp)
+    target_compile_definitions(mediaperch_tests PRIVATE
+        "MEDIAPERCH_DEMUX_MP4=\"$<TARGET_FILE:mp_demux_mp4>\""
+        "MEDIAPERCH_TEST_AV=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mp4/av.mp4\""
+        "MEDIAPERCH_TEST_AV_BT2020=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mp4/av_bt2020.mp4\"")
+    add_dependencies(mediaperch_tests mp_demux_mp4)
+endif()
+
 # The VST3 host, with a VST3 this repository writes so that the test does not
 # depend on what happens to be installed. `vst3_host.cpp` is compiled into the
 # test binary the same way autoeq.cpp is above: a module's source is not a

@@ -396,12 +396,20 @@ MpResult MP_CALL demux_stream_config(MpDemux* d, std::uint32_t index, std::uint8
     return MP_OK;
 }
 
-MpResult MP_CALL demux_select(MpDemux* d, std::uint32_t index) noexcept
+MpResult MP_CALL demux_select_streams(MpDemux* d, const std::uint32_t* indices,
+                                      std::uint32_t count) noexcept
 {
-    if (d == nullptr) {
+    if (d == nullptr || indices == nullptr || count == 0) {
         return MP_ERR_INVALID;
     }
-    return index == 0 ? MP_OK : MP_ERR_INVALID;
+    // **One stream in this container, so there is nothing to interleave.** A
+    // set of two is a caller asking for something the file cannot hold rather
+    // than this module declining to try, and MP_ERR_UNSUPPORTED is the honest
+    // difference between the two.
+    if (count > 1) {
+        return MP_ERR_UNSUPPORTED;
+    }
+    return indices[0] == 0 ? MP_OK : MP_ERR_INVALID;
 }
 
 MpResult MP_CALL demux_read_packet(MpDemux* d, void* dst, std::size_t dst_bytes,
@@ -455,6 +463,7 @@ try {
     // Every packet stands alone: WavPack's blocks each carry their own sample
     // index and libwavpack has been asked to start at one, so there is nothing
     // to warm up.
+    out->stream = 0; // the only one this container has
     out->flags = MP_PACKET_SYNC | MP_PACKET_TIMED;
     d->position += d->is_dsd ? got / 2u : got;
     return MP_OK;
@@ -462,9 +471,10 @@ try {
     return MP_ERR_NO_MEMORY;
 }
 
-MpResult MP_CALL demux_seek(MpDemux* d, std::uint64_t frame) noexcept
+MpResult MP_CALL demux_seek(MpDemux* d, std::uint32_t stream,
+                            std::uint64_t frame) noexcept
 {
-    if (d == nullptr) {
+    if (d == nullptr || stream != 0) {
         return MP_ERR_INVALID;
     }
     // A DSD file counts in DoP frames outside this module and in DSD bytes
@@ -512,11 +522,12 @@ const MpDemuxVtbl g_vtbl = {
     /* stream_count  */ &demux_stream_count,
     /* stream_info   */ &demux_stream_info,
     /* stream_config */ &demux_stream_config,
-    /* select        */ &demux_select,
+    /* select_streams*/ &demux_select_streams,
     /* read_packet   */ &demux_read_packet,
     /* seek          */ &demux_seek,
     /* read_frames   */ nullptr, // it names its payload's codec; see the top
     /* close         */ &demux_close,
+    /* stream_video_info */ nullptr, // WavPack is audio
 };
 
 const MpCodec g_codecs[] = {MP_CODEC_PCM, MP_CODEC_DSD};

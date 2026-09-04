@@ -119,12 +119,24 @@ bool Demux::best_audio_stream(std::uint32_t& out) const
     return found;
 }
 
-MpResult Demux::select(std::uint32_t index)
+bool Demux::video_info(std::uint32_t index, MpVideoInfo& out) const
 {
-    if (!*this || vtbl_->select == nullptr) {
+    if (!*this || !has(*vtbl_, offsetof(MpDemuxVtbl, stream_video_info)) ||
+        vtbl_->stream_video_info == nullptr) {
+        return false;
+    }
+    out = MpVideoInfo{};
+    out.size = sizeof(out);
+    return vtbl_->stream_video_info(handle_, index, &out) == MP_OK;
+}
+
+MpResult Demux::select_streams(std::span<const std::uint32_t> indices)
+{
+    if (!*this || vtbl_->select_streams == nullptr) {
         return MP_ERR_UNSUPPORTED;
     }
-    return vtbl_->select(handle_, index);
+    return vtbl_->select_streams(handle_, indices.data(),
+                                 static_cast<std::uint32_t>(indices.size()));
 }
 
 MpResult Demux::read_packet(std::vector<std::uint8_t>& buffer, MpPacket& out)
@@ -154,12 +166,12 @@ MpResult Demux::read_packet(std::vector<std::uint8_t>& buffer, MpPacket& out)
     return MP_ERR_NO_MEMORY;
 }
 
-MpResult Demux::seek(std::uint64_t frame)
+MpResult Demux::seek(std::uint32_t stream, std::uint64_t frame)
 {
     if (!*this || vtbl_->seek == nullptr) {
         return MP_ERR_UNSUPPORTED;
     }
-    return vtbl_->seek(handle_, frame);
+    return vtbl_->seek(handle_, stream, frame);
 }
 
 MpResult Demux::read_frames(void* dst, std::size_t bytes, std::size_t& out_bytes)
@@ -509,7 +521,7 @@ bool PacketSource::seek(std::uint64_t frame)
     // The edit is measured from the start of the *stream*, so a seek past it
     // has nothing left to discard and a seek before it still does.
     const std::uint64_t absolute = frame + stream_.skip_frames;
-    if (demux_.seek(absolute) != MP_OK) {
+    if (demux_.seek(stream_.index, absolute) != MP_OK) {
         return false;
     }
     warm_up(frame);
