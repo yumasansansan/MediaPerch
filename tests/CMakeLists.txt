@@ -118,6 +118,7 @@ if(TARGET mp_video_d3d11)
     target_sources(mediaperch_tests PRIVATE video_d3d11_test.cpp)
     target_compile_definitions(mediaperch_tests PRIVATE
         "MEDIAPERCH_VIDEO_D3D11=\"$<TARGET_FILE:mp_video_d3d11>\"")
+    target_link_libraries(mediaperch_tests PRIVATE d3d11 dxgi)
     add_dependencies(mediaperch_tests mp_video_d3d11)
 endif()
 

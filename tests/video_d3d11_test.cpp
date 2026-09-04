@@ -31,6 +31,9 @@
 #endif
 #include <windows.h>
 
+#include <d3d11.h>
+#include <dxgi.h>
+
 namespace {
 
 /// The module, loaded the way the engine loads it.
@@ -381,20 +384,11 @@ TEST_CASE("a presenter refuses what it cannot do, and says so", "[video][d3d11]"
     frame.stride[1] = 16;
     CHECK(module.vtbl->present(presenter.handle(), &frame) == MP_OK);
 
-    // **A decoder's own texture is the limit that remains.** A DXVA decoder
-    // usually creates its output with D3D11_BIND_DECODER and no
-    // D3D11_BIND_SHADER_RESOURCE, so a view over it fails and the frame has to
-    // be copied into one that allows a view -- and which of the two a driver
-    // gives is not knowable from here, on a machine whose only device is WARP
-    // and therefore has no hardware decoder at all. Refused with a sentence
-    // rather than written blind.
-    frame.texture = &frame; // any non-null pointer: it is refused before use
-    CHECK(module.vtbl->present(presenter.handle(), &frame) == MP_ERR_UNSUPPORTED);
-    CHECK(presenter.described("trouble").find("system memory") != std::string::npos);
-
     // A plane that is not there, and a stride too short for the width it
-    // claims, are both refused rather than read past.
-    frame.texture = nullptr;
+    // claims, are both refused rather than read past. **A `texture` that is
+    // not a texture is not on that list**: the ABI takes a resource pointer and
+    // a caller that passes rubbish there has done what a caller passing rubbish
+    // in `plane[0]` has done, which no amount of checking here can catch.
     frame.plane[1] = nullptr;
     CHECK(module.vtbl->present(presenter.handle(), &frame) == MP_ERR_UNSUPPORTED);
     frame.plane[1] = planes.data() + 16u * 16u;
@@ -638,4 +632,121 @@ TEST_CASE("video tagged BT.709 is decoded with BT.1886, not with sRGB",
 
     // Twelve per cent apart at middle grey, which is the size of the mistake.
     CHECK(as_srgb[0] > as_bt1886[0] * 1.1f);
+}
+
+TEST_CASE("a decoder's own texture is viewed rather than copied", "[video][d3d11][yuv]")
+{
+    // **What decoding on the GPU is for**, tested without a hardware decoder.
+    // An ID3D11VideoDecoder writes NV12 into an array it owns and a frame is a
+    // slice of it; this makes such a texture by hand on the presenter's own
+    // device -- which is what `get_device` exists to hand over -- and checks
+    // the presenter samples it in place. What is not tested here is Media
+    // Foundation actually granting the binding, because WARP has no hardware
+    // decoder; that is MF_SA_D3D11_BINDFLAGS and it is asked for in codec_mft.
+    Module module;
+    REQUIRE(module.vtbl != nullptr);
+
+    Presenter presenter{*module.vtbl, 32, 32};
+    REQUIRE(presenter.ok());
+    presenter.info().matrix = 1;  // BT.709
+    presenter.info().transfer = 1;
+    REQUIRE(presenter.configure() == "");
+
+    MpGraphicsDevice graphics{};
+    graphics.size = sizeof(graphics);
+    REQUIRE(module.vtbl->get_device(presenter.handle(), &graphics) == MP_OK);
+    CHECK(graphics.api == MP_GRAPHICS_D3D11);
+    REQUIRE(graphics.device != nullptr);
+    auto* device = static_cast<ID3D11Device*>(graphics.device);
+
+    // NV12 with a shader-resource binding, which is exactly what codec_mft asks
+    // an MFT for. If WARP will not give it, that is worth failing over rather
+    // than skipping: a test that quietly does nothing is also a claim.
+    UINT support = 0;
+    REQUIRE(SUCCEEDED(device->CheckFormatSupport(DXGI_FORMAT_NV12, &support)));
+    REQUIRE((support & D3D11_FORMAT_SUPPORT_TEXTURE2D) != 0);
+
+    constexpr std::uint8_t k_y = 120;
+    constexpr std::uint8_t k_cb = 90;
+    constexpr std::uint8_t k_cr = 200;
+    std::vector<std::uint8_t> nv12(32u * 32u + 16u * 32u);
+    std::fill(nv12.begin(), nv12.begin() + 32 * 32, k_y);
+    for (std::size_t i = 32u * 32u; i < nv12.size(); i += 2) {
+        nv12[i] = k_cb;
+        nv12[i + 1] = k_cr;
+    }
+
+    // An array of two slices, so the frame's index is exercised rather than
+    // assumed to be zero -- a decoder hands out one array and an index into it.
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = 32;
+    desc.Height = 32;
+    desc.MipLevels = 1;
+    desc.ArraySize = 2;
+    desc.Format = DXGI_FORMAT_NV12;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+    D3D11_SUBRESOURCE_DATA seed[2]{};
+    std::vector<std::uint8_t> blank(nv12.size(), 0);
+    seed[0].pSysMem = blank.data();
+    seed[0].SysMemPitch = 32;
+    seed[1].pSysMem = nv12.data();
+    seed[1].SysMemPitch = 32;
+
+    ID3D11Texture2D* texture = nullptr;
+    REQUIRE(SUCCEEDED(device->CreateTexture2D(&desc, seed, &texture)));
+
+    MpVideoFrame frame{};
+    frame.size = sizeof(frame);
+    frame.format = MP_PIXEL_NV12;
+    frame.width = 32;
+    frame.height = 32;
+    frame.texture = texture;
+    frame.texture_index = 1; // the slice that has the picture in it
+    REQUIRE(module.vtbl->present(presenter.handle(), &frame) == MP_OK);
+
+    const std::vector<float> shown = presenter.read_back();
+    REQUIRE(shown.size() == 32u * 32u * 4u);
+
+    // The same conversion the CPU-plane test checks, so the two paths are held
+    // to one answer rather than each to its own.
+    const double kr = 0.2126;
+    const double kb = 0.0722;
+    const double kg = 1.0 - kr - kb;
+    const double y = (k_y / 255.0 - 16.0 / 255.0) * (255.0 / 219.0);
+    const double u = (k_cb / 255.0 - 0.5) * (255.0 / 224.0);
+    const double v = (k_cr / 255.0 - 0.5) * (255.0 / 224.0);
+    const auto to_linear = [](double c) { return std::pow(std::clamp(c, 0.0, 1.0), 2.4); };
+    CHECK(shown[0] == Catch::Approx(to_linear(y + 2.0 * (1.0 - kr) * v)).margin(1e-5));
+    CHECK(shown[2] == Catch::Approx(to_linear(y + 2.0 * (1.0 - kb) * u)).margin(1e-5));
+
+    // And a slice past the end of the array is refused rather than read.
+    frame.texture_index = 7;
+    CHECK(module.vtbl->present(presenter.handle(), &frame) == MP_ERR_UNSUPPORTED);
+    CHECK(presenter.described("trouble").find("slice") != std::string::npos);
+    frame.texture_index = 1;
+
+    // **A texture without the binding is the case MF_SA_D3D11_BINDFLAGS exists
+    // to prevent**, and it is a driver saying no rather than a caller making a
+    // mistake -- so it is refused with a sentence naming the flag rather than
+    // copied silently into something that would work.
+    D3D11_TEXTURE2D_DESC plain = desc;
+    plain.ArraySize = 1;
+    plain.BindFlags = 0;
+    plain.Usage = D3D11_USAGE_STAGING;
+    plain.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    ID3D11Texture2D* unbindable = nullptr;
+    if (SUCCEEDED(device->CreateTexture2D(&plain, nullptr, &unbindable))) {
+        MpVideoFrame unusable = frame;
+        unusable.texture = unbindable;
+        unusable.texture_index = 0;
+        CHECK(module.vtbl->present(presenter.handle(), &unusable) == MP_ERR_UNSUPPORTED);
+        CHECK(presenter.described("trouble").find("D3D11_BIND_SHADER_RESOURCE") !=
+              std::string::npos);
+        unbindable->Release();
+    }
+
+    texture->Release();
 }

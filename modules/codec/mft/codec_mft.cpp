@@ -19,6 +19,15 @@
 // host picks the decoder that matches the presenter's device -- which is what
 // the `api` argument to `probe` is for.
 //
+// Worth naming precisely, because the names are three generations deep and get
+// used interchangeably. **DXVA2 is a Direct3D 9 API** -- `IDirectXVideoDecoder`
+// and its service -- and this module does not touch it. The D3D11 equivalent is
+// `ID3D11VideoDevice`, which FFmpeg calls `d3d11va`, and D3D12's is
+// `ID3D12VideoDevice`. What all three share is the DXVA *specification*: the
+// decoder GUIDs, the bitstream buffer layout, the picture parameter structures.
+// The protocol is DXVA; the API to reach it is whichever Direct3D you are on.
+// An MFT sits above all of that and hands back a texture.
+//
 // **Two output paths, and the software one is not a consolation.** With a
 // device, a hardware MFT decodes into a texture on it and nothing crosses the
 // bus. Without one -- a machine with no usable adapter, a CI runner, or a host
@@ -432,6 +441,21 @@ try {
             d3d->AddRef();
             *c->device.put() = d3d;
             c->on_gpu = true;
+
+            // **Ask for the binding rather than hoping for it.** A decoder's
+            // output is allocated by the transform, and by default it is a
+            // texture with D3D11_BIND_DECODER and nothing else -- which a
+            // presenter cannot make a view over, so the frame would have to be
+            // copied and the point of decoding on the GPU would be gone.
+            // `MF_SA_D3D11_BINDFLAGS` is the documented way to say what the
+            // allocation needs, and every hardware decoder that matters
+            // honours it. A driver that does not gives back a texture without
+            // the flag, and the presenter says which of the two happened.
+            Com<IMFAttributes> outputs;
+            if (SUCCEEDED(c->transform->GetOutputStreamAttributes(0, outputs.put()))) {
+                outputs->SetUINT32(MF_SA_D3D11_BINDFLAGS,
+                                   D3D11_BIND_DECODER | D3D11_BIND_SHADER_RESOURCE);
+            }
         } else {
             // The transform found by the hardware enumeration but unwilling to
             // take the device is a driver saying no. Its frames come back in

@@ -1799,6 +1799,56 @@ Three things the first run of that test found:
   decoder has forgotten them and the first packet after a seek is a keyframe whose SPS and
   PPS live in the container.
 
+#### DXVA2, D3D11 and D3D12 are three APIs over one specification
+
+Worth naming precisely, because the names are three generations deep and get used
+interchangeably -- including by an earlier version of this document.
+
+**DXVA2 is a Direct3D 9 API.** `IDirectXVideoDecoder` and `IDirectXVideoDecoderService`,
+introduced with Vista, and nothing in this tree touches it. The Direct3D 11 equivalent is
+`ID3D11VideoDevice` and `ID3D11VideoDecoder`, which FFmpeg calls `d3d11va`; Direct3D 12's is
+`ID3D12VideoDevice`. What all three share is the DXVA **specification** -- the decoder GUIDs,
+the bitstream buffer layout, the picture parameter structures -- so the protocol is DXVA and
+the API to reach it is whichever Direct3D you are on. An MFT sits above all of it.
+
+**And a decoder's texture can be sampled, which was written down here as unknowable and is
+not.** An MFT allocates its own output, by default as a texture with `D3D11_BIND_DECODER` and
+nothing else -- which no presenter can view, so the frame would have to be copied and the
+point of decoding on the GPU would be gone. `MF_SA_D3D11_BINDFLAGS` on the transform's output
+stream attributes is the documented way to say what the allocation needs, and `codec_mft`
+asks for `D3D11_BIND_DECODER | D3D11_BIND_SHADER_RESOURCE`. A driver that declines gives back
+a texture without the flag and the presenter says so by name rather than copying quietly.
+
+The presenter adopts such a texture with two views over the one resource -- `R8_UNORM` for
+the luma plane and `R8G8_UNORM` for the interleaved chroma, at the array slice the frame
+names, because a decoder hands out one array and an index into it. Nothing is read back,
+copied or converted. **Tested without a hardware decoder**, by making exactly that texture on
+the presenter's own device and handing it over, which also exercises `get_device`; what stays
+untested here is Media Foundation granting the binding, because WARP has no hardware decoder.
+
+#### What a D3D12 decoder actually costs
+
+Since one is planned, the difference is worth knowing before it is started, and it is larger
+than the API names suggest.
+
+`codec_mft` gets a whole decoder: an `IMFTransform` takes an Annex B bitstream and hands back
+frames. **D3D12 Video does not work that way.** `ID3D12VideoDecoder` takes the DXVA picture
+parameters and slice control data, which means the *host* has parsed the sequence, picture
+and slice headers -- so a `codec_d3d12video` module contains an H.264 (and then an HEVC, and
+then an AV1) bitstream parser before it decodes anything. That is what FFmpeg's `d3d12va`
+hwaccel is, and it is most of the work.
+
+Two things do get easier. The output resources are **created by the caller**, so the binding
+question above simply does not arise -- you allocate them with what you need. And a parser
+written for it is the same parser a software decoder would want, so it is not thrown away.
+
+There is a middle road worth naming so that it is a choice rather than a discovery: decode on
+D3D11 through `codec_mft` and share the texture with a D3D12 presenter through a shared NT
+handle and a fence. It works, it is what several browsers do, and it is exactly the two
+devices and the synchronisation §9.8.1 says to avoid -- which is a smaller cost than a copy
+and a larger one than nothing. Which of the two a D3D12 presenter takes is a decision for
+when there is one.
+
 ### 9.8.2 Which decoders, and can a software one use the GPU
 
 **openh264, dav1d and their neighbours are separate modules, not replacements.**

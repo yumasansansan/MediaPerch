@@ -697,6 +697,84 @@ bool write_plane(MpVideo* v, ID3D11Texture2D* texture, const void* src,
     return true;
 }
 
+/// A decoder's own texture, viewed rather than copied.
+///
+/// **This is what decoding on the GPU is for**: an `ID3D11VideoDecoder` writes
+/// NV12 into an array it owns, and a frame is a slice of that array. Two views
+/// over the one texture -- `R8_UNORM` for the luma plane and `R8G8_UNORM` for
+/// the interleaved chroma -- is how D3D11 exposes the planes of an NV12
+/// resource, and nothing is read back, copied or converted on the way.
+///
+/// It needs `D3D11_BIND_SHADER_RESOURCE` on the decoder's output, which is not
+/// automatic and **is not a matter of luck**: an MFT states whether it is
+/// D3D11-aware and takes `MF_SA_D3D11_BINDFLAGS` on its output stream, so a
+/// host asks for the binding rather than hoping for it. `codec_mft` asks.
+bool adopt(MpVideo* v, const MpVideoFrame& frame, std::string& why)
+{
+    auto* texture = static_cast<ID3D11Texture2D*>(frame.texture);
+    D3D11_TEXTURE2D_DESC desc{};
+    texture->GetDesc(&desc);
+
+    if ((desc.BindFlags & D3D11_BIND_SHADER_RESOURCE) == 0) {
+        // A driver that would not give the binding the decoder asked for. The
+        // answer is a copy into a texture that allows one, which nothing here
+        // needs yet -- and saying which of the two happened is worth more than
+        // doing it silently.
+        why = "the decoder texture cannot be sampled: it was created without "
+              "D3D11_BIND_SHADER_RESOURCE";
+        return false;
+    }
+    if (desc.Format != DXGI_FORMAT_NV12 && desc.Format != DXGI_FORMAT_P010) {
+        why = "the decoder texture is neither NV12 nor P010";
+        return false;
+    }
+    if (frame.texture_index >= desc.ArraySize) {
+        why = "the frame names a slice past the end of the decoder's array";
+        return false;
+    }
+
+    // A device of its own is a frame from a decoder somebody opened on another
+    // device -- see plan.md §9.8.1. Sharing it would take a shared handle and a
+    // fence, and being told is better than the picture being wrong.
+    Com<ID3D11Device> owner;
+    texture->GetDevice(owner.put());
+    if (owner.get() != v->device.get()) {
+        why = "the frame is on a different device from the presenter";
+        return false;
+    }
+
+    const bool ten_bit = desc.Format == DXGI_FORMAT_P010;
+    v->source_view.reset();
+    v->source.reset();
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC view{};
+    view.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+    view.Texture2DArray.MostDetailedMip = 0;
+    view.Texture2DArray.MipLevels = 1;
+    view.Texture2DArray.FirstArraySlice = frame.texture_index;
+    view.Texture2DArray.ArraySize = 1;
+
+    view.Format = ten_bit ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R8_UNORM;
+    if (FAILED(v->device->CreateShaderResourceView(texture, &view, v->luma_view.put()))) {
+        why = "no luma view over the decoder texture";
+        return false;
+    }
+    view.Format = ten_bit ? DXGI_FORMAT_R16G16_UNORM : DXGI_FORMAT_R8G8_UNORM;
+    if (FAILED(v->device->CreateShaderResourceView(texture, &view, v->chroma_view.put()))) {
+        why = "no chroma view over the decoder texture";
+        return false;
+    }
+
+    // The textures this module owns are not in the path for an adopted frame,
+    // and holding them would keep a decoder's pool larger than it needs to be.
+    v->luma.reset();
+    v->chroma.reset();
+    v->source_width = frame.width != 0 ? frame.width : desc.Width;
+    v->source_height = frame.height != 0 ? frame.height : desc.Height;
+    v->source_format = ten_bit ? MP_PIXEL_P010 : MP_PIXEL_NV12;
+    return true;
+}
+
 /// The frame, in whichever of the three shapes it arrived in.
 bool upload(MpVideo* v, const MpVideoFrame& frame, std::string& why)
 {
@@ -706,17 +784,7 @@ bool upload(MpVideo* v, const MpVideoFrame& frame, std::string& why)
         return false;
     }
     if (frame.texture != nullptr) {
-        // **A decoder's own texture, and this is where it would be adopted.**
-        // Nothing here can do it yet and saying so beats a copy nobody asked
-        // for: a DXVA decoder's output is usually created with
-        // D3D11_BIND_DECODER and no D3D11_BIND_SHADER_RESOURCE, so a view over
-        // it fails and the frame has to be copied into a texture that allows
-        // one. Which of the two a driver gives is not knowable from here, and
-        // there is no hardware decoder on the machine this is tested on -- so
-        // it is refused rather than written blind. See plan.md §9.8.1.
-        why = "a decoder texture is not adopted yet; open the codec with no device "
-              "to get frames in system memory";
-        return false;
+        return adopt(v, frame, why);
     }
     if (frame.width == 0 || frame.height == 0) {
         why = "a frame with no pixels in it";
