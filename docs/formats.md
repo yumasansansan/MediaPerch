@@ -1827,18 +1827,43 @@ the declines.
 
 ## Fuzzing
 
-`dr_wav` and `dr_flac` have libFuzzer targets in `fuzz/`, built with ASan and run
-for thirty seconds each in CI. A longer local campaign — eight minutes across the
-two, at about 150,000 executions a second — found **no crashes**, and grew the
-coverage corpus to 474 WAV and 2,113 FLAC inputs.
+**Eight targets, one per parser, and every one runs in CI on every push** for
+thirty seconds — which is a smoke test that the campaign still builds rather
+than a campaign, and somewhere for a regression corpus to live.
 
-That is a short campaign and it proves correspondingly little. What it does prove
-is that the machinery works, which is the part that rots.
+| Target | What it fuzzes | How |
+|---|---|---|
+| `wav_fuzzer` | dr_wav | C++ under AddressSanitizer |
+| `flac_fuzzer` | libFLAC | " |
+| `mpa_fuzzer` | libmpg123, both halves | " |
+| `mp4_fuzzer` | Bento4 | " |
+| `settings_fuzzer` | DragonPerch's INI parser | " |
+| `alac_fuzzer` | the ALAC decoder | Rust, coverage-guided on the stable toolchain |
+| `aac_fuzzer` | the AAC-LC decoder | " |
+| `adts_fuzzer` | the ADTS framer | " |
+
+The Rust three have no sanitizer and do not need one: an index past a slice is a
+panic, which libFuzzer reports as a crash, so the bounds checks *are* the
+sanitizer. What they do need is coverage instrumentation, which stable `rustc`
+reaches by a route that is not the documented one and took five link errors to
+find; [building.md](building.md) has it.
+
+Longer local campaigns, five minutes each, found **nothing** in any of them —
+1.5 million executions on libmpg123, 1.9 million on the AAC decoder, 10.6
+million on the ADTS framer. What a campaign of that length proves is
+correspondingly little. What it does prove is that the machinery works, which is
+the part that rots.
+
+**It has found things.** `flacframe_fuzzer` found an out-of-bounds read in the
+FLAC frame parser that used to be here, in ninety seconds. `mp4_fuzzer` found two
+denial-of-service bugs in Bento4 in ten minutes, both reported upstream. And
+`aac_fuzzer` found the ID3v2 allocation in libmpg123 that made a ten-byte header
+worth 147 MB. Each of those is written up where the format is.
 
 ## Still untested
 
 - 8-bit WAV, which is unsigned and would need a conversion to reach any of our
-  sample types; `decode_native` refuses it deliberately rather than converting.
+  sample types; `codec_pcm` refuses it deliberately rather than converting.
 - ~~Anything above two channels, at any depth.~~ Stale: 5.1 and 7.1 are
   measured above, channel by channel, and the generated matrix carries 5.1 rows
   for WAV, FLAC and ALAC. Left visible rather than deleted because the reason it
