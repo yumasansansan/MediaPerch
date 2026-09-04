@@ -18,6 +18,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -313,5 +315,138 @@ TEST_CASE("the H.264 track of a real MP4 decodes to frames", "[video][mft]")
     // whole point: a timestamp with no stated unit is a number nobody can read.
     CHECK(produced.timescale == 10000000u);
 
+    codec->close(decoder);
+}
+
+TEST_CASE("a decoded frame reaches the presenter and comes back as pixels",
+          "[video][mft][d3d11]")
+{
+    // **The whole chain, and the first picture this project has produced.**
+    // demux_mp4 reads the container, codec_mft decodes the bitstream to NV12 in
+    // system memory, video_d3d11 converts it by the matrix the container named
+    // and renders it, and read_back hands over single-precision linear light
+    // that a test can look at. Nothing here is looked at by a person.
+    Module demux_module{MEDIAPERCH_DEMUX_MP4, MP_KIND_DEMUX};
+    Module codec_module{MEDIAPERCH_CODEC_MFT, MP_KIND_VCODEC};
+    Module video_module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(demux_module.vtbl != nullptr);
+    REQUIRE(codec_module.vtbl != nullptr);
+    REQUIRE(video_module.vtbl != nullptr);
+    const auto* codec = static_cast<const MpVideoCodecVtbl*>(codec_module.vtbl);
+    const auto* video = static_cast<const MpVideoVtbl*>(video_module.vtbl);
+
+    mp::Demux demux;
+    REQUIRE(demux.open(*static_cast<const MpDemuxVtbl*>(demux_module.vtbl),
+                       MEDIAPERCH_TEST_AV) == MP_OK);
+    std::uint32_t stream = 0;
+    MpStreamInfo info{};
+    bool found = false;
+    for (std::uint32_t i = 0; i < demux.stream_count(); ++i) {
+        if (demux.stream_info(i, info) && info.kind == MP_STREAM_VIDEO) {
+            stream = i;
+            found = true;
+            break;
+        }
+    }
+    REQUIRE(found);
+
+    std::vector<std::uint8_t> config;
+    REQUIRE(demux.stream_config(stream, config));
+    MpVideoCodec* decoder = nullptr;
+    REQUIRE(codec->open(MP_CODEC_H264, nullptr, config.data(),
+                        static_cast<std::uint32_t>(config.size()), &decoder) == MP_OK);
+
+    // **The container's colour, not the decoder's.** demux_mp4 read `colr`;
+    // codec_mft deliberately reports unspecified because it knows less. This is
+    // the join, and getting it the wrong way round is how a picture ends up
+    // merely plausible.
+    MpVideoInfo geometry{};
+    geometry.size = sizeof(geometry);
+    REQUIRE(demux.video_info(stream, geometry));
+
+    MpVideo* presenter = nullptr;
+    REQUIRE(video->open(nullptr, &presenter) == MP_OK);
+    REQUIRE(video->set(presenter, "device", "warp") == MP_OK);
+    REQUIRE(video->configure(presenter, &geometry) == MP_OK);
+
+    const std::uint32_t only_video[] = {stream};
+    REQUIRE(demux.select_streams(only_video) == MP_OK);
+
+    std::vector<std::uint8_t> buffer;
+    MpPacket packet{};
+    std::uint32_t presented = 0;
+
+    const auto drain = [&] {
+        for (int guard = 0; guard < 64; ++guard) {
+            MpVideoFrame frame{};
+            frame.size = sizeof(frame);
+            const MpResult r = codec->next_frame(decoder, &frame);
+            if (r == MP_END) {
+                return;
+            }
+            if (r == MP_ERR_BUSY) {
+                continue;
+            }
+            REQUIRE(r == MP_OK);
+            REQUIRE(video->present(presenter, &frame) == MP_OK);
+            ++presented;
+        }
+    };
+
+    while (demux.read_packet(buffer, packet) == MP_OK) {
+        if (codec->decode(decoder, buffer.data(), packet.bytes, packet.frame) ==
+            MP_ERR_BUSY) {
+            drain();
+            REQUIRE(codec->decode(decoder, buffer.data(), packet.bytes, packet.frame) ==
+                    MP_OK);
+        }
+        drain();
+    }
+    REQUIRE(codec->flush(decoder) == MP_OK);
+    drain();
+    CHECK(presented == 24);
+
+    // The last frame, in linear light at single precision.
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    MpPixelFormat format = MP_PIXEL_NONE;
+    REQUIRE(video->read_back(presenter, nullptr, 0, &width, &height, &format) ==
+            MP_ERR_NO_MEMORY);
+    CHECK(width == 128u);
+    CHECK(height == 96u);
+    REQUIRE(format == MP_PIXEL_RGBA32F);
+
+    std::vector<float> pixels(static_cast<std::size_t>(width) * height * 4u);
+    REQUIRE(video->read_back(presenter, pixels.data(), pixels.size() * sizeof(float),
+                             &width, &height, &format) == MP_OK);
+
+    // **A picture, and this is what says so.** testsrc2 is bars and shapes, so
+    // a frame of it has a spread of luminance and more than one hue -- neither
+    // of which a cleared buffer, a stuck decoder or a dropped chroma plane
+    // would produce.
+    float darkest = 2.0f;
+    float brightest = -1.0f;
+    bool coloured = false;
+    for (std::size_t i = 0; i < pixels.size(); i += 4) {
+        const float r = pixels[i];
+        const float g = pixels[i + 1];
+        const float b = pixels[i + 2];
+        const float luminance = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+        darkest = std::min(darkest, luminance);
+        brightest = std::max(brightest, luminance);
+        if (std::abs(r - b) > 0.05f || std::abs(g - b) > 0.05f) {
+            coloured = true;
+        }
+        // Linear light out of an SDR frame stays inside the range the transfer
+        // is defined over; anything outside it is arithmetic that went wrong
+        // rather than a highlight.
+        CHECK(r >= -0.001f);
+        CHECK(r <= 1.001f);
+    }
+    CHECK(darkest < 0.2f);
+    CHECK(brightest > 0.5f);
+    CHECK(coloured);
+
+    video->close(presenter);
     codec->close(decoder);
 }

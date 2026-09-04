@@ -19,6 +19,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -122,8 +123,12 @@ public:
         info_.height = height;
         info_.display_width = width;
         info_.display_height = height;
-        info_.primaries = 1;  // BT.709
-        info_.transfer = 1;   // BT.709
+        info_.primaries = 1; // BT.709
+        // **sRGB by default here, because the source is BGRA8**: a test pattern
+        // and a software decoder produce sRGB, and video tagged BT.709 gets
+        // BT.1886 instead. Which curve is not a matter of taste and the code
+        // point is how a stream says which -- see the shader.
+        info_.transfer = 13; // IEC 61966-2-1, which is sRGB
         info_.matrix = 1;
         info_.timescale = 24000;
     }
@@ -364,9 +369,6 @@ TEST_CASE("a presenter refuses what it cannot do, and says so", "[video][d3d11]"
     REQUIRE(presenter.ok());
     REQUIRE(presenter.configure() == "");
 
-    // NV12 is what every hardware decoder produces and nothing here decodes
-    // video yet, so the path has no producer and no test could check it. It is
-    // refused with a sentence rather than accepted and rendered as noise.
     std::vector<std::uint8_t> planes(16u * 16u * 3u / 2u, 0x80);
     MpVideoFrame frame{};
     frame.size = sizeof(frame);
@@ -377,8 +379,27 @@ TEST_CASE("a presenter refuses what it cannot do, and says so", "[video][d3d11]"
     frame.stride[0] = 16;
     frame.plane[1] = planes.data() + 16u * 16u;
     frame.stride[1] = 16;
+    CHECK(module.vtbl->present(presenter.handle(), &frame) == MP_OK);
+
+    // **A decoder's own texture is the limit that remains.** A DXVA decoder
+    // usually creates its output with D3D11_BIND_DECODER and no
+    // D3D11_BIND_SHADER_RESOURCE, so a view over it fails and the frame has to
+    // be copied into one that allows a view -- and which of the two a driver
+    // gives is not knowable from here, on a machine whose only device is WARP
+    // and therefore has no hardware decoder at all. Refused with a sentence
+    // rather than written blind.
+    frame.texture = &frame; // any non-null pointer: it is refused before use
     CHECK(module.vtbl->present(presenter.handle(), &frame) == MP_ERR_UNSUPPORTED);
-    CHECK(presenter.described("trouble").find("NV12") != std::string::npos);
+    CHECK(presenter.described("trouble").find("system memory") != std::string::npos);
+
+    // A plane that is not there, and a stride too short for the width it
+    // claims, are both refused rather than read past.
+    frame.texture = nullptr;
+    frame.plane[1] = nullptr;
+    CHECK(module.vtbl->present(presenter.handle(), &frame) == MP_ERR_UNSUPPORTED);
+    frame.plane[1] = planes.data() + 16u * 16u;
+    frame.stride[0] = 4;
+    CHECK(module.vtbl->present(presenter.handle(), &frame) == MP_ERR_UNSUPPORTED);
 }
 
 TEST_CASE("what a person can set, and what it reports back", "[video][d3d11]")
@@ -465,4 +486,156 @@ TEST_CASE("what presenting in FP16 costs, measured rather than assumed",
     REQUIRE(dark > 0.0f);
     CHECK(dark < 0.01f);
     CHECK(std::abs(presented[2] - dark) / dark <= 1.0f / 2048.0f);
+}
+
+TEST_CASE("NV12 becomes RGB by the matrix the container named", "[video][d3d11][yuv]")
+{
+    // **The exact check.** A synthetic NV12 frame whose Y, Cb and Cr this test
+    // chooses, against the BT.709 conversion computed here from the published
+    // luma weights -- not against whatever the shader produced last time. The
+    // read-back is FP32, so the comparison is the arithmetic rather than a
+    // quantisation of it.
+    Module module;
+    REQUIRE(module.vtbl != nullptr);
+
+    Presenter presenter{*module.vtbl, 32, 32};
+    REQUIRE(presenter.ok());
+    presenter.info().matrix = 1; // BT.709
+    presenter.info().transfer = 1;
+    presenter.info().primaries = 1;
+    REQUIRE(presenter.configure() == "");
+
+    // Studio range, which is what a decoder produces unless a container says
+    // otherwise: Y in 16..235, chroma centred on 128.
+    constexpr std::uint8_t k_y = 120;
+    constexpr std::uint8_t k_cb = 90;
+    constexpr std::uint8_t k_cr = 200;
+
+    std::vector<std::uint8_t> luma(32u * 32u, k_y);
+    std::vector<std::uint8_t> chroma(16u * 16u * 2u);
+    for (std::size_t i = 0; i < chroma.size(); i += 2) {
+        chroma[i] = k_cb;
+        chroma[i + 1] = k_cr;
+    }
+
+    MpVideoFrame frame{};
+    frame.size = sizeof(frame);
+    frame.format = MP_PIXEL_NV12;
+    frame.width = 32;
+    frame.height = 32;
+    frame.plane[0] = luma.data();
+    frame.stride[0] = 32;
+    frame.plane[1] = chroma.data();
+    frame.stride[1] = 32;
+    REQUIRE(module.vtbl->present(presenter.handle(), &frame) == MP_OK);
+
+    const std::vector<float> shown = presenter.read_back();
+    REQUIRE(shown.size() == 32u * 32u * 4u);
+
+    // BT.709, computed here in double from Kr and Kb, which is the same
+    // derivation yuv_matrix.cpp does and deliberately not the same code.
+    const double kr = 0.2126;
+    const double kb = 0.0722;
+    const double kg = 1.0 - kr - kb;
+    const double y = (k_y / 255.0 - 16.0 / 255.0) * (255.0 / 219.0);
+    const double u = (k_cb / 255.0 - 0.5) * (255.0 / 224.0);
+    const double v = (k_cr / 255.0 - 0.5) * (255.0 / 224.0);
+    const double r = y + 2.0 * (1.0 - kr) * v;
+    const double g = y - 2.0 * kb * (1.0 - kb) / kg * u - 2.0 * kr * (1.0 - kr) / kg * v;
+    const double b = y + 2.0 * (1.0 - kb) * u;
+
+    // BT.1886, a pure 2.4, because the stream is tagged BT.709 rather than
+    // sRGB -- see the shader's comment on which curve and why.
+    const auto to_linear = [](double c) {
+        return std::pow(std::clamp(c, 0.0, 1.0), 2.4);
+    };
+    CHECK(shown[0] == Catch::Approx(to_linear(r)).margin(1e-5));
+    CHECK(shown[1] == Catch::Approx(to_linear(g)).margin(1e-5));
+    CHECK(shown[2] == Catch::Approx(to_linear(b)).margin(1e-5));
+    CHECK(shown[3] == Catch::Approx(1.0f).margin(1e-6));
+
+    // And a chosen colour is not grey, which is the cheapest evidence that the
+    // matrix ran at all: a conversion that dropped the chroma would give three
+    // equal channels for any Y.
+    CHECK(std::abs(shown[0] - shown[2]) > 0.01f);
+}
+
+TEST_CASE("studio range and full range are not the same picture", "[video][d3d11][yuv]")
+{
+    // Treating 16..235 as 0..255 crushes the blacks and clips the whites, which
+    // reads as a contrast setting rather than as a bug -- so the flag the
+    // container carries has to reach the shader, and this is the test that it
+    // does.
+    Module module;
+    REQUIRE(module.vtbl != nullptr);
+
+    std::vector<float> studio;
+    std::vector<float> full;
+    for (int pass = 0; pass < 2; ++pass) {
+        Presenter presenter{*module.vtbl, 16, 16};
+        REQUIRE(presenter.ok());
+        presenter.info().matrix = 1;
+        presenter.info().transfer = 1;
+        if (pass == 1) {
+            presenter.info().flags |= MP_VIDEO_FULL_RANGE;
+        }
+        REQUIRE(presenter.configure() == "");
+
+        std::vector<std::uint8_t> luma(16u * 16u, 235);
+        std::vector<std::uint8_t> chroma(8u * 8u * 2u, 128);
+        MpVideoFrame frame{};
+        frame.size = sizeof(frame);
+        frame.format = MP_PIXEL_NV12;
+        frame.width = 16;
+        frame.height = 16;
+        frame.plane[0] = luma.data();
+        frame.stride[0] = 16;
+        frame.plane[1] = chroma.data();
+        frame.stride[1] = 16;
+        REQUIRE(module.vtbl->present(presenter.handle(), &frame) == MP_OK);
+        (pass == 0 ? studio : full) = presenter.read_back();
+    }
+    REQUIRE(!studio.empty());
+    REQUIRE(!full.empty());
+
+    // 235 is studio white, so studio range makes it 1.0 and full range makes it
+    // 235/255 -- which after a 2.4 power is about 0.83.
+    CHECK(studio[0] == Catch::Approx(1.0f).margin(1e-4));
+    CHECK(full[0] < 0.9f);
+    CHECK(full[0] > 0.7f);
+}
+
+TEST_CASE("video tagged BT.709 is decoded with BT.1886, not with sRGB",
+          "[video][d3d11][colour]")
+{
+    // **Two curves, and which one is not a matter of taste.** BT.709 states a
+    // camera OETF and its reference display EOTF is BT.1886, a pure 2.4 --
+    // which is what the picture was graded on. Decoding it with the sRGB curve
+    // lifts the shadows, which is the mirror image of the fault §9.2 records
+    // Windows committing in the other direction, and it is invisible until
+    // somebody puts two players side by side.
+    Module module;
+    REQUIRE(module.vtbl != nullptr);
+
+    const std::vector<std::uint8_t> source = flat(16, 16, 0x80, 0x80, 0x80);
+    const float encoded = 0x80 / 255.0f;
+
+    std::vector<float> as_srgb;
+    std::vector<float> as_bt1886;
+    for (int pass = 0; pass < 2; ++pass) {
+        Presenter presenter{*module.vtbl, 16, 16};
+        REQUIRE(presenter.ok());
+        presenter.info().transfer = pass == 0 ? 13u : 1u;
+        REQUIRE(presenter.configure() == "");
+        REQUIRE(presenter.present(source, 16, 16) == MP_OK);
+        (pass == 0 ? as_srgb : as_bt1886) = presenter.read_back();
+    }
+    REQUIRE(!as_srgb.empty());
+    REQUIRE(!as_bt1886.empty());
+
+    CHECK(as_srgb[0] == Catch::Approx(srgb_to_linear(encoded)).margin(1e-6));
+    CHECK(as_bt1886[0] == Catch::Approx(std::pow(encoded, 2.4f)).margin(1e-6));
+
+    // Twelve per cent apart at middle grey, which is the size of the mistake.
+    CHECK(as_srgb[0] > as_bt1886[0] * 1.1f);
 }

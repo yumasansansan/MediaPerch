@@ -1427,6 +1427,30 @@ it; the plan carries the value so a shader never has to ask a display anything.
 The one genuine pass-through in §9 is therefore narrower than it looked: **PQ content, on an
 HDR display, with nothing composited over it.** Everything else is converted.
 
+### 9.9.2 Two transfer curves, and which one a stream gets
+
+Decided while writing the shader, because a renderer cannot decode a frame without answering
+it, and it is the kind of thing that is invisible until two players are side by side.
+
+**Content tagged sRGB gets the sRGB piecewise curve. Video tagged BT.709 or BT.601 gets
+BT.1886, a pure 2.4 power.** BT.709 states a camera OETF; the display EOTF those standards
+specify is BT.1886, and that is what the picture was graded on. Decoding video with the sRGB
+curve instead lifts the shadows -- about twelve per cent at middle grey -- which is the
+mirror image of the fault §9.2 records Windows committing in the other direction.
+
+The code point decides, so nothing is guessed: `MpVideoInfo::transfer` comes from `colr` or
+from the resolution convention, and the shader takes a flag rather than a policy. A test
+renders the same grey both ways and holds each to its own curve.
+
+**And the YUV matrix is derived rather than tabulated**, in `double`, once, at present time --
+which is §9.10's rule about where double precision belongs, and the first place it buys
+anything. Every coefficient is a ratio of the two luma weights a standard states, so
+transcribing eight numbers per matrix by hand is how a digit goes missing. The test computes
+the same conversion independently from Kr and Kb and holds the shader to it at 1e-5.
+
+Studio range is the default and the flag is honoured: treating 16..235 as 0..255 crushes the
+blacks and clips the whites, which reads as a contrast setting rather than as a bug.
+
 ### 9.10 How many bits, and where they are lost
 
 Asked because a display may be 10-bit, or 12, and answering it turned up three places where
@@ -1774,6 +1798,38 @@ Three things the first run of that test found:
 - **The parameter sets go back in front after a reset**, not only at the start. A flushed
   decoder has forgotten them and the first packet after a seek is a keyframe whose SPS and
   PPS live in the container.
+
+### 9.8.2 Which decoders, and can a software one use the GPU
+
+**openh264, dav1d and their neighbours are separate modules, not replacements.**
+`MP_KIND_VCODEC` was made a kind rather than a flag so that this is a matter of loading a
+different module, and the audio side is already this shape: `codec_flac` is libFLAC,
+`codec_mpa` is libmpg123, `codec_aac` is this tree's own Rust. Video will be the same.
+
+Four reasons one would be wanted beside `codec_mft`:
+
+- **Codecs Windows does not have.** AV1 needs Windows 11 and a Store extension; VVC has
+  nothing at all. **dav1d** is the answer for the first and is BSD-2.
+- **Determinism.** MF's software decoder is a black box that can change with a Windows
+  update. A decoder in the tree is checkable the way `codec_alac` and `codec_aac` are, which
+  for a project whose method is hashing output is not a small thing.
+- **The other platforms.** The Linux head needs a decoder that is not Media Foundation, and
+  the same one runs everywhere.
+- **openh264's licence is more specific than it looks.** Cisco pays the H.264 pool for *the
+  binary they publish*; building the source yourself does not carry that, which is a
+  distinction worth reading carefully before treating BSD-2 as the whole answer.
+
+**Can any of them use the GPU? For the decoding itself, no.** openh264, dav1d and libaom are
+CPU with hand-written SIMD, deliberately: entropy decoding -- CABAC, CAVLC, AV1's symbol
+decoder -- is serial by construction and maps badly onto a GPU. What uses the GPU is the
+fixed-function video block, NVDEC and VCN and Quick Sync, reached through DXVA2, D3D12 Video,
+Vulkan Video or VA-API -- which is `codec_mft` and its siblings, and is different silicon
+rather than the same decoder running somewhere else.
+
+**What can go to the GPU is everything after the decode**, and it already does. The colour
+conversion is a shader here. AV1 film grain synthesis is the other obvious one: dav1d does it
+on the CPU, it is embarrassingly parallel, and a presenter is where it would belong -- which
+is an argument for the split this ABI already makes rather than against it.
 
 ### 9.9 What a video packet's timestamp is counted in
 

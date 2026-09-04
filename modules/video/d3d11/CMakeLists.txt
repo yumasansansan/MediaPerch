@@ -19,7 +19,8 @@ mediaperch_add_module(mp_video_d3d11
     KIND video
     SOURCES
         video_d3d11.cpp
-        colour_plan.cpp)
+        colour_plan.cpp
+        yuv_matrix.cpp)
 
 target_include_directories(mp_video_d3d11 PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(mp_video_d3d11 PRIVATE d3d11 dxgi d3dcompiler)

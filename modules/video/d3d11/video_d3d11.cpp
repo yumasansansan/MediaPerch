@@ -73,6 +73,7 @@
 // surface, and there are no decoded surfaces. Both arrive with the decoder.
 
 #include "colour_plan.hpp"
+#include "yuv_matrix.hpp"
 
 #include <mediaperch/module.h>
 
@@ -152,13 +153,24 @@ private:
 // what the display says its white is. Writing it as a shader rather than as a
 // lookup is what lets the tone mappers join it later without another pass.
 constexpr char k_shader[] = R"HLSL(
-Texture2D<float4> source : register(t0);
+Texture2D<float4> rgba   : register(t0);   // the BGRA8 path
+Texture2D<float>  luma   : register(t1);   // NV12 / P010 Y
+Texture2D<float2> chroma : register(t2);   // NV12 / P010 CbCr
 SamplerState bilinear : register(s0);
 
 cbuffer Constants : register(b0)
 {
-    float sdr_scale;   // §9.6: the display's white over scRGB's 80 nits
-    float3 padding;
+    float sdr_scale;      // §9.6: the display's white over scRGB's 80 nits
+    float luma_offset;    // studio range puts black at 16/255
+    float luma_scale;
+    float chroma_scale;
+
+    float4 yuv;           // r_v, g_u, g_v, b_u -- see yuv_matrix.hpp
+
+    float sample_scale;   // P010's ten bits sit in the top of sixteen
+    float transfer_gamma; // 2.4 for BT.1886, unused when srgb_piecewise is 1
+    float srgb_piecewise; // 1 = the sRGB curve, 0 = a pure power
+    float padding;
 };
 
 struct Vertex {
@@ -175,33 +187,74 @@ Vertex vs_main(uint id : SV_VertexID)
     return out_vertex;
 }
 
-// The sRGB electro-optical transfer function, piecewise as the standard states
-// it. Not a 2.2 power: that is the approximation §9.2 records Windows using in
-// the one place it should not, and this file is not going to repeat it.
-float3 srgb_to_linear(float3 c)
+// **The transfer decode, by the code point the container stated.**
+//
+// Two curves, and which one is not a matter of taste. Content tagged sRGB gets
+// the sRGB piecewise curve. Content tagged BT.709 or BT.601 gets BT.1886, a
+// pure 2.4 power, because that is the reference display EOTF those standards
+// specify and it is what the picture was graded on -- decoding video with the
+// sRGB curve instead lifts the shadows, which is the mirror image of the fault
+// §9.2 records Windows committing in the other direction.
+float3 to_linear(float3 c)
 {
     // Clamped, then abs: a UNORM texture cannot be negative, but the compiler
     // cannot prove it and pow of a negative base is undefined -- which is what
     // X3571 says, and this file is built with warnings as errors precisely so
     // that a shader nobody reads cannot quietly contain one.
     c = saturate(c);
-    return c <= 0.04045 ? c / 12.92 : pow(abs((c + 0.055) / 1.055), 2.4);
+    float3 piecewise = c <= 0.04045 ? c / 12.92 : pow(abs((c + 0.055) / 1.055), 2.4);
+    float3 power = pow(abs(c), transfer_gamma);
+    return lerp(power, piecewise, srgb_piecewise);
 }
 
-float4 ps_main(Vertex input) : SV_Target
+float4 ps_rgba(Vertex input) : SV_Target
 {
-    float4 texel = source.Sample(bilinear, input.uv);
+    float4 texel = rgba.Sample(bilinear, input.uv);
     // **The target is scRGB, which is linear.** An sRGB texture sampled without
     // decoding would be presented as though its gamma were already gone, which
     // is the washed-out picture people mistake for a tone mapping problem.
-    float3 linear_rgb = srgb_to_linear(texel.rgb) * sdr_scale;
-    return float4(linear_rgb, texel.a);
+    return float4(to_linear(texel.rgb) * sdr_scale, texel.a);
+}
+
+float4 ps_nv12(Vertex input) : SV_Target
+{
+    // Chroma is sampled bilinearly at half resolution, which is the
+    // reconstruction 4:2:0 asks for and is what every player does. Nothing here
+    // pretends it is the chroma siting a stream may have stated: that is a
+    // quarter-pixel shift and it belongs with the tone mappers.
+    float  y  = luma.Sample(bilinear, input.uv).r * sample_scale;
+    float2 uv = chroma.Sample(bilinear, input.uv).rg * sample_scale;
+
+    y = (y - luma_offset) * luma_scale;
+    float u = (uv.x - 0.5) * chroma_scale;
+    float v = (uv.y - 0.5) * chroma_scale;
+
+    // Non-linear R'G'B' first, which is what the matrix produces, and then the
+    // transfer. Doing them the other way round is a mistake that looks almost
+    // right and is wrong everywhere the picture is not grey.
+    float3 encoded = float3(y + yuv.x * v,
+                            y - yuv.y * u - yuv.z * v,
+                            y + yuv.w * u);
+    return float4(to_linear(encoded) * sdr_scale, 1.0);
 }
 )HLSL";
 
+/// Mirrors the `cbuffer` above, which HLSL packs in four-float rows.
 struct Constants {
     float sdr_scale = 1.0f;
-    float padding[3] = {0.0f, 0.0f, 0.0f};
+    float luma_offset = 0.0f;
+    float luma_scale = 1.0f;
+    float chroma_scale = 1.0f;
+
+    float r_v = 0.0f;
+    float g_u = 0.0f;
+    float g_v = 0.0f;
+    float b_u = 0.0f;
+
+    float sample_scale = 1.0f;
+    float transfer_gamma = 2.4f;
+    float srgb_piecewise = 1.0f;
+    float padding = 0.0f;
 };
 
 /// What §9.4 could work out, given a device and a window. Kept separate from
@@ -274,15 +327,28 @@ struct MpVideo {
     Com<ID3D11Texture2D> staging;
 
     Com<ID3D11VertexShader> vertex_shader;
-    Com<ID3D11PixelShader> pixel_shader;
+    /// One per source kind rather than a branch in one shader: a constant that
+    /// is the same for every pixel of every frame is not a thing to test at
+    /// every pixel of every frame.
+    Com<ID3D11PixelShader> pixel_rgba;
+    Com<ID3D11PixelShader> pixel_nv12;
     Com<ID3D11SamplerState> sampler;
     Com<ID3D11Buffer> constants;
 
-    /// The frame most recently uploaded.
+    /// The frame most recently uploaded. `source` is the BGRA8 path; `luma`
+    /// and `chroma` are the two planes of NV12 or P010, kept as separate
+    /// textures rather than as one `DXGI_FORMAT_NV12` because that format
+    /// carries constraints -- even dimensions, device support -- for a
+    /// convenience this does not need.
     Com<ID3D11Texture2D> source;
     Com<ID3D11ShaderResourceView> source_view;
+    Com<ID3D11Texture2D> luma;
+    Com<ID3D11ShaderResourceView> luma_view;
+    Com<ID3D11Texture2D> chroma;
+    Com<ID3D11ShaderResourceView> chroma_view;
     std::uint32_t source_width = 0;
     std::uint32_t source_height = 0;
+    MpPixelFormat source_format = MP_PIXEL_NONE;
 
     HWND window = nullptr;
     bool warp = false;
@@ -294,6 +360,10 @@ struct MpVideo {
     std::uint32_t height = 0;
 
     mp::video::Stream stream{};
+    /// `MP_VIDEO_FULL_RANGE` from the container. Studio range is the default
+    /// and the safe one: treating 16..235 as 0..255 crushes the blacks and
+    /// clips the whites, which reads as a contrast setting rather than a bug.
+    bool full_range = false;
     mp::video::Display display{};
     mp::video::Plan plan{};
     mp::video::ToneMap preferred = mp::video::ToneMap::driver;
@@ -391,14 +461,19 @@ bool make_device(MpVideo* v, std::string& why)
 bool make_shaders(MpVideo* v, std::string& why)
 {
     Com<ID3DBlob> vs;
-    Com<ID3DBlob> ps;
-    if (!compile("vs_main", "vs_5_0", vs, why) || !compile("ps_main", "ps_5_0", ps, why)) {
+    Com<ID3DBlob> rgba;
+    Com<ID3DBlob> nv12;
+    if (!compile("vs_main", "vs_5_0", vs, why) ||
+        !compile("ps_rgba", "ps_5_0", rgba, why) ||
+        !compile("ps_nv12", "ps_5_0", nv12, why)) {
         return false;
     }
     if (FAILED(v->device->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(),
                                              nullptr, v->vertex_shader.put())) ||
-        FAILED(v->device->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(),
-                                            nullptr, v->pixel_shader.put()))) {
+        FAILED(v->device->CreatePixelShader(rgba->GetBufferPointer(), rgba->GetBufferSize(),
+                                            nullptr, v->pixel_rgba.put())) ||
+        FAILED(v->device->CreatePixelShader(nv12->GetBufferPointer(), nv12->GetBufferSize(),
+                                            nullptr, v->pixel_nv12.put()))) {
         why = "the colour shader compiled and would not load";
         return false;
     }
@@ -578,56 +653,132 @@ bool make_target(MpVideo* v, std::string& why)
     return true;
 }
 
-/// The frame's texture, made once and reused while the geometry holds.
-bool upload(MpVideo* v, const MpVideoFrame& frame, std::string& why)
+/// A dynamic texture and a view over it, made once and reused while the
+/// geometry holds. Everything a frame needs is one of these per plane.
+bool make_plane(MpVideo* v, std::uint32_t width, std::uint32_t height, DXGI_FORMAT format,
+                Com<ID3D11Texture2D>& texture, Com<ID3D11ShaderResourceView>& view,
+                std::string& why)
 {
-    if (frame.format != MP_PIXEL_BGRA8) {
-        why = "this build presents MP_PIXEL_BGRA8 only; NV12 and P010 arrive with "
-              "the decoder that produces them";
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = width;
+    desc.Height = height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = format;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DYNAMIC;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    if (FAILED(v->device->CreateTexture2D(&desc, nullptr, texture.put())) ||
+        FAILED(v->device->CreateShaderResourceView(texture.get(), nullptr, view.put()))) {
+        why = "no texture for the frame";
         return false;
     }
-    if (frame.plane[0] == nullptr || frame.stride[0] < frame.width * 4u) {
-        why = "the frame has no pixels, or a stride too short for its width";
-        return false;
-    }
+    return true;
+}
 
-    if (!v->source || v->source_width != frame.width || v->source_height != frame.height) {
-        v->source_view.reset();
-        v->source.reset();
-        D3D11_TEXTURE2D_DESC desc{};
-        desc.Width = frame.width;
-        desc.Height = frame.height;
-        desc.MipLevels = 1;
-        desc.ArraySize = 1;
-        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        desc.SampleDesc.Count = 1;
-        desc.Usage = D3D11_USAGE_DYNAMIC;
-        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        if (FAILED(v->device->CreateTexture2D(&desc, nullptr, v->source.put())) ||
-            FAILED(v->device->CreateShaderResourceView(v->source.get(), nullptr,
-                                                       v->source_view.put()))) {
-            why = "no texture for the frame";
-            return false;
-        }
-        v->source_width = frame.width;
-        v->source_height = frame.height;
-    }
-
+/// Rows into a mapped texture, honouring both strides.
+bool write_plane(MpVideo* v, ID3D11Texture2D* texture, const void* src,
+                 std::uint32_t src_stride, std::uint32_t row_bytes, std::uint32_t rows,
+                 std::string& why)
+{
     D3D11_MAPPED_SUBRESOURCE mapped{};
-    if (FAILED(v->context->Map(v->source.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+    if (FAILED(v->context->Map(texture, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
         why = "the frame texture would not map";
         return false;
     }
-    const auto* src = static_cast<const std::uint8_t*>(frame.plane[0]);
-    auto* dst = static_cast<std::uint8_t*>(mapped.pData);
-    const std::size_t row = static_cast<std::size_t>(frame.width) * 4u;
-    for (std::uint32_t y = 0; y < frame.height; ++y) {
-        std::memcpy(dst + static_cast<std::size_t>(y) * mapped.RowPitch,
-                    src + static_cast<std::size_t>(y) * frame.stride[0], row);
+    const auto* from = static_cast<const std::uint8_t*>(src);
+    auto* to = static_cast<std::uint8_t*>(mapped.pData);
+    for (std::uint32_t y = 0; y < rows; ++y) {
+        std::memcpy(to + static_cast<std::size_t>(y) * mapped.RowPitch,
+                    from + static_cast<std::size_t>(y) * src_stride, row_bytes);
     }
-    v->context->Unmap(v->source.get(), 0);
+    v->context->Unmap(texture, 0);
     return true;
+}
+
+/// The frame, in whichever of the three shapes it arrived in.
+bool upload(MpVideo* v, const MpVideoFrame& frame, std::string& why)
+{
+    const bool planar = frame.format == MP_PIXEL_NV12 || frame.format == MP_PIXEL_P010;
+    if (!planar && frame.format != MP_PIXEL_BGRA8) {
+        why = "this presenter takes BGRA8, NV12 and P010";
+        return false;
+    }
+    if (frame.texture != nullptr) {
+        // **A decoder's own texture, and this is where it would be adopted.**
+        // Nothing here can do it yet and saying so beats a copy nobody asked
+        // for: a DXVA decoder's output is usually created with
+        // D3D11_BIND_DECODER and no D3D11_BIND_SHADER_RESOURCE, so a view over
+        // it fails and the frame has to be copied into a texture that allows
+        // one. Which of the two a driver gives is not knowable from here, and
+        // there is no hardware decoder on the machine this is tested on -- so
+        // it is refused rather than written blind. See plan.md §9.8.1.
+        why = "a decoder texture is not adopted yet; open the codec with no device "
+              "to get frames in system memory";
+        return false;
+    }
+    if (frame.width == 0 || frame.height == 0) {
+        why = "a frame with no pixels in it";
+        return false;
+    }
+
+    const bool changed = v->source_width != frame.width ||
+                         v->source_height != frame.height ||
+                         v->source_format != frame.format;
+    if (changed) {
+        v->source_view.reset();
+        v->source.reset();
+        v->luma_view.reset();
+        v->luma.reset();
+        v->chroma_view.reset();
+        v->chroma.reset();
+        v->source_width = frame.width;
+        v->source_height = frame.height;
+        v->source_format = frame.format;
+    }
+
+    if (!planar) {
+        if (frame.plane[0] == nullptr || frame.stride[0] < frame.width * 4u) {
+            why = "the frame has no pixels, or a stride too short for its width";
+            return false;
+        }
+        if (!v->source &&
+            !make_plane(v, frame.width, frame.height, DXGI_FORMAT_B8G8R8A8_UNORM,
+                        v->source, v->source_view, why)) {
+            return false;
+        }
+        return write_plane(v, v->source.get(), frame.plane[0], frame.stride[0],
+                           frame.width * 4u, frame.height, why);
+    }
+
+    // 4:2:0, so the chroma plane is half in each direction -- rounded up,
+    // because an odd width still has a chroma column for its last pixel.
+    const std::uint32_t chroma_width = (frame.width + 1u) / 2u;
+    const std::uint32_t chroma_height = (frame.height + 1u) / 2u;
+    const bool ten_bit = frame.format == MP_PIXEL_P010;
+    const std::uint32_t luma_bytes = ten_bit ? 2u : 1u;
+
+    if (frame.plane[0] == nullptr || frame.plane[1] == nullptr ||
+        frame.stride[0] < frame.width * luma_bytes ||
+        frame.stride[1] < chroma_width * luma_bytes * 2u) {
+        why = "a planar frame with a missing plane, or a stride too short for its width";
+        return false;
+    }
+
+    if (!v->luma &&
+        (!make_plane(v, frame.width, frame.height,
+                     ten_bit ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R8_UNORM, v->luma,
+                     v->luma_view, why) ||
+         !make_plane(v, chroma_width, chroma_height,
+                     ten_bit ? DXGI_FORMAT_R16G16_UNORM : DXGI_FORMAT_R8G8_UNORM,
+                     v->chroma, v->chroma_view, why))) {
+        return false;
+    }
+    return write_plane(v, v->luma.get(), frame.plane[0], frame.stride[0],
+                       frame.width * luma_bytes, frame.height, why) &&
+           write_plane(v, v->chroma.get(), frame.plane[1], frame.stride[1],
+                       chroma_width * luma_bytes * 2u, chroma_height, why);
 }
 
 // --------------------------------------------------------------------------
@@ -666,6 +817,7 @@ try {
                                   .matrix = in->matrix,
                                   .width = in->width,
                                   .height = in->height};
+    v->full_range = (in->flags & MP_VIDEO_FULL_RANGE) != 0;
     v->width = in->display_width != 0 ? in->display_width : in->width;
     v->height = in->display_height != 0 ? in->display_height : in->height;
 
@@ -703,8 +855,37 @@ try {
         return MP_ERR_UNSUPPORTED;
     }
 
+    const bool planar = v->source_format == MP_PIXEL_NV12 ||
+                        v->source_format == MP_PIXEL_P010;
+
     Constants constants{};
     constants.sdr_scale = v->plan.sdr_scale;
+
+    // **The transfer, by the code point the container stated.** sRGB gets the
+    // piecewise curve; BT.709 and BT.601 video gets BT.1886, a pure 2.4, which
+    // is the reference display EOTF those standards specify and what the
+    // picture was graded on. Decoding video with the sRGB curve instead lifts
+    // the shadows, which is the mirror image of §9.2's complaint.
+    const std::uint32_t transfer = mp::video::assumed_transfer(v->stream);
+    constants.srgb_piecewise = transfer == mp::video::k_transfer_srgb ? 1.0f : 0.0f;
+    constants.transfer_gamma = 2.4f;
+
+    if (planar) {
+        // Derived in double and rounded once, which is §9.10's rule and this
+        // is where it pays: eight coefficients per matrix, all of them ratios
+        // of the luma weights.
+        const mp::video::YuvMatrix m = mp::video::yuv_matrix_for(
+            v->stream.matrix, v->full_range, v->source_format == MP_PIXEL_P010);
+        constants.luma_offset = m.luma_offset;
+        constants.luma_scale = m.luma_scale;
+        constants.chroma_scale = m.chroma_scale;
+        constants.r_v = m.r_v;
+        constants.g_u = m.g_u;
+        constants.g_v = m.g_v;
+        constants.b_u = m.b_u;
+        constants.sample_scale = m.sample_scale;
+    }
+
     D3D11_MAPPED_SUBRESOURCE mapped{};
     if (SUCCEEDED(v->context->Map(v->constants.get(), 0, D3D11_MAP_WRITE_DISCARD, 0,
                                   &mapped))) {
@@ -719,7 +900,11 @@ try {
                                   0.0f,
                                   1.0f};
     ID3D11RenderTargetView* views[] = {v->target_view.get()};
-    ID3D11ShaderResourceView* resources[] = {v->source_view.get()};
+    // Three slots, of which a frame uses one or two. Binding all three each
+    // time keeps a stale view from a previous frame's shape out of the one
+    // being drawn.
+    ID3D11ShaderResourceView* resources[] = {v->source_view.get(), v->luma_view.get(),
+                                             v->chroma_view.get()};
     ID3D11SamplerState* samplers[] = {v->sampler.get()};
     ID3D11Buffer* buffers[] = {v->constants.get()};
 
@@ -728,8 +913,9 @@ try {
     v->context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     v->context->IASetInputLayout(nullptr); // the triangle comes from SV_VertexID
     v->context->VSSetShader(v->vertex_shader.get(), nullptr, 0);
-    v->context->PSSetShader(v->pixel_shader.get(), nullptr, 0);
-    v->context->PSSetShaderResources(0, 1, resources);
+    v->context->PSSetShader(planar ? v->pixel_nv12.get() : v->pixel_rgba.get(), nullptr,
+                            0);
+    v->context->PSSetShaderResources(0, 3, resources);
     v->context->PSSetSamplers(0, 1, samplers);
     v->context->PSSetConstantBuffers(0, 1, buffers);
     v->context->Draw(3, 0);
