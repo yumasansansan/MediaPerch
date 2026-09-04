@@ -1217,6 +1217,13 @@ Paths above are relative to the repository root.
    └────────────────┘   └─────────────────────────────┘
 ```
 
+**Video crosses that boundary as a surface, not as a window.** The engine renders into a
+DirectComposition surface handle and the shell composes it into its own visual tree, so the
+engine still creates no window and links no toolkit, and a shell that is killed mid-frame
+takes only its own visual tree with it -- the engine goes on rendering and the next shell
+attaches to the same handle. plan.md §9.7.1 has the mechanism and the one coupling it
+forces, which is that the presenter owns the D3D device and the decoder is handed it.
+
 The reason the shell is a separate process is the one DragonPerch measured rather than
 assumed: initialising XAML costs a process about 40 MB of private bytes permanently, and
 closing the window returns none of it. An audio engine that must not miss a 3 ms deadline

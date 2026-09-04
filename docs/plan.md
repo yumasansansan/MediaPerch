@@ -1610,6 +1610,88 @@ same week:
 - **`demux_mp4` truncated the 16.16 display size** rather than rounding it, losing the
   fraction an anamorphic track states. It rounds now.
 
+### 9.7.1 Who owns the window, and how a frame crosses a process
+
+**Decided: the engine renders, the shell hosts.** The alternatives were the engine opening
+its own window, or the shell owning an `HWND` and handing it over. Both put something on the
+wrong side of §10's line -- a headless engine that creates windows is not headless, and a
+presenter that draws into a window belonging to a process that may be killed at any moment
+has to survive that killing anyway. So the frame crosses the boundary instead of the window
+crossing it.
+
+The mechanism is a **DirectComposition surface handle**, which is what browsers use for
+exactly this and is the one documented way to compose a surface produced in one process into
+a window owned by another:
+
+```
+  mediaperchd                                    mediaperch-shell
+  ------------------------------                 ---------------------------
+  DCompositionCreateSurfaceHandle  ── HANDLE ──▶  IDCompositionDevice::
+        │                          (over the      CreateSurfaceFromHandle
+        │                           existing            │
+        ▼                            IPC)               ▼
+  IDXGIFactoryMedia::                             IDCompositionVisual::SetContent
+  CreateSwapChainForCompositionSurfaceHandle            │
+        │                                               ▼
+        ▼                                         IDCompositionTarget on its HWND
+  video_d3d11 renders and Presents                      │
+                                                        ▼  Commit()
+                                                   the picture
+```
+
+Four properties follow, and they are the reason for the choice rather than pleasant side
+effects.
+
+**The engine still has no window and no toolkit.** `CreateSwapChainForCompositionSurfaceHandle`
+takes no `HWND`; `DCompositionCreateSurfaceHandle` is a free function and needs no
+composition device, so the engine links one entry point from `dcomp.dll` and builds no visual
+tree. The visual tree, the target and the `Commit` are all the shell's. §10 is untouched.
+
+**The shell can die mid-frame.** The surface handle belongs to the engine. A shell that
+crashes takes its own visual tree with it and the engine goes on rendering into a surface
+nobody is showing; a shell that starts up calls `CreateSurfaceFromHandle` on the same handle
+and the picture reappears. **No renegotiation, no device loss, no gap** -- which is the video
+half of the test §10 already asks for on the audio side, and it is a test rather than a hope.
+
+**One device, shared with the decoder.** This is the coupling that has to be decided rather
+than discovered: a hardware video decoder produces textures on a particular `ID3D11Device`,
+and handing them to a presenter on a *different* device costs a shared handle and a fence at
+best and a copy at worst. **The presenter creates the device and the decoder is handed it**,
+because a presenter is made once and outlives every decoder a playlist goes through, and
+because the presenter is the one that has to satisfy `IDXGIFactoryMedia`. In ABI terms that is
+an opaque platform pointer moving from `MpVideoVtbl` to whatever decodes -- the same kind of
+thing `open` already takes.
+
+**D3D12 is a second module, not a rewrite.** `IDXGIFactoryMedia` takes an
+`ID3D12CommandQueue` for a D3D12 swap chain and the composition side does not change at all,
+so `modules/video/d3d12` sits beside `modules/video/d3d11` behind one `MpVideoVtbl`, shares
+`colour_plan.hpp` unchanged, and is chosen by priority or by name -- exactly as `sink_asio`
+sits beside `sink_wasapi`. That is what the module boundary was for.
+
+#### What the ABI needs, and when
+
+`MpVideoVtbl::open` takes `void* window`, which was right for a presenter that either has an
+`HWND` or has nothing. Under this architecture it has a third case, and it is the important
+one: it *produces* a surface rather than consuming a target. So:
+
+```c
+typedef uint32_t MpSurfaceKind;
+enum {
+    MP_SURFACE_OFFSCREEN = 0u, /* no display; read_back is the output */
+    MP_SURFACE_WINDOW    = 1u, /* `handle` is an HWND -- one process, one window */
+    MP_SURFACE_COMPOSED  = 2u  /* the presenter makes a shareable surface */
+};
+MpResult (*open)(MpSurfaceKind kind, void *handle, MpVideo **out);
+/* MP_ANY. The handle a host passes to whatever composes it: a DComp surface
+ * handle on Windows, a dmabuf on Wayland, an IOSurface on macOS. */
+MpResult (*get_surface)(MpVideo *v, void **out_handle);
+```
+
+**Written down now and implemented with the shell**, for the same reason ABI v3 was decided
+before it was written: the shape is what would have been expensive to discover late, and a
+vtable entry with no implementation is the mistake this tree has already made once and
+reverted. Nothing composes anything yet.
+
 ### 9.8 Media Foundation is a codec here, not a pipeline
 
 This paragraph used to read "`decode_mf` hardware decode", which was written before ABI v2
