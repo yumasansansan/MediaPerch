@@ -65,10 +65,14 @@
 // a compatibility option here; they are a different pipeline that cannot do the
 // thing this module exists to do.
 //
-// What is not here yet, and why. NV12 and P010 arrive now -- as planes and,
-// from a hardware decoder, as a texture this module views in place -- so the
-// half of this paragraph that said otherwise is gone with the decoder that
-// made it true. What is left is the colour work §9 turns on: the transfer
+// **The chroma arrangements are derived, not enumerated.** 4:0:0, 4:2:0,
+// 4:2:2 and 4:4:4 all reach the same conversion, planar or semi-planar, at 8
+// through 16 bits -- because ABI v4 made a frame describe itself and the plane
+// sizes fall out of `mp_pixel_chroma_width` rather than out of a branch per
+// format. Interleaved Y'CbCr (YUY2, AYUV and their neighbours) is refused: it
+// is a different unpack and nothing here produces it.
+//
+// What is not here yet, and why. The colour work §9 turns on: the transfer
 // functions here are sRGB and BT.1886, so a PQ or an HLG source is decoded
 // with the wrong curve rather than refused, and the tone mappers are chosen
 // and reported and not applied. §9.9.1 says HLG goes on the linear path in
@@ -156,9 +160,11 @@ private:
 // what the display says its white is. Writing it as a shader rather than as a
 // lookup is what lets the tone mappers join it later without another pass.
 constexpr char k_shader[] = R"HLSL(
-Texture2D<float4> rgba   : register(t0);   // the BGRA8 path
-Texture2D<float>  luma   : register(t1);   // NV12 / P010 Y
-Texture2D<float2> chroma : register(t2);   // NV12 / P010 CbCr
+Texture2D<float4> rgba     : register(t0);  // the BGRA8 path
+Texture2D<float>  luma     : register(t1);  // Y, semi-planar and planar alike
+Texture2D<float2> chroma   : register(t2);  // semi-planar CbCr, interleaved
+Texture2D<float>  chroma_u : register(t3);  // planar Cb
+Texture2D<float>  chroma_v : register(t4);  // planar Cr
 SamplerState bilinear : register(s0);
 
 cbuffer Constants : register(b0)
@@ -170,10 +176,10 @@ cbuffer Constants : register(b0)
 
     float4 yuv;           // r_v, g_u, g_v, b_u -- see yuv_matrix.hpp
 
-    float sample_scale;   // P010's ten bits sit in the top of sixteen
+    float sample_scale;   // mp_pixel_sample_scale: where the bits sit, not how many
     float transfer_gamma; // 2.4 for BT.1886, unused when srgb_piecewise is 1
     float srgb_piecewise; // 1 = the sRGB curve, 0 = a pure power
-    float padding;
+    float has_chroma;     // 0 for 4:0:0, where there is no chroma plane to read
 };
 
 struct Vertex {
@@ -219,18 +225,19 @@ float4 ps_rgba(Vertex input) : SV_Target
     return float4(to_linear(texel.rgb) * sdr_scale, texel.a);
 }
 
-float4 ps_nv12(Vertex input) : SV_Target
+// **The conversion, given samples that have already been read.** Both pixel
+// shaders below reach this with the same three numbers, so there is one matrix
+// and one transfer in this file rather than one per plane arrangement -- and a
+// 4:2:0 frame and a 4:4:4 frame are held to the same arithmetic by
+// construction rather than by two functions being kept in step.
+float4 convert(float y, float u, float v)
 {
-    // Chroma is sampled bilinearly at half resolution, which is the
-    // reconstruction 4:2:0 asks for and is what every player does. Nothing here
-    // pretends it is the chroma siting a stream may have stated: that is a
-    // quarter-pixel shift and it belongs with the tone mappers.
-    float  y  = luma.Sample(bilinear, input.uv).r * sample_scale;
-    float2 uv = chroma.Sample(bilinear, input.uv).rg * sample_scale;
-
     y = (y - luma_offset) * luma_scale;
-    float u = (uv.x - 0.5) * chroma_scale;
-    float v = (uv.y - 0.5) * chroma_scale;
+    // `has_chroma` is 0 for 4:0:0, where the chroma planes do not exist. It
+    // multiplies the *centred* chroma, so grey comes out as grey rather than
+    // as whatever an unbound texture samples to.
+    u = (u - 0.5) * chroma_scale * has_chroma;
+    v = (v - 0.5) * chroma_scale * has_chroma;
 
     // Non-linear R'G'B' first, which is what the matrix produces, and then the
     // transfer. Doing them the other way round is a mistake that looks almost
@@ -239,6 +246,29 @@ float4 ps_nv12(Vertex input) : SV_Target
                             y - yuv.y * u - yuv.z * v,
                             y + yuv.w * u);
     return float4(to_linear(encoded) * sdr_scale, 1.0);
+}
+
+float4 ps_nv12(Vertex input) : SV_Target
+{
+    // Chroma is sampled bilinearly at whatever resolution its plane has, which
+    // is the reconstruction subsampling asks for and is what every player does.
+    // **Normalised coordinates are why 4:2:2 and 4:4:4 need no case here**: a
+    // half-width plane and a full-width one are sampled by the same call.
+    // Nothing here pretends it is the chroma siting a stream may have stated:
+    // that is a quarter-pixel shift and it belongs with the tone mappers.
+    float  y  = luma.Sample(bilinear, input.uv).r * sample_scale;
+    float2 uv = chroma.Sample(bilinear, input.uv).rg * sample_scale;
+    return convert(y, uv.x, uv.y);
+}
+
+float4 ps_planar(Vertex input) : SV_Target
+{
+    // Three planes, or one for 4:0:0 -- in which case `has_chroma` is 0 and
+    // what these two samples contain does not reach the picture.
+    float y = luma.Sample(bilinear, input.uv).r * sample_scale;
+    float u = chroma_u.Sample(bilinear, input.uv).r * sample_scale;
+    float v = chroma_v.Sample(bilinear, input.uv).r * sample_scale;
+    return convert(y, u, v);
 }
 )HLSL";
 
@@ -257,7 +287,7 @@ struct Constants {
     float sample_scale = 1.0f;
     float transfer_gamma = 2.4f;
     float srgb_piecewise = 1.0f;
-    float padding = 0.0f;
+    float has_chroma = 1.0f;
 };
 
 /// What §9.4 could work out, given a device and a window. Kept separate from
@@ -335,6 +365,7 @@ struct MpVideo {
     /// every pixel of every frame.
     Com<ID3D11PixelShader> pixel_rgba;
     Com<ID3D11PixelShader> pixel_nv12;
+    Com<ID3D11PixelShader> pixel_planar;
     Com<ID3D11SamplerState> sampler;
     Com<ID3D11Buffer> constants;
 
@@ -347,8 +378,17 @@ struct MpVideo {
     Com<ID3D11ShaderResourceView> source_view;
     Com<ID3D11Texture2D> luma;
     Com<ID3D11ShaderResourceView> luma_view;
+    /// Semi-planar CbCr, interleaved in one two-component texture.
     Com<ID3D11Texture2D> chroma;
     Com<ID3D11ShaderResourceView> chroma_view;
+    /// Planar Cb and Cr, a texture each. **Separate members rather than reusing
+    /// `chroma`**: the two arrangements declare different texture types in the
+    /// shader, and a one-component view bound where a two-component one is
+    /// declared reads garbage in its second channel rather than failing.
+    Com<ID3D11Texture2D> chroma_u;
+    Com<ID3D11ShaderResourceView> chroma_u_view;
+    Com<ID3D11Texture2D> chroma_v;
+    Com<ID3D11ShaderResourceView> chroma_v_view;
     std::uint32_t source_width = 0;
     std::uint32_t source_height = 0;
     MpPixelLayout source_layout{};
@@ -504,9 +544,11 @@ bool make_shaders(MpVideo* v, std::string& why)
     Com<ID3DBlob> vs;
     Com<ID3DBlob> rgba;
     Com<ID3DBlob> nv12;
+    Com<ID3DBlob> planar;
     if (!compile("vs_main", "vs_5_0", vs, why) ||
         !compile("ps_rgba", "ps_5_0", rgba, why) ||
-        !compile("ps_nv12", "ps_5_0", nv12, why)) {
+        !compile("ps_nv12", "ps_5_0", nv12, why) ||
+        !compile("ps_planar", "ps_5_0", planar, why)) {
         return false;
     }
     if (FAILED(v->device->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(),
@@ -514,7 +556,10 @@ bool make_shaders(MpVideo* v, std::string& why)
         FAILED(v->device->CreatePixelShader(rgba->GetBufferPointer(), rgba->GetBufferSize(),
                                             nullptr, v->pixel_rgba.put())) ||
         FAILED(v->device->CreatePixelShader(nv12->GetBufferPointer(), nv12->GetBufferSize(),
-                                            nullptr, v->pixel_nv12.put()))) {
+                                            nullptr, v->pixel_nv12.put())) ||
+        FAILED(v->device->CreatePixelShader(planar->GetBufferPointer(),
+                                            planar->GetBufferSize(), nullptr,
+                                            v->pixel_planar.put()))) {
         why = "the colour shader compiled and would not load";
         return false;
     }
@@ -638,11 +683,10 @@ bool presentable(const MpPixelLayout& l, std::string& why)
         }
         return true;
     }
-    if (l.packing != MP_PACK_SEMI_PLANAR) {
-        // Three planes want a third shader resource and a third sampler read,
-        // which is real work and has no producer here yet -- every decoder in
-        // this tree hands back semi-planar. See plan.md §9.8.2.
-        why = "this presenter takes semi-planar chroma; planar is not built yet";
+    if (l.packing == MP_PACK_INTERLEAVED) {
+        // Packed Y'CbCr -- YUY2, AYUV, Y410 and their neighbours -- is a
+        // different unpack in the shader and nothing in this tree produces it.
+        why = "this presenter takes planar and semi-planar chroma, not interleaved";
         return false;
     }
     if (l.container_bits != 8u && l.container_bits != 16u) {
@@ -879,6 +923,10 @@ bool adopt(MpVideo* v, const MpVideoFrame& frame, std::string& why)
     // and holding them would keep a decoder's pool larger than it needs to be.
     v->luma.reset();
     v->chroma.reset();
+    v->chroma_u.reset();
+    v->chroma_u_view.reset();
+    v->chroma_v.reset();
+    v->chroma_v_view.reset();
     v->source_width = frame.width != 0 ? frame.width : desc.Width;
     v->source_height = frame.height != 0 ? frame.height : desc.Height;
     v->source_layout = adopted;
@@ -916,6 +964,10 @@ bool upload(MpVideo* v, const MpVideoFrame& frame, std::string& why)
         v->luma.reset();
         v->chroma_view.reset();
         v->chroma.reset();
+        v->chroma_u_view.reset();
+        v->chroma_u.reset();
+        v->chroma_v_view.reset();
+        v->chroma_v.reset();
         v->source_width = frame.width;
         v->source_height = frame.height;
         v->source_layout = in;
@@ -939,30 +991,63 @@ bool upload(MpVideo* v, const MpVideoFrame& frame, std::string& why)
     // Rounded up by `mp_pixel_chroma_width`, because an odd width still has a
     // chroma column for its last pixel -- and the same call answers for 4:2:2
     // and 4:4:4 without being told which.
+    const std::uint32_t planes = mp_pixel_planes(&in);
     const std::uint32_t chroma_width = mp_pixel_chroma_width(&in, frame.width);
     const std::uint32_t chroma_height = mp_pixel_chroma_height(&in, frame.height);
     const std::uint32_t sample_bytes = mp_pixel_component_bytes(&in);
     const std::uint32_t luma_row = frame.width * sample_bytes;
-    const std::uint32_t chroma_row = chroma_width * sample_bytes * 2u;
+    // Two components a sample when they are interleaved, one when they are not.
+    const std::uint32_t chroma_row =
+        chroma_width * sample_bytes * (planes == 2u ? 2u : 1u);
 
-    if (frame.plane[0] == nullptr || frame.plane[1] == nullptr ||
-        frame.stride[0] < luma_row || frame.stride[1] < chroma_row) {
-        why = "a planar frame with a missing plane, or a stride too short for its width";
+    if (frame.plane[0] == nullptr || frame.stride[0] < luma_row) {
+        why = "a frame with no luma plane, or a stride too short for its width";
         return false;
     }
+    for (std::uint32_t i = 1; i < planes; ++i) {
+        if (frame.plane[i] == nullptr || frame.stride[i] < chroma_row) {
+            why = "a chroma plane is missing, or its stride is too short for its width";
+            return false;
+        }
+    }
 
-    if (!v->luma &&
-        (!make_plane(v, frame.width, frame.height,
-                     plane_format_of(1u, in.container_bits), v->luma, v->luma_view,
-                     why) ||
+    if (!v->luma && !make_plane(v, frame.width, frame.height,
+                                plane_format_of(1u, in.container_bits), v->luma,
+                                v->luma_view, why)) {
+        return false;
+    }
+    if (!write_plane(v, v->luma.get(), frame.plane[0], frame.stride[0], luma_row,
+                     frame.height, why)) {
+        return false;
+    }
+    if (planes == 1u) {
+        // 4:0:0. The luma plane is the whole picture and the shader is told so
+        // rather than left to sample two textures that were never made.
+        return true;
+    }
+    if (planes == 2u) {
+        if (!v->chroma &&
+            !make_plane(v, chroma_width, chroma_height,
+                        plane_format_of(2u, in.container_bits), v->chroma,
+                        v->chroma_view, why)) {
+            return false;
+        }
+        return write_plane(v, v->chroma.get(), frame.plane[1], frame.stride[1],
+                           chroma_row, chroma_height, why);
+    }
+
+    if (!v->chroma_u &&
+        (!make_plane(v, chroma_width, chroma_height,
+                     plane_format_of(1u, in.container_bits), v->chroma_u,
+                     v->chroma_u_view, why) ||
          !make_plane(v, chroma_width, chroma_height,
-                     plane_format_of(2u, in.container_bits), v->chroma, v->chroma_view,
-                     why))) {
+                     plane_format_of(1u, in.container_bits), v->chroma_v,
+                     v->chroma_v_view, why))) {
         return false;
     }
-    return write_plane(v, v->luma.get(), frame.plane[0], frame.stride[0], luma_row,
-                       frame.height, why) &&
-           write_plane(v, v->chroma.get(), frame.plane[1], frame.stride[1], chroma_row,
+    return write_plane(v, v->chroma_u.get(), frame.plane[1], frame.stride[1], chroma_row,
+                       chroma_height, why) &&
+           write_plane(v, v->chroma_v.get(), frame.plane[2], frame.stride[2], chroma_row,
                        chroma_height, why);
 }
 
@@ -1040,7 +1125,17 @@ try {
         return MP_ERR_UNSUPPORTED;
     }
 
-    const bool planar = v->source_layout.chroma != MP_CHROMA_RGB;
+    // Which of the three the frame is, asked of the layout each time rather
+    // than remembered: a stream that changes shape mid-file changes this with
+    // it. 4:0:0 goes down the planar path with one plane and `has_chroma` 0.
+    const bool ycbcr = v->source_layout.chroma != MP_CHROMA_RGB;
+    const bool semi_planar = ycbcr && mp_pixel_planes(&v->source_layout) == 2u;
+    ID3D11PixelShader* shader = v->pixel_rgba.get();
+    if (semi_planar) {
+        shader = v->pixel_nv12.get();
+    } else if (ycbcr) {
+        shader = v->pixel_planar.get();
+    }
 
     Constants constants{};
     constants.sdr_scale = v->plan.sdr_scale;
@@ -1054,7 +1149,8 @@ try {
     constants.srgb_piecewise = transfer == mp::video::k_transfer_srgb ? 1.0f : 0.0f;
     constants.transfer_gamma = 2.4f;
 
-    if (planar) {
+    if (ycbcr) {
+        constants.has_chroma = v->source_layout.chroma == MP_CHROMA_MONO ? 0.0f : 1.0f;
         // Derived in double and rounded once, which is §9.10's rule and this
         // is where it pays: eight coefficients per matrix, all of them ratios
         // of the luma weights.
@@ -1088,11 +1184,14 @@ try {
                                   0.0f,
                                   1.0f};
     ID3D11RenderTargetView* views[] = {v->target_view.get()};
-    // Three slots, of which a frame uses one or two. Binding all three each
-    // time keeps a stale view from a previous frame's shape out of the one
-    // being drawn.
+    // Five slots, of which a frame uses one, two or three. Binding all five
+    // each time keeps a stale view from a previous frame's shape out of the one
+    // being drawn -- and an unused slot is a null the current shader does not
+    // declare, rather than a texture it might read.
     ID3D11ShaderResourceView* resources[] = {v->source_view.get(), v->luma_view.get(),
-                                             v->chroma_view.get()};
+                                             v->chroma_view.get(),
+                                             v->chroma_u_view.get(),
+                                             v->chroma_v_view.get()};
     ID3D11SamplerState* samplers[] = {v->sampler.get()};
     ID3D11Buffer* buffers[] = {v->constants.get()};
 
@@ -1101,9 +1200,8 @@ try {
     v->context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     v->context->IASetInputLayout(nullptr); // the triangle comes from SV_VertexID
     v->context->VSSetShader(v->vertex_shader.get(), nullptr, 0);
-    v->context->PSSetShader(planar ? v->pixel_nv12.get() : v->pixel_rgba.get(), nullptr,
-                            0);
-    v->context->PSSetShaderResources(0, 3, resources);
+    v->context->PSSetShader(shader, nullptr, 0);
+    v->context->PSSetShaderResources(0, 5, resources);
     v->context->PSSetSamplers(0, 1, samplers);
     v->context->PSSetConstantBuffers(0, 1, buffers);
     v->context->Draw(3, 0);

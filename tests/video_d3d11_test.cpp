@@ -566,6 +566,217 @@ TEST_CASE("NV12 becomes RGB by the matrix the container named", "[video][d3d11][
     CHECK(std::abs(shown[0] - shown[2]) > 0.01f);
 }
 
+namespace {
+
+/// A planar layout stated the way a decoder that is not here yet would state
+/// it: dav1d hands back I420, I422, I444 and I400 at 8, 10 and 12 bits, with
+/// the significant bits at the BOTTOM of the container rather than the top.
+MpPixelLayout planar_layout(MpChroma chroma, std::uint32_t bits)
+{
+    MpPixelLayout out{};
+    out.size = sizeof(out);
+    out.chroma = chroma;
+    out.packing = MP_PACK_PLANAR;
+    out.bits = bits;
+    out.container_bits = bits > 8u ? 16u : 8u;
+    return out;
+}
+
+/// BT.709 from the published luma weights, in double, deliberately not the
+/// same code `yuv_matrix.cpp` runs. `scale` puts a sample of any depth on the
+/// 0..1 the standard is written in.
+struct Rgb {
+    double r;
+    double g;
+    double b;
+};
+Rgb bt709(double y_code, double cb_code, double cr_code, double full)
+{
+    const double kr = 0.2126;
+    const double kb = 0.0722;
+    const double kg = 1.0 - kr - kb;
+    const double y = (y_code / full - 16.0 / 255.0) * (255.0 / 219.0);
+    const double u = (cb_code / full - 0.5) * (255.0 / 224.0);
+    const double v = (cr_code / full - 0.5) * (255.0 / 224.0);
+    return {y + 2.0 * (1.0 - kr) * v,
+            y - 2.0 * kb * (1.0 - kb) / kg * u - 2.0 * kr * (1.0 - kr) / kg * v,
+            y + 2.0 * (1.0 - kb) * u};
+}
+
+double bt1886(double c) { return std::pow(std::clamp(c, 0.0, 1.0), 2.4); }
+
+} // namespace
+
+TEST_CASE("planar 4:2:0, 4:2:2 and 4:4:4 reach the same conversion",
+          "[video][d3d11][yuv]")
+{
+    // **Three subsamplings and one answer**, which is the point of describing a
+    // layout rather than naming it. The chroma plane is a different size in
+    // each and nothing else changes: the shader samples with normalised
+    // coordinates, so a half-width plane and a full-width one are the same
+    // call, and the picture must come out identical for a flat colour.
+    //
+    // No decoder in this tree produces planar yet -- dav1d is what will. The
+    // frames are built here, which is exactly how the presenter was checked
+    // before there was anything to decode at all.
+    Module module;
+    REQUIRE(module.vtbl != nullptr);
+
+    constexpr std::uint8_t k_y = 120;
+    constexpr std::uint8_t k_cb = 90;
+    constexpr std::uint8_t k_cr = 200;
+    const Rgb want = bt709(k_y, k_cb, k_cr, 255.0);
+
+    const MpChroma layouts[] = {MP_CHROMA_420, MP_CHROMA_422, MP_CHROMA_444};
+    for (MpChroma chroma : layouts) {
+        const MpPixelLayout layout = planar_layout(chroma, 8u);
+        INFO("chroma " << static_cast<unsigned>(chroma));
+
+        Presenter presenter{*module.vtbl, 32, 32};
+        REQUIRE(presenter.ok());
+        presenter.info().matrix = 1; // BT.709
+        presenter.info().transfer = 1;
+        presenter.info().primaries = 1;
+        REQUIRE(presenter.configure() == "");
+
+        const std::uint32_t cw = mp_pixel_chroma_width(&layout, 32u);
+        const std::uint32_t ch = mp_pixel_chroma_height(&layout, 32u);
+        std::vector<std::uint8_t> luma(32u * 32u, k_y);
+        std::vector<std::uint8_t> cb(static_cast<std::size_t>(cw) * ch, k_cb);
+        std::vector<std::uint8_t> cr(static_cast<std::size_t>(cw) * ch, k_cr);
+
+        MpVideoFrame frame{};
+        frame.size = sizeof(frame);
+        frame.layout = layout;
+        frame.width = 32;
+        frame.height = 32;
+        frame.plane[0] = luma.data();
+        frame.stride[0] = 32;
+        frame.plane[1] = cb.data();
+        frame.stride[1] = cw;
+        frame.plane[2] = cr.data();
+        frame.stride[2] = cw;
+        REQUIRE(module.vtbl->present(presenter.handle(), &frame) == MP_OK);
+
+        const std::vector<float> shown = presenter.read_back();
+        REQUIRE(shown.size() == 32u * 32u * 4u);
+        CHECK(shown[0] == Catch::Approx(bt1886(want.r)).margin(1e-5));
+        CHECK(shown[1] == Catch::Approx(bt1886(want.g)).margin(1e-5));
+        CHECK(shown[2] == Catch::Approx(bt1886(want.b)).margin(1e-5));
+        // Not grey, so a run that dropped both chroma planes would fail here
+        // rather than agree with itself.
+        CHECK(std::abs(shown[0] - shown[2]) > 0.01f);
+    }
+}
+
+TEST_CASE("4:0:0 is grey rather than whatever an unbound texture samples to",
+          "[video][d3d11][yuv]")
+{
+    // **The failure this guards against is a picture, not an error.** A
+    // monochrome frame has one plane; sampling two textures that were never
+    // made gives zero, and zero through `(c - 0.5) * chroma_scale` is a strong
+    // green. So the shader is told there is no chroma rather than left to read
+    // it, and grey means grey.
+    Module module;
+    REQUIRE(module.vtbl != nullptr);
+
+    Presenter presenter{*module.vtbl, 16, 16};
+    REQUIRE(presenter.ok());
+    presenter.info().matrix = 1;
+    presenter.info().transfer = 1;
+    REQUIRE(presenter.configure() == "");
+
+    constexpr std::uint8_t k_y = 150;
+    std::vector<std::uint8_t> luma(16u * 16u, k_y);
+
+    MpVideoFrame frame{};
+    frame.size = sizeof(frame);
+    frame.layout = planar_layout(MP_CHROMA_MONO, 8u);
+    frame.width = 16;
+    frame.height = 16;
+    frame.plane[0] = luma.data();
+    frame.stride[0] = 16;
+    REQUIRE(module.vtbl->present(presenter.handle(), &frame) == MP_OK);
+
+    const std::vector<float> shown = presenter.read_back();
+    REQUIRE(shown.size() == 16u * 16u * 4u);
+
+    // Chroma at its centre is chroma that says nothing, so the answer is the
+    // luma channel three times.
+    //
+    // **And the centre is 127.5, not 128.** Half of the full scale falls
+    // between two codes at every even depth, so a monochrome frame written as
+    // 4:2:0 with its chroma planes filled with 128 is not quite neutral -- a
+    // ten-thousandth of the range green. Saying 0 chroma means saying exactly
+    // 0.5, which is what `has_chroma` does and what an integer code cannot.
+    const Rgb want = bt709(k_y, 127.5, 127.5, 255.0);
+    CHECK(shown[0] == Catch::Approx(bt1886(want.r)).margin(1e-5));
+    CHECK(shown[0] == Catch::Approx(shown[1]).margin(1e-6));
+    CHECK(shown[1] == Catch::Approx(shown[2]).margin(1e-6));
+}
+
+TEST_CASE("ten and twelve bits at the bottom of the container, not the top",
+          "[video][d3d11][yuv]")
+{
+    // **The sixty-four the ABI's `shift` exists for, as pixels.** P010 puts ten
+    // bits at the top of sixteen and dav1d puts them at the bottom; both are
+    // ten-bit 4:2:0 and a presenter that assumed either would be wrong about
+    // the other by a factor of sixty-four. Here the bits are at the bottom,
+    // which is the case that did not exist before v4.
+    Module module;
+    REQUIRE(module.vtbl != nullptr);
+
+    struct Case {
+        std::uint32_t bits;
+        std::uint32_t y;
+        std::uint32_t cb;
+        std::uint32_t cr;
+    };
+    const Case cases[] = {{10u, 480u, 360u, 800u}, {12u, 1920u, 1440u, 3200u}};
+
+    for (const Case& c : cases) {
+        INFO(c.bits << " bits");
+        const MpPixelLayout layout = planar_layout(MP_CHROMA_444, c.bits);
+        CHECK(layout.container_bits == 16u);
+        CHECK(layout.shift == 0u);
+
+        Presenter presenter{*module.vtbl, 16, 16};
+        REQUIRE(presenter.ok());
+        presenter.info().matrix = 1;
+        presenter.info().transfer = 1;
+        REQUIRE(presenter.configure() == "");
+
+        std::vector<std::uint16_t> luma(16u * 16u, static_cast<std::uint16_t>(c.y));
+        std::vector<std::uint16_t> cb(16u * 16u, static_cast<std::uint16_t>(c.cb));
+        std::vector<std::uint16_t> cr(16u * 16u, static_cast<std::uint16_t>(c.cr));
+
+        MpVideoFrame frame{};
+        frame.size = sizeof(frame);
+        frame.layout = layout;
+        frame.width = 16;
+        frame.height = 16;
+        frame.plane[0] = luma.data();
+        frame.stride[0] = 32;
+        frame.plane[1] = cb.data();
+        frame.stride[1] = 32;
+        frame.plane[2] = cr.data();
+        frame.stride[2] = 32;
+        REQUIRE(module.vtbl->present(presenter.handle(), &frame) == MP_OK);
+
+        const std::vector<float> shown = presenter.read_back();
+        REQUIRE(shown.size() == 16u * 16u * 4u);
+
+        // The code values are read against the full scale of their own depth,
+        // which is what `sample_scale` restores after a container-normalised
+        // sample.
+        const double full = static_cast<double>((1u << c.bits) - 1u);
+        const Rgb want = bt709(c.y, c.cb, c.cr, full);
+        CHECK(shown[0] == Catch::Approx(bt1886(want.r)).margin(2e-5));
+        CHECK(shown[1] == Catch::Approx(bt1886(want.g)).margin(2e-5));
+        CHECK(shown[2] == Catch::Approx(bt1886(want.b)).margin(2e-5));
+    }
+}
+
 TEST_CASE("studio range and full range are not the same picture", "[video][d3d11][yuv]")
 {
     // Treating 16..235 as 0..255 crushes the blacks and clips the whites, which
