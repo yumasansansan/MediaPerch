@@ -1822,9 +1822,54 @@ a texture without the flag and the presenter says so by name rather than copying
 The presenter adopts such a texture with two views over the one resource -- `R8_UNORM` for
 the luma plane and `R8G8_UNORM` for the interleaved chroma, at the array slice the frame
 names, because a decoder hands out one array and an index into it. Nothing is read back,
-copied or converted. **Tested without a hardware decoder**, by making exactly that texture on
-the presenter's own device and handing it over, which also exercises `get_device`; what stays
-untested here is Media Foundation granting the binding, because WARP has no hardware decoder.
+copied or converted. One test makes exactly that texture on the presenter's own device and
+hands it over, which also exercises `get_device` and is the case a machine with no GPU can
+still run.
+
+#### WARP is the tests' choice, not the machine's limit
+
+An earlier version of this section said the binding could not be checked here "because WARP
+has no hardware decoder". Half of that is true and the conclusion drawn from it was not.
+
+WARP really has no video device: no `ID3D11VideoDevice`, no decoder profiles, and
+`D3D11_CREATE_DEVICE_VIDEO_SUPPORT` fails against it with `DXGI_ERROR_UNSUPPORTED` rather
+than yielding a device without it. But **WARP is what the tests ask for**, by name and on
+purpose, because a hash of its pixels means the same thing on every machine. The development
+machine has an Intel Iris Xe with 80 decoder profiles, and asking it was always possible.
+
+Asked, it says this:
+
+| | |
+| --- | --- |
+| decoder found | `Microsoft H264 Video Decoder MFT`, `MF_SA_D3D11_AWARE = 1`, **synchronous** |
+| frames returned | 24 of 24 as textures, none in system memory |
+| the texture | `DXGI_FORMAT_NV12`, an array of **11 slices**, one frame per slice |
+| bind flags | `0x208` -- `D3D11_BIND_DECODER \| D3D11_BIND_SHADER_RESOURCE`, both |
+| the two views | `R8_UNORM` and `R8G8_UNORM` over it, `S_OK` each |
+
+So `MF_SA_D3D11_BINDFLAGS` is honoured, and the zero-copy path is real rather than argued
+for. A second test decodes the fixture on the hardware device and holds the picture to the
+same evidence the system-memory chain is held to; it skips, saying which, on a machine whose
+presenter device has no `ID3D11VideoDevice`.
+
+Two things the asking changed:
+
+- **The presenter's device is made for two jobs.** §9.8.1 puts it there because a presenter
+  outlives every decoder a playlist goes through -- which means it must be created with
+  `D3D11_CREATE_DEVICE_VIDEO_SUPPORT`, and made multithread protected, neither of which the
+  presenting half needs and neither of which can be added afterwards. Media Foundation
+  decodes on threads of its own, and a shared device that does not serialise its own use
+  fails as intermittent corruption rather than as an error. The video flag is asked for on
+  hardware only, and an adapter that refuses it still presents.
+- **An asynchronous MFT is a different program.** `MFTEnumEx` marks one with
+  `MF_TRANSFORM_ASYNC`; it must be unlocked and then driven by `METransformNeedInput` and
+  `METransformHaveOutput` events, and until it is, every `IMFTransform` method returns
+  `MF_E_TRANSFORM_ASYNC_LOCKED`. `codec_mft` drives no event queue, so it passes such a
+  transform over rather than activating one and failing at `SetInputType` with the software
+  fallback already spent. Several vendors ship async hardware decoders; that path is a
+  follow-up, and it costs less than it sounds because Microsoft's own H.264 transform is
+  synchronous *and* D3D11-aware -- on this machine it **is** the DXVA host, not a software
+  fallback, which is why one decoder covers both columns of the table above.
 
 #### What a D3D12 decoder actually costs
 

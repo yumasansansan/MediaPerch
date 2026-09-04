@@ -30,6 +30,8 @@
 #endif
 #include <windows.h>
 
+#include <d3d11.h>
+
 namespace {
 
 /// A module, loaded the way the engine loads one.
@@ -449,4 +451,221 @@ TEST_CASE("a decoded frame reaches the presenter and comes back as pixels",
 
     video->close(presenter);
     codec->close(decoder);
+}
+
+TEST_CASE("a hardware decoder decodes into a texture the presenter samples in place",
+          "[video][mft][d3d11][hardware]")
+{
+    // **The zero-copy path, on whatever GPU this machine actually has.**
+    //
+    // Every other test here asks the presenter for WARP, because WARP is
+    // deterministic and a hash of its pixels means the same thing everywhere.
+    // The cost of that choice is precisely this case: WARP has no video device
+    // at all -- no `ID3D11VideoDevice`, no decoder profiles, and asking it for
+    // `D3D11_CREATE_DEVICE_VIDEO_SUPPORT` fails outright -- so the tests that
+    // ask for it cannot see whether Media Foundation grants the binding
+    // `codec_mft` requests through `MF_SA_D3D11_BINDFLAGS`. That is a fact
+    // about WARP and not about the machine, and this test is the machine's.
+    //
+    // So: the hardware device, the fixture decoded on it, and a look at the
+    // texture that comes back. It skips rather than fails where there is no
+    // hardware adapter, and says so -- a test that quietly does nothing is
+    // also a claim.
+    Module demux_module{MEDIAPERCH_DEMUX_MP4, MP_KIND_DEMUX};
+    Module codec_module{MEDIAPERCH_CODEC_MFT, MP_KIND_VCODEC};
+    Module video_module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(demux_module.vtbl != nullptr);
+    REQUIRE(codec_module.vtbl != nullptr);
+    REQUIRE(video_module.vtbl != nullptr);
+    const auto* codec = static_cast<const MpVideoCodecVtbl*>(codec_module.vtbl);
+    const auto* video = static_cast<const MpVideoVtbl*>(video_module.vtbl);
+
+    mp::Demux demux;
+    REQUIRE(demux.open(*static_cast<const MpDemuxVtbl*>(demux_module.vtbl),
+                       MEDIAPERCH_TEST_AV) == MP_OK);
+    std::uint32_t stream = 0;
+    MpStreamInfo info{};
+    bool found = false;
+    for (std::uint32_t i = 0; i < demux.stream_count(); ++i) {
+        if (demux.stream_info(i, info) && info.kind == MP_STREAM_VIDEO) {
+            stream = i;
+            found = true;
+            break;
+        }
+    }
+    REQUIRE(found);
+    std::vector<std::uint8_t> config;
+    REQUIRE(demux.stream_config(stream, config));
+    MpVideoInfo geometry{};
+    geometry.size = sizeof(geometry);
+    REQUIRE(demux.video_info(stream, geometry));
+
+    // No `device` setting, which asks for the hardware adapter and falls back
+    // to WARP -- and the fallback is what the skip below is looking for.
+    MpVideo* presenter = nullptr;
+    REQUIRE(video->open(nullptr, &presenter) == MP_OK);
+    REQUIRE(video->configure(presenter, &geometry) == MP_OK);
+
+    MpGraphicsDevice graphics{};
+    graphics.size = sizeof(graphics);
+    REQUIRE(video->get_device(presenter, &graphics) == MP_OK);
+    REQUIRE(graphics.api == MP_GRAPHICS_D3D11);
+    REQUIRE(graphics.device != nullptr);
+
+    // Asked of the device rather than of the setting, because this is the
+    // property that matters: an adapter with no video engine is the same case
+    // as WARP, and neither can decode.
+    ID3D11VideoDevice* video_device = nullptr;
+    if (FAILED(static_cast<ID3D11Device*>(graphics.device)
+                   ->QueryInterface(IID_PPV_ARGS(&video_device)))) {
+        video->close(presenter);
+        SKIP("the presenter's device has no ID3D11VideoDevice, so there is nothing "
+             "to decode with -- WARP, a remote session, or an adapter with no video "
+             "engine");
+    }
+    const UINT profiles = video_device->GetVideoDecoderProfileCount();
+    video_device->Release();
+    CHECK(profiles > 0);
+
+    std::uint32_t score = 0;
+    REQUIRE(codec->probe(MP_CODEC_H264, MP_GRAPHICS_D3D11, config.data(),
+                         static_cast<std::uint32_t>(config.size()), &score) == MP_OK);
+    CHECK(score > 0);
+
+    MpVideoCodec* decoder = nullptr;
+    REQUIRE(codec->open(MP_CODEC_H264, &graphics, config.data(),
+                        static_cast<std::uint32_t>(config.size()), &decoder) == MP_OK);
+
+    const std::uint32_t only_video[] = {stream};
+    REQUIRE(demux.select_streams(only_video) == MP_OK);
+
+    std::vector<std::uint8_t> buffer;
+    MpPacket packet{};
+    std::uint32_t frames = 0;
+    std::uint32_t textures = 0;
+    std::uint32_t presented = 0;
+    bool granted = true;
+    bool looked = false;
+    std::string shape;
+
+    const auto drain = [&] {
+        for (int guard = 0; guard < 64; ++guard) {
+            MpVideoFrame frame{};
+            frame.size = sizeof(frame);
+            const MpResult r = codec->next_frame(decoder, &frame);
+            if (r == MP_END) {
+                return;
+            }
+            if (r == MP_ERR_BUSY) {
+                continue;
+            }
+            REQUIRE(r == MP_OK);
+            ++frames;
+            if (frame.texture == nullptr) {
+                REQUIRE(video->present(presenter, &frame) == MP_OK);
+                ++presented;
+                continue;
+            }
+            ++textures;
+            if (!looked) {
+                looked = true;
+                D3D11_TEXTURE2D_DESC desc{};
+                static_cast<ID3D11Texture2D*>(frame.texture)->GetDesc(&desc);
+                char line[256];
+                std::snprintf(line, sizeof(line),
+                              "%ux%u DXGI format %u, an array of %u slices, this frame "
+                              "at %u, bind flags 0x%X",
+                              desc.Width, desc.Height, static_cast<unsigned>(desc.Format),
+                              desc.ArraySize, frame.texture_index, desc.BindFlags);
+                shape = line;
+                // A decoder hands out one array and an index into it, which is
+                // why the frame carries both.
+                CHECK(desc.ArraySize >= 1u);
+                CHECK(frame.texture_index < desc.ArraySize);
+                CHECK((desc.Format == DXGI_FORMAT_NV12 || desc.Format == DXGI_FORMAT_P010));
+                CHECK((desc.BindFlags & D3D11_BIND_DECODER) != 0);
+                granted = (desc.BindFlags & D3D11_BIND_SHADER_RESOURCE) != 0;
+            }
+            // **Both answers are correct behaviour and only one is silence.**
+            // A driver that honoured MF_SA_D3D11_BINDFLAGS gets sampled in
+            // place; one that declined has to be told about by name rather
+            // than copied around quietly, which is what the refusal is.
+            if (granted) {
+                INFO(shape);
+                REQUIRE(video->present(presenter, &frame) == MP_OK);
+                ++presented;
+            } else {
+                CHECK(video->present(presenter, &frame) == MP_ERR_UNSUPPORTED);
+            }
+        }
+    };
+
+    while (demux.read_packet(buffer, packet) == MP_OK) {
+        if (codec->decode(decoder, buffer.data(), packet.bytes, packet.frame) ==
+            MP_ERR_BUSY) {
+            drain();
+            REQUIRE(codec->decode(decoder, buffer.data(), packet.bytes, packet.frame) ==
+                    MP_OK);
+        }
+        drain();
+    }
+    REQUIRE(codec->flush(decoder) == MP_OK);
+    drain();
+    CHECK(frames == 24u);
+
+    codec->close(decoder);
+
+    if (textures == 0) {
+        video->close(presenter);
+        SKIP("this machine has a video device but its decoder would not take it; "
+             "the frames came back in system memory, which the other tests cover");
+    }
+    INFO(shape);
+    CHECK(textures == frames);
+
+    if (!granted) {
+        char why[512] = "";
+        video->describe(presenter, 0, why, sizeof(why));
+        video->close(presenter);
+        SKIP("this machine's decoder would not grant D3D11_BIND_SHADER_RESOURCE, so "
+             "the presenter refused the texture by name, which is the other half of "
+             "what MF_SA_D3D11_BINDFLAGS is for");
+    }
+    CHECK(presented == frames);
+
+    // **And the picture, so that "adopted" means more than "not refused".**
+    // The same evidence the system-memory chain is held to: testsrc2 is bars
+    // and shapes, so a frame of it has a spread of luminance and more than one
+    // hue, and a stuck decoder or a dropped chroma plane has neither.
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    MpPixelFormat format = MP_PIXEL_NONE;
+    REQUIRE(video->read_back(presenter, nullptr, 0, &width, &height, &format) ==
+            MP_ERR_NO_MEMORY);
+    CHECK(width == 128u);
+    CHECK(height == 96u);
+    REQUIRE(format == MP_PIXEL_RGBA32F);
+
+    std::vector<float> pixels(static_cast<std::size_t>(width) * height * 4u);
+    REQUIRE(video->read_back(presenter, pixels.data(), pixels.size() * sizeof(float),
+                             &width, &height, &format) == MP_OK);
+
+    float darkest = 2.0f;
+    float brightest = -1.0f;
+    bool coloured = false;
+    for (std::size_t i = 0; i < pixels.size(); i += 4) {
+        const float r = pixels[i];
+        const float g = pixels[i + 1];
+        const float b = pixels[i + 2];
+        darkest = std::min(darkest, 0.2126f * r + 0.7152f * g + 0.0722f * b);
+        brightest = std::max(brightest, 0.2126f * r + 0.7152f * g + 0.0722f * b);
+        if (std::abs(r - b) > 0.05f || std::abs(g - b) > 0.05f) {
+            coloured = true;
+        }
+    }
+    CHECK(darkest < 0.2f);
+    CHECK(brightest > 0.5f);
+    CHECK(coloured);
+
+    video->close(presenter);
 }

@@ -340,7 +340,28 @@ bool activate(MpVideoCodec* c, bool want_hardware, std::string& why)
     }
 
     bool made = false;
+    bool passed_over_async = false;
     for (UINT32 i = 0; i < count; ++i) {
+        // **An asynchronous MFT is a different program, not a faster one.**
+        // `MFTEnumEx` marks one with `MF_TRANSFORM_ASYNC`; it has to be
+        // unlocked with `MF_TRANSFORM_ASYNC_UNLOCK` and then driven by
+        // `METransformNeedInput` and `METransformHaveOutput` events, and until
+        // it is, every `IMFTransform` method returns
+        // MF_E_TRANSFORM_ASYNC_LOCKED. Nothing here drives an event queue yet,
+        // and activating one anyway would fail at `SetInputType` with the
+        // software fallback already spent -- so it is passed over, which leaves
+        // the synchronous decoder for this machine to find.
+        //
+        // That is not a hypothetical loss: several vendors ship async hardware
+        // decoders. It is a smaller one than it sounds, because Microsoft's own
+        // H.264 transform is synchronous *and* D3D11-aware, so it is the DXVA
+        // host on an Intel machine rather than a software fallback.
+        UINT32 async = 0;
+        if (SUCCEEDED(activates[i]->GetUINT32(MF_TRANSFORM_ASYNC, &async)) && async != 0) {
+            passed_over_async = true;
+            activates[i]->Release();
+            continue;
+        }
         if (!made && SUCCEEDED(activates[i]->ActivateObject(
                          IID_PPV_ARGS(c->transform.put())))) {
             made = true;
@@ -349,7 +370,10 @@ bool activate(MpVideoCodec* c, bool want_hardware, std::string& why)
     }
     ::CoTaskMemFree(activates);
     if (!made) {
-        why = "the decoder would not activate";
+        why = passed_over_async
+                  ? "every decoder for this codec is an asynchronous MFT, which nothing "
+                    "here drives yet"
+                  : "the decoder would not activate";
         return false;
     }
     return true;

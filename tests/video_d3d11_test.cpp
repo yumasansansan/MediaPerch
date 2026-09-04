@@ -640,9 +640,10 @@ TEST_CASE("a decoder's own texture is viewed rather than copied", "[video][d3d11
     // An ID3D11VideoDecoder writes NV12 into an array it owns and a frame is a
     // slice of it; this makes such a texture by hand on the presenter's own
     // device -- which is what `get_device` exists to hand over -- and checks
-    // the presenter samples it in place. What is not tested here is Media
-    // Foundation actually granting the binding, because WARP has no hardware
-    // decoder; that is MF_SA_D3D11_BINDFLAGS and it is asked for in codec_mft.
+    // the presenter samples it in place. Media Foundation granting the binding
+    // is a separate question and a separate test: this one asks for WARP,
+    // which has no video device at all, and codec_mft_test.cpp takes the
+    // hardware one.
     Module module;
     REQUIRE(module.vtbl != nullptr);
 
@@ -721,6 +722,12 @@ TEST_CASE("a decoder's own texture is viewed rather than copied", "[video][d3d11
     const auto to_linear = [](double c) { return std::pow(std::clamp(c, 0.0, 1.0), 2.4); };
     CHECK(shown[0] == Catch::Approx(to_linear(y + 2.0 * (1.0 - kr) * v)).margin(1e-5));
     CHECK(shown[2] == Catch::Approx(to_linear(y + 2.0 * (1.0 - kb) * u)).margin(1e-5));
+    // Green is worth checking on its own: red and blue take one chroma each,
+    // and green is the only channel where both coefficients are derived rather
+    // than read off, so a mistake in the luma weights shows here first.
+    CHECK(shown[1] == Catch::Approx(to_linear(y - 2.0 * kb * (1.0 - kb) / kg * u -
+                                              2.0 * kr * (1.0 - kr) / kg * v))
+                          .margin(1e-5));
 
     // And a slice past the end of the array is refused rather than read.
     frame.texture_index = 7;

@@ -95,6 +95,7 @@
 #include <windows.h>
 
 #include <d3d11_1.h>
+#include <d3d11_4.h>
 #include <d3dcompiler.h>
 #include <dxgi1_6.h>
 
@@ -399,6 +400,14 @@ bool compile(const char* entry, const char* target, Com<ID3DBlob>& out, std::str
 }
 
 /// The device, and the two ways of getting one.
+///
+/// **It is made for two jobs.** §9.8.1 puts the device here rather than in the
+/// decoder -- a presenter is made once and outlives every decoder a playlist
+/// goes through -- so a decoder that will be handed this one needs two things
+/// the presenting half never asks for: `ID3D11VideoDevice`, which comes of
+/// `D3D11_CREATE_DEVICE_VIDEO_SUPPORT`, and multithread protection, because
+/// Media Foundation decodes on threads of its own. Both are free to the
+/// presenting half and neither can be added afterwards.
 bool make_device(MpVideo* v, std::string& why)
 {
     UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
@@ -410,29 +419,47 @@ bool make_device(MpVideo* v, std::string& why)
     static constexpr D3D_FEATURE_LEVEL k_levels[] = {D3D_FEATURE_LEVEL_11_1,
                                                      D3D_FEATURE_LEVEL_11_0};
 
-    const D3D_DRIVER_TYPE first = v->warp ? D3D_DRIVER_TYPE_WARP : D3D_DRIVER_TYPE_HARDWARE;
-    HRESULT hr = ::D3D11CreateDevice(nullptr, first, nullptr, flags, k_levels,
+    const auto create = [&](D3D_DRIVER_TYPE type, UINT extra) {
+        HRESULT hr = ::D3D11CreateDevice(nullptr, type, nullptr, flags | extra, k_levels,
+                                         static_cast<UINT>(std::size(k_levels)),
+                                         D3D11_SDK_VERSION, v->device.put(), nullptr,
+                                         v->context.put());
+#ifndef NDEBUG
+        if (FAILED(hr) && (flags & D3D11_CREATE_DEVICE_DEBUG) != 0) {
+            flags &= ~static_cast<UINT>(D3D11_CREATE_DEVICE_DEBUG);
+            hr = ::D3D11CreateDevice(nullptr, type, nullptr, flags | extra, k_levels,
                                      static_cast<UINT>(std::size(k_levels)),
                                      D3D11_SDK_VERSION, v->device.put(), nullptr,
                                      v->context.put());
-#ifndef NDEBUG
-    if (FAILED(hr)) {
-        flags &= ~static_cast<UINT>(D3D11_CREATE_DEVICE_DEBUG);
-        hr = ::D3D11CreateDevice(nullptr, first, nullptr, flags, k_levels,
-                                 static_cast<UINT>(std::size(k_levels)), D3D11_SDK_VERSION,
-                                 v->device.put(), nullptr, v->context.put());
-    }
+        }
 #endif
-    if (FAILED(hr) && !v->warp) {
-        // **WARP is the answer rather than the consolation.** A machine with no
-        // usable adapter -- a CI runner, a remote session -- still renders, and
-        // renders the same pixels every time, which is what makes a hash of
-        // them worth anything.
-        log_line(MP_LOG_INFO, "video_d3d11: no hardware device, using WARP");
-        v->warp = true;
-        hr = ::D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, flags, k_levels,
-                                 static_cast<UINT>(std::size(k_levels)), D3D11_SDK_VERSION,
-                                 v->device.put(), nullptr, v->context.put());
+        return hr;
+    };
+
+    HRESULT hr = E_FAIL;
+    if (!v->warp) {
+        // **The video flag is asked for on hardware and never on WARP.** WARP
+        // has no video device at all -- no `ID3D11VideoDevice`, no decoder
+        // profiles -- and asking it for `D3D11_CREATE_DEVICE_VIDEO_SUPPORT`
+        // fails with DXGI_ERROR_UNSUPPORTED rather than handing back a device
+        // without it. An adapter with no video engine is the same case one step
+        // down, which is what the second attempt is for: such a machine still
+        // presents, and its decoder is the software one.
+        hr = create(D3D_DRIVER_TYPE_HARDWARE, D3D11_CREATE_DEVICE_VIDEO_SUPPORT);
+        if (FAILED(hr)) {
+            hr = create(D3D_DRIVER_TYPE_HARDWARE, 0);
+        }
+        if (FAILED(hr)) {
+            // **WARP is the answer rather than the consolation.** A machine
+            // with no usable adapter -- a CI runner, a remote session -- still
+            // renders, and renders the same pixels every time, which is what
+            // makes a hash of them worth anything.
+            log_line(MP_LOG_INFO, "video_d3d11: no hardware device, using WARP");
+            v->warp = true;
+        }
+    }
+    if (v->warp) {
+        hr = create(D3D_DRIVER_TYPE_WARP, 0);
     }
     if (FAILED(hr)) {
         char code[64];
@@ -440,6 +467,18 @@ bool make_device(MpVideo* v, std::string& why)
                       static_cast<unsigned long>(hr));
         why = code;
         return false;
+    }
+
+    // **Media Foundation decodes on threads of its own**, and a device shared
+    // with it has to serialise its own use or the two race. What comes of not
+    // saying so is not an error to catch: it is intermittent corruption, which
+    // is the worst kind to go looking for months later. Every device gets it,
+    // including WARP, because whether a decoder will be handed this one is not
+    // known when it is made.
+    Com<ID3D11Multithread> threading;
+    if (SUCCEEDED(v->device->QueryInterface(__uuidof(ID3D11Multithread),
+                                            reinterpret_cast<void**>(threading.put())))) {
+        threading->SetMultithreadProtected(TRUE);
     }
 
     Com<IDXGIDevice> dxgi;
