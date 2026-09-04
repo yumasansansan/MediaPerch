@@ -31,6 +31,21 @@ const char* name_of(Encoding e) noexcept
     return "linear scRGB";
 }
 
+const char* name_of(Convert c) noexcept
+{
+    switch (c) {
+    case Convert::none:
+        return "none";
+    case Convert::to_linear:
+        return "to linear";
+    case Convert::hlg_to_linear:
+        return "HLG OOTF to linear";
+    case Convert::to_pq:
+        return "to PQ";
+    }
+    return "to linear";
+}
+
 bool tone_map_from_name(const char* name, ToneMap& out) noexcept
 {
     if (name == nullptr) {

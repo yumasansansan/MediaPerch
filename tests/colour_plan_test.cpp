@@ -192,6 +192,60 @@ TEST_CASE("HLG is HDR too, which is the transfer people forget", "[video][colour
     CHECK(plan_for(hlg, sdr).tone_mapping);
 }
 
+TEST_CASE("HLG does not pass through, even on a display that can show it",
+          "[video][colour]")
+{
+    using namespace mp::video;
+
+    // **The bug this test was written for.** An earlier version of `plan_for`
+    // put PQ and HLG in the same branch and, on an HDR display with nothing
+    // composited, chose a PQ buffer for both with the comment "pass PQ
+    // through". HLG is not PQ. PQ states absolute nits; HLG is scene-referred
+    // and its OOTF is a system gamma derived from the display's peak. HLG code
+    // values written into a buffer tagged PQ are a picture that is far too dark
+    // and wrongly graded -- and it would have looked like a tone mapping fault.
+    Display hdr{};
+    hdr.hdr = true;
+    hdr.peak_nits = 600.0f;
+
+    Stream pq = hdr10_2160p();
+    Stream hlg = hdr10_2160p();
+    hlg.transfer = k_transfer_hlg;
+
+    // PQ, alone on an HDR display, is the one genuine pass-through in §9.
+    const Plan pq_plan = plan_for(pq, hdr, ToneMap::driver, false);
+    CHECK(pq_plan.encoding == Encoding::pq);
+    CHECK(pq_plan.convert == Convert::none);
+    CHECK_FALSE(pq_plan.tone_mapping);
+
+    // HLG is linearised instead, which costs the packed buffer. No platform
+    // here presents HLG directly -- DXGI has no HLG swap chain colour space and
+    // neither does CAMetalLayer -- so that is the honest price of the format
+    // rather than a limitation of this module.
+    const Plan hlg_plan = plan_for(hlg, hdr, ToneMap::driver, false);
+    CHECK(hlg_plan.encoding == Encoding::linear);
+    CHECK(hlg_plan.convert == Convert::hlg_to_linear);
+    // And still not tone-mapped: the display can show every stop of it. The
+    // conversion and the mapping are different questions, which is why they are
+    // two fields.
+    CHECK_FALSE(hlg_plan.tone_mapping);
+    CHECK(hlg_plan.tone_map == ToneMap::none);
+
+    // The OOTF needs the display's peak, so the plan carries it rather than
+    // making a shader ask a display anything.
+    CHECK(hlg_plan.hlg_peak_nits == Catch::Approx(600.0f));
+
+    // On an SDR display it is both converted and mapped.
+    Display sdr{};
+    const Plan hlg_on_sdr = plan_for(hlg, sdr);
+    CHECK(hlg_on_sdr.convert == Convert::hlg_to_linear);
+    CHECK(hlg_on_sdr.tone_mapping);
+
+    // And everything that is not HLG takes the ordinary linearisation.
+    CHECK(plan_for(sdr_1080p(), sdr).convert == Convert::to_linear);
+    CHECK(plan_for(pq, sdr).convert == Convert::to_linear);
+}
+
 TEST_CASE("the names a person types round-trip", "[video][colour]")
 {
     using namespace mp::video;

@@ -1398,6 +1398,35 @@ by all follow from what the container said and what the display is, and none of 
 device to work out. They are the part that is easy to get subtly wrong, and they are tested
 against the cases this section names.
 
+### 9.9.1 HLG is not PQ, and it does not pass through
+
+Written down because the first version of `plan_for` got it wrong in a way that would have
+looked like a tone mapping fault. It put PQ and HLG in one branch -- both are HDR transfers,
+so both took the "the display can show it" path -- and on an HDR display with nothing
+composited it chose a PQ buffer for both, under a comment that said *pass PQ through*.
+
+**PQ states absolute nits. HLG does not.** ST.2084 maps a code value to a luminance, full
+stop. ARIB STD-B67 is scene-referred: its OOTF is a system gamma derived from the *display's*
+peak luminance, so the same signal is deliberately a different picture on a 600-nit panel and
+a 1000-nit one. HLG code values written into a buffer tagged PQ are a picture that is far too
+dark and wrongly graded, and nothing about the failure points at the transfer function.
+
+**And no platform here presents HLG directly.** DXGI has no HLG swap chain colour space --
+`YCBCR_STUDIO_GHLG_TOPLEFT_P2020` exists for video surfaces and not for presentation -- and
+`CAMetalLayer` has none either. So HLG is linearised like everything else, which costs it the
+packed buffer. That is the price of the format rather than a limitation of this module, and
+it is worth stating in both places it will be looked for.
+
+Two consequences in the code. `Plan` gained a **`Convert`** alongside `ToneMap`, because
+conflating them is what caused this: tone mapping reduces dynamic range a display cannot
+show, while a transfer conversion changes how numbers are coded and reduces nothing -- and
+HLG needs one on a display that can show every stop of it. And `Display` gained
+`peak_nits`, read from `DXGI_OUTPUT_DESC1::MaxLuminance`, because the OOTF is a function of
+it; the plan carries the value so a shader never has to ask a display anything.
+
+The one genuine pass-through in §9 is therefore narrower than it looked: **PQ content, on an
+HDR display, with nothing composited over it.** Everything else is converted.
+
 ### 9.10 How many bits, and where they are lost
 
 Asked because a display may be 10-bit, or 12, and answering it turned up three places where

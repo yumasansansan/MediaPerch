@@ -67,6 +67,12 @@ struct Display {
     /// `DISPLAYCONFIG_SDR_WHITE_LEVEL`, in nits. 80 is the scRGB reference and
     /// what a display that does not say is assumed to use.
     float sdr_white_nits = 80.0f;
+    /// The brightest the display claims, from `DXGI_OUTPUT_DESC1::MaxLuminance`
+    /// or its equivalent. **HLG needs it and PQ does not**: PQ states absolute
+    /// nits, while HLG is scene-referred and its OOTF has a system gamma that
+    /// is a function of the display's peak. 1000 is the reference HLG display
+    /// and the assumption BT.2100 makes when nothing says otherwise.
+    float peak_nits = 1000.0f;
 };
 
 /// §9.3's four, in the order §9.7 wants them tried.
@@ -109,8 +115,38 @@ enum class Encoding : std::uint32_t {
     pq,
 };
 
+/// What has to happen to the source's transfer function on the way in.
+///
+/// **Separate from tone mapping, which conflating them got wrong.** Tone
+/// mapping reduces dynamic range because a display cannot show it all. A
+/// transfer conversion changes how the numbers are coded and reduces nothing --
+/// and HLG needs one even on a display that can show every stop of it, because
+/// no platform presents HLG directly.
+enum class Convert : std::uint32_t {
+    /// The buffer already holds what the source coded. Only PQ into a PQ
+    /// buffer gets this.
+    none,
+    /// Undo the source's transfer into linear light. sRGB, BT.709 and PQ all
+    /// take it, and it is what a linear buffer always needs.
+    to_linear,
+    /// Undo HLG's inverse-OETF *and* its OOTF, which is the step that makes
+    /// HLG different: the OOTF is a system gamma derived from the display's
+    /// peak luminance, so the same signal is a different picture on two
+    /// displays and that is by design.
+    hlg_to_linear,
+    /// Linearise, then re-encode as PQ. What a source that is not PQ needs to
+    /// reach a PQ buffer -- and the reason this plan does not send one there.
+    to_pq,
+};
+
 struct Plan {
     Encoding encoding = Encoding::linear;
+    /// What the source's transfer needs on the way into that buffer.
+    Convert convert = Convert::to_linear;
+    /// The peak the HLG OOTF was derived for, in nits. Meaningless unless
+    /// `convert` is `hlg_to_linear`, and carried here so the shader does not
+    /// have to ask a display anything.
+    float hlg_peak_nits = 1000.0f;
     /// Whether anything is drawn over the video, which rules out a packed
     /// format that cannot blend -- and is a fact about the *player*, not about
     /// any platform's format list.
@@ -158,15 +194,18 @@ struct Plan {
 /// needs none would darken a picture that was already right.
 ///
 /// `composited` says whether anything is drawn over the video -- subtitles, an
-/// OSD. It costs the HDR10 swap chain, which cannot blend.
+/// OSD. It costs the packed PQ buffer, which cannot blend.
 [[nodiscard]] constexpr Plan plan_for(const Stream& stream, const Display& display,
                                       ToneMap preferred = ToneMap::driver,
                                       bool composited = true) noexcept
 {
     Plan plan{};
-    const bool content_is_hdr = is_hdr_transfer(assumed_transfer(stream));
+    const std::uint32_t transfer = assumed_transfer(stream);
+    const bool content_is_hdr = is_hdr_transfer(transfer);
+    const bool content_is_hlg = transfer == k_transfer_hlg;
 
     plan.needs_blending = composited;
+    plan.hlg_peak_nits = display.peak_nits;
 
     if (!content_is_hdr) {
         // **Nothing to map.** SDR content on any display is SDR content; the
@@ -176,11 +215,17 @@ struct Plan {
         plan.tone_mapping = false;
         plan.encoding = Encoding::linear;
     } else if (display.hdr) {
-        // The display can show it. Pass PQ through, and take the cheaper
-        // encoding when there is nothing to blend over it.
+        // The display can show it, so nothing is tone-mapped -- but **that is
+        // not the same as nothing being done**, which is what an earlier
+        // version of this function assumed. PQ passes through into a PQ buffer
+        // and HLG does not: it is scene-referred, its OOTF depends on the
+        // display's peak, and no platform here presents it directly. DXGI has
+        // no HLG swap chain colour space at all; a `CAMetalLayer` has none
+        // either. So HLG is linearised like everything else, which costs the
+        // packed buffer and is the honest price of the format.
         plan.tone_map = ToneMap::none;
         plan.tone_mapping = false;
-        plan.encoding = composited ? Encoding::linear : Encoding::pq;
+        plan.encoding = composited || content_is_hlg ? Encoding::linear : Encoding::pq;
     } else {
         // HDR content, SDR display: §9.1's whole point. Something must map it,
         // and composition will not -- it clips, silently, and everything
@@ -188,6 +233,16 @@ struct Plan {
         plan.tone_map = preferred == ToneMap::none ? ToneMap::driver : preferred;
         plan.tone_mapping = true;
         plan.encoding = Encoding::linear;
+    }
+
+    // What the transfer needs, which follows from the two above and is stated
+    // rather than left for a renderer to infer from `transfer` and `encoding`.
+    if (plan.encoding == Encoding::pq) {
+        plan.convert = Convert::none; // only PQ reaches a PQ buffer
+    } else if (content_is_hlg) {
+        plan.convert = Convert::hlg_to_linear;
+    } else {
+        plan.convert = Convert::to_linear;
     }
 
     // §9.6, and it applies whenever the buffer is linear on an HDR display --
@@ -203,6 +258,7 @@ struct Plan {
 /// The name a person types and reads back.
 [[nodiscard]] const char* name_of(ToneMap m) noexcept;
 [[nodiscard]] const char* name_of(Encoding e) noexcept;
+[[nodiscard]] const char* name_of(Convert c) noexcept;
 [[nodiscard]] bool tone_map_from_name(const char* name, ToneMap& out) noexcept;
 
 } // namespace mp::video

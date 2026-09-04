@@ -241,6 +241,13 @@ mp::video::Display probe_display(IDXGIFactory2* factory, HWND window)
     // G22_NONE_P709, so `wide` stays false and only Windows 11 24H2's
     // ADVANCED_COLOR_INFO_2 could say otherwise.
     display.hdr = desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+    // **HLG needs this and PQ does not.** PQ states absolute nits; HLG is
+    // scene-referred and its OOTF is a system gamma derived from the display's
+    // peak, so the same signal is a different picture on two displays and that
+    // is the format working as designed rather than a fault.
+    if (desc.MaxLuminance > 0.0f) {
+        display.peak_nits = desc.MaxLuminance;
+    }
 
     (void)window;
     // The SDR white level comes from QueryDisplayConfig, which needs the
@@ -900,6 +907,11 @@ try {
                       v->window == nullptr && v->wide_target ? "fp32" : "fp16");
         return MP_OK;
     case 10:
+        std::snprintf(out, out_bytes,
+                      "convert\t%s\twhat the source transfer needs (read only)",
+                      mp::video::name_of(v->plan.convert));
+        return MP_OK;
+    case 11:
         std::snprintf(out, out_bytes, "trouble\t%s\twhat went wrong (read only)",
                       v->trouble.empty() ? "nothing" : v->trouble.c_str());
         return MP_OK;
