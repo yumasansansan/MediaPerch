@@ -1352,6 +1352,13 @@ chain eligible for Advanced Color processing at all.
   `IDXGISwapChain3::SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)`. Half the
   bandwidth, but no alpha blending — so only when nothing is composited over the video.
 
+**And fullscreen is worth reaching for its own sake**, which this section did not
+previously say: a fullscreen flip-model chain gets *independent flip*, where the
+display controller scans the swap chain's buffer out directly and the DWM composites
+nothing. It removes a copy and about a frame of latency. It does **not** move the
+precision ceiling — §9.10 — because the buffer being scanned out is still a swap
+chain buffer in one of the same four formats.
+
 ### 9.6 The one that will look wrong first
 
 On an **HDR** display, scRGB `1.0` means 80 nits — *scene-referred*. On an Advanced Color
@@ -1396,22 +1403,119 @@ against the cases this section names.
 Asked because a display may be 10-bit, or 12, and answering it turned up three places where
 this tree was throwing precision away.
 
-**Presenting is capped at FP16 and that is DXGI's ceiling, not a choice.** A flip-model swap
-chain accepts `B8G8R8A8_UNORM`, `R8G8B8A8_UNORM`, `R10G10B10A2_UNORM` and
-`R16G16B16A16_FLOAT`, and nothing above them. Half is what a 10-bit or 12-bit panel is fed
-through, and its precision profile suits a linear light buffer better than the width suggests:
-it is *relatively* precise, about eleven significant bits everywhere, so the spacing is
-finest in the shadows where banding is visible and coarsest near white where a step is
-hardest to see. Near white it is roughly twelve bits of encoded precision -- beyond every
-consumer panel -- and in the deep shadows it is finer than 16-bit integer by more than an
-order of magnitude. What it costs is measured rather than assumed: a test renders the same
-frame at both widths and holds the difference to one unit in the last place.
+**Presenting is capped at FP16, that is DXGI's ceiling rather than a choice, and it is not
+enough.** A flip-model swap chain accepts `B8G8R8A8_UNORM`, `R8G8B8A8_UNORM`,
+`R10G10B10A2_UNORM` and `R16G16B16A16_FLOAT`, and nothing above them.
 
-**Everything before the store is single precision**, and stays there. HLSL `float` is 32-bit,
-this module uses no `half` and no `min16float`, and there is deliberately **no intermediate
-render target while there is one pass** -- adding one would round twice where writing
-straight to the destination rounds once. The intermediate arrives with the second pass, in
-single precision, and the count stays at one.
+The first version of this paragraph said half was fine because it exceeded every consumer
+panel, which is the wrong yardstick for a video engine that may end up doing colour grading:
+if a 16-bit output is conceivable then rounding to something narrower is a decision, and a
+decision needs a number rather than an audience.
+
+Here is the number. Half is *relatively* precise -- its step is between 1/2048 and 1/1024 of
+the value, everywhere. An N-bit encoded output with a gamma near 2.4 needs a relative linear
+precision of `2.4 / (2^N - 1)` at white, and harsher than that below it. So:
+
+| Output | Needed at white | Half is short by |
+|---|---|---|
+| 8-bit | 9.4e-3 | no -- ten times finer |
+| 10-bit | 2.3e-3 | no -- twice finer |
+| **12-bit** | 5.9e-4 | **1.7x** |
+| 14-bit | 1.5e-4 | 6.7x |
+| 16-bit | 3.7e-5 | 27x |
+
+**Half is already short at twelve bits**, not at some hypothetical future panel, and it is
+short over most of the range rather than only at white -- the requirement gets harsher as the
+signal darkens, until sRGB's linear toe. Where half *is* better than an integer format is the
+deep shadows, by an order of magnitude, which is why it suits a linear light buffer at all.
+That is a reason to prefer it over `R10G10B10A2` at the same width, not a reason to call it
+sufficient.
+
+What it costs is measured rather than assumed: a test renders the same frame at FP32 and at
+FP16 and holds the difference to one unit in half's last place, so the table above is a
+property of the code rather than of this document.
+
+#### Getting past it
+
+There is **no route above FP16 on the desktop**, and the reason is structural rather than an
+API gap. DirectComposition composites DXGI surfaces and takes the same four formats;
+fullscreen exclusive takes the same four; the kernel-mode `D3DKMT` thunks present the same
+allocations, and the display DDI carries no wider present format for them to name. And
+underneath all of it, **the DWM's own composition space is FP16 scRGB** when Advanced Color
+is on -- Microsoft documents that -- so a wider surface handed to it would be rounded to half
+before it reached a cable regardless.
+
+#### Taking the desktop over instead
+
+The obvious next question, and the answer is no in three separate ways that are worth keeping
+apart, because two of them sound like they might be yes.
+
+**The compositor cannot be replaced or switched off.** `DwmEnableComposition` was deprecated
+in Windows 8 and has been a no-op ever since; there is no supported route and no unsupported
+one either, because the capability was removed rather than hidden. Windows 7 could run
+without it. Nothing since can.
+
+**It can be bypassed, and that buys latency rather than bits.** A fullscreen flip-model swap
+chain gets *independent flip*: the display controller scans the swap chain's buffer out
+directly and the DWM composites nothing. That is real, it is worth having, and it removes a
+copy and a frame of latency -- **but the buffer it scans out is still a DXGI swap chain
+buffer**, so it is still one of the same four formats. The ceiling does not move. Worth
+noting the arithmetic here: our own FP32-to-FP16 store is the one rounding either way, and
+the DWM compositing FP16 into FP16 was never adding a second.
+
+**Owning the driver would not help, and it is the interesting one.** Suppose the objection is
+taken all the way and a WDDM display miniport is written. What the display controller can
+scan out is 8-bit, 10-bit and 16-bit integer, and FP16. **No display controller scans out
+single precision** -- there is no such thing to reach. The one thing owning that layer would
+buy is `R16G16B16A16_UNORM`, which is a real scanout format, is genuinely better than half for
+a 16-bit output, and is *not* a valid swap chain format, so DXGI cannot ask for it. That is
+the entire gap a driver would close: sixteen bits of integer instead of eleven of mantissa,
+on hardware that may or may not support it, in exchange for writing and signing a kernel-mode
+display driver. It is not a trade a media player makes, and it is a smaller prize than it
+sounds like -- 16-bit UNORM in a *linear* buffer is worse than half in the shadows, so it
+would have to be an encoded buffer, which moves the tone mapping into the driver.
+
+So the honest shape of it: **the desktop's ceiling is not a Microsoft policy that a
+determined implementation can go around. It is where the scanout hardware stops.** What
+changes the answer is different hardware -- which is the next paragraph, and is why it is a
+module rather than an argument.
+
+The route that exists is the one the audio side already took: **do not use the desktop
+path.** `sink_asio` is in this tree because ASIO goes around the Windows audio engine, and it
+is a module beside `sink_wasapi` rather than a change to either. A presenter on a dedicated
+video output -- Blackmagic DeckLink, AJA Kona -- goes around the compositor the same way,
+takes 10-bit or 12-bit straight from a buffer over SDI or HDMI, and would render **FP32
+directly to the card's integer format, never touching half at all**.
+
+**The architecture already permits that with no ABI change**, which is worth stating because
+it is the thing that would have been expensive to discover later. `MpVideoVtbl::open` takes
+NULL for a window, which is what a card wants; `set("device", ...)` already exists and
+already carries a value (`warp` or `hardware`), so `decklink:0` needs no new entry point; and
+the off-screen target is already `R32G32B32A32_FLOAT`, which is what such a module would
+quantise from.
+
+Worth being honest about the ceiling on that path too: SDI carries 10 or 12 bits and HDMI's
+deep colour modes define up to 16 but nothing implements them, so **12-bit is the widest a
+display link actually delivers today**. The gap half leaves at 12 bits is 1.7x, and a card
+path closes exactly that.
+
+And for the use this ceiling was raised about -- grading, analysis, anything whose output is
+a file rather than a panel -- the relevant path is `read_back`, which is `R32G32B32A32_FLOAT`
+and has no ceiling at all.
+
+**Everything before the store is single precision**, and stays there. HLSL `float` is 32-bit
+and this module uses no `half` and no `min16float`, so every transfer function is computed at
+full single precision and rounded exactly once, when it is written.
+
+There is **no intermediate render target yet**, and the first version of this paragraph gave
+the wrong reason for that -- it claimed an intermediate would round twice. It does not: the
+shader writes single precision into it exactly and the copy to the back buffer rounds once,
+which is the same one rounding as writing straight there. What an intermediate costs is a
+full-screen copy, and what it buys is **a windowed session that can still read back single
+precision** -- monitor at what the display takes, export at what the arithmetic produced,
+which is precisely what a grading tool wants. It is not built because nothing here opens a
+window yet, and off-screen already renders FP32 directly, which is the same thing without the
+copy. It goes in with the first window.
 
 **Off-screen renders into `R32G32B32A32_FLOAT`**, which a swap chain will not take and a
 measurement should not do without: a test that hashes an FP16 buffer is measuring the

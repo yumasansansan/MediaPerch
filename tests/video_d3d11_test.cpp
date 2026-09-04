@@ -415,10 +415,13 @@ TEST_CASE("what presenting in FP16 costs, measured rather than assumed",
     // the honest thing is to know what it costs instead of assuming it is
     // nothing.
     //
-    // Half is *relatively* precise, which suits a linear light buffer: about
-    // eleven significant bits everywhere, so the spacing is fine in the
-    // shadows where banding lives and coarsest near white where the eye is
-    // least able to see a step.
+    // Half is *relatively* precise -- a step between 1/2048 and 1/1024 of the
+    // value, everywhere -- which suits a linear light buffer and is why it
+    // beats a 10-bit integer at the same width. It is **not** sufficient: a
+    // 12-bit output needs 1/1706 at white, so half is already 1.7 times short
+    // there and 27 times short at 16 bits. What this test does is establish
+    // that the loss is exactly half's own quantisation and nothing else, so
+    // that the number in plan.md §9.10 is a property of the code.
     Module module;
     REQUIRE(module.vtbl != nullptr);
 

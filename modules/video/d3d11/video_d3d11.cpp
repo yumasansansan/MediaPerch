@@ -27,11 +27,27 @@
 // decision, while an off-screen target takes `R32G32B32A32_FLOAT` and is what a
 // measurement should land in.
 //
-// There is deliberately **no intermediate render target while there is one
-// pass**. Adding one would round twice -- once into it and once into the back
-// buffer -- where the shader writing straight to the destination rounds once.
-// It arrives with the second pass, in single precision, and the count stays at
-// one.
+// **That ceiling is a real loss and not a rounding to be waved through.** Half
+// is relatively precise -- a step of 1/1024 of the value at worst -- and a
+// 12-bit output needs 1/1706 at white, so it is already short there and 27
+// times short at 16 bits. There is no way past it on the desktop: the DWM
+// composites in FP16 scRGB itself. The way past it is not to use the desktop,
+// which is what `sink_asio` is to `sink_wasapi` and what a presenter on a
+// DeckLink or a Kona would be to this one -- rendering FP32 straight into the
+// card's integer format with no half anywhere. The `device` setting below is
+// deliberately a string rather than a flag so that such a module needs no new
+// entry point. plan.md §9.10 has the table.
+//
+// There is **no intermediate render target yet, and the reason is not the one
+// that first suggested itself.** An intermediate does not round twice: the
+// shader writes single precision into it exactly, and the copy to the back
+// buffer rounds once, which is the same one rounding as writing straight
+// there. What it costs is a full-screen copy, and what it buys is a windowed
+// session that can still read back single precision -- monitor at what a
+// display takes, export at what the arithmetic produced. That is exactly what
+// a grading tool wants, and it is not built because nothing here opens a
+// window yet; off-screen already renders FP32 directly, which is the same
+// thing without the copy.
 //
 // Double precision belongs on the CPU, where the constants are derived: a
 // matrix or an EETF parameter worked out in `double` and rounded once into the
@@ -776,11 +792,19 @@ try {
     if (std::strcmp(key, "device") == 0) {
         // Asked for before `configure`, because that is where the device is
         // made. A test asks for WARP so the pixels are the same every time.
+        //
+        // **A string rather than a flag, on purpose.** This module knows two
+        // values; a presenter on a dedicated video output knows `decklink:0`
+        // and its neighbours, and takes them through this same key rather than
+        // through an entry point that would have to be added to every module
+        // that does not need it.
         if (std::strcmp(value, "warp") == 0) {
             v->warp = true;
         } else if (std::strcmp(value, "hardware") == 0) {
             v->warp = false;
         } else {
+            v->trouble = std::string{"this presenter has no device called "} + value +
+                         "; it knows hardware and warp";
             return MP_ERR_INVALID;
         }
         return v->device ? MP_ERR_UNSUPPORTED : MP_OK;

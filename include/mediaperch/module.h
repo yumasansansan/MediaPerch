@@ -659,7 +659,12 @@ enum {
      * `RGBA16F` is scRGB as a display gets it: linear half-float, and **the
      * most precise format a flip-model swap chain accepts** -- DXGI offers
      * 8-bit UNORM, 10-bit UNORM and this, and nothing above it, so presenting
-     * is capped here by the platform rather than by a choice.
+     * through the desktop is capped here by the platform rather than by a
+     * choice. It is not a *sufficient* format: half's relative step is
+     * 1/1024 at worst, and a 12-bit output needs 1/1706 at white. See
+     * plan.md §9.10, and note that a presenter on a dedicated video output
+     * would quantise from RGBA32F straight to the card's own integer format
+     * and never touch half.
      *
      * `RGB10A2` is HDR10: PQ-encoded, ten bits a channel packed into a u32
      * with R in the low bits.
