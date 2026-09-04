@@ -1372,6 +1372,25 @@ scRGB) and get it correct. Only then add `shader`, and only as an option — a h
 tone mapper that ships before the platform one has been made to work is how a project ends
 up maintaining a colour pipeline it never meant to own.
 
+**And before any of it, a way to tell.** §9.2 is the record of what happens without one:
+Windows maps PQ to a 2.4 gamma where the sRGB curve belongs, Intel published a support note
+saying so, and it has survived years of that because the result looks fine. A colour pipeline
+judged by whether it looks plausible is not judged.
+
+So `MpVideoVtbl::open` takes NULL for a window and renders to a texture, `read_back` hands
+the pixels over as 8-bit sRGB, and the presenter is measured the way every decoder in this
+tree is measured -- by hashing what came out. **WARP is asked for by name** in the tests
+rather than tolerated as a fallback: Microsoft's software rasteriser is on every Windows
+install and is deterministic, so the bytes are the same on a machine with a GPU, a machine
+without one, and a CI runner. `read_back` is also the screenshot people want, which is why it
+is one call rather than a diagnostic build.
+
+The decisions themselves are `modules/video/d3d11/colour_plan.hpp`, deliberately apart from
+any Direct3D: which swap chain format, which tone mapper, and what SDR content is multiplied
+by all follow from what the container said and what the display is, and none of them needs a
+device to work out. They are the part that is easy to get subtly wrong, and they are tested
+against the cases this section names.
+
 ### 9.8 Media Foundation is a codec here, not a pipeline
 
 This paragraph used to read "`decode_mf` hardware decode", which was written before ABI v2
@@ -1574,7 +1593,7 @@ HDR state.
 | M5.75 | Path B is hashable, and a VST3 can be a stage in it | **done.** `mp::Processor` is `ProcessedGraph`'s arithmetic without the device, the ring or the threads, so `decode --path processed --gain --dsp` runs the chain and prints its SHA-256 -- the flags had been accepted and silently ignored, which is why nothing in this tree had ever compared the resampler between two builds. It found three bugs on the first run: `use_processed` could not see a gain, `Processor::reset` returned `MP_END` on success, and a seek left the noise shaper feeding back error from wherever the stream used to be. The baseline and AVX2 builds agree over 144 runs. `modules/dsp/vst3` hosts somebody else's plugin on `pluginterfaces` alone, with a VST3 written in `tests/` so the host is tested without one installed |
 | M5.95 | ABI v3: several streams from one file | **done.** `select` named one stream and `seek(frame)` meant "the selected one", which has no answer once a player wants audio and video out of one file -- and appending would have left both meaning something narrower than their names. So `select_streams`, `seek(stream, frame)`, `MpPacket::reserved` becoming `stream`, and `stream_video_info` appended for the three colour code points §9.1 turns on. Checked against `demux_mp4` reading a real MP4 with two tracks in it, which is the first test here that drives a module rather than a fake. `demux_mkv` serves several tracks too, which is what makes v3 an interface rather than one module's habit -- and clearing MP_PACKET_TIMED on a video packet that never had a position is what that second container found |
 | M5.97 | Section 9.9: a video packet says what its timestamp is counted in | **done.** MpVideoInfo::timescale, appended -- the first time the size prefix earned its keep, and a test asks for the older size to check it. Answering it turned up three more: MP4 was reporting decode timestamps where Matroska reports presentation ones, MP_PACKET_SYNC was claimed on every packet including video, and the edit list was read for audio tracks only -- sixty milliseconds of A/V offset in the fixture. A video seek landed one frame late, so it subtracts the track's largest composition offset before a lookup that indexes decode time -- with a guard for Bento4 reading that offset unsigned |
-| M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse |
+| M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse. **Started**: MP_KIND_VIDEO has a vtable, `video_d3d11` renders BGRA8 into a flip-model scRGB target or an off-screen one, and `read_back` makes the result a hash rather than a screenshot somebody looks at. §9's colour decisions are a separate testable header. NV12, P010 and the tone mappers wait for the decoder that produces frames for them |
 | M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled |
 | M8 | WinUI 3 shell | killing it mid-track changes nothing audible |
 | M9 | Linux head | ALSA or PipeWire in an exclusive-equivalent mode, proving the core was actually portable |

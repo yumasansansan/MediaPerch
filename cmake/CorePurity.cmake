@@ -46,11 +46,24 @@ set(forbidden_macros "_WIN32" "_MSC_VER" "__linux__" "__APPLE__" "__unix__")
 
 set(sources "")
 foreach(dir IN LISTS MEDIAPERCH_CORE_DIR)
+    # **A directory that is not there is the failure, not an empty answer.**
+    # This check passed on nothing for three commits after src/core became
+    # src/engine and src/player: the glob found no files, found no violations
+    # in them, and reported success. A test that cannot fail is worse than no
+    # test, because it is also a claim.
+    if(NOT IS_DIRECTORY "${dir}")
+        message(FATAL_ERROR
+            "core purity: ${dir} is not a directory. Whoever moved it has to "
+            "say so here, because this check silently passes on an empty list.")
+    endif()
     file(GLOB_RECURSE found
         "${dir}/*.hpp"
         "${dir}/*.cpp"
         "${dir}/*.h"
         "${dir}/*.c")
+    if(found STREQUAL "")
+        message(FATAL_ERROR "core purity: ${dir} holds no sources")
+    endif()
     list(APPEND sources ${found})
 endforeach()
 

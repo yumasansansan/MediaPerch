@@ -622,6 +622,94 @@ typedef struct MpCodecVtbl {
 } MpCodecVtbl;
 
 /* ------------------------------------------------------------------ */
+/* Video presentation                                                  */
+/* ------------------------------------------------------------------ */
+
+/* **A presenter is to video what a sink is to audio**, and the resemblance is
+ * deliberate: open on a device, tell it what is coming, hand it frames. What
+ * does not carry over is negotiation. An audio sink may refuse a format and
+ * §6's whole argument rests on it being able to; a display refuses nothing and
+ * converts everything, which is why §9 is about *how* it converts rather than
+ * about whether it will.
+ *
+ * The frames are on the CPU. A hardware decoder produces a texture and handing
+ * one over without a copy is the point of decoding on the GPU -- but nothing
+ * here decodes video yet, and a field no module fills is a field no test
+ * checks. It appends when `codec_mft` arrives. */
+
+typedef struct MpVideo MpVideo; /* opaque, module-owned */
+
+typedef uint32_t MpPixelFormat;
+enum {
+    MP_PIXEL_NONE = 0u,
+    /* 8-bit 4:2:0: a full-size Y plane, then a half-size interleaved UV plane.
+     * What every hardware decoder on Windows produces. */
+    MP_PIXEL_NV12 = 1u,
+    /* The same two planes with 10 bits in the top of each 16, which is what
+     * HDR content decodes to. */
+    MP_PIXEL_P010 = 2u,
+    /* One plane, 8 bits each of B, G, R and A. Not a codec's output -- it is
+     * what a test pattern and a software decoder have, and what makes a
+     * presenter checkable before there is anything to decode. */
+    MP_PIXEL_BGRA8 = 3u
+};
+
+/* One frame, in the pixels a decoder produced.
+ *
+ * `pts` is in `MpVideoInfo::timescale` ticks, the same units the demuxer
+ * timestamps packets in -- §8 compares it against the audio clock and drops or
+ * duplicates against that, never the other way round. */
+typedef struct MpVideoFrame {
+    uint32_t size;
+    MpPixelFormat format;
+    uint32_t width;
+    uint32_t height;
+    /* NULL past what the format uses. */
+    const void *plane[3];
+    uint32_t stride[3];
+    uint32_t reserved;
+    uint64_t pts;
+} MpVideoFrame;
+
+typedef struct MpVideoVtbl {
+    uint32_t size;
+    uint32_t reserved;
+
+    /* MP_ANY. `window` is an HWND on Windows. **NULL means off-screen**, which
+     * is not a degraded mode: it is how a presenter is measured. Everything
+     * §9 decides -- which transfer function, which tone mapper, how much to
+     * scale SDR content by -- lands in pixels, and pixels can be hashed. A
+     * renderer nobody can test is a renderer judged by whether it looks
+     * plausible, which is how the OS tone mapper's 2.4 gamma survived for
+     * years (§9.2). */
+    MpResult(MP_CALL *open)(void *window, MpVideo **out);
+    void(MP_CALL *close)(MpVideo *v);
+
+    /* MP_ANY. What is coming: the geometry and the colour the container
+     * stated. The presenter answers by choosing a swap chain format, a colour
+     * space and a tone mapper, and `describe` says which. */
+    MpResult(MP_CALL *configure)(MpVideo *v, const MpVideoInfo *in);
+
+    /* MP_IO. One frame, presented. */
+    MpResult(MP_CALL *present)(MpVideo *v, const MpVideoFrame *frame);
+
+    /* MP_ANY. `key=value`, as MpDspVtbl means it, and the same `trouble`
+     * convention for a stage that knows why it refused. */
+    MpResult(MP_CALL *set)(MpVideo *v, const char *key, const char *value);
+    /* MP_ANY. One `key\tcurrent\tdescription` per index, MP_END past the last. */
+    MpResult(MP_CALL *describe)(MpVideo *v, uint32_t index, char *out,
+                                uint32_t out_bytes);
+
+    /* MP_ANY. The pixels last presented, as BGRA8, `width * height * 4` bytes.
+     *
+     * **This is the measuring apparatus, in the ABI on purpose.** A screenshot
+     * is a feature people want; a rendered frame a test can hash is the only
+     * way a colour pipeline gets held to anything. Both are the same call. */
+    MpResult(MP_CALL *read_back)(MpVideo *v, void *dst, size_t dst_bytes,
+                                 uint32_t *out_width, uint32_t *out_height);
+} MpVideoVtbl;
+
+/* ------------------------------------------------------------------ */
 /* Sinks                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -853,7 +941,7 @@ enum {
      * cost of leaving a hole is a hole. */
     MP_KIND_SINK = 2u,
     MP_KIND_DSP = 3u,   /* MpDspVtbl */
-    MP_KIND_VIDEO = 4u, /* reserved */
+    MP_KIND_VIDEO = 4u, /* MpVideoVtbl */
     MP_KIND_META = 5u,  /* reserved */
     MP_KIND_DEMUX = 6u, /* MpDemuxVtbl */
     MP_KIND_CODEC = 7u  /* MpCodecVtbl */
@@ -965,6 +1053,8 @@ MP_STATIC_ASSERT(offsetof(MpPacket, size) == 0, "size must lead");
 MP_STATIC_ASSERT(offsetof(MpPacket, stream) == 12, "MpPacket::stream took reserved's slot");
 MP_STATIC_ASSERT(sizeof(MpPacket) == 24, "MpPacket layout is ABI");
 MP_STATIC_ASSERT(offsetof(MpVideoInfo, size) == 0, "size must lead");
+MP_STATIC_ASSERT(offsetof(MpVideoFrame, size) == 0, "size must lead");
+MP_STATIC_ASSERT(offsetof(MpVideoVtbl, size) == 0, "size must lead");
 MP_STATIC_ASSERT(sizeof(MpVideoInfo) == 48, "MpVideoInfo layout is ABI");
 MP_STATIC_ASSERT(offsetof(MpVideoInfo, flags) < offsetof(MpVideoInfo, timescale),
                  "MpVideoInfo only ever grows at the end");

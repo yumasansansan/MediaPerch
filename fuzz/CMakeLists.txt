@@ -48,7 +48,8 @@ function(mediaperch_add_fuzzer name source corpus)
         "${CMAKE_SOURCE_DIR}/external/dr_libs"
         "${CMAKE_SOURCE_DIR}/external/dragonperch/src/core"
         "${CMAKE_SOURCE_DIR}/include"
-        "${CMAKE_SOURCE_DIR}/src/core"
+        "${CMAKE_SOURCE_DIR}/src/engine"
+        "${CMAKE_SOURCE_DIR}/src/player"
         "${CMAKE_SOURCE_DIR}/modules/demux/mp4")
 
     # MSVC's STL annotates container bounds for ASan, and the annotations only
@@ -286,5 +287,5 @@ endif()
 # in one house would have two sets of edge cases and only one would be fuzzed.
 mediaperch_add_fuzzer(settings_fuzzer settings_fuzzer.cpp
                       "${CMAKE_SOURCE_DIR}/external/dragonperch/fuzz/corpus/ini"
-                      "${CMAKE_SOURCE_DIR}/src/core/mediaperch/settings.cpp"
+                      "${CMAKE_SOURCE_DIR}/src/player/mediaperch/settings.cpp"
                       "${CMAKE_SOURCE_DIR}/external/dragonperch/src/core/dragonperch/ini.cpp")

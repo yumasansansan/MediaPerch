@@ -100,6 +100,21 @@ if(TARGET mediaperch_win)
     target_link_libraries(mediaperch_tests PRIVATE MediaPerch::win)
 endif()
 
+# The presenter, rendered off-screen on WARP and read back. Not a screenshot
+# somebody looks at: pixels, hashed, on the same path a display gets.
+if(TARGET mp_video_d3d11)
+    target_sources(mediaperch_tests PRIVATE video_d3d11_test.cpp)
+    target_compile_definitions(mediaperch_tests PRIVATE
+        "MEDIAPERCH_VIDEO_D3D11=\"$<TARGET_FILE:mp_video_d3d11>\"")
+    add_dependencies(mediaperch_tests mp_video_d3d11)
+endif()
+
+# §9's colour decisions, which are arithmetic and are tested as such. The
+# renderer that acts on them needs a GPU; what to render does not.
+target_sources(mediaperch_tests PRIVATE colour_plan_test.cpp
+               ../modules/video/d3d11/colour_plan.cpp)
+target_include_directories(mediaperch_tests PRIVATE ../modules/video/d3d11)
+
 # ABI v3 against a real demuxer and a real file with two streams in it. Every
 # other test here drives fakes on purpose; this one cannot, because what is
 # under test is whether the shape works on a container somebody else's tool
@@ -154,7 +169,7 @@ catch_discover_tests(mediaperch_tests)
 # time as everything else.
 add_test(NAME core_purity
     COMMAND "${CMAKE_COMMAND}"
-            -D "MEDIAPERCH_CORE_DIR=${CMAKE_SOURCE_DIR}/src/core"
+            -D "MEDIAPERCH_CORE_DIR=${CMAKE_SOURCE_DIR}/src/engine;${CMAKE_SOURCE_DIR}/src/player"
             -P "${CMAKE_SOURCE_DIR}/cmake/CorePurity.cmake")
 
 # Also not a unit test: a second compiler front end over the portable sources.

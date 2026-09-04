@@ -1186,7 +1186,12 @@ modules/             everything that can be loaded and unloaded at runtime, sort
                      when the plugin says it can, f32 both ways when it cannot,
                      and `describe` says which.
   dsp/*/             crossfeed, and whatever else. Never present in passthrough.
-  video/d3d11/       presentation, and the three tone-map providers.
+  video/d3d11/       presentation: the flip model, scRGB, and the three tone-map
+                     providers. Renders off-screen when there is no window --
+                     not a degraded mode but the one that can be hashed, which
+                     is how a colour pipeline gets held to anything at all.
+                     colour_plan.hpp is the deciding, apart from the drawing,
+                     so §9's argument is testable without a display.
 shell/windows/       the WinUI 3 window. C#, Native AOT, **optional**: the engine runs
                      with none of it on disk, the same way DragonPerch's daemon does.
 shell/cli/           the shell that is always there. Same IPC, no toolkit.

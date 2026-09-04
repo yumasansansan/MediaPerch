@@ -36,7 +36,8 @@ endif()
 
 set(includes
     "-I${MEDIAPERCH_ROOT}/include"
-    "-I${MEDIAPERCH_ROOT}/src/core"
+    "-I${MEDIAPERCH_ROOT}/src/engine"
+    "-I${MEDIAPERCH_ROOT}/src/player"
     "-I${MEDIAPERCH_ROOT}/modules/shared/transform"
     "-I${MEDIAPERCH_ROOT}/modules/shared/biquad"
     "-I${MEDIAPERCH_ROOT}/modules/shared/convolve"

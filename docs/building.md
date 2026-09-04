@@ -40,6 +40,11 @@ git submodule update --init
 | `external/asio` | the ASIO interface, headers only | `sink_asio` |
 | `external/vst3sdk/pluginterfaces` | the VST3 interfaces, and four .cpp files | `dsp_vst3` |
 
+`modules/video/d3d11` vendors nothing at all: Direct3D 11, DXGI and the shader compiler are
+in the Windows SDK the build already requires. The colour shader is compiled at run time
+rather than baked in, because a shader that sits next to the comment explaining it is one
+somebody can check -- and `d3dcompiler_47.dll` has shipped in Windows since 10.
+
 **Each submodule sits with the one module that needs it**, which is a property of the
 container/codec split rather than a tidying. One module used to bring in four of the Xiph
 libraries at once, because it was the container and both codecs together. libogg belongs to the
