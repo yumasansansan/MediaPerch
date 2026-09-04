@@ -419,10 +419,24 @@ bool make_shaders(MpVideo* v, std::string& why)
     return true;
 }
 
-DXGI_FORMAT dxgi_format_of(mp::video::SwapFormat f) noexcept
+/// **Where the platform's format list enters, and the only place it does.**
+///
+/// `colour_plan.hpp` decides what the buffer must *hold*; this decides what
+/// Windows will put it in. The widest DXGI presents for a linear buffer is
+/// half, which §9.10 records as a real shortfall rather than a sufficiency --
+/// and a presenter on another platform maps the same plan differently. A
+/// Wayland one has `DRM_FORMAT_ABGR16161616`, sixteen bits of integer, which
+/// DXGI has no equivalent of; a Metal one has `rgba16Float` and stops where
+/// this does.
+DXGI_FORMAT dxgi_format_of(const mp::video::Plan& plan) noexcept
 {
-    return f == mp::video::SwapFormat::rgb10_hdr10 ? DXGI_FORMAT_R10G10B10A2_UNORM
-                                                   : DXGI_FORMAT_R16G16B16A16_FLOAT;
+    // PQ is packed into ten bits because that is the only thing DXGI offers
+    // for it, and it cannot be blended -- which is why the plan only asks for
+    // it when nothing is composited over the video.
+    if (plan.encoding == mp::video::Encoding::pq && !plan.needs_blending) {
+        return DXGI_FORMAT_R10G10B10A2_UNORM;
+    }
+    return DXGI_FORMAT_R16G16B16A16_FLOAT;
 }
 
 /// What is actually rendered into. The same as the swap chain's when there is
@@ -431,10 +445,10 @@ DXGI_FORMAT dxgi_format_of(mp::video::SwapFormat f) noexcept
 DXGI_FORMAT target_format_of(const MpVideo* v) noexcept
 {
     if (v->window == nullptr && v->wide_target &&
-        v->plan.format == mp::video::SwapFormat::fp16_scrgb) {
+        v->plan.encoding == mp::video::Encoding::linear) {
         return DXGI_FORMAT_R32G32B32A32_FLOAT;
     }
-    return dxgi_format_of(v->plan.format);
+    return dxgi_format_of(v->plan);
 }
 
 MpPixelFormat pixel_format_of(DXGI_FORMAT f) noexcept
@@ -461,10 +475,10 @@ std::size_t pixel_bytes_of(MpPixelFormat f) noexcept
     }
 }
 
-DXGI_COLOR_SPACE_TYPE colour_space_of(mp::video::SwapFormat f) noexcept
+DXGI_COLOR_SPACE_TYPE colour_space_of(const mp::video::Plan& plan) noexcept
 {
     // scRGB is linear with the BT.709 primaries; HDR10 is PQ with BT.2020.
-    return f == mp::video::SwapFormat::rgb10_hdr10
+    return dxgi_format_of(plan) == DXGI_FORMAT_R10G10B10A2_UNORM
                ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
                : DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
 }
@@ -485,7 +499,7 @@ bool make_target(MpVideo* v, std::string& why)
         desc.Height = v->height;
         // The swap chain gets what DXGI will present, which is never the wide
         // one -- `target_format_of` only widens when there is no window.
-        desc.Format = dxgi_format_of(v->plan.format);
+        desc.Format = dxgi_format_of(v->plan);
         desc.SampleDesc.Count = 1;
         desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
         desc.BufferCount = 2;
@@ -504,7 +518,7 @@ bool make_target(MpVideo* v, std::string& why)
         Com<IDXGISwapChain3> chain3;
         if (SUCCEEDED(v->swap_chain->QueryInterface(
                 __uuidof(IDXGISwapChain3), reinterpret_cast<void**>(chain3.put())))) {
-            const DXGI_COLOR_SPACE_TYPE space = colour_space_of(v->plan.format);
+            const DXGI_COLOR_SPACE_TYPE space = colour_space_of(v->plan);
             UINT support = 0;
             if (SUCCEEDED(chain3->CheckColorSpaceSupport(space, &support)) &&
                 (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) != 0) {
@@ -862,8 +876,9 @@ try {
                       v->display.hdr ? "HDR" : "SDR");
         return MP_OK;
     case 5:
-        std::snprintf(out, out_bytes, "format\t%s\tthe swap chain (read only)",
-                      mp::video::name_of(v->plan.format));
+        std::snprintf(out, out_bytes,
+                      "encoding\t%s\twhat the buffer holds (read only)",
+                      mp::video::name_of(v->plan.encoding));
         return MP_OK;
     case 6:
         std::snprintf(out, out_bytes, "applied\t%s\tthe tone mapper in the path (read only)",

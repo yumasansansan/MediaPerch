@@ -20,15 +20,15 @@ const char* name_of(ToneMap m) noexcept
     return "none";
 }
 
-const char* name_of(SwapFormat f) noexcept
+const char* name_of(Encoding e) noexcept
 {
-    switch (f) {
-    case SwapFormat::fp16_scrgb:
-        return "fp16 scRGB";
-    case SwapFormat::rgb10_hdr10:
-        return "rgb10 HDR10";
+    switch (e) {
+    case Encoding::linear:
+        return "linear scRGB";
+    case Encoding::pq:
+        return "PQ BT.2020";
     }
-    return "fp16 scRGB";
+    return "linear scRGB";
 }
 
 bool tone_map_from_name(const char* name, ToneMap& out) noexcept

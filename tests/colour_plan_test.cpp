@@ -51,7 +51,7 @@ TEST_CASE("SDR content is not tone-mapped, whatever the display is", "[video][co
         const Plan plan = plan_for(sdr_1080p(), display);
         CHECK(plan.tone_map == ToneMap::none);
         CHECK_FALSE(plan.tone_mapping);
-        CHECK(plan.format == SwapFormat::fp16_scrgb);
+        CHECK(plan.encoding == Encoding::linear);
     }
 }
 
@@ -68,7 +68,7 @@ TEST_CASE("HDR content on an SDR display is mapped, because composition clips",
     Display sdr{};
     const Plan plan = plan_for(hdr10_2160p(), sdr);
     CHECK(plan.tone_mapping);
-    CHECK(plan.format == SwapFormat::fp16_scrgb);
+    CHECK(plan.encoding == Encoding::linear);
 
     // §9.3: the driver's is the default, because it is the cheapest, it is what
     // the OS player path uses, and it is the answer to why this looks like
@@ -97,12 +97,14 @@ TEST_CASE("HDR content on an HDR display passes through", "[video][colour]")
     const Plan with_osd = plan_for(hdr10_2160p(), hdr, ToneMap::driver, true);
     CHECK(with_osd.tone_map == ToneMap::none);
     CHECK_FALSE(with_osd.tone_mapping);
-    CHECK(with_osd.format == SwapFormat::fp16_scrgb);
+    CHECK(with_osd.encoding == Encoding::linear);
+    CHECK(with_osd.needs_blending);
 
     // Nothing over it, and §9.5's fullscreen optimisation applies: half the
     // bandwidth at 4K, which is 24 MB a frame rather than 48.
     const Plan alone = plan_for(hdr10_2160p(), hdr, ToneMap::driver, false);
-    CHECK(alone.format == SwapFormat::rgb10_hdr10);
+    CHECK(alone.encoding == Encoding::pq);
+    CHECK_FALSE(alone.needs_blending);
 }
 
 TEST_CASE("SDR content on an HDR display is scaled to the display's white",

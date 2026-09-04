@@ -268,7 +268,7 @@ TEST_CASE("a presenter renders with no window, so the pixels can be checked",
     CHECK(presenter.described("device") == "warp");
     // SDR content, so §9's question does not arise and nothing maps it.
     CHECK(presenter.described("applied") == "none");
-    CHECK(presenter.described("format") == "fp16 scRGB");
+    CHECK(presenter.described("encoding") == "linear scRGB");
     CHECK(presenter.described("trouble") == "nothing");
 
     const std::vector<std::uint8_t> source = flat(64, 48, 0x20, 0x40, 0x80);

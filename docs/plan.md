@@ -1450,10 +1450,13 @@ before it reached a cable regardless.
 The obvious next question, and the answer is no in three separate ways that are worth keeping
 apart, because two of them sound like they might be yes.
 
-**The compositor cannot be replaced or switched off.** `DwmEnableComposition` was deprecated
-in Windows 8 and has been a no-op ever since; there is no supported route and no unsupported
-one either, because the capability was removed rather than hidden. Windows 7 could run
-without it. Nothing since can.
+**The compositor cannot be replaced, and switching it off is not a route to more bits.**
+`DwmEnableComposition` was deprecated in Windows 8 and has been a no-op ever since. An
+earlier version of this paragraph said there was no unsupported route either, which is not
+true: people have renamed or broken `dwm.exe` and run without it, and a surprising amount of
+Windows keeps working. What that gets you is the basic display path, which is **8-bit**. So
+the objection is real and the direction is wrong -- going around the compositor by killing it
+lands below where it started, not above.
 
 **It can be bypassed, and that buys latency rather than bits.** A fullscreen flip-model swap
 chain gets *independent flip*: the display controller scans the swap chain's buffer out
@@ -1479,6 +1482,41 @@ So the honest shape of it: **the desktop's ceiling is not a Microsoft policy tha
 determined implementation can go around. It is where the scanout hardware stops.** What
 changes the answer is different hardware -- which is the next paragraph, and is why it is a
 module rather than an argument.
+
+#### The same question on the other two platforms
+
+Asked because this tree is going to be ported, and the answer is not the same everywhere --
+which is itself the argument for the presenter being a module and for the decision that
+reaches it being free of any one platform's format list.
+
+| | Widest it will present | Past the compositor? |
+|---|---|---|
+| **Windows**, DXGI | FP16 (`R16G16B16A16_FLOAT`) | independent flip, same formats. No wider route |
+| **Linux**, Wayland + KMS | FP16 *and* **16-bit integer** (`DRM_FORMAT_ABGR16161616`) | **yes** -- a DRM lease drives KMS directly |
+| **macOS**, CAMetalLayer | FP16 (`rgba16Float`) | no |
+
+**Linux is the one where the ceiling actually moves.** A Wayland client hands over a dmabuf
+with a DRM FourCC, and that vocabulary includes `ABGR16161616` -- sixteen bits of integer per
+channel -- which DXGI has no equivalent of at all and which hardware planes on several GPUs
+will scan out. On top of that, `wp_drm_lease_v1` lets an application take an output away from
+the compositor entirely and drive KMS itself, which is how VR headsets work and which Windows
+has nothing comparable to. A compositor can also put a client buffer straight onto a plane
+without compositing it, the way independent flip does.
+
+**macOS is the most closed of the three.** A `CAMetalLayer` presents `bgra8Unorm`,
+`bgr10a2Unorm`, Apple's `bgra10_xr` and `rgba16Float`, and there is no fullscreen-exclusive
+path, no display lease, and no way past WindowServer. Half is the ceiling and it is a harder
+ceiling than Windows'.
+
+**What this means for the code, and it is the reason for a refactor rather than a note.**
+`colour_plan.hpp` decides §9's questions for every platform, and it had DXGI's format list
+inside it: an enum of `{ fp16_scrgb, rgb10_hdr10 }`, which is Windows' four formats minus
+two. Portable logic that names one platform's formats makes every other platform round to
+them -- and Linux is precisely the platform where half is not the widest thing available. It
+decides an **encoding** now (linear scRGB, or PQ) plus whether the buffer has to blend, and
+each presenter maps that to the widest format its own platform offers. `dxgi_format_of` is
+the only function in the Windows module that knows a DXGI format, and its comment says what a
+Wayland or Metal one would answer instead.
 
 The route that exists is the one the audio side already took: **do not use the desktop
 path.** `sink_asio` is in this tree because ASIO goes around the Windows audio engine, and it

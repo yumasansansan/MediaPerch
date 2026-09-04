@@ -2,11 +2,17 @@
 //
 // What §9 decides, as arithmetic, so that it can be checked without a display.
 //
-// **This is the whole of the HDR argument and none of the Direct3D.** Which
-// swap chain format, which colour space, which tone mapper, and how much to
-// scale SDR content by are four answers that follow from two facts -- what the
-// container said the stream is, and what the display turned out to be -- and
-// none of them needs a device to work out. Separating them is what lets the
+// **This is the whole of the HDR argument and none of the Direct3D.** What the
+// presentation buffer must hold, whether it has to blend, which tone mapper,
+// and how much to scale SDR content by are four answers that follow from two
+// facts -- what the container said the stream is, and what the display turned
+// out to be -- and none of them needs a device to work out.
+//
+// It is also free of any one platform's format list, which took a correction:
+// it used to decide between `fp16_scrgb` and `rgb10_hdr10`, which is DXGI's
+// vocabulary and would have made a Wayland presenter round to Windows'
+// ceiling. Linux is exactly where that matters -- DRM has `ABGR16161616` and
+// DXGI has nothing like it (§9.10). Separating them is what lets the
 // part that is easy to get subtly wrong be tested at all: a renderer judged by
 // whether it looks plausible is how the OS tone mapper's 2.4 gamma survived for
 // years with a vendor bug report open against it (§9.2).
@@ -77,19 +83,38 @@ enum class ToneMap : std::uint32_t {
     shader,
 };
 
-/// §9.5's two.
-enum class SwapFormat : std::uint32_t {
-    /// `DXGI_FORMAT_R16G16B16A16_FLOAT` in scRGB. Works on every display kind
-    /// and blends with an OSD, at 64 bits a pixel.
-    fp16_scrgb,
-    /// `DXGI_FORMAT_R10G10B10A2_UNORM` with the PQ colour space. Half the
-    /// bandwidth and no alpha blending, so only when nothing is composited
+/// What the presentation buffer *holds*. **Not which format it is in.**
+///
+/// This header decides for every platform and knows the format list of none of
+/// them, which is the difference between a portable decision and a Windows one
+/// wearing a portable name. An earlier version of this enum was
+/// `{ fp16_scrgb, rgb10_hdr10 }` -- DXGI's own four formats, minus two, baked
+/// into logic that a Wayland presenter was supposed to share. It would have
+/// made every platform round to half whether or not half was the widest thing
+/// it had, and Linux is precisely the platform where it is not: DRM defines
+/// `ABGR16161616`, sixteen bits of integer per channel, and hardware planes
+/// that scan it out.
+///
+/// So the decision is the encoding, and the format is the presenter's -- the
+/// widest its platform offers that carries this encoding and blends if
+/// `Plan::needs_blending` says it must.
+enum class Encoding : std::uint32_t {
+    /// Linear light, BT.709 primaries: scRGB. Works on every display kind, and
+    /// is what an OSD can be blended into.
+    linear,
+    /// PQ-encoded, BT.2020 primaries: HDR10 as a display takes it. Cheaper on
+    /// every platform that has a packed format for it, and on none of them can
+    /// it be alpha-blended, so it is only offered when nothing is composited
     /// over the video.
-    rgb10_hdr10,
+    pq,
 };
 
 struct Plan {
-    SwapFormat format = SwapFormat::fp16_scrgb;
+    Encoding encoding = Encoding::linear;
+    /// Whether anything is drawn over the video, which rules out a packed
+    /// format that cannot blend -- and is a fact about the *player*, not about
+    /// any platform's format list.
+    bool needs_blending = true;
     ToneMap tone_map = ToneMap::none;
     /// **What SDR content is multiplied by, in linear space, before it is
     /// composited.** §9.6: on an HDR display scRGB 1.0 is 80 nits and is
@@ -141,32 +166,34 @@ struct Plan {
     Plan plan{};
     const bool content_is_hdr = is_hdr_transfer(assumed_transfer(stream));
 
+    plan.needs_blending = composited;
+
     if (!content_is_hdr) {
         // **Nothing to map.** SDR content on any display is SDR content; the
         // question §9 asks does not arise, and mapping it anyway is how a
         // player makes a correct picture worse.
         plan.tone_map = ToneMap::none;
         plan.tone_mapping = false;
-        plan.format = SwapFormat::fp16_scrgb;
+        plan.encoding = Encoding::linear;
     } else if (display.hdr) {
-        // The display can show it. Pass PQ through, and take the cheaper swap
-        // chain when there is nothing to blend over it.
+        // The display can show it. Pass PQ through, and take the cheaper
+        // encoding when there is nothing to blend over it.
         plan.tone_map = ToneMap::none;
         plan.tone_mapping = false;
-        plan.format = composited ? SwapFormat::fp16_scrgb : SwapFormat::rgb10_hdr10;
+        plan.encoding = composited ? Encoding::linear : Encoding::pq;
     } else {
         // HDR content, SDR display: §9.1's whole point. Something must map it,
-        // and DWM composition will not -- it clips, silently, and everything
+        // and composition will not -- it clips, silently, and everything
         // outside [0, 1] is gone.
         plan.tone_map = preferred == ToneMap::none ? ToneMap::driver : preferred;
         plan.tone_mapping = true;
-        plan.format = SwapFormat::fp16_scrgb;
+        plan.encoding = Encoding::linear;
     }
 
-    // §9.6, and it applies whenever the swap chain is scRGB on an HDR display
-    // -- including the case where the video needs no mapping at all, because
-    // the subtitles still do.
-    plan.sdr_scale = display.hdr && plan.format == SwapFormat::fp16_scrgb
+    // §9.6, and it applies whenever the buffer is linear on an HDR display --
+    // including the case where the video needs no mapping at all, because the
+    // subtitles still do. A PQ buffer states absolute nits and needs no scale.
+    plan.sdr_scale = display.hdr && plan.encoding == Encoding::linear
                          ? (display.sdr_white_nits > 0.0f ? display.sdr_white_nits / 80.0f
                                                           : 1.0f)
                          : 1.0f;
@@ -175,7 +202,7 @@ struct Plan {
 
 /// The name a person types and reads back.
 [[nodiscard]] const char* name_of(ToneMap m) noexcept;
-[[nodiscard]] const char* name_of(SwapFormat f) noexcept;
+[[nodiscard]] const char* name_of(Encoding e) noexcept;
 [[nodiscard]] bool tone_map_from_name(const char* name, ToneMap& out) noexcept;
 
 } // namespace mp::video
