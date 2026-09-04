@@ -34,11 +34,16 @@
 
 namespace {
 
-/// The module and the file, both passed in by CMake: a test that went looking
-/// for either would be testing the search.
-const char* module_path()
+/// The modules and the files, all passed in by CMake: a test that went looking
+/// for any of them would be testing the search.
+const char* mp4_module()
 {
     return MEDIAPERCH_DEMUX_MP4;
+}
+
+const char* mkv_module()
+{
+    return MEDIAPERCH_DEMUX_MKV;
 }
 
 const char* av_path()
@@ -51,6 +56,11 @@ const char* bt2020_path()
     return MEDIAPERCH_TEST_AV_BT2020;
 }
 
+const char* mkv_path()
+{
+    return MEDIAPERCH_TEST_AV_MKV;
+}
+
 /// The demuxer's vtable, loaded the way the engine loads it.
 ///
 /// Deliberately not through `mp::win::ModuleRegistry`: what is under test is
@@ -59,9 +69,9 @@ const char* bt2020_path()
 /// so in six lines is a better test of the ABI than borrowing the loader that
 /// already knows.
 struct Module {
-    Module()
+    explicit Module(const char* path)
     {
-        auto* dll = ::LoadLibraryA(module_path());
+        auto* dll = ::LoadLibraryA(path);
         if (dll == nullptr) {
             return;
         }
@@ -127,7 +137,7 @@ Streams find(const mp::Demux& demux)
 
 TEST_CASE("one demuxer serves two streams out of one file", "[abi][v3][demux]")
 {
-    Module module;
+    Module module{mp4_module()};
     REQUIRE(module.vtbl != nullptr);
 
     mp::Demux demux;
@@ -220,7 +230,7 @@ TEST_CASE("a seek names the stream its frame is counted in", "[abi][v3][demux]")
     // were selected. **A host seeking by the audio clock names the audio
     // stream** -- and `frame` is in that stream's own rate, which is 44100 here
     // and 24000/1001 for the video, so the two numbers are not interchangeable.
-    Module module;
+    Module module{mp4_module()};
     REQUIRE(module.vtbl != nullptr);
 
     mp::Demux demux;
@@ -271,7 +281,7 @@ TEST_CASE("the container's colour is read rather than guessed", "[abi][v3][video
     // The three code points are the reason `stream_video_info` exists. Nothing
     // else says whether the frames are BT.709 or BT.2020, or whether the
     // transfer is sRGB or PQ, and §9.1 turns on knowing before a frame is drawn.
-    Module module;
+    Module module{mp4_module()};
     REQUIRE(module.vtbl != nullptr);
 
     SECTION("geometry, and the frame rate as the ratio it is")
@@ -327,5 +337,177 @@ TEST_CASE("the container's colour is read rather than guessed", "[abi][v3][video
         // only difference.
         CHECK(info.width == 128);
         CHECK(info.height == 96);
+    }
+}
+
+// --------------------------------------------------------------------------
+// The same shape, in a container that interleaves differently
+// --------------------------------------------------------------------------
+
+TEST_CASE("Matroska serves two tracks out of one pass as well", "[abi][v3][demux]")
+{
+    // **A second container is what makes v3 an interface rather than one
+    // module's habit.** MP4 stores samples in a flat table with a linear reader
+    // that already knew how to walk several tracks; Matroska stores blocks
+    // inside clusters, laced several frames to a block, and the reader here had
+    // a lace cursor and a frame rate that were both the one selected track's.
+    // Whether the ABI's shape survives that is the question, and it is not the
+    // same question MP4 answered.
+    Module module{mkv_module()};
+    REQUIRE(module.vtbl != nullptr);
+
+    mp::Demux demux;
+    REQUIRE(demux.open(*module.vtbl, mkv_path()) == MP_OK);
+    REQUIRE(demux.stream_count() == 2);
+
+    const Streams at = find(demux);
+    REQUIRE(at.both);
+
+    SECTION("both tracks, interleaved, each saying which it is")
+    {
+        const std::uint32_t both[] = {at.audio, at.video};
+        REQUIRE(demux.select_streams(both) == MP_OK);
+
+        std::vector<std::uint8_t> buffer;
+        MpPacket packet{};
+        std::uint32_t audio_packets = 0;
+        std::uint32_t video_packets = 0;
+        bool interleaved = false;
+        std::uint32_t previous = 0xFFFFFFFFu;
+
+        for (int guard = 0; guard < 10000; ++guard) {
+            const MpResult r = demux.read_packet(buffer, packet);
+            if (r == MP_END) {
+                break;
+            }
+            REQUIRE(r == MP_OK);
+            REQUIRE((packet.stream == at.audio || packet.stream == at.video));
+            if (previous != 0xFFFFFFFFu && packet.stream != previous) {
+                interleaved = true;
+            }
+            previous = packet.stream;
+            if (packet.stream == at.audio) {
+                ++audio_packets;
+            } else {
+                ++video_packets;
+            }
+        }
+
+        // What ffprobe counts in the file: 51 Opus packets and 24 H.264 frames.
+        // **Packets and not blocks**: Matroska laces several frames into one
+        // block, so a demuxer that counted blocks would be short here and
+        // nowhere else.
+        CHECK(audio_packets == 51);
+        CHECK(video_packets == 24);
+        CHECK(interleaved);
+    }
+
+    SECTION("one track, and the other one is not in it")
+    {
+        const std::uint32_t only_video[] = {at.video};
+        REQUIRE(demux.select_streams(only_video) == MP_OK);
+
+        std::vector<std::uint8_t> buffer;
+        MpPacket packet{};
+        std::uint32_t packets = 0;
+        for (int guard = 0; guard < 10000; ++guard) {
+            const MpResult r = demux.read_packet(buffer, packet);
+            if (r == MP_END) {
+                break;
+            }
+            REQUIRE(r == MP_OK);
+            CHECK(packet.stream == at.video);
+            ++packets;
+        }
+        CHECK(packets == 24);
+    }
+
+    SECTION("a timestamp means two different frame numbers, and each track gets its own")
+    {
+        // The reason `frames_of` takes a track index now. One cluster timestamp
+        // is 48 kHz frames to the Opus track and something else entirely to the
+        // video, and a reader with one idea of the rate answers the same number
+        // for both.
+        const std::uint32_t both[] = {at.audio, at.video};
+        REQUIRE(demux.select_streams(both) == MP_OK);
+
+        MpStreamInfo audio_info{};
+        REQUIRE(demux.stream_info(at.audio, audio_info));
+        REQUIRE(audio_info.format.sample_rate != 0);
+
+        std::vector<std::uint8_t> buffer;
+        MpPacket packet{};
+        std::uint64_t last_audio = 0;
+        std::uint32_t timed_audio = 0;
+        for (int guard = 0; guard < 10000; ++guard) {
+            if (demux.read_packet(buffer, packet) != MP_OK) {
+                break;
+            }
+            if (packet.stream != at.audio || (packet.flags & MP_PACKET_TIMED) == 0) {
+                continue;
+            }
+            CHECK(packet.frame >= last_audio); // monotonic, in the audio's rate
+            last_audio = packet.frame;
+            ++timed_audio;
+        }
+        CHECK(timed_audio != 0);
+
+        // **One second of audio, counted in the audio's rate.** 48048 rather
+        // than 48000 because the file is 1.001 seconds long: 24 video frames at
+        // 24000/1001, and the muxer matched the audio to it. A tenth of a
+        // second of slack, which is the wrong sort of number to be off by if
+        // the rate were the video track's -- that would answer 0 for every
+        // packet, because a video track has no sample rate at all.
+        CHECK(last_audio > audio_info.format.sample_rate / 2);
+        CHECK(last_audio < audio_info.format.sample_rate * 11 / 10);
+
+        // And the video's packets say they are not timestamped, rather than
+        // claiming position 0 and meaning it.
+        REQUIRE(demux.seek(at.audio, 0) == MP_OK);
+        bool video_claims_a_position = false;
+        for (int guard = 0; guard < 500; ++guard) {
+            if (demux.read_packet(buffer, packet) != MP_OK) {
+                break;
+            }
+            if (packet.stream == at.video && (packet.flags & MP_PACKET_TIMED) != 0) {
+                video_claims_a_position = true;
+            }
+        }
+        CHECK_FALSE(video_claims_a_position);
+    }
+
+    SECTION("a seek moves both, and is counted in the named track's rate")
+    {
+        const std::uint32_t both[] = {at.audio, at.video};
+        REQUIRE(demux.select_streams(both) == MP_OK);
+
+        MpStreamInfo audio_info{};
+        REQUIRE(demux.stream_info(at.audio, audio_info));
+        REQUIRE(demux.seek(at.audio, audio_info.format.sample_rate / 2) == MP_OK);
+
+        std::vector<std::uint8_t> buffer;
+        MpPacket packet{};
+        bool saw_audio = false;
+        bool saw_video = false;
+        for (int guard = 0; guard < 500 && !(saw_audio && saw_video); ++guard) {
+            if (demux.read_packet(buffer, packet) != MP_OK) {
+                break;
+            }
+            saw_audio = saw_audio || packet.stream == at.audio;
+            saw_video = saw_video || packet.stream == at.video;
+        }
+        CHECK(saw_audio);
+        CHECK(saw_video);
+
+        CHECK(demux.seek(9, 0) == MP_ERR_INVALID);
+    }
+
+    SECTION("and the same refusals as everywhere else")
+    {
+        const std::uint32_t nonexistent[] = {7};
+        CHECK(demux.select_streams(nonexistent) == MP_ERR_INVALID);
+        const std::uint32_t twice[] = {at.video, at.video};
+        CHECK(demux.select_streams(twice) == MP_ERR_INVALID);
+        CHECK(demux.select_streams({}) == MP_ERR_INVALID);
     }
 }

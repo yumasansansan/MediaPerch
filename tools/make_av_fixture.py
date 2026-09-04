@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# The two MP4s in tests/data/mp4, and why they are committed rather than built.
+# The fixtures with two streams in them, and why they are committed rather than
+# built at test time.
 #
 # `av.mp4` is what FFmpeg writes: one H.264 track and one AAC track, 128x96 and
 # one second, small enough to live in the repository. It is committed because
@@ -29,7 +30,8 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = os.path.join(HERE, "tests", "data", "mp4")
+MP4 = os.path.join(HERE, "tests", "data", "mp4")
+MKV = os.path.join(HERE, "tests", "data", "mkv")
 
 # BT.2020 primaries, the PQ transfer, non-constant-luminance BT.2020 matrix, and
 # full range -- the ISO/IEC 23091-2 code points, which is what MpVideoInfo
@@ -63,13 +65,30 @@ def retag(src, dst, primaries, transfer, matrix, full_range):
     io.open(dst, "wb").write(bytes(data))
 
 
+def build_mkv(path):
+    # Opus rather than AAC, so the Matroska fixture also exercises the
+    # BlockGroup path: the last block of an Opus track carries DiscardPadding,
+    # which is the one thing this demuxer reads out of a group rather than a
+    # SimpleBlock.
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error",
+         "-f", "lavfi", "-i", "testsrc2=size=128x96:rate=24000/1001:duration=1",
+         "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=1",
+         "-c:v", "libx264", "-preset", "veryfast", "-crf", "40",
+         "-pix_fmt", "yuv420p", "-g", "6",
+         "-c:a", "libopus", "-b:a", "32k", path],
+        check=True)
+
+
 def main():
-    os.makedirs(OUT, exist_ok=True)
-    av = os.path.join(OUT, "av.mp4")
+    os.makedirs(MP4, exist_ok=True)
+    os.makedirs(MKV, exist_ok=True)
+    av = os.path.join(MP4, "av.mp4")
     build_av(av)
-    retag(av, os.path.join(OUT, "av_bt2020.mp4"), *BT2020)
-    for name in ("av.mp4", "av_bt2020.mp4"):
-        p = os.path.join(OUT, name)
+    retag(av, os.path.join(MP4, "av_bt2020.mp4"), *BT2020)
+    build_mkv(os.path.join(MKV, "av.mkv"))
+    for directory, name in ((MP4, "av.mp4"), (MP4, "av_bt2020.mp4"), (MKV, "av.mkv")):
+        p = os.path.join(directory, name)
         print("%-16s %d bytes" % (name, os.path.getsize(p)))
     return 0
 

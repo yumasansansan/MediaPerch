@@ -105,13 +105,15 @@ endif()
 # under test is whether the shape works on a container somebody else's tool
 # wrote, and a fake that interleaved the way I imagined MP4 interleaves would
 # prove nothing.
-if(TARGET mp_demux_mp4)
+if(TARGET mp_demux_mp4 AND TARGET mp_demux_mkv)
     target_sources(mediaperch_tests PRIVATE demux_v3_test.cpp)
     target_compile_definitions(mediaperch_tests PRIVATE
         "MEDIAPERCH_DEMUX_MP4=\"$<TARGET_FILE:mp_demux_mp4>\""
+        "MEDIAPERCH_DEMUX_MKV=\"$<TARGET_FILE:mp_demux_mkv>\""
         "MEDIAPERCH_TEST_AV=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mp4/av.mp4\""
-        "MEDIAPERCH_TEST_AV_BT2020=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mp4/av_bt2020.mp4\"")
-    add_dependencies(mediaperch_tests mp_demux_mp4)
+        "MEDIAPERCH_TEST_AV_BT2020=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mp4/av_bt2020.mp4\""
+        "MEDIAPERCH_TEST_AV_MKV=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mkv/av.mkv\"")
+    add_dependencies(mediaperch_tests mp_demux_mp4 mp_demux_mkv)
 endif()
 
 # The VST3 host, with a VST3 this repository writes so that the test does not

@@ -310,7 +310,22 @@ struct MpDemux {
     std::uint64_t timestamp_scale = k_default_scale;
     double duration_scaled = 0.0;
     std::vector<Track> tracks;
-    std::size_t selected = 0;
+
+    /// **The selected set, in `tracks` order.** One index was enough while
+    /// nothing read two tracks at once. Matroska interleaves at cluster
+    /// granularity, so several come out of one pass over the file the same way
+    /// they do in MP4 -- what had to change was not the container but this
+    /// reader, whose lace cursor and whose idea of a frame rate were both the
+    /// one selected track's.
+    std::vector<std::size_t> selected;
+    /// Which track the block currently being handed out belongs to. Set by
+    /// `next_block`, read by everything that has to know what it is holding.
+    std::size_t reading = 0;
+    /// The audio track this module picked at open, which is what
+    /// `MP_STREAM_DEFAULT` reports. Not the same question as what is selected
+    /// now, and confusing the two made a host that selected the video track see
+    /// the video track called the default one.
+    std::size_t preferred = 0;
 
     /// Where the clusters begin, so a seek can start over from a known point.
     std::uint64_t first_cluster = 0;
@@ -355,18 +370,31 @@ struct MpDemux {
     std::uint64_t discard_ns = 0;
     unsigned next_lace = 0;
 
-    std::uint64_t position = 0; ///< the next packet's first sample
     bool ended = false;
 
-    [[nodiscard]] const Track& track() const { return tracks[selected]; }
+    /// The track the current block belongs to.
+    [[nodiscard]] const Track& track() const { return tracks[reading]; }
+    /// Whether `number` is one of the selected tracks, and which one it is.
+    [[nodiscard]] bool selected_by_number(std::uint64_t number, std::size_t& out) const
+    {
+        for (const std::size_t at : selected) {
+            if (tracks[at].number == number) {
+                out = at;
+                return true;
+            }
+        }
+        return false;
+    }
 };
 
 namespace {
 
-/// Nanoseconds to frames of the selected track.
-std::uint64_t frames_of(const MpDemux* d, std::uint64_t ns) noexcept
+/// Nanoseconds to frames of one track, whose rate is the only one that makes
+/// the number mean anything. Two tracks in a file have two answers for one
+/// timestamp, which is the whole reason this takes an index now.
+std::uint64_t frames_of(const MpDemux* d, std::size_t track, std::uint64_t ns) noexcept
 {
-    const std::uint64_t rate = d->track().format.sample_rate;
+    const std::uint64_t rate = d->tracks[track].format.sample_rate;
     if (rate == 0) {
         return 0;
     }
@@ -599,7 +627,9 @@ bool restart_at(MpDemux* d, std::uint64_t at)
     return true;
 }
 
-/// The next block of the selected track, laced frames and all. False at the end.
+/// The next block of **any selected track**, laced frames and all, in the order
+/// the file stores them. `d->reading` says which track it turned out to be.
+/// False at the end.
 bool next_block(MpDemux* d)
 {
     for (int guard = 0; guard < (1 << 24); ++guard) {
@@ -675,9 +705,12 @@ bool next_block(MpDemux* d)
             } else {
                 block = FindChild<KaxBlock>(static_cast<EbmlMaster&>(*child));
             }
-            if (block == nullptr || block->TrackNum() != d->track().number) {
+            std::size_t from = 0;
+            if (block == nullptr ||
+                !d->selected_by_number(block->TrackNum(), from)) {
                 continue;
             }
+            d->reading = from;
             // **The cluster's timestamp is the block's base.** A block stores a
             // signed 16-bit offset from it and nothing else, so a block read
             // without its cluster has no position at all.
@@ -775,23 +808,44 @@ Tail find_tail(MpDemux* d)
     return tail;
 }
 
+/// Narrows the selection to one track for the duration of a scope, and puts it
+/// back. Both callers below walk the file looking for one track's blocks and
+/// would otherwise have to skip everybody else's by hand.
+class OnlyTrack {
+public:
+    OnlyTrack(MpDemux* d, std::size_t track) : d_(d), was_(d->selected), reading_(d->reading)
+    {
+        d_->selected = {track};
+        d_->reading = track;
+    }
+    ~OnlyTrack()
+    {
+        d_->selected = std::move(was_);
+        d_->reading = reading_;
+    }
+    OnlyTrack(const OnlyTrack&) = delete;
+    OnlyTrack& operator=(const OnlyTrack&) = delete;
+
+private:
+    MpDemux* d_;
+    std::vector<std::size_t> was_;
+    std::size_t reading_;
+};
+
 /// The tail for `track`, worked out once and remembered.
 const Tail& tail_of(MpDemux* d, std::size_t track)
 {
     if (!d->tracks[track].tail_looked_for) {
-        const std::size_t was = d->selected;
-        d->selected = track;
+        const OnlyTrack only{d, track};
         d->tracks[track].tail = find_tail(d);
         d->tracks[track].tail_looked_for = true;
-        d->selected = was;
     }
     return d->tracks[track].tail;
 }
 
 bool peek_mpeg_header(MpDemux* d, std::size_t track, std::vector<std::uint8_t>& out)
 {
-    const std::size_t was = d->selected;
-    d->selected = track;
+    const OnlyTrack only{d, track};
     const bool got = next_block(d) && d->block != nullptr &&
                      d->block->NumberFrames() != 0 &&
                      d->block->GetBuffer(0).Size() >= 4;
@@ -799,7 +853,6 @@ bool peek_mpeg_header(MpDemux* d, std::size_t track, std::vector<std::uint8_t>& 
         const auto* p = static_cast<const std::uint8_t*>(d->block->GetBuffer(0).Buffer());
         out.assign(p, p + 4);
     }
-    d->selected = was;
     return got;
 }
 
@@ -894,7 +947,9 @@ try {
         log_fmt(MP_LOG_DEBUG, "%s carries no audio track", path);
         return MP_ERR_UNSUPPORTED;
     }
-    d->selected = chosen;
+    d->selected = {chosen};
+    d->reading = chosen;
+    d->preferred = chosen;
 
     if (!restart_at(d.get(), d->first_cluster)) {
         return MP_ERR_IO;
@@ -940,7 +995,7 @@ try {
     out->index = index;
     out->kind = t.kind;
     out->codec = t.codec;
-    out->flags = index == d->selected ? MP_STREAM_DEFAULT : 0u;
+    out->flags = index == d->preferred ? MP_STREAM_DEFAULT : 0u;
     out->config_bytes = static_cast<std::uint32_t>(t.config.size());
     out->format = t.format;
 
@@ -1011,21 +1066,23 @@ try {
     if (d == nullptr || indices == nullptr || count == 0) {
         return MP_ERR_INVALID;
     }
-    // **One at a time, for now, and that is a statement about this module
-    // rather than about Matroska.** The container interleaves at cluster
-    // granularity and could serve several; what is single here is the reader --
-    // the lace cursor, `position` and `frames_of` are all the selected track's.
-    // Making them per-track is the change this module needs the day a video
-    // path reads a Matroska, and `demux_mp4` is where v3's several-streams is
-    // proved until then.
-    if (count > 1) {
-        return MP_ERR_UNSUPPORTED;
+    std::vector<std::size_t> chosen;
+    chosen.reserve(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        if (indices[i] >= d->tracks.size()) {
+            return MP_ERR_INVALID;
+        }
+        // A track named twice would have its blocks handed out twice, which is
+        // a caller's bug rather than a request.
+        for (const std::size_t already : chosen) {
+            if (already == indices[i]) {
+                return MP_ERR_INVALID;
+            }
+        }
+        chosen.push_back(indices[i]);
     }
-    if (indices[0] >= d->tracks.size()) {
-        return MP_ERR_INVALID;
-    }
-    d->selected = indices[0];
-    d->position = 0;
+    d->selected = std::move(chosen);
+    d->reading = d->selected.front();
     return restart_at(d, d->first_cluster) ? MP_OK : MP_ERR_IO;
 } catch (...) {
     return MP_ERR_IO;
@@ -1072,17 +1129,25 @@ try {
     // laced block has a position the container stated. The rest are between two
     // known points, and saying so is what MP_PACKET_TIMED is for -- a demuxer
     // that guessed would put every seek in a laced file wrong by up to a lace.
-    if (d->next_lace == 0) {
+    //
+    // **And only a track with a sample rate has a position at all.**
+    // `MpPacket::frame` is counted in frames, which a video track does not
+    // have; `frames_of` answers 0 for one, and flagging that MP_PACKET_TIMED
+    // would say "position 0, and I mean it" for every frame of the video. A
+    // demuxer that cannot say must say 0 *without* the flag, which is the
+    // difference the flag exists to carry. What a video packet's timestamp
+    // should be counted in is a question the ABI has not answered yet -- see
+    // plan.md §9.9.
+    const bool countable = d->track().format.sample_rate != 0;
+    if (d->next_lace == 0 && countable) {
         const std::uint64_t ns = d->block->GlobalTimestamp();
-        d->position = frames_of(d, ns);
-        out->frame = d->position;
+        out->frame = frames_of(d, d->reading, ns);
         out->flags = MP_PACKET_TIMED;
-        out->stream = static_cast<std::uint32_t>(d->selected);
     } else {
         out->frame = 0;
         out->flags = 0;
-        out->stream = static_cast<std::uint32_t>(d->selected);
     }
+    out->stream = static_cast<std::uint32_t>(d->reading);
     ++d->next_lace;
     return MP_OK;
 } catch (...) {
@@ -1101,9 +1166,9 @@ try {
     // never after it, and `MP_PACKET_TIMED` on the first block is what lets the
     // host discard the difference. Landing after the target would be
     // unrecoverable; landing before it costs one cluster of decoding.
-    // `frame` is in the named stream's own rate, which is not necessarily the
+    // `frame` is in the named stream's own rate, which is not necessarily a
     // selected one's -- a host seeking by the audio clock names the audio
-    // stream whether or not it is the stream it is reading.
+    // stream whether or not it is among the streams it is reading.
     const std::uint64_t rate = d->tracks[stream].format.sample_rate;
     if (rate == 0) {
         return MP_ERR_UNSUPPORTED;
@@ -1117,11 +1182,11 @@ try {
             best = cue;
         }
     }
-    if (!restart_at(d, best.at)) {
-        return MP_ERR_IO;
-    }
-    d->position = frames_of(d, best.ns);
-    return MP_OK;
+    // **One file has one position, so every selected track moves.** A cluster
+    // holds blocks of all of them, so landing on a cluster boundary lands all
+    // of them at once -- each from its own nearest point, which is not the same
+    // point, and the host discards what precedes its own target per stream.
+    return restart_at(d, best.at) ? MP_OK : MP_ERR_IO;
 } catch (...) {
     return MP_ERR_IO;
 }

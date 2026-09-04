@@ -634,15 +634,27 @@ fixtures are committed rather than generated at test time, because multi-stream 
 correctness property of the ABI rather than a quality measurement and belongs in the default
 test run, which must not depend on FFmpeg being on the machine.
 
-#### What still declines
+#### Two containers, which is what makes it an interface
 
-`demux_mkv` answers `MP_ERR_UNSUPPORTED` above one stream, and that is a statement about the
-module rather than about Matroska. The container interleaves at cluster granularity and could
-serve several; what is single is the reader — the lace cursor, `position` and `frames_of` are
-all the selected track's. Making them per-track is what that module needs the day a video
-path reads a Matroska. `demux_ffmpeg` declines for a different and permanent reason: it is a
-child process decoding to a pipe, so a second stream would be a second `ffmpeg`. `demux_mf`
-declines because an `IMFSourceReader` is a pipeline with no seam in it, which is §9.8.
+`demux_mkv` serves several tracks too, and doing it there is what turned v3 from one module's
+habit into a shape. MP4 stores samples in a flat table and Bento4's `AP4_LinearReader`
+already knew how to walk several tracks in storage order; Matroska stores blocks inside
+clusters, laces several frames into a block, and this module's reader had a lace cursor and
+an idea of the frame rate that were both **the one selected track's**. What changed is
+`selected` becoming a set, `frames_of` taking the track whose rate makes its answer mean
+anything, and `next_block` accepting any selected track and recording which one it found. A
+scoped `OnlyTrack` narrows the selection for the two open-time helpers that walk the file
+looking for one track's blocks.
+
+One thing it found: **a video packet was claiming a position it did not have.** `frames_of`
+answers 0 for a track with no sample rate, and the packet was flagged `MP_PACKET_TIMED`
+anyway -- which says "position 0, and I mean it" for every frame of the video, when the flag
+exists precisely to distinguish that from "I do not timestamp". It is cleared now for a track
+that has no frames to count.
+
+`demux_ffmpeg` still declines, for a different and permanent reason: it is a child process
+decoding to a pipe, so a second stream would be a second `ffmpeg`. `demux_mf` declines
+because an `IMFSourceReader` is a pipeline with no seam in it, which is §9.8.
 
 **Out-of-process modules use the same ABI.** A future `mp_host_ffmpeg.exe` implements the
 identical vtable over shared memory and a pipe, so a decoder that dies on a malformed file
@@ -1402,6 +1414,29 @@ which is precisely the work an MFT already does, correctly, for every codec the 
 supports. Sitting on the MFT layer is not a compromise; sitting on the SourceReader layer
 would be.
 
+### 9.9 What a video packet's timestamp is counted in
+
+**Not answered, and named here so it is not discovered in the middle of a renderer.**
+`MpPacket::frame` is documented as "in the stream's own frames", which an audio stream has
+and a video stream does not. The two demuxers that read video answer differently today:
+`demux_mkv` declines to timestamp a video packet at all, and `demux_mp4` hands back the
+sample's decode timestamp in the track's media timescale -- a number a host cannot interpret,
+because nothing tells it what the timescale is.
+
+Three ways out, and the choice belongs with the first thing that has to draw a frame:
+
+- **A time base per stream**, appended to `MpVideoInfo` -- the units `frame` is counted in,
+  which is `GetMediaTimeScale()` in MP4 and the timestamp scale in Matroska. Smallest, and
+  matches what both containers actually store.
+- **Nanoseconds everywhere**, converted by the demuxer. Uniform, and throws away the exact
+  rational the container stated, which is how a player drifts.
+- **The frame index**, which only exists for constant frame rate and is a lie for the rest.
+
+The first is what this plan expects to take. It is an append, so it costs nothing to defer --
+but a renderer written against `frame` before it is answered would be written against a
+number that means something different in each container, which is the kind of bug that is
+found by watching lips move.
+
 ---
 
 ## 10. Shell and IPC
@@ -1484,7 +1519,7 @@ HDR state.
 | M5.5 | Every parser is a library or is Rust | **done.** What this tree writes and what it links were both re-decided against measurement, and both moved: `demux_mp4` to Bento4, `demux_mkv` to libmatroska, `demux_flac`/`codec_flac` to libFLAC, `demux_mpa`/`codec_mpa` to libmpg123 -- and what was left, the parsers no library reads better, went to Rust: `codec_alac`, `codec_aac`, `demux_adts`. Every one of them bit-identical to the C++ it replaced, which is what made each move checkable rather than a judgement. [formats.md](formats.md) has every measurement, including the two upstream bugs a fuzzer found in Bento4 and the four things libmpg123's API did not say |
 | M5.9 | The structural cut: `src/engine` and `src/player` | **done.** The portable half was one library holding both the audio engine and the thing that decides what to play. §4 answers yes to "could this ABI carry a DAW's engine", and a DAW taking it would have taken the transport, the playlist, the INI schema and the IPC wire format with it. They are `src/player` now, and `src/engine` has no route to them: the include path is what enforces it, so reaching across is a compile error rather than a review comment. CI builds `mediaperch_engine` alone, which checks both cuts at once |
 | M5.75 | Path B is hashable, and a VST3 can be a stage in it | **done.** `mp::Processor` is `ProcessedGraph`'s arithmetic without the device, the ring or the threads, so `decode --path processed --gain --dsp` runs the chain and prints its SHA-256 -- the flags had been accepted and silently ignored, which is why nothing in this tree had ever compared the resampler between two builds. It found three bugs on the first run: `use_processed` could not see a gain, `Processor::reset` returned `MP_END` on success, and a seek left the noise shaper feeding back error from wherever the stream used to be. The baseline and AVX2 builds agree over 144 runs. `modules/dsp/vst3` hosts somebody else's plugin on `pluginterfaces` alone, with a VST3 written in `tests/` so the host is tested without one installed |
-| M5.95 | ABI v3: several streams from one file | **done.** `select` named one stream and `seek(frame)` meant "the selected one", which has no answer once a player wants audio and video out of one file -- and appending would have left both meaning something narrower than their names. So `select_streams`, `seek(stream, frame)`, `MpPacket::reserved` becoming `stream`, and `stream_video_info` appended for the three colour code points §9.1 turns on. Checked against `demux_mp4` reading a real MP4 with two tracks in it, which is the first test here that drives a module rather than a fake. `demux_mkv` still declines above one stream and says why |
+| M5.95 | ABI v3: several streams from one file | **done.** `select` named one stream and `seek(frame)` meant "the selected one", which has no answer once a player wants audio and video out of one file -- and appending would have left both meaning something narrower than their names. So `select_streams`, `seek(stream, frame)`, `MpPacket::reserved` becoming `stream`, and `stream_video_info` appended for the three colour code points §9.1 turns on. Checked against `demux_mp4` reading a real MP4 with two tracks in it, which is the first test here that drives a module rather than a fake. `demux_mkv` serves several tracks too, which is what makes v3 an interface rather than one module's habit -- and clearing MP_PACKET_TIMED on a video packet that never had a position is what that second container found |
 | M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse |
 | M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled |
 | M8 | WinUI 3 shell | killing it mid-track changes nothing audible |
