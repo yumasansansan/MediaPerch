@@ -36,8 +36,8 @@
     {
       "name": "core-only",
       "inherits": "ninja-msvc",
-      "displayName": "Core alone",
-      "description": "What CI builds to keep src/core portable. No platform head, no modules. Ninja rather than the .sln so CI does not care which Visual Studio the runner has.",
+      "displayName": "Engine and player alone",
+      "description": "What CI builds to keep the portable half portable, and to keep the engine free of the player. No platform head, no modules. Ninja rather than the .sln so CI does not care which Visual Studio the runner has.",
       "cacheVariables": {
         "MEDIAPERCH_BUILD_PLATFORM": "OFF"
       }

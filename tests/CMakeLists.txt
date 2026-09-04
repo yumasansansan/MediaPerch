@@ -126,7 +126,7 @@ if(TARGET mp_dsp_vst3)
 endif()
 
 target_link_libraries(mediaperch_tests
-    PRIVATE MediaPerch::core Catch2::Catch2WithMain mediaperch_flags)
+    PRIVATE MediaPerch::player Catch2::Catch2WithMain mediaperch_flags)
 
 set_target_properties(mediaperch_tests PROPERTIES FOLDER "tests")
 

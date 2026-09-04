@@ -135,7 +135,7 @@ decode-quality check inside it goes from 174 to 39.
 |---|---|---|
 | `ninja-msvc` | MSVC | day to day. `-debug`, `-release` and `-relwithdebinfo` build presets |
 | `measure` | MSVC | Release **with the measuring apparatus kept** — see below |
-| `core-only` | MSVC | what CI builds to keep `src/core` portable |
+| `core-only` | MSVC | what CI builds to keep `src/engine` and `src/player` portable, and the engine free of the player |
 | `asan` | Clang | the parsers under ASan and UBSan |
 | `fuzz` | Clang | the libFuzzer targets |
 
@@ -614,9 +614,12 @@ has and which it does not.
 
 All three run as part of `ctest`, so they cannot be skipped by not remembering them.
 
-- **`core_purity`** greps `src/core` for OS headers and platform conditionals and fails the
-  test run if either appears. `src/core` is built alone in CI as well, so the rule is
-  enforced from two directions.
+- **`core_purity`** greps `src/engine` and `src/player` for OS headers and platform
+  conditionals and fails the test run if either appears. `mediaperch_engine` is built alone
+  in CI as well, so the rule is enforced from two directions. That second build checks a
+  second rule for free: the engine target does not have `src/player` on its include path, so
+  an engine file reaching for the transport or the playlist is a `C1083`, not a review
+  comment.
 - **`tests/abi_header_c.c`** is compiled as C rather than C++. The ABI header exists to be
   read by another language; a header that has only ever been through a C++ compiler has not
   been tested for that job. The `MP_STATIC_ASSERT` block in the header fires there under C's

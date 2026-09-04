@@ -32,12 +32,20 @@ env:
     >>"%GITHUB_ENV%" echo LIBPATH=%LIBPATH%
 
 jobs:
-  # The rule that src/core is portable is only worth something if something
+  # The rule that the portable half is portable is only worth something if
+  # something
   # checks it. This job builds the core with the platform head switched off and
   # runs the purity check, so the day an OS header appears in there is the day
   # this goes red -- not eighteen months later when a Linux head is attempted.
+  # **Two cuts, both checked here.** The engine has to build with no platform
+  # head -- that is the portability claim -- and with no *player*, which is the
+  # newer one: a transport, a playlist, a settings file and a wire protocol are
+  # what a DAW would bring its own of, and until they were a separate library
+  # taking the engine meant taking them too. Building `mediaperch_engine` alone
+  # is what keeps that true, because the target does not have src/player on its
+  # include path and a reach across it will not compile.
   core-alone:
-    name: core alone, no platform head
+    name: engine alone, no player and no platform head
     runs-on: windows-2025-vs2026
     steps:
       - uses: actions/checkout@v7
@@ -51,12 +59,15 @@ jobs:
       - name: Configure
         run: cmake --preset core-only
 
-      - name: Build the core, and nothing else
-        run: cmake --build --preset core-only --target mediaperch_core
+      - name: Build the engine, and nothing else
+        run: cmake --build --preset core-only --target mediaperch_engine
 
-      - name: Check that the core is still portable
+      - name: Build the player on top of it
+        run: cmake --build --preset core-only --target mediaperch_player
+
+      - name: Check that both are still portable
         run: >
-          cmake -D MEDIAPERCH_CORE_DIR=${{ github.workspace }}/src/core
+          cmake "-D MEDIAPERCH_CORE_DIR=${{ github.workspace }}/src/engine;${{ github.workspace }}/src/player"
           -P cmake/CorePurity.cmake
 
   # The ABI header is compiled as C here as well as C++ (tests/abi_header_c.c),

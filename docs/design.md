@@ -43,7 +43,7 @@ architecture than any taste question:
 | Sample touching | `memcpy`, or one byte move if the container differs | gain, resample, convolution, dither |
 | Volume | `IAudioEndpointVolume`, or none | in the graph |
 | Chosen | when the file's format survives negotiation | when the user asks, or negotiation failed |
-| Code path | `src/core/passthrough.*` | `src/core/processed.*` |
+| Code path | `src/engine/passthrough.*` | `src/engine/processed.*` + `processor.*` |
 
 They share the ring buffer, the sink module and the clock. Nothing else. The passthrough
 graph contains no floating-point arithmetic on sample data at all, which is a property a
@@ -1028,9 +1028,15 @@ kernel was writing into was a stack frame that had already gone.
 ## Layout
 
 ```
-src/core/            portable. No OS headers — CI builds this alone to keep it that way.
-                     The graph, negotiation, the ring, the clock model, the playlist,
-                     the module registry, the config schema.
+src/engine/          portable, and **the half a DAW would take**. No OS headers — CI
+                     builds it alone to keep it that way. Formats, negotiation, the
+                     ring, the two graphs, the conversion, the DSP chain. It knows
+                     nothing about what to play next.
+src/player/          what decides that: the transport, the playlist, the settings
+                     schema and the wire protocol a shell speaks. Portable on the
+                     same terms, and it can see src/engine where src/engine cannot
+                     see it — the include path is what enforces that, so reaching
+                     across does not compile.
 src/win/             Windows head: MMDevice/WASAPI, Media Foundation, D3D11,
                      DirectComposition, MMCSS, paths, logging, the IPC server.
 src/linux/           Linux head. Not started. The core is shaped so that it can be.

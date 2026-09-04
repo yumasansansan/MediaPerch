@@ -68,7 +68,8 @@ add_library(mediaperch_abi INTERFACE)
 add_library(MediaPerch::abi ALIAS mediaperch_abi)
 target_include_directories(mediaperch_abi INTERFACE "${CMAKE_CURRENT_LIST_DIR}/include")
 
-add_subdirectory(src/core)
+add_subdirectory(src/engine)
+add_subdirectory(src/player)
 
 # **Two settings for the submodules' CMake, which is older than ours.**
 #

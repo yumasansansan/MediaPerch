@@ -144,7 +144,7 @@ mediaperch-probe verify      # a file, hashed at the device boundary
 
 ## The shape of it, in one paragraph
 
-A headless engine process (`src/core`, portable, no OS headers; plus a platform head) loads
+A headless engine process (`src/engine` and `src/player`, portable, no OS headers; plus a platform head) loads
 container readers, codecs, sinks, DSP and the video presenter at run time as shared
 libraries behind a plain C ABI — so a module can be replaced, or written by somebody else. Shells are separate
 processes and are optional: a small always-present CLI, and a WinUI 3 window that can be

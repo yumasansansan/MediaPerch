@@ -107,7 +107,7 @@ The rest follows:
 
 ### The decision
 
-> **C++23 for `src/core`, the platform heads and every module. A plain C module ABI, kept
+> **C++23 for `src/engine` and `src/player`, the platform heads and every module. A plain C module ABI, kept
 > exactly as specified in §4 — not because Rust is coming, but because the ABI is the
 > expensive thing to change later and making it C costs nothing now.**
 
@@ -539,6 +539,40 @@ one, and both live above the boundary in exactly the same place. And **state sav
 restore already works**: `describe` reports every setting and `set` takes it back, which is
 what the settings file round-trips through today and what a project file would.
 
+### ABI v3: what appending cannot reach
+
+Asked when the video work was about to start, and answered before it, because the answer
+decides whether M6's first commit is a header or a renderer. **Almost everything appends.
+Two things in the demuxer do not, and one thing is not a widening but a new kind.**
+
+| Need | Appendable? |
+|---|---|
+| Video geometry, and the primaries/transfer/matrix §9 turns on | **yes** — a `stream_video_info` call, appended. `MpStreamInfo::format` stays what it says it is |
+| Presentation | **yes** — `MP_KIND_VIDEO` is already reserved as 4, and a vtable behind a reserved number costs nothing |
+| A DSP error string | **yes**, and it did: `describe`'s `trouble` key, without touching the vtable |
+| Numeric automatable parameters, encoders, buses, events | **yes**, all four, as the table above says |
+| **Several streams from one file** | **no.** `select` names one stream and `read_packet` reads it. Appending `select_streams` leaves `select` meaning something narrower than its name, and `MpPacket` has to say which stream a packet came from — `reserved` is sitting there for it, but a field that changes meaning is a break whatever it is called |
+| **Seeking, once there are several** | **no.** `seek(frame)` is "the selected stream". With two selected there is no answer, and an appended `seek_stream(index, frame)` leaves two functions where the older one is now a trap |
+| **Video decode** | **not a widening.** `MpCodecVtbl::decode` writes PCM into the caller's buffer. A hardware video decoder produces a texture it owns, in a pool; copying a 4K NV12 frame out at 60 fps is 750 MB/s spent to undo the reason for decoding on the GPU. A second `decode_frame` in the same vtable would make a codec module implement one of two output models, which is the shape with two meanings §15 warns about. It is a **new kind**, `MP_KIND_VCODEC`, beside the reserved `MP_KIND_VIDEO` |
+
+So the break is narrow: `MpDemuxVtbl::select` and `seek`, and `MpPacket::reserved`. Nothing
+in `MpCodecVtbl`, `MpSinkVtbl` or `MpDspVtbl` moves, and no audio module changes except to
+be recompiled.
+
+**And it should land with the first module that needs it, not before.** §15's own rule is
+"do not add an interface until the second implementation of it exists", and this ABI has
+already had one enum reverted for having no user. Multi-stream demuxing has no caller today;
+it gets one the day `demux_mp4` is asked for audio and video at once, and that is the commit
+where the shape gets checked against something rather than argued about. Deciding it now and
+writing it here is what keeps it from being discovered late; writing the code now is what
+would make it speculative.
+
+The cost of breaking is worth stating because it is nearly nothing and will not stay that
+way: `mp_module_entry` refuses a mismatched `MP_ABI_VERSION`, so a bump makes every module
+fail to load until it is rebuilt — and **every module in the world is in this repository.**
+The same was true at v1 to v2, which deleted a whole kind. It is true today. It stops being
+true the first time somebody else ships one.
+
 **Out-of-process modules use the same ABI.** A future `mp_host_ffmpeg.exe` implements the
 identical vtable over shared memory and a pipe, so a decoder that dies on a malformed file
 takes a helper process down and not the audio. The ABI is shaped now so that this needs no
@@ -587,8 +621,9 @@ works in binary64, and an f32 bus would add a second rounding to the one path wh
 is that it has exactly one; the cost is memory bandwidth on a workload measured in tens of
 megabytes a second. design.md §"The DSP chain" carries the reasoning.
 
-**What is written so far** is `src/core/processed.*`, `src/core/convert.*`,
-`src/core/dither.*`, `src/core/shaper_tables.*` and `src/core/dsp.*`: the graph, the
+**What is written so far** is `src/engine/processed.*`, `src/engine/processor.*`,
+`src/engine/convert.*`, `src/engine/dither.*`, `src/engine/shaper_tables.*` and
+`src/engine/dsp.*`: the graph, the
 sample-type conversion through a normalised `double`, five dither distributions, binomial
 noise shaping of any order to 9, 79 transcribed shaping curves, a gain, and the chain
 itself. `modules/dsp/gain` is the first stage behind `MpDspVtbl`, and exists as much to
@@ -645,7 +680,7 @@ that is the bug that costs a week.
 | control | normal | IPC, module load/unload, graph rebuild, device notifications |
 
 The ring is single-producer/single-consumer, power-of-two, acquire/release indices, no CAS.
-It lives in `src/core` and is one of the two things `tests/` cares most about.
+It lives in `src/engine` and is one of the two things `tests/` cares most about.
 
 ### Volume, and why Path A has none
 
@@ -1249,10 +1284,52 @@ HDR10 path where there is no second surface.
 
 ### 9.7 Order of work
 
-Present the OS path first (`driver` tone mapping, `decode_mf` hardware decode, flip-model
+Present the OS path first (`driver` tone mapping, hardware decode through an MFT, flip-model
 scRGB) and get it correct. Only then add `shader`, and only as an option — a hand-written
 tone mapper that ships before the platform one has been made to work is how a project ends
 up maintaining a colour pipeline it never meant to own.
+
+### 9.8 Media Foundation is a codec here, not a pipeline
+
+This paragraph used to read "`decode_mf` hardware decode", which was written before ABI v2
+and names a module that no longer exists. Restoring it would undo the thing v2 was for.
+
+**MF is two libraries wearing one name.** `IMFSourceReader` is a whole pipeline -- it opens
+the file, demuxes it, decodes it and hands back samples, and there is no seam in it. That is
+what `decode_mf` was, and it is why v1 could not say where a frame came from.
+`IMFTransform` is one decoder: bitstream in, frames out, no file, no container, no seeking.
+`MFTEnumEx` with `MFT_ENUM_FLAG_HARDWARE` finds the vendor's, and
+`IMFDXGIDeviceManager` hands it the D3D11 device so it decodes straight into textures this
+process already owns.
+
+The second is a **codec** in exactly the sense §4 means, so the video path keeps the shape
+the audio path has:
+
+```
+  demux_mp4 / demux_mkv ─▶ codec_mft (an IMFTransform) ─▶ video_d3d11
+   ours, fuzzed, seeking    the black box, one job wide     ours
+```
+
+What that buys is not tidiness:
+
+- **The container stays ours.** Bento4 and libmatroska are fuzzed, and their seeking is
+  measured to land byte-identically in four framings. MF's is neither, and is not
+  inspectable.
+- **The HDR metadata comes from the container**, which is where it is written. §9.1 turns on
+  knowing the stream's primaries, transfer and matrix before a frame is drawn; asking MF for
+  its opinion of them adds a layer that can be wrong with nothing to check it against.
+- **The black box shrinks to one function.** A decoder that turns a bitstream into a texture
+  is a thing whose output can be held against another decoder's, which is what
+  [formats.md](formats.md) already does for every audio codec here.
+- **`demux_mf` stays what it is:** a *fallback demuxer* flagged `MP_STREAM_SELF_DECODES`,
+  which is the honest v2 shape for the SourceReader and is right for the formats nothing
+  else here reads. It is not the video path.
+
+The alternative below MF is D3D11VA directly (`ID3D11VideoDevice::CreateVideoDecoder`),
+which is what FFmpeg's hwaccel does. It means parsing slice headers to fill DXVA buffers --
+which is precisely the work an MFT already does, correctly, for every codec the GPU
+supports. Sitting on the MFT layer is not a compromise; sitting on the SourceReader layer
+would be.
 
 ---
 
@@ -1334,6 +1411,7 @@ HDR state.
 | M5 | `decode_mf` and `decode_ffmpeg`, and the resolution table | **done.** `ctest -R format_matrix` builds one file per format, shows it to every decoder, and rewrites the matrix in the README -- and fails when the README stops matching. `mediaperch-probe claims` shows every decoder's probe score for a file, so a cell can say whether a decoder *claimed* the file or was forced to try. The lossless corpus comes from the reference encoders rather than FFmpeg, whose FLAC encoder writes 24 bits when asked for 32. Generating it found two claims in [formats.md](formats.md) that had gone stale and one real gap: nothing but Media Foundation claimed WMA |
 | M4.5 | ABI v2: the container decides (§12) | **done.** Every format this tree reads resolves container-first: eight demuxers and seven codecs, and each one decodes to the hash its v1 decoder produced. Two formats gained a first-class reader on the way -- MPEG layer II, which had gone to FFmpeg, and OggFLAC, which `demux_ogg` had been naming since step 4 with nothing to hand it to. Seeking became the host's, once, rather than each decoder's separately: a seek to an arbitrary sample lands byte-identically in WAV, native FLAC, OggFLAC and ALAC-in-MP4, which are four unrelated framings. Modules are laid out and installed by kind -- `modules/<kind>/<name>` in the tree, `bin/<config>/modules/<kind>/` out of it. Step 7 deleted `MP_KIND_DECODER`, the eight modules that used it, `mp::Decoder`, the registry's second resolution path, and one submodule that had no caller left |
 | M5.5 | Every parser is a library or is Rust | **done.** What this tree writes and what it links were both re-decided against measurement, and both moved: `demux_mp4` to Bento4, `demux_mkv` to libmatroska, `demux_flac`/`codec_flac` to libFLAC, `demux_mpa`/`codec_mpa` to libmpg123 -- and what was left, the parsers no library reads better, went to Rust: `codec_alac`, `codec_aac`, `demux_adts`. Every one of them bit-identical to the C++ it replaced, which is what made each move checkable rather than a judgement. [formats.md](formats.md) has every measurement, including the two upstream bugs a fuzzer found in Bento4 and the four things libmpg123's API did not say |
+| M5.9 | The structural cut: `src/engine` and `src/player` | **done.** The portable half was one library holding both the audio engine and the thing that decides what to play. §4 answers yes to "could this ABI carry a DAW's engine", and a DAW taking it would have taken the transport, the playlist, the INI schema and the IPC wire format with it. They are `src/player` now, and `src/engine` has no route to them: the include path is what enforces it, so reaching across is a compile error rather than a review comment. CI builds `mediaperch_engine` alone, which checks both cuts at once |
 | M5.75 | Path B is hashable, and a VST3 can be a stage in it | **done.** `mp::Processor` is `ProcessedGraph`'s arithmetic without the device, the ring or the threads, so `decode --path processed --gain --dsp` runs the chain and prints its SHA-256 -- the flags had been accepted and silently ignored, which is why nothing in this tree had ever compared the resampler between two builds. It found three bugs on the first run: `use_processed` could not see a gain, `Processor::reset` returned `MP_END` on success, and a seek left the noise shaper feeding back error from wherever the stream used to be. The baseline and AVX2 builds agree over 144 runs. `modules/dsp/vst3` hosts somebody else's plugin on `pluginterfaces` alone, with a VST3 written in `tests/` so the host is tested without one installed |
 | M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse |
 | M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled |
@@ -1744,4 +1822,4 @@ real time.
 | The module ABI ossifies too early and every change becomes a break | `size`-prefixed structs (§4.2) and a v1 that is deliberately small. Do not add an interface until the second implementation of it exists |
 | Memory-safety bugs in parsers | ~~now that Rust is not doing that job~~ — it is, for the three parsers this tree still writes; see §2's *When to revisit*. The rest of the mitigation stands and does the heavier lifting, because most parsing bytes are somebody else's library: libFuzzer on every parser from M2, ASan/UBSan in CI, `/GS` and `/guard:cf` in release, and `demux_ffmpeg` out of process. **That last one is done, by a route the plan did not name**: the module drives the `ffmpeg` command line rather than linking libavformat, so FFmpeg's parsing surface is already in a process that can die without taking the audio with it, and `mp_host_ffmpeg.exe` (§4) is a thing to build only if a module ever needs to be linked in |
 | The video half quietly becomes the whole project | audio is complete and shippable at M5. Video is M6 onward and is allowed to be late |
-| FFmpeg's licence and binary size make it awkward to ship | it is a module, so ship it separately; `decode_native` and `decode_mf` mean the base install still plays music and video |
+| FFmpeg's licence and binary size make it awkward to ship | it is a module, so ship it separately. The base install still plays music without it -- nine demuxers and eight codecs of this tree's own -- and will play video without it too, because §9.8 puts hardware decode on an `IMFTransform` rather than on anything FFmpeg links |

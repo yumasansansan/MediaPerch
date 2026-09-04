@@ -1,10 +1,15 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# src/core is portable: no OS headers, no platform conditionals. That rule is
-# only worth anything if something checks it, so this runs as a test rather than
-# living in a contributing guide.
+# The portable half is portable: no OS headers, no platform conditionals. That
+# rule is only worth anything if something checks it, so this runs as a test
+# rather than living in a contributing guide.
 #
-#   cmake -D MEDIAPERCH_CORE_DIR=<dir> -P cmake/CorePurity.cmake
+#   cmake -D MEDIAPERCH_CORE_DIR=<dir>[;<dir>...] -P cmake/CorePurity.cmake
+#
+# A list, because there are two of them now: src/engine and src/player. The
+# *other* rule -- that the engine cannot see the player -- needs no script, and
+# that is the point of it being two libraries: src/player is not on the engine's
+# include path, so reaching across is a compile error.
 
 if(NOT MEDIAPERCH_CORE_DIR)
     message(FATAL_ERROR "MEDIAPERCH_CORE_DIR is required")
@@ -39,11 +44,15 @@ set(forbidden_includes
 # harder to grep for later.
 set(forbidden_macros "_WIN32" "_MSC_VER" "__linux__" "__APPLE__" "__unix__")
 
-file(GLOB_RECURSE sources
-    "${MEDIAPERCH_CORE_DIR}/*.hpp"
-    "${MEDIAPERCH_CORE_DIR}/*.cpp"
-    "${MEDIAPERCH_CORE_DIR}/*.h"
-    "${MEDIAPERCH_CORE_DIR}/*.c")
+set(sources "")
+foreach(dir IN LISTS MEDIAPERCH_CORE_DIR)
+    file(GLOB_RECURSE found
+        "${dir}/*.hpp"
+        "${dir}/*.cpp"
+        "${dir}/*.h"
+        "${dir}/*.c")
+    list(APPEND sources ${found})
+endforeach()
 
 set(violations "")
 
@@ -70,12 +79,12 @@ endforeach()
 list(LENGTH sources source_count)
 
 if(violations)
-    message("src/core is not portable any more:")
+    message("the portable half is not portable any more:")
     foreach(violation IN LISTS violations)
         message("  ${violation}")
     endforeach()
     message(FATAL_ERROR
-        "The core is built alone in CI precisely so this cannot drift. "
+        "The engine is built alone in CI precisely so this cannot drift. "
         "Whatever needs the OS belongs in a platform head or a module.")
 endif()
 
