@@ -14,7 +14,30 @@
 // mapper's 2.4 gamma survived years of bug reports (§9.2); this one renders to
 // a texture a test can read back and hash, on the same path as the one that
 // reaches a display. `read_back` is in the ABI for exactly that, and doubles as
-// the screenshot people want anyway.
+// the screenshot people want anyway -- and it hands back the pixels in the
+// format they were rendered in, because a measurement that quantises before it
+// is taken is measuring the quantiser.
+//
+// **The arithmetic is single precision and the destination is as wide as it is
+// allowed to be.** HLSL `float` is 32-bit and this file uses no `half` and no
+// `min16float`, so every transfer function and every scale is computed at full
+// single precision and rounded exactly once, when it is written. Where that
+// write goes is the only thing that varies: a flip-model swap chain accepts
+// nothing above `R16G16B16A16_FLOAT`, which is DXGI's ceiling rather than a
+// decision, while an off-screen target takes `R32G32B32A32_FLOAT` and is what a
+// measurement should land in.
+//
+// There is deliberately **no intermediate render target while there is one
+// pass**. Adding one would round twice -- once into it and once into the back
+// buffer -- where the shader writing straight to the destination rounds once.
+// It arrives with the second pass, in single precision, and the count stays at
+// one.
+//
+// Double precision belongs on the CPU, where the constants are derived: a
+// matrix or an EETF parameter worked out in `double` and rounded once into the
+// constant buffer is exact to more digits than any display has. In a shader it
+// would buy nothing measurable -- no texture format carries it, and single
+// precision already has seven decimal digits against a 16-bit panel's five.
 //
 // **WARP is a first-class device, not a fallback for broken machines.** It is
 // Microsoft's software rasteriser, it is on every Windows install, and it is
@@ -240,6 +263,10 @@ struct MpVideo {
 
     HWND window = nullptr;
     bool warp = false;
+    /// Off-screen only: single precision unless a caller asks for the format a
+    /// display would actually get. A swap chain has no say -- FP16 is the most
+    /// DXGI will present.
+    bool wide_target = true;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
 
@@ -382,6 +409,42 @@ DXGI_FORMAT dxgi_format_of(mp::video::SwapFormat f) noexcept
                                                    : DXGI_FORMAT_R16G16B16A16_FLOAT;
 }
 
+/// What is actually rendered into. The same as the swap chain's when there is
+/// one, because that is what a display gets; wider off-screen, because a
+/// measurement should not be quantised before it is taken.
+DXGI_FORMAT target_format_of(const MpVideo* v) noexcept
+{
+    if (v->window == nullptr && v->wide_target &&
+        v->plan.format == mp::video::SwapFormat::fp16_scrgb) {
+        return DXGI_FORMAT_R32G32B32A32_FLOAT;
+    }
+    return dxgi_format_of(v->plan.format);
+}
+
+MpPixelFormat pixel_format_of(DXGI_FORMAT f) noexcept
+{
+    switch (f) {
+    case DXGI_FORMAT_R32G32B32A32_FLOAT:
+        return MP_PIXEL_RGBA32F;
+    case DXGI_FORMAT_R10G10B10A2_UNORM:
+        return MP_PIXEL_RGB10A2;
+    default:
+        return MP_PIXEL_RGBA16F;
+    }
+}
+
+std::size_t pixel_bytes_of(MpPixelFormat f) noexcept
+{
+    switch (f) {
+    case MP_PIXEL_RGBA32F:
+        return 16u;
+    case MP_PIXEL_RGBA16F:
+        return 8u;
+    default:
+        return 4u;
+    }
+}
+
 DXGI_COLOR_SPACE_TYPE colour_space_of(mp::video::SwapFormat f) noexcept
 {
     // scRGB is linear with the BT.709 primaries; HDR10 is PQ with BT.2020.
@@ -398,13 +461,15 @@ bool make_target(MpVideo* v, std::string& why)
     v->staging.reset();
     v->swap_chain.reset();
 
-    const DXGI_FORMAT format = dxgi_format_of(v->plan.format);
+    const DXGI_FORMAT format = target_format_of(v);
 
     if (v->window != nullptr) {
         DXGI_SWAP_CHAIN_DESC1 desc{};
         desc.Width = v->width;
         desc.Height = v->height;
-        desc.Format = format;
+        // The swap chain gets what DXGI will present, which is never the wide
+        // one -- `target_format_of` only widens when there is no window.
+        desc.Format = dxgi_format_of(v->plan.format);
         desc.SampleDesc.Count = 1;
         desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
         desc.BufferCount = 2;
@@ -647,15 +712,20 @@ try {
 }
 
 MpResult MP_CALL video_read_back(MpVideo* v, void* dst, std::size_t dst_bytes,
-                                 std::uint32_t* out_width,
-                                 std::uint32_t* out_height) noexcept
+                                 std::uint32_t* out_width, std::uint32_t* out_height,
+                                 MpPixelFormat* out_format) noexcept
 try {
-    if (v == nullptr || out_width == nullptr || out_height == nullptr) {
+    if (v == nullptr || out_width == nullptr || out_height == nullptr ||
+        out_format == nullptr) {
         return MP_ERR_INVALID;
     }
     *out_width = v->width;
     *out_height = v->height;
-    const std::size_t needed = static_cast<std::size_t>(v->width) * v->height * 4u;
+    *out_format = pixel_format_of(target_format_of(v));
+
+    const std::size_t pixel_bytes = pixel_bytes_of(*out_format);
+    const std::size_t needed =
+        static_cast<std::size_t>(v->width) * v->height * pixel_bytes;
     if (dst == nullptr || dst_bytes < needed) {
         return MP_ERR_NO_MEMORY; // the caller asks again with room, as read_packet does
     }
@@ -670,66 +740,19 @@ try {
         return MP_ERR_INTERNAL;
     }
 
-    // **Back to 8-bit sRGB, which is what a hash and a screenshot both want.**
-    // The target is linear FP16 or PQ 10-bit; neither is a thing to write to a
-    // PNG or to compare by eye. The inverse of the shader's own decode, so a
-    // frame that went in unscaled comes back out unchanged.
+    // **The pixels as they were rendered, and nothing else.** A row copy,
+    // because a staging texture has a pitch of its own and a caller wants the
+    // rows to follow one another -- but not a conversion. The first version of
+    // this encoded to 8-bit sRGB, which quantised away the dark end where the
+    // difference between the sRGB curve and a 2.4 gamma actually lives, and on
+    // the HDR10 path read PQ code values as though they were linear.
+    const std::size_t row_bytes = static_cast<std::size_t>(v->width) * pixel_bytes;
     auto* out = static_cast<std::uint8_t*>(dst);
-    const bool half = v->plan.format == mp::video::SwapFormat::fp16_scrgb;
     for (std::uint32_t y = 0; y < v->height; ++y) {
-        const auto* row = static_cast<const std::uint8_t*>(mapped.pData) +
-                          static_cast<std::size_t>(y) * mapped.RowPitch;
-        for (std::uint32_t x = 0; x < v->width; ++x) {
-            float rgba[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-            if (half) {
-                const auto* texel = reinterpret_cast<const std::uint16_t*>(row) + x * 4u;
-                for (int c = 0; c < 4; ++c) {
-                    // A minimal half-to-float, because DirectXMath is a
-                    // dependency this module does not otherwise need.
-                    const std::uint16_t h = texel[c];
-                    const std::uint32_t sign = static_cast<std::uint32_t>(h & 0x8000u) << 16;
-                    const std::uint32_t exponent = (h >> 10) & 0x1Fu;
-                    const std::uint32_t mantissa = h & 0x3FFu;
-                    std::uint32_t bits = 0;
-                    if (exponent == 0) {
-                        bits = sign; // zero, or a subnormal near enough to it
-                    } else if (exponent == 31) {
-                        bits = sign | 0x7F800000u | (mantissa << 13);
-                    } else {
-                        bits = sign | ((exponent + 112u) << 23) | (mantissa << 13);
-                    }
-                    float value = 0.0f;
-                    std::memcpy(&value, &bits, sizeof(value));
-                    rgba[c] = value;
-                }
-            } else {
-                const auto* texel = reinterpret_cast<const std::uint32_t*>(row) + x;
-                const std::uint32_t packed = *texel;
-                rgba[0] = static_cast<float>(packed & 0x3FFu) / 1023.0f;
-                rgba[1] = static_cast<float>((packed >> 10) & 0x3FFu) / 1023.0f;
-                rgba[2] = static_cast<float>((packed >> 20) & 0x3FFu) / 1023.0f;
-                rgba[3] = static_cast<float>((packed >> 30) & 0x3u) / 3.0f;
-            }
-
-            const auto encode = [half](float linear) {
-                if (!half) {
-                    return linear; // PQ, and undoing that is the tone mapper's job
-                }
-                const float clamped = std::clamp(linear, 0.0f, 1.0f);
-                return clamped <= 0.0031308f
-                           ? clamped * 12.92f
-                           : 1.055f * std::powf(clamped, 1.0f / 2.4f) - 0.055f;
-            };
-            const auto byte = [](float v01) {
-                return static_cast<std::uint8_t>(std::clamp(v01, 0.0f, 1.0f) * 255.0f + 0.5f);
-            };
-            std::uint8_t* pixel =
-                out + (static_cast<std::size_t>(y) * v->width + x) * 4u;
-            pixel[0] = byte(encode(rgba[2])); // B
-            pixel[1] = byte(encode(rgba[1])); // G
-            pixel[2] = byte(encode(rgba[0])); // R
-            pixel[3] = byte(rgba[3]);
-        }
+        std::memcpy(out + static_cast<std::size_t>(y) * row_bytes,
+                    static_cast<const std::uint8_t*>(mapped.pData) +
+                        static_cast<std::size_t>(y) * mapped.RowPitch,
+                    row_bytes);
     }
     v->context->Unmap(v->staging.get(), 0);
     return MP_OK;
@@ -761,6 +784,20 @@ try {
             return MP_ERR_INVALID;
         }
         return v->device ? MP_ERR_UNSUPPORTED : MP_OK;
+    }
+    if (std::strcmp(key, "precision") == 0) {
+        // Off-screen only, and it is the difference between measuring the
+        // pipeline and measuring what a display gets. Both are worth doing:
+        // `fp32` is the arithmetic, `fp16` is the arithmetic plus the rounding
+        // DXGI imposes on everybody.
+        if (std::strcmp(value, "fp32") == 0) {
+            v->wide_target = true;
+        } else if (std::strcmp(value, "fp16") == 0) {
+            v->wide_target = false;
+        } else {
+            return MP_ERR_INVALID;
+        }
+        return MP_OK;
     }
     if (std::strcmp(key, "composited") == 0) {
         v->composited = std::strcmp(value, "0") != 0;
@@ -818,6 +855,12 @@ try {
                       static_cast<unsigned long long>(v->frames));
         return MP_OK;
     case 9:
+        std::snprintf(out, out_bytes,
+                      "precision\t%s\twhat it renders into; fp16 is what a display gets "
+                      "and all DXGI will present",
+                      v->window == nullptr && v->wide_target ? "fp32" : "fp16");
+        return MP_OK;
+    case 10:
         std::snprintf(out, out_bytes, "trouble\t%s\twhat went wrong (read only)",
                       v->trouble.empty() ? "nothing" : v->trouble.c_str());
         return MP_OK;

@@ -1391,6 +1391,54 @@ by all follow from what the container said and what the display is, and none of 
 device to work out. They are the part that is easy to get subtly wrong, and they are tested
 against the cases this section names.
 
+### 9.10 How many bits, and where they are lost
+
+Asked because a display may be 10-bit, or 12, and answering it turned up three places where
+this tree was throwing precision away.
+
+**Presenting is capped at FP16 and that is DXGI's ceiling, not a choice.** A flip-model swap
+chain accepts `B8G8R8A8_UNORM`, `R8G8B8A8_UNORM`, `R10G10B10A2_UNORM` and
+`R16G16B16A16_FLOAT`, and nothing above them. Half is what a 10-bit or 12-bit panel is fed
+through, and its precision profile suits a linear light buffer better than the width suggests:
+it is *relatively* precise, about eleven significant bits everywhere, so the spacing is
+finest in the shadows where banding is visible and coarsest near white where a step is
+hardest to see. Near white it is roughly twelve bits of encoded precision -- beyond every
+consumer panel -- and in the deep shadows it is finer than 16-bit integer by more than an
+order of magnitude. What it costs is measured rather than assumed: a test renders the same
+frame at both widths and holds the difference to one unit in the last place.
+
+**Everything before the store is single precision**, and stays there. HLSL `float` is 32-bit,
+this module uses no `half` and no `min16float`, and there is deliberately **no intermediate
+render target while there is one pass** -- adding one would round twice where writing
+straight to the destination rounds once. The intermediate arrives with the second pass, in
+single precision, and the count stays at one.
+
+**Off-screen renders into `R32G32B32A32_FLOAT`**, which a swap chain will not take and a
+measurement should not do without: a test that hashes an FP16 buffer is measuring the
+presentation format as much as the pipeline. `precision=fp16` asks for what a display gets,
+which is how the paragraph above is measured at all.
+
+**Double precision belongs on the CPU, where constants are derived.** A colour matrix or an
+EETF parameter worked out in `double` and rounded once into the constant buffer is exact to
+more digits than any display has; in a shader it would buy nothing measurable, since no
+texture format carries it and single precision already has seven decimal digits against a
+16-bit panel's five. It is the same rule the audio side follows, where the shaping curves are
+transcribed at full precision and the bus is f64 because the argument for Path B is that it
+rounds exactly once.
+
+Three things were losing bits before this was asked, and all three were in code written the
+same week:
+
+- **`read_back` handed back 8-bit sRGB.** It quantised away the dark end, which is where the
+  difference between the sRGB curve and §9.2's 2.4 gamma actually lives and is the whole
+  reason the measurement exists. On the HDR10 path it was worse than lossy: it read PQ code
+  values as though they were linear and produced bytes that were neither.
+- **It clamped to [0, 1] before encoding.** scRGB above 1.0 is not an error -- it is how the
+  format represents brighter than 80 nits -- so every bit of HDR headroom was being thrown
+  away by the one call that exists to inspect it.
+- **`demux_mp4` truncated the 16.16 display size** rather than rounding it, losing the
+  fraction an anamorphic track states. It rounds now.
+
 ### 9.8 Media Foundation is a codec here, not a pipeline
 
 This paragraph used to read "`decode_mf` hardware decode", which was written before ABI v2

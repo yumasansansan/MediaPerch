@@ -66,6 +66,41 @@ struct Module {
     const MpVideoVtbl* vtbl = nullptr;
 };
 
+/// The scRGB target is IEEE half, and DirectXMath is a dependency these tests
+/// do not otherwise want for one conversion.
+float half_to_float(std::uint16_t h)
+{
+    const std::uint32_t sign = static_cast<std::uint32_t>(h & 0x8000u) << 16;
+    const std::uint32_t exponent = (h >> 10) & 0x1Fu;
+    const std::uint32_t mantissa = h & 0x3FFu;
+    std::uint32_t bits = sign;
+    if (exponent == 31) {
+        bits |= 0x7F800000u | (mantissa << 13);
+    } else if (exponent != 0) {
+        bits |= ((exponent + 112u) << 23) | (mantissa << 13);
+    } else if (mantissa != 0) {
+        // **Subnormals, rather than flushed to zero.** They are half's deepest
+        // shadows -- below about 6e-5 -- and flushing them here would make the
+        // measuring instrument blind in exactly the range where banding lives
+        // and where the transfer function argument is decided.
+        float value = static_cast<float>(mantissa) * 5.960464477539063e-8f;
+        if (sign != 0) {
+            value = -value;
+        }
+        return value;
+    }
+    float value = 0.0f;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+/// sRGB, as the standard states it, so the test computes the expected answer
+/// rather than comparing against what the shader happened to produce.
+float srgb_to_linear(float c)
+{
+    return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+}
+
 /// One presenter, off-screen and on WARP, which is the reproducible pair.
 class Presenter {
 public:
@@ -131,20 +166,44 @@ public:
         return vtbl_->present(handle_, &frame);
     }
 
-    /// The rendered pixels, BGRA8.
-    [[nodiscard]] std::vector<std::uint8_t> read_back()
+    /// The rendered pixels, as linear floats whichever width they were stored
+    /// in.
+    ///
+    /// **Single precision off-screen by default**, because a measurement that
+    /// is quantised before it is taken is measuring the quantiser. The FP16
+    /// path is what a display gets and is asked for by name, so the difference
+    /// between the two is itself something a test can look at.
+    [[nodiscard]] std::vector<float> read_back()
     {
         std::uint32_t w = 0;
         std::uint32_t h = 0;
+        MpPixelFormat format = MP_PIXEL_NONE;
         // The same grow-and-ask-again shape read_packet has: nothing is lost
         // by asking with no room first.
-        const MpResult sized = vtbl_->read_back(handle_, nullptr, 0, &w, &h);
+        const MpResult sized = vtbl_->read_back(handle_, nullptr, 0, &w, &h, &format);
         if (sized != MP_ERR_NO_MEMORY || w == 0 || h == 0) {
             return {};
         }
-        std::vector<std::uint8_t> out(static_cast<std::size_t>(w) * h * 4u);
-        if (vtbl_->read_back(handle_, out.data(), out.size(), &w, &h) != MP_OK) {
+        const std::size_t pixels = static_cast<std::size_t>(w) * h * 4u;
+        std::vector<float> out(pixels);
+
+        if (format == MP_PIXEL_RGBA32F) {
+            if (vtbl_->read_back(handle_, out.data(), out.size() * sizeof(float), &w, &h,
+                                 &format) != MP_OK) {
+                return {};
+            }
+            return out;
+        }
+        if (format != MP_PIXEL_RGBA16F) {
             return {};
+        }
+        std::vector<std::uint16_t> halves(pixels);
+        if (vtbl_->read_back(handle_, halves.data(), halves.size() * sizeof(std::uint16_t),
+                             &w, &h, &format) != MP_OK) {
+            return {};
+        }
+        for (std::size_t i = 0; i < pixels; ++i) {
+            out[i] = half_to_float(halves[i]);
         }
         return out;
     }
@@ -215,18 +274,23 @@ TEST_CASE("a presenter renders with no window, so the pixels can be checked",
     const std::vector<std::uint8_t> source = flat(64, 48, 0x20, 0x40, 0x80);
     REQUIRE(presenter.present(source, 64, 48) == MP_OK);
 
-    const std::vector<std::uint8_t> shown = presenter.read_back();
+    const std::vector<float> shown = presenter.read_back();
     REQUIRE(shown.size() == 64u * 48u * 4u);
 
-    // **In and out unchanged**, which is the property everything else is
-    // measured against. The shader decodes sRGB to linear because the target is
-    // scRGB, `read_back` encodes it again because a screenshot is sRGB, and a
-    // scale of one between them means the round trip is the identity to within
-    // what eight bits can hold.
+    // **What the target holds is linear scRGB**, so the expected value is the
+    // sRGB decode of what went in -- computed here from the standard rather
+    // than compared against whatever the shader produced last time.
+    const float expect_r = srgb_to_linear(0x80 / 255.0f);
+    const float expect_g = srgb_to_linear(0x40 / 255.0f);
+    const float expect_b = srgb_to_linear(0x20 / 255.0f);
+    // **Single precision, so the margin is the shader arithmetic and nothing
+    // else.** A tolerance of 1e-3 would pass on a pipeline that quantised to
+    // eight bits somewhere; 1e-6 is what a correct FP32 path actually gives.
     for (std::size_t i = 0; i < shown.size(); i += 4) {
-        CHECK(std::abs(int{shown[i]} - int{source[i]}) <= 1);
-        CHECK(std::abs(int{shown[i + 1]} - int{source[i + 1]}) <= 1);
-        CHECK(std::abs(int{shown[i + 2]} - int{source[i + 2]}) <= 1);
+        CHECK(shown[i + 0] == Catch::Approx(expect_r).margin(1e-6));
+        CHECK(shown[i + 1] == Catch::Approx(expect_g).margin(1e-6));
+        CHECK(shown[i + 2] == Catch::Approx(expect_b).margin(1e-6));
+        CHECK(shown[i + 3] == Catch::Approx(1.0f).margin(1e-6));
     }
 }
 
@@ -239,10 +303,10 @@ TEST_CASE("WARP renders the same bytes every time", "[video][d3d11]")
     REQUIRE(module.vtbl != nullptr);
 
     const std::vector<std::uint8_t> source = flat(32, 32, 0x11, 0x99, 0xEE);
-    std::vector<std::uint8_t> first;
-    std::vector<std::uint8_t> second;
+    std::vector<float> first;
+    std::vector<float> second;
 
-    for (std::vector<std::uint8_t>* into : {&first, &second}) {
+    for (std::vector<float>* into : {&first, &second}) {
         Presenter presenter{*module.vtbl, 32, 32};
         REQUIRE(presenter.ok());
         REQUIRE(presenter.configure() == "");
@@ -268,16 +332,26 @@ TEST_CASE("the sRGB decode is the piecewise curve, not a 2.2 power",
     REQUIRE(presenter.ok());
     REQUIRE(presenter.configure() == "");
 
-    for (const std::uint8_t level : {std::uint8_t{4}, std::uint8_t{10}, std::uint8_t{64},
-                                     std::uint8_t{200}}) {
+    for (const std::uint8_t level : {std::uint8_t{1}, std::uint8_t{4}, std::uint8_t{10},
+                                     std::uint8_t{64}, std::uint8_t{200}}) {
         const std::vector<std::uint8_t> source = flat(16, 16, level, level, level);
         REQUIRE(presenter.present(source, 16, 16) == MP_OK);
-        const std::vector<std::uint8_t> shown = presenter.read_back();
+        const std::vector<float> shown = presenter.read_back();
         REQUIRE(shown.size() == 16u * 16u * 4u);
-        // Decoded and re-encoded by the same curve, so the value survives. A
-        // 2.2 power on the way in and the piecewise curve on the way out would
-        // move a level of 4 by more than one.
-        CHECK(std::abs(int{shown[0]} - int{level}) <= 1);
+
+        const float encoded = level / 255.0f;
+        const float expected = srgb_to_linear(encoded);
+        CHECK(shown[0] == Catch::Approx(expected).margin(1e-6));
+
+        // **And it is not a 2.2 power**, which is the approximation §9.2
+        // records Windows using where the sRGB curve belongs. At a level of 1
+        // the two answers differ by a factor of nine -- invisible after an
+        // 8-bit round trip, which is exactly why this test reads linear floats
+        // and why the first version of read_back could not have caught it.
+        const float wrong = std::pow(encoded, 2.2f);
+        if (level <= 10) {
+            CHECK(std::abs(shown[0] - wrong) > std::abs(shown[0] - expected));
+        }
     }
 }
 
@@ -330,4 +404,62 @@ TEST_CASE("what a person can set, and what it reports back", "[video][d3d11]")
     // path -- and `applied` says what is actually happening rather than what
     // was requested, which is the difference `describe` exists to carry.
     CHECK(presenter.described("applied") == "none");
+}
+
+TEST_CASE("what presenting in FP16 costs, measured rather than assumed",
+          "[video][d3d11][colour]")
+{
+    // **DXGI will not present anything wider.** A flip-model swap chain takes
+    // 8-bit UNORM, 10-bit UNORM or R16G16B16A16_FLOAT and nothing else, so the
+    // half is the platform's ceiling rather than this module's choice -- and
+    // the honest thing is to know what it costs instead of assuming it is
+    // nothing.
+    //
+    // Half is *relatively* precise, which suits a linear light buffer: about
+    // eleven significant bits everywhere, so the spacing is fine in the
+    // shadows where banding lives and coarsest near white where the eye is
+    // least able to see a step.
+    Module module;
+    REQUIRE(module.vtbl != nullptr);
+
+    const std::vector<std::uint8_t> source = flat(16, 16, 0x08, 0x80, 0xFF);
+
+    std::vector<float> wide;
+    std::vector<float> presented;
+    for (int pass = 0; pass < 2; ++pass) {
+        Presenter presenter{*module.vtbl, 16, 16};
+        REQUIRE(presenter.ok());
+        REQUIRE(module.vtbl->set(presenter.handle(), "precision",
+                                 pass == 0 ? "fp32" : "fp16") == MP_OK);
+        REQUIRE(presenter.configure() == "");
+        CHECK(presenter.described("precision") == (pass == 0 ? "fp32" : "fp16"));
+        REQUIRE(presenter.present(source, 16, 16) == MP_OK);
+        (pass == 0 ? wide : presented) = presenter.read_back();
+    }
+    REQUIRE(wide.size() == 16u * 16u * 4u);
+    REQUIRE(presented.size() == wide.size());
+
+    // The two differ, and by no more than half's own spacing. If they were
+    // identical the wide target would not be wide; if they differed by more,
+    // something other than the store would be rounding.
+    float worst_relative = 0.0f;
+    for (std::size_t i = 0; i < wide.size(); ++i) {
+        const float reference = wide[i];
+        if (reference <= 0.0f) {
+            continue;
+        }
+        worst_relative =
+            std::max(worst_relative, std::abs(presented[i] - reference) / reference);
+    }
+    // Half has ten stored mantissa bits, so one unit in the last place is at
+    // most 2^-11 of the value.
+    CHECK(worst_relative <= 1.0f / 2048.0f);
+
+    // And the relative bound holds in the shadows as well as at white, which
+    // is the property an integer format does not have: 8-bit at this level
+    // would be a relative error of several per cent.
+    const float dark = wide[2]; // the 0x08 channel, decoded to about 0.0022
+    REQUIRE(dark > 0.0f);
+    CHECK(dark < 0.01f);
+    CHECK(std::abs(presented[2] - dark) / dark <= 1.0f / 2048.0f);
 }

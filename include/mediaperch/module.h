@@ -651,7 +651,26 @@ enum {
     /* One plane, 8 bits each of B, G, R and A. Not a codec's output -- it is
      * what a test pattern and a software decoder have, and what makes a
      * presenter checkable before there is anything to decode. */
-    MP_PIXEL_BGRA8 = 3u
+    MP_PIXEL_BGRA8 = 3u,
+
+    /* The three a presenter renders *into*, and hands back from `read_back`.
+     * All are one plane, RGBA order, tightly packed.
+     *
+     * `RGBA16F` is scRGB as a display gets it: linear half-float, and **the
+     * most precise format a flip-model swap chain accepts** -- DXGI offers
+     * 8-bit UNORM, 10-bit UNORM and this, and nothing above it, so presenting
+     * is capped here by the platform rather than by a choice.
+     *
+     * `RGB10A2` is HDR10: PQ-encoded, ten bits a channel packed into a u32
+     * with R in the low bits.
+     *
+     * `RGBA32F` is linear single precision, which a swap chain will not take
+     * and an off-screen target will. It is what a *measurement* renders into,
+     * so that what a test hashes is the pipeline's arithmetic and not the
+     * presentation format's rounding. */
+    MP_PIXEL_RGBA16F = 4u,
+    MP_PIXEL_RGB10A2 = 5u,
+    MP_PIXEL_RGBA32F = 6u
 };
 
 /* One frame, in the pixels a decoder produced.
@@ -700,13 +719,26 @@ typedef struct MpVideoVtbl {
     MpResult(MP_CALL *describe)(MpVideo *v, uint32_t index, char *out,
                                 uint32_t out_bytes);
 
-    /* MP_ANY. The pixels last presented, as BGRA8, `width * height * 4` bytes.
+    /* MP_ANY. The pixels last presented, **in the format they were rendered
+     * in**, tightly packed. `out_format` says which -- MP_PIXEL_RGBA16F for
+     * the scRGB path, MP_PIXEL_RGB10A2 for HDR10. Call with `dst` NULL to be
+     * told the geometry and the format; the result is MP_ERR_NO_MEMORY and
+     * nothing is written, the same shape `read_packet` uses.
      *
      * **This is the measuring apparatus, in the ABI on purpose.** A screenshot
      * is a feature people want; a rendered frame a test can hash is the only
-     * way a colour pipeline gets held to anything. Both are the same call. */
+     * way a colour pipeline gets held to anything. Both are the same call.
+     *
+     * And it does not convert, for the reason nothing else in this tree does.
+     * An earlier version handed back 8-bit sRGB, which was wrong twice: it
+     * quantised away the dark end, where the difference between the sRGB curve
+     * and the 2.4 gamma of §9.2 actually lives and where a measurement is for;
+     * and on the HDR10 path it read PQ code values as though they were linear,
+     * producing bytes that were neither. A caller that wants eight bits knows
+     * what it wants them for. */
     MpResult(MP_CALL *read_back)(MpVideo *v, void *dst, size_t dst_bytes,
-                                 uint32_t *out_width, uint32_t *out_height);
+                                 uint32_t *out_width, uint32_t *out_height,
+                                 MpPixelFormat *out_format);
 } MpVideoVtbl;
 
 /* ------------------------------------------------------------------ */

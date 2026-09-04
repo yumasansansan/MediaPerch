@@ -791,8 +791,12 @@ try {
     // **`tkhd` is the display size and the sample entry is the coded one**, and
     // they differ whenever the pixels are not square -- anamorphic DVD-era
     // content, and anything a phone rotated. Both are 16.16 fixed point here.
-    info.display_width = track->GetWidth() >> 16;
-    info.display_height = track->GetHeight() >> 16;
+    // **Rounded, not truncated.** `tkhd` states the display size as 16.16
+    // fixed point and an anamorphic track can state a fraction -- 853.33 for a
+    // 16:9 crop of 640x480, say. Dropping the fraction is a pixel of aspect
+    // ratio thrown away for nothing.
+    info.display_width = (track->GetWidth() + 0x8000u) >> 16;
+    info.display_height = (track->GetHeight() + 0x8000u) >> 16;
     if (info.display_width == 0 || info.display_height == 0) {
         info.display_width = info.width;
         info.display_height = info.height;
