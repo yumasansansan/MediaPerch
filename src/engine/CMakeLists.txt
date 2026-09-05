@@ -45,6 +45,8 @@ add_library(mediaperch_engine STATIC
     mediaperch/processed.hpp
     mediaperch/processor.cpp
     mediaperch/processor.hpp
+    mediaperch/video.cpp
+    mediaperch/video.hpp
     mediaperch/repack.cpp
     mediaperch/repack.hpp
     mediaperch/result.cpp

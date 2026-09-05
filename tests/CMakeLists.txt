@@ -133,7 +133,9 @@ endif()
 # planar frame -- so it is where the presenter's planar path meets a real
 # producer rather than a frame a test built by hand.
 if(TARGET mp_codec_dav1d AND TARGET mp_demux_mp4 AND TARGET mp_video_d3d11)
-    target_sources(mediaperch_tests PRIVATE codec_dav1d_test.cpp)
+    # §8 through the real modules: a container, a decoder, a presenter and a
+    # clock somebody chose. M6's claim, minus the 4K file and the display.
+    target_sources(mediaperch_tests PRIVATE codec_dav1d_test.cpp video_graph_test.cpp)
     target_compile_definitions(mediaperch_tests PRIVATE
         "MEDIAPERCH_CODEC_DAV1D=\"$<TARGET_FILE:mp_codec_dav1d>\"")
     add_dependencies(mediaperch_tests mp_codec_dav1d)

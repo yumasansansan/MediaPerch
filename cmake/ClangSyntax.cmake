@@ -96,6 +96,9 @@ set(sources
     # §8's clock. Portable by construction -- it reads no clock and calls
     # nothing -- which is exactly the kind of file this check exists for.
     src/engine/mediaperch/avsync.cpp
+    # The video graph is portable too: it drives modules through their
+    # vtables and has no idea what a window is.
+    src/engine/mediaperch/video.cpp
     modules/shared/transform/transform.cpp
     modules/shared/biquad/biquad.cpp
     modules/shared/convolve/convolve.cpp

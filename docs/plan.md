@@ -1496,6 +1496,53 @@ run takes as long as the file is. Half a second ahead, twelve frames go and twel
 — and the audio is untouched, which is the whole of §8. Stopped, a thousand polls produce a
 thousand repeats, nothing shown and nothing dropped: the picture holds.
 
+#### The graph that applies it
+
+`src/engine/mediaperch/video.hpp` is the video half of a player: `VideoDecoder` and
+`Presenter` behind their vtables — `mp::Sink` for pictures — and `VideoGraph`, which decodes,
+asks the pacer, and presents.
+
+**One frame in hand, and no queue.** A decoded frame is valid until the next call on the
+codec that produced it, which the ABI says because a hardware decoder hands out a slice of a
+pool it owns. A graph that queued frames ahead would have to copy them, which is precisely
+what §9.8.1's texture-adoption argument exists to avoid. So the graph holds one frame,
+decides about it, and asks for the next only when it is done — and the lookahead a queue
+would have bought is already inside the decoder, which reorders B-frames and, since M6.6,
+runs on every core the machine has.
+
+**It owns no thread**, which is the difference from the audio graphs. They own one because
+the device's own event is what paces them. Video's pace is the display's, and a display
+belongs to the head — DirectComposition, a swap chain's waitable object, a vblank. So `pump`
+is a call, and whoever owns the display loop makes it.
+
+**A drop does not cost a refresh.** One `pump` lets go of as many past frames as it has to
+before it finds one to show. A decoder that fell behind has several frames whose time has
+passed, and letting one go per display refresh would never catch the clock — the thing that
+looks like a stall and is actually a policy.
+
+**Where the container and the bitstream disagree, the bitstream wins.** After the first
+frame the graph asks the decoder what it actually produced and reconfigures the presenter if
+the answer differs — geometry, primaries, transfer, matrix, range. `codec_mft` needs this:
+its geometry comes out of the sequence parameter set and not out of the container. The
+exceptions are the timescale and the frame rate, which are never taken from a decoder,
+because a decoder does not re-time a stream — the codecs report zero there and say so.
+
+**Packets come from an interface, not from a demuxer**, and that is a deliberate hole with a
+name. §4 says one file has one position: audio and video out of the same file must come from
+one demuxer with both streams selected, and the thing that reads it once and routes what
+comes out does not exist yet. `IPacketFeed` is what it will implement. A caller reading a
+single stream implements it in four lines today, and nothing above it has to change when the
+router arrives.
+
+`tests/video_graph_test.cpp` runs it: `demux_mp4` reading `av1.mp4`, `codec_dav1d` decoding
+it with the presenter's own device handed over, `video_d3d11` on WARP, and a clock that is a
+number. At the right speed, 24 decoded, 24 shown, none dropped, nothing more than a
+millisecond late, and the run takes as long as the file is — a pump that presented on demand
+would have finished in microseconds. Half a second ahead, twelve go and twelve are shown, and
+**the picture at the end is still right**, because dropping a frame is not skipping a decode:
+every frame was decoded, since a frame nobody decodes is one the next frame references.
+Stopped, five hundred polls and the picture holds.
+
 For audio-only playback the clock is used for gapless boundaries and for the position
 readout, and nothing else reads it.
 
@@ -2728,6 +2775,7 @@ HDR state.
 | M5.99 | The presenter draws every shape v4 can describe | **done.** 4:0:0, 4:2:0, 4:2:2 and 4:4:4, planar or semi-planar, at 8 through 16 bits, with one matrix and one transfer that a two-plane and a three-plane entry point both reach. The subsamplings need no case: normalised coordinates make a half-width chroma plane and a full-width one the same call, so the general form is less code than the 4:2:0 special case it replaced. Two things the tests found rather than the reasoning: 4:0:0 fails as a strong green rather than as an error, because an unbound texture samples to zero and zero is not neutral chroma; and neutral chroma is 127.5, not 128, because half the full scale falls between two codes at every even depth -- the shader was right and the first test was not. Interleaved Y'CbCr is refused with a sentence |
 | M5.98 | ABI v4: a frame describes its pixels | **done.** MpPixelFormat was six DXGI names in a header meant to outlive Direct3D, and could not say 4:2:2, 4:4:4 or twelve bits at all -- while naming the combinations would have taken seventy-five enumerators. MpPixelLayout is six fields and the arithmetic over them, and `shift` is what earned the break: ten bits at the top of sixteen and ten at the bottom are the same depth and a factor of sixty-four apart, which v3's `bool ten_bit` had no way to be right about. The general formula reproduces the constant `yuv_matrix.cpp` carried, exactly, which is what makes it a refactor. Doing it before `codec_dav1d` rather than after cost one producer and one consumer, and turned up a ten-bit frame `codec_mft` had been labelling eight |
 | M5.97 | Section 9.9: a video packet says what its timestamp is counted in | **done.** MpVideoInfo::timescale, appended -- the first time the size prefix earned its keep, and a test asks for the older size to check it. Answering it turned up three more: MP4 was reporting decode timestamps where Matroska reports presentation ones, MP_PACKET_SYNC was claimed on every packet including video, and the edit list was read for audio tracks only -- sixty milliseconds of A/V offset in the fixture. A video seek landed one frame late, so it subtracts the track's largest composition offset before a lookup that indexes decode time -- with a guard for Bento4 reading that offset unsigned |
+| M6.8 | The video graph: decode, pace, present | **done.** VideoDecoder and Presenter behind their vtables -- mp::Sink for pictures -- and VideoGraph, which holds one frame, asks §8's pacer and presents. One frame and no queue, because a decoded frame is valid until the next call on the codec that produced it and a queue would have to copy what §9.8.1 went to some trouble not to copy; the lookahead is inside the decoder, which reorders B-frames and since M6.6 uses every core. No thread of its own either: the audio graphs own one because the device's event paces them, and video's pace is the display's, which belongs to the head. A drop does not cost a refresh -- one pump lets go of every frame whose time has passed, because letting one go per refresh would never catch the clock. After the first frame the decoder is asked what it actually produced and the presenter reconfigured where the bitstream disagrees with the container, except for the timescale and the frame rate, which a decoder never re-times. Packets arrive through IPacketFeed rather than from a demuxer, which is a hole with a name: §4 says one file has one position, so audio and video must share one demuxer, and the router that would do that is what comes next. Checked on demux_mp4 + codec_dav1d + video_d3d11 with a clock somebody chose: 24 shown and none dropped at the right speed with nothing more than a millisecond late, twelve dropped and twelve shown half a second behind with the picture still right at the end, and five hundred polls of a stopped clock holding it |
 | M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse. **Started**: MP_KIND_VIDEO has a vtable, `video_d3d11` renders BGRA8 into a flip-model scRGB target or an off-screen one, and `read_back` makes the result a hash rather than a screenshot somebody looks at. §9's colour decisions are a separate testable header. NV12, P010 and the tone mappers wait for the decoder that produces frames for them |
 | M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled |
 | M8 | WinUI 3 shell | killing it mid-track changes nothing audible |
