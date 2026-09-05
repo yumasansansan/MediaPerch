@@ -37,6 +37,18 @@ add_executable(mediaperch_tests
     transport_test.cpp
 )
 
+# **Every module, loaded, at this tree's ABI version.** Not a named module: the
+# one that falls behind is the one nobody remembered to name, which is how five
+# Rust modules stayed dead for a day after ABI v4. The directory is passed in
+# rather than searched for -- a test that went looking would be testing the
+# search -- and `mp_codec_pcm` is only there to name the directory its own kind
+# is built into.
+if(TARGET mp_codec_pcm)
+    target_sources(mediaperch_tests PRIVATE module_abi_test.cpp)
+    target_compile_definitions(mediaperch_tests PRIVATE
+        "MEDIAPERCH_MODULE_DIR=L\"$<TARGET_FILE_DIR:mp_codec_pcm>/..\"")
+endif()
+
 # `sink_asio`'s DoP unpack is in a header with no Windows in it, so the one part
 # of an ASIO sink that can be checked without a driver is checked here. See
 # dop_test.cpp for what would be wrong if it were wrong.

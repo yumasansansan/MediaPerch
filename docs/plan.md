@@ -746,6 +746,50 @@ Planar has no producer in this tree yet, and the frames in `tests/video_d3d11_te
 built by hand -- which is exactly how the presenter was checked before there was anything to
 decode at all.
 
+#### A version bump is global, and the Rust mirror did not hear it
+
+**Five modules were dead for a day, and three checks each had a reason not to say so.**
+
+`modules/shared/mp-abi` is the Rust mirror of the header, and it carries no video structure
+at all -- the Rust modules are AAC, ALAC and DSD decoding and the ADTS and DSD demuxers. So
+v4, which changed the video half and nothing else, left nothing in that file to update and
+produced no compile error. Its `ABI_VERSION` stayed at 3 while the header went to 4, and
+`mp_module_entry` answers null to a host on another version, which is the whole point of a
+bump. **AAC and ALAC quietly became FFmpeg's, and DSD lost its bit-exact DoP path and came
+out as F32** -- Path A silently became Path B for every DSD file.
+
+The interesting part is why nothing caught it, because each reason is a check working as
+designed:
+
+- **The C++ tests load the modules they name**, and no test names those five. The Rust
+  modules had never needed one, because they had never been the thing under test.
+- **`rust_modules` builds the crates and runs their own tests**, which know about the format
+  they parse and nothing about a host.
+- **`format_matrix` would have shown it in one line** -- and it needs FFmpeg and a corpus, so
+  it skips in every CI leg that builds. It passes in 0.03 seconds there and takes 24 on a
+  machine that has them. The one job with FFmpeg runs `decode_quality` alone. So the table
+  that would have caught this is only ever really measured by a person.
+
+`tests/module_abi_test.cpp` is what catches it now, and it deliberately names nothing: it
+walks the directory the modules are built into -- 34 DLLs -- and requires each to answer at
+MP_ABI_VERSION, to report that version back, and to refuse the versions either side. The
+module that falls behind is the one nobody remembered to name.
+
+Two smaller checks broke the same way and are worth recording together, because the shape is
+the same -- a check that stops checking without going red:
+
+- **`clang_syntax` had its include paths listed by hand.** Three shared modules became five
+  while nobody edited `cmake/ClangSyntax.cmake`, and the second front end started failing on
+  a missing header rather than on a diagnostic. It globs `modules/shared/*` now, which is the
+  list it was trying to be.
+- **Microsoft's H.264 transform can answer a drain before it has finished.** One CI leg of
+  six lost the last frame of twenty-four, with no code change from the green run before it,
+  on a machine taking eight times as long per test; forty runs here never reproduced it. The
+  ABI says `next_frame` drains until MP_END after a flush, so relaying an early
+  NEED_MORE_INPUT would make this module break its own contract because somebody else's
+  decoder broke theirs -- and the frame it costs is the last one of every file. `codec_mft`
+  now doubts the end of a drain four times, a millisecond apart, before believing it.
+
 ---
 
 ## 5. The audio engine

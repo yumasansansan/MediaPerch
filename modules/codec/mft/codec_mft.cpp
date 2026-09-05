@@ -70,6 +70,11 @@ const MpHost* g_host = nullptr;
 /// that is the whole of it**: both are 4:2:0 semi-planar, and P010's ten bits
 /// sit at the top of each sixteen rather than at the bottom, which is a factor
 /// of sixty-four for anyone who reads the container and stops there.
+/// How many times the end of a drain is doubted before it is believed. Each
+/// try costs a millisecond and one ProcessOutput call, and only ever at the end
+/// of a stream.
+constexpr int k_drain_retries = 4;
+
 constexpr MpPixelLayout k_nv12 = MP_LAYOUT_NV12;
 constexpr MpPixelLayout k_p010 = MP_LAYOUT_P010;
 
@@ -247,6 +252,10 @@ struct MpVideoCodec {
     /// the system-memory path used to label every frame NV12, which would have
     /// been a ten-bit picture reported as eight.
     bool ten_bit = false;
+    /// Set by `flush` and cleared by `reset` or the end of a drain. While it is
+    /// set, MF_E_TRANSFORM_NEED_MORE_INPUT is not taken at face value -- see
+    /// `codec_next_frame`.
+    bool draining = false;
 
     /// The sample being handed out, and whatever it is holding, kept alive
     /// until the next call because that is what `next_frame` promises.
@@ -721,8 +730,34 @@ try {
     }
 
     DWORD status = 0;
-    const HRESULT hr = c->transform->ProcessOutput(0, 1, &output, &status);
+    HRESULT hr = c->transform->ProcessOutput(0, 1, &output, &status);
+    if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT && c->draining) {
+        // **A drain that answers before it has finished.** The ABI says
+        // `next_frame` drains until MP_END after a flush, so a caller is
+        // entitled to stop at the first one -- and Microsoft's H.264 transform
+        // is registered synchronous while threading internally, so under load
+        // it can report NEED_MORE_INPUT with a frame still in flight. Measured
+        // on CI: one leg of six lost the twenty-fourth frame of twenty-four,
+        // with no code change from the run before it, on a machine taking
+        // eight times as long per test. Forty runs on the development machine
+        // never reproduced it.
+        //
+        // Relaying that as MP_END would make this module break its own
+        // contract because somebody else's decoder broke theirs, and the frame
+        // it costs is the last one of every file. So the end of a drain has to
+        // be said twice, with a moment in between for a worker thread that was
+        // nearly there. When the decoder is honest this is one extra
+        // ProcessOutput call per stream, once.
+        for (int again = 0; again < k_drain_retries; ++again) {
+            ::Sleep(1);
+            hr = c->transform->ProcessOutput(0, 1, &output, &status);
+            if (hr != MF_E_TRANSFORM_NEED_MORE_INPUT) {
+                break;
+            }
+        }
+    }
     if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+        c->draining = false;
         return MP_END; // nothing held back: feed it another packet
     }
     if (hr == MF_E_TRANSFORM_STREAM_CHANGE) {
@@ -845,6 +880,7 @@ MpResult MP_CALL codec_flush(MpVideoCodec* c) noexcept
     // back; `MFT_MESSAGE_COMMAND_FLUSH` throws it away, which is what `reset`
     // wants and what a caller at the end of a file does not.
     c->transform->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+    c->draining = true;
     return SUCCEEDED(c->transform->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0))
                ? MP_OK
                : MP_ERR_INTERNAL;
@@ -856,6 +892,7 @@ MpResult MP_CALL codec_reset(MpVideoCodec* c) noexcept
         return MP_ERR_INVALID;
     }
     release_frame(c);
+    c->draining = false;
     c->transform->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
     // **The parameter sets go back in front.** A flushed decoder has forgotten
     // them, and the next packet after a seek is a keyframe whose SPS and PPS

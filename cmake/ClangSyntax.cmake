@@ -38,10 +38,21 @@ set(includes
     "-I${MEDIAPERCH_ROOT}/include"
     "-I${MEDIAPERCH_ROOT}/src/engine"
     "-I${MEDIAPERCH_ROOT}/src/player"
-    "-I${MEDIAPERCH_ROOT}/modules/shared/transform"
-    "-I${MEDIAPERCH_ROOT}/modules/shared/biquad"
-    "-I${MEDIAPERCH_ROOT}/modules/shared/convolve"
     "-I${MEDIAPERCH_ROOT}/external/dragonperch/src/core")
+
+# **Every shared module, found rather than listed.** The three that were named
+# here by hand became five while nobody edited this file, and the check went red
+# for a missing include path rather than for a diagnostic -- twice, because
+# `pcm_format.hpp` broke it and `module_log.hpp` is what the error then said,
+# clang stopping at the first fatal error either way. A shared module is by
+# construction a directory under modules/shared with a header meant to be
+# included by name, so the directory listing is the list.
+file(GLOB shared_dirs LIST_DIRECTORIES true "${MEDIAPERCH_ROOT}/modules/shared/*")
+foreach(dir IN LISTS shared_dirs)
+    if(IS_DIRECTORY "${dir}")
+        list(APPEND includes "-I${dir}")
+    endif()
+endforeach()
 
 # **Somebody else's headers go in with `-isystem`**, which is what stops their
 # diagnostics from being ours. libebml and libmatroska are full of conversions

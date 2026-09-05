@@ -56,7 +56,24 @@ pub mod result {
     pub const ERR_INTERNAL: MpResult = 10;
 }
 
-pub const ABI_VERSION: u32 = 3;
+/// The ABI these modules are built against, which has to be **this tree's
+/// current version and not merely a version they still understand**: a host
+/// hands `mp_module_entry` its own number and a module that answers with
+/// anything else gets nothing loaded.
+///
+/// **It fell behind once, and the way it did is worth writing down.** ABI v4
+/// changed the video half only -- MpPixelFormat became MpPixelLayout and
+/// MpVideoFrame grew -- and nothing in this file mirrors a video structure, so
+/// there was nothing here to update and no compile error to notice. The
+/// constant stayed at 3 while the header went to 4, and five modules -- AAC,
+/// ALAC and DSD decoding, and the ADTS and DSD demuxers -- silently stopped
+/// loading. AAC and ALAC quietly became FFmpeg's, and DSD lost its bit-exact
+/// DoP path and came out as F32.
+///
+/// A version bump is global whatever half of the ABI it was about. The check
+/// that catches this now is `module_abi_test.cpp`, which loads every module
+/// this tree builds and requires it to answer at MP_ABI_VERSION.
+pub const ABI_VERSION: u32 = 4;
 
 pub mod kind {
     pub const DSP: u32 = 3;
