@@ -258,6 +258,168 @@ MpResult Codec::reset()
 // PacketSource
 // --------------------------------------------------------------------------
 
+// --------------------------------------------------------------------------
+// PacketRouter
+// --------------------------------------------------------------------------
+
+PacketRouter::PacketRouter(Demux& demux, std::span<const std::uint32_t> streams,
+                           PacketRouterLimits limits)
+    : demux_(&demux), limits_(limits)
+{
+    queues_.reserve(streams.size());
+    for (const std::uint32_t stream : streams) {
+        if (find(stream) == nullptr) {
+            queues_.push_back(std::make_unique<Queue>(*this, stream));
+        }
+    }
+}
+
+PacketRouter::Queue* PacketRouter::find(std::uint32_t stream) noexcept
+{
+    for (const std::unique_ptr<Queue>& queue : queues_) {
+        if (queue->stream == stream) {
+            return queue.get();
+        }
+    }
+    return nullptr;
+}
+
+IPacketFeed* PacketRouter::feed(std::uint32_t stream) noexcept
+{
+    Queue* queue = find(stream);
+    return queue != nullptr ? &queue->feed : nullptr;
+}
+
+bool PacketRouter::someone_is_full(const Queue* mine) const noexcept
+{
+    for (const std::unique_ptr<Queue>& queue : queues_) {
+        if (queue.get() != mine && queue->bytes >= limits_.queued_bytes_per_stream) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<std::uint8_t> PacketRouter::spare()
+{
+    if (spares_.empty()) {
+        return {};
+    }
+    std::vector<std::uint8_t> out = std::move(spares_.back());
+    spares_.pop_back();
+    out.clear();
+    return out;
+}
+
+void PacketRouter::recycle(std::vector<std::uint8_t>&& used)
+{
+    // A handful, because the point is to stop allocating a megabyte per
+    // keyframe rather than to keep a pool. More than there are consumers is
+    // more than can be in flight.
+    if (spares_.size() < 4) {
+        used.clear();
+        spares_.push_back(std::move(used));
+    }
+}
+
+MpResult PacketRouter::next(std::uint32_t stream, std::vector<std::uint8_t>& buffer,
+                            MpPacket& out)
+{
+    Queue* mine = find(stream);
+    if (mine == nullptr || demux_ == nullptr) {
+        return MP_ERR_INVALID;
+    }
+
+    if (!mine->waiting.empty()) {
+        // Swapped rather than copied: the packet was already put in a vector
+        // once, and putting it in the caller's is a pointer exchange.
+        Held held = std::move(mine->waiting.front());
+        mine->waiting.pop_front();
+        mine->bytes -= held.info.bytes;
+        buffer.swap(held.bytes);
+        out = held.info;
+        recycle(std::move(held.bytes));
+        stats_.queued_bytes -= held.info.bytes;
+        --stats_.queued_packets;
+        return MP_OK;
+    }
+
+    if (ended_) {
+        return MP_END;
+    }
+
+    for (;;) {
+        // Checked before reading, because a packet already read cannot be put
+        // back: the cap is exceeded by at most the one packet that discovers
+        // it, and never by a run of them.
+        if (someone_is_full(mine)) {
+            return MP_ERR_BUSY;
+        }
+
+        MpPacket packet{};
+        const MpResult r = demux_->read_packet(buffer, packet);
+        if (r == MP_END) {
+            ended_ = true;
+            return MP_END;
+        }
+        if (r != MP_OK) {
+            return r;
+        }
+        ++stats_.read;
+
+        if (packet.stream == stream) {
+            // The common case for an interleaved file, and it cost no copy:
+            // the demuxer read straight into the caller's own buffer.
+            out = packet;
+            return MP_OK;
+        }
+
+        Queue* other = find(packet.stream);
+        if (other == nullptr) {
+            // A stream the demuxer served that nobody selected. Not this
+            // router's to keep, and dropping it is what `select_streams` asked
+            // for.
+            continue;
+        }
+
+        Held held;
+        held.bytes = spare();
+        held.bytes.swap(buffer); // held takes the packet, buffer takes the spare
+        held.info = packet;
+        other->bytes += packet.bytes;
+        other->waiting.push_back(std::move(held));
+        ++stats_.queued;
+        ++stats_.queued_packets;
+        stats_.queued_bytes += packet.bytes;
+        if (stats_.queued_bytes > stats_.peak_queued_bytes) {
+            stats_.peak_queued_bytes = stats_.queued_bytes;
+        }
+    }
+}
+
+MpResult PacketRouter::seek(std::uint32_t stream, std::uint64_t frame)
+{
+    if (demux_ == nullptr) {
+        return MP_ERR_INVALID;
+    }
+    const MpResult r = demux_->seek(stream, frame);
+    if (r == MP_OK) {
+        clear();
+    }
+    return r;
+}
+
+void PacketRouter::clear() noexcept
+{
+    for (const std::unique_ptr<Queue>& queue : queues_) {
+        queue->waiting.clear();
+        queue->bytes = 0;
+    }
+    ended_ = false;
+    stats_.queued_bytes = 0;
+    stats_.queued_packets = 0;
+}
+
 bool PacketSource::open(const MpDemuxVtbl& demux, const char* path,
                         const FindCodec& find_codec, std::string& why)
 {

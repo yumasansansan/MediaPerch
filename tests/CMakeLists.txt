@@ -205,6 +205,9 @@ if(TARGET mp_demux_mp4 AND TARGET mp_demux_mkv)
         "MEDIAPERCH_TEST_VP9=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mkv/vp9.webm\""
         "MEDIAPERCH_TEST_VP8=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mkv/vp8.webm\""
         "MEDIAPERCH_TEST_AV2=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mkv/av2.webm\"")
+    # One demuxer, two consumers, and the position they share -- which needs
+    # a real file with two streams in it, so it lives with the fixtures.
+    target_sources(mediaperch_tests PRIVATE packet_router_test.cpp)
     add_dependencies(mediaperch_tests mp_demux_mp4 mp_demux_mkv)
 endif()
 

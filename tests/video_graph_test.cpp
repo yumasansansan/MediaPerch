@@ -288,3 +288,114 @@ TEST_CASE("the graph reports what the decoder actually produced",
     CHECK(after.fps_num == container.fps_num);
     CHECK(after.fps_den == container.fps_den);
 }
+
+TEST_CASE("the video graph runs off one demuxer that audio is reading too",
+          "[video][graph][router]")
+{
+    // **The shape a player actually has.** §4 says one file has one position,
+    // so audio and video come out of one demuxer with both streams selected
+    // and `PacketRouter` hands each side a feed. Nothing in `VideoGraph`
+    // changes: it was written against `IPacketFeed` for this.
+    Module demux_module{MEDIAPERCH_DEMUX_MP4, MP_KIND_DEMUX};
+    Module codec_module{MEDIAPERCH_CODEC_DAV1D, MP_KIND_VCODEC};
+    Module video_module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(demux_module.as<MpDemuxVtbl>() != nullptr);
+    REQUIRE(codec_module.as<MpVideoCodecVtbl>() != nullptr);
+    REQUIRE(video_module.as<MpVideoVtbl>() != nullptr);
+
+    mp::Demux demux;
+    REQUIRE(demux.open(*demux_module.as<MpDemuxVtbl>(), MEDIAPERCH_TEST_AV1) == MP_OK);
+
+    std::uint32_t audio_stream = 0;
+    std::uint32_t video_stream = 0;
+    bool have_audio = false;
+    bool have_video = false;
+    MpStreamInfo stream_info{};
+    for (std::uint32_t i = 0; i < demux.stream_count(); ++i) {
+        if (!demux.stream_info(i, stream_info)) {
+            continue;
+        }
+        if (stream_info.kind == MP_STREAM_AUDIO && !have_audio) {
+            audio_stream = i;
+            have_audio = true;
+        }
+        if (stream_info.kind == MP_STREAM_VIDEO && !have_video) {
+            video_stream = i;
+            have_video = true;
+        }
+    }
+    REQUIRE(have_audio);
+    REQUIRE(have_video);
+
+    MpVideoInfo info{};
+    info.size = sizeof(info);
+    REQUIRE(demux.video_info(video_stream, info));
+
+    mp::Presenter presenter;
+    REQUIRE(presenter.open(*video_module.as<MpVideoVtbl>(), nullptr) == MP_OK);
+    REQUIRE(presenter.set("device", "warp") == MP_OK);
+    REQUIRE(presenter.configure(info) == MP_OK);
+    MpGraphicsDevice device{};
+    REQUIRE(presenter.get_device(device) == MP_OK);
+
+    std::vector<std::uint8_t> config;
+    (void)demux.stream_config(video_stream, config);
+    mp::VideoDecoder decoder;
+    REQUIRE(decoder.open(*codec_module.as<MpVideoCodecVtbl>(), MP_CODEC_AV1, &device,
+                         config.data(),
+                         static_cast<std::uint32_t>(config.size())) == MP_OK);
+
+    const std::uint32_t both[] = {audio_stream, video_stream};
+    REQUIRE(demux.select_streams(both) == MP_OK);
+    mp::PacketRouter router{demux, both};
+    mp::IPacketFeed* video_feed = router.feed(video_stream);
+    mp::IPacketFeed* audio_feed = router.feed(audio_stream);
+    REQUIRE(video_feed != nullptr);
+    REQUIRE(audio_feed != nullptr);
+
+    mp::VideoGraph graph{*video_feed, decoder, presenter, info};
+
+    // The audio side is a player's decode thread, standing in for itself: it
+    // takes what is its own and keeps taking, which is what stops the video
+    // side's reads from queueing the whole track.
+    std::vector<std::uint8_t> audio_buffer;
+    MpPacket audio_packet{};
+    std::uint64_t audio_packets = 0;
+    bool audio_done = false;
+    const auto drain_audio = [&] {
+        while (!audio_done) {
+            const MpResult r = audio_feed->next(audio_buffer, audio_packet);
+            if (r == MP_OK) {
+                ++audio_packets;
+                continue;
+            }
+            if (r == MP_END) {
+                audio_done = true;
+            }
+            return; // MP_ERR_BUSY means the video side has to read first
+        }
+    };
+
+    double now = 0.0;
+    for (int guard = 0; guard < 200000; ++guard) {
+        drain_audio();
+        const mp::VideoGraph::Step step = graph.pump(now);
+        REQUIRE(step != mp::VideoGraph::Step::failed);
+        if (step == mp::VideoGraph::Step::finished) {
+            break;
+        }
+        if (step == mp::VideoGraph::Step::repeated) {
+            now += 0.001;
+        }
+    }
+    REQUIRE(graph.finished());
+
+    CHECK(graph.stats().shown == 24);
+    CHECK(graph.stats().dropped == 0);
+    CHECK(audio_packets > 0);
+    // Both sides read the whole file once, and nothing is still waiting.
+    CHECK(router.stats().queued_packets == 0);
+    // And the interleave is what stops the queues being the whole track: the
+    // peak is a fraction of the file rather than one side of it.
+    CHECK(router.stats().peak_queued_bytes > 0);
+}

@@ -177,6 +177,11 @@ MpResult VideoGraph::fetch()
         }
 
         const MpResult read = packets_->next(buffer_, packet_);
+        if (read == MP_ERR_BUSY) {
+            // Another consumer of the same demuxer has to read before this one
+            // can. Not an error and not the end: there is simply nothing yet.
+            return MP_ERR_BUSY;
+        }
         if (read == MP_END) {
             // No more packets. What the decoder is holding back to reorder is
             // the tail of the file, and a caller that stopped at the last
@@ -259,6 +264,12 @@ VideoGraph::Step VideoGraph::pump(double audible_seconds)
             if (got == MP_END) {
                 finished_ = true;
                 return Step::finished;
+            }
+            if (got == MP_ERR_BUSY) {
+                // Nothing available yet -- see Step::repeated. The picture
+                // that is up stays up, which is the right thing to do while
+                // somebody else catches up and costs no call.
+                return Step::repeated;
             }
             if (got != MP_OK) {
                 error_ = got;

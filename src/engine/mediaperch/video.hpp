@@ -20,6 +20,7 @@
 // display loop makes it.
 
 #include "mediaperch/avsync.hpp"
+#include "mediaperch/packet.hpp"
 
 #include <mediaperch/module.h>
 
@@ -96,28 +97,6 @@ private:
     MpVideo* handle_ = nullptr;
 };
 
-/// Where a video graph's packets come from.
-///
-/// An interface and not a demuxer, because §4 says one file has one position:
-/// audio and video out of the same file have to come from **one** demuxer with
-/// both streams selected, and the thing that reads it once and routes what
-/// comes out does not exist yet. When it does, it implements this. Until then a
-/// caller reading a single stream implements it in four lines, and nothing here
-/// has to be rewritten when the other one arrives.
-class IPacketFeed {
-public:
-    IPacketFeed() = default;
-    IPacketFeed(const IPacketFeed&) = delete;
-    IPacketFeed& operator=(const IPacketFeed&) = delete;
-    IPacketFeed(IPacketFeed&&) = delete;
-    IPacketFeed& operator=(IPacketFeed&&) = delete;
-    virtual ~IPacketFeed() = default;
-
-    /// The next packet, MP_END at the end of the stream. `buffer` is grown as
-    /// needed and `out.bytes` says how much of it is the packet.
-    virtual MpResult next(std::vector<std::uint8_t>& buffer, MpPacket& out) = 0;
-};
-
 /// §8 applied: decode, and present when the audio clock says so.
 class VideoGraph final {
 public:
@@ -140,8 +119,11 @@ public:
     enum class Step {
         /// A frame was presented.
         shown,
-        /// Nothing was due. The picture already up stays up, which is the
-        /// duplicate §8 describes and costs nothing to perform.
+        /// Nothing was due, or nothing was available. The picture already up
+        /// stays up, which is the duplicate §8 describes and costs nothing to
+        /// perform. **A feed answering MP_ERR_BUSY lands here too**: another
+        /// consumer of the same demuxer has to read before this one can, and
+        /// holding the picture is what to do meanwhile.
         repeated,
         /// A frame was past its time and was let go rather than shown late.
         dropped,

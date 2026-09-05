@@ -1543,6 +1543,52 @@ would have finished in microseconds. Half a second ahead, twelve go and twelve a
 every frame was decoded, since a frame nobody decodes is one the next frame references.
 Stopped, five hundred polls and the picture holds.
 
+#### One demuxer, and the position two consumers share
+
+**Done.** `PacketRouter` in `src/engine/mediaperch/packet.hpp` reads one demuxer once and
+hands each selected stream an `IPacketFeed`. The hole `VideoGraph` was written around is
+filled, and nothing in `VideoGraph` changed: it took the interface for this.
+
+The ABI header says what is wrong with the alternative in as many words — opening the
+container twice means two file positions, and a seek then has to move both and land them on
+the same moment. `PacketRouter::seek` is one call for exactly that reason: it moves the file
+and empties every queue, because those two halves cannot be separated. A seek that left the
+queues alone would hand a consumer packets from before it, which is the one thing a seek is
+against.
+
+**The queues are the only buffering, and most packets miss them.** A consumer asking for its
+own stream has the demuxer read **straight into its own buffer**; only a packet that turns
+out to belong to somebody else is moved aside, and only until they ask. Serving a queued
+packet is a vector swap rather than a copy, and the vectors are recycled, so a 4K keyframe
+does not cost an allocation per frame.
+
+**Back pressure, not silence.** A queue that grew without bound turns a badly interleaved
+file — or a consumer that stopped asking — into memory exhaustion. So there is a cap per
+stream, and reaching it makes the *other* consumer's `next` answer MP_ERR_BUSY: "somebody has
+to drain before I can read more". Dropping the packets instead would be silent corruption;
+blocking would be a deadlock between two consumers on different threads. `VideoGraph` treats
+it as `Step::repeated` — nothing is available, so the picture that is up stays up — which is
+the same thing it does when nothing is due.
+
+The second front end earned its place again on the way: `Limits` was a nested struct with
+default member initializers used as a default argument, which MSVC accepts and clang refuses
+-- and `PassthroughConfig` carries a comment saying exactly that, from the last time. It is
+at namespace scope now, and the check found it before the build did.
+
+**The test is the equivalence.** What each stream gets through the router is compared, packet
+for packet and byte for byte, against what it would have got from a demuxer of its own: same
+count, same order, same bytes, while only one file position exists. Asked in turn, the way a
+player asks, 68 packets are read for 68 delivered and none is left waiting. Drained one
+stream at a time — the hard case — every audio packet in the file waits and then comes out
+intact.
+
+Two of the numbers that test first asserted were wrong, and both were the fixture rather than
+the router. The audio track of `av.mp4` is **four thousand bytes in forty-four packets**, so a
+four-kilobyte cap is the whole track and fills only after the file has run out; the cap test
+uses 512 and stops part way through, which is what it meant to test. And a seek to half a
+second lands on frame zero, because that fixture's only sync sample is its first frame —
+§9.9's rule that a seek lands at or before the target, not a router that failed to move.
+
 For audio-only playback the clock is used for gapless boundaries and for the position
 readout, and nothing else reads it.
 
@@ -2775,6 +2821,7 @@ HDR state.
 | M5.99 | The presenter draws every shape v4 can describe | **done.** 4:0:0, 4:2:0, 4:2:2 and 4:4:4, planar or semi-planar, at 8 through 16 bits, with one matrix and one transfer that a two-plane and a three-plane entry point both reach. The subsamplings need no case: normalised coordinates make a half-width chroma plane and a full-width one the same call, so the general form is less code than the 4:2:0 special case it replaced. Two things the tests found rather than the reasoning: 4:0:0 fails as a strong green rather than as an error, because an unbound texture samples to zero and zero is not neutral chroma; and neutral chroma is 127.5, not 128, because half the full scale falls between two codes at every even depth -- the shader was right and the first test was not. Interleaved Y'CbCr is refused with a sentence |
 | M5.98 | ABI v4: a frame describes its pixels | **done.** MpPixelFormat was six DXGI names in a header meant to outlive Direct3D, and could not say 4:2:2, 4:4:4 or twelve bits at all -- while naming the combinations would have taken seventy-five enumerators. MpPixelLayout is six fields and the arithmetic over them, and `shift` is what earned the break: ten bits at the top of sixteen and ten at the bottom are the same depth and a factor of sixty-four apart, which v3's `bool ten_bit` had no way to be right about. The general formula reproduces the constant `yuv_matrix.cpp` carried, exactly, which is what makes it a refactor. Doing it before `codec_dav1d` rather than after cost one producer and one consumer, and turned up a ten-bit frame `codec_mft` had been labelling eight |
 | M5.97 | Section 9.9: a video packet says what its timestamp is counted in | **done.** MpVideoInfo::timescale, appended -- the first time the size prefix earned its keep, and a test asks for the older size to check it. Answering it turned up three more: MP4 was reporting decode timestamps where Matroska reports presentation ones, MP_PACKET_SYNC was claimed on every packet including video, and the edit list was read for audio tracks only -- sixty milliseconds of A/V offset in the fixture. A video seek landed one frame late, so it subtracts the track's largest composition offset before a lookup that indexes decode time -- with a guard for Bento4 reading that offset unsigned |
+| M6.9 | One demuxer, and the position two consumers share | **done.** PacketRouter reads one demuxer once and hands each selected stream an IPacketFeed, which fills the hole VideoGraph was written around without changing a line of it. The ABI header already said what is wrong with the alternative: two file positions that a seek has to move separately and land on the same moment. So seek here is one call that moves the file and empties every queue, because a seek that left them would hand a consumer packets from before it. The queues are the only buffering and most packets miss them -- a consumer asking for its own stream has the demuxer read straight into its own buffer, serving a queued packet is a vector swap, and the vectors are recycled so a 4K keyframe costs no allocation. A per-stream cap answers MP_ERR_BUSY rather than growing, because dropping would be silent corruption and blocking would be a deadlock between two threads; VideoGraph reads that as its repeated, which is what it already does when nothing is due. Checked by equivalence: what each stream gets through the router is what it would have got from a demuxer of its own, packet for packet and byte for byte, with one file position. Two assertions that first test made were wrong and both were the fixture -- av.mp4's whole audio track is four kilobytes in forty-four packets, so a four-kilobyte cap fills only after the file ends, and a seek to half a second lands on frame zero because that fixture's only sync sample is its first |
 | M6.8 | The video graph: decode, pace, present | **done.** VideoDecoder and Presenter behind their vtables -- mp::Sink for pictures -- and VideoGraph, which holds one frame, asks §8's pacer and presents. One frame and no queue, because a decoded frame is valid until the next call on the codec that produced it and a queue would have to copy what §9.8.1 went to some trouble not to copy; the lookahead is inside the decoder, which reorders B-frames and since M6.6 uses every core. No thread of its own either: the audio graphs own one because the device's event paces them, and video's pace is the display's, which belongs to the head. A drop does not cost a refresh -- one pump lets go of every frame whose time has passed, because letting one go per refresh would never catch the clock. After the first frame the decoder is asked what it actually produced and the presenter reconfigured where the bitstream disagrees with the container, except for the timescale and the frame rate, which a decoder never re-times. Packets arrive through IPacketFeed rather than from a demuxer, which is a hole with a name: §4 says one file has one position, so audio and video must share one demuxer, and the router that would do that is what comes next. Checked on demux_mp4 + codec_dav1d + video_d3d11 with a clock somebody chose: 24 shown and none dropped at the right speed with nothing more than a millisecond late, twelve dropped and twelve shown half a second behind with the picture still right at the end, and five hundred polls of a stopped clock holding it |
 | M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse. **Started**: MP_KIND_VIDEO has a vtable, `video_d3d11` renders BGRA8 into a flip-model scRGB target or an off-screen one, and `read_back` makes the result a hash rather than a screenshot somebody looks at. §9's colour decisions are a separate testable header. NV12, P010 and the tone mappers wait for the decoder that produces frames for them |
 | M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled |
