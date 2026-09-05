@@ -54,7 +54,7 @@ set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(CMAKE_SKIP_INSTALL_RULES ON)
 
 add_subdirectory("${CMAKE_SOURCE_DIR}/external/wavpack"
-                 "${CMAKE_BINARY_DIR}/external/wavpack" EXCLUDE_FROM_ALL)
+                 "${CMAKE_BINARY_DIR}/external/wavpack" EXCLUDE_FROM_ALL SYSTEM)
 
 mediaperch_add_module(mp_demux_wavpack
     KIND demux

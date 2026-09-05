@@ -61,6 +61,16 @@ extern "C" {
  * derives the same number rather than guessing at it. */
 #define MP_INLINE static inline
 
+/* A cast that both languages accept without complaint. This header is
+ * compiled as C and as C++, and a C cast in a C++ translation unit is what
+ * -Wold-style-cast exists to refuse -- which, with warnings as errors, is a
+ * build that fails on the ABI header. So the two spellings live here, once. */
+#if defined(__cplusplus)
+#  define MP_CAST(type, value) static_cast<type>(value)
+#else
+#  define MP_CAST(type, value) ((type)(value))
+#endif
+
 #if defined(__cplusplus)
 #  define MP_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
 #elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
@@ -923,8 +933,8 @@ MP_INLINE double mp_pixel_sample_scale(const MpPixelLayout *l)
         l->container_bits == 0u) {
         return 1.0;
     }
-    full = (double)((((uint64_t)1) << l->container_bits) - 1u);
-    used = (double)(((((uint64_t)1) << l->bits) - 1u) << l->shift);
+    full = MP_CAST(double, (MP_CAST(uint64_t, 1) << l->container_bits) - 1u);
+    used = MP_CAST(double, ((MP_CAST(uint64_t, 1) << l->bits) - 1u) << l->shift);
     return used != 0.0 ? full / used : 1.0;
 }
 
@@ -1374,7 +1384,8 @@ enum {
 };
 
 #define MP_MAKE_VERSION(major, minor, patch) \
-    (((uint32_t)(major) << 22) | ((uint32_t)(minor) << 12) | (uint32_t)(patch))
+    ((MP_CAST(uint32_t, major) << 22) | (MP_CAST(uint32_t, minor) << 12) | \
+     MP_CAST(uint32_t, patch))
 
 typedef struct MpModuleDesc {
     uint32_t size;

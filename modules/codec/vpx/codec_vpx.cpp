@@ -21,6 +21,8 @@
 
 #include <mediaperch/module.h>
 
+#include "decoder_threads.hpp"
+
 #include <vpx/vp8dx.h>
 #include <vpx/vpx_decoder.h>
 
@@ -171,6 +173,10 @@ void read_image_format(MpVideoCodec* c, const vpx_image_t& img) noexcept
         c->info.matrix = 9;
         break;
     case VPX_CS_SRGB:
+        // VP9 profiles 1 and 3 can carry RGB, and libvpx reports it as sRGB
+        // over 4:4:4 planes. Matrix 0 is identity, which is the honest code
+        // point for it -- and one the presenter refuses with a sentence rather
+        // than drawing R, G and B as if they were Y', Cb and Cr.
         c->info.primaries = 1;
         c->info.transfer = 13;
         c->info.matrix = 0;
@@ -235,7 +241,8 @@ try {
     c->info.size = sizeof(MpVideoInfo);
 
     vpx_codec_dec_cfg_t cfg{};
-    cfg.threads = 0; // libvpx picks
+    // Not zero: libvpx reads that as one thread. See modules/shared/decoder_threads.
+    cfg.threads = mp::decoder_threads();
     if (vpx_codec_dec_init(&c->ctx, iface, &cfg, 0) != VPX_CODEC_OK) {
         log_line(MP_LOG_ERROR, "codec_vpx: libvpx would not start");
         return MP_ERR_UNSUPPORTED;
@@ -359,7 +366,7 @@ try {
         c->started = false;
     }
     vpx_codec_dec_cfg_t cfg{};
-    cfg.threads = 0;
+    cfg.threads = mp::decoder_threads();
     if (vpx_codec_dec_init(&c->ctx, iface, &cfg, 0) != VPX_CODEC_OK) {
         return MP_ERR_INTERNAL;
     }

@@ -33,7 +33,7 @@ set(MSVC_FORCE_STATIC_C_RUNTIME OFF CACHE BOOL "" FORCE)
 set(CMAKE_SKIP_INSTALL_RULES ON)
 
 add_subdirectory("${CMAKE_SOURCE_DIR}/external/Bento4"
-                 "${CMAKE_BINARY_DIR}/external/Bento4" EXCLUDE_FROM_ALL)
+                 "${CMAKE_BINARY_DIR}/external/Bento4" EXCLUDE_FROM_ALL SYSTEM)
 
 mediaperch_add_module(mp_demux_mp4
     KIND demux

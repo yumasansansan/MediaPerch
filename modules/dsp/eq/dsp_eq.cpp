@@ -28,12 +28,6 @@
 #include <string>
 #include <vector>
 
-namespace {
-
-const MpHost* g_host = nullptr;
-
-} // namespace
-
 /// How the same response is realised.
 enum class Mode : std::uint32_t {
     /// The cascade itself. No latency, no pre-ringing, and the phase a
@@ -369,11 +363,30 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
     }
     if (std::strcmp(key, "curve") == 0) {
         // `low:high:points`, which is what a display asks for.
+        // Read the way every other `set` here reads a number -- strtod and
+        // strtoul with the end pointer checked -- rather than sscanf, which
+        // the CRT deprecates and /WX therefore refuses.
         double low = d->curve_low_hz;
         double high = d->curve_high_hz;
-        long points = d->curve_points;
-        if (std::sscanf(value, "%lf:%lf:%ld", &low, &high, &points) < 1) {
+        unsigned long points = d->curve_points;
+        char* end = nullptr;
+        low = std::strtod(value, &end);
+        if (end == value) {
             return MP_ERR_INVALID;
+        }
+        if (*end == ':') {
+            const char* next = end + 1;
+            high = std::strtod(next, &end);
+            if (end == next) {
+                return MP_ERR_INVALID;
+            }
+            if (*end == ':') {
+                next = end + 1;
+                points = std::strtoul(next, &end, 10);
+                if (end == next) {
+                    return MP_ERR_INVALID;
+                }
+            }
         }
         if (low <= 0.0 || high <= low || points < 2 || points > 4096) {
             return MP_ERR_INVALID;
@@ -468,7 +481,7 @@ MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
     case 13:
         std::snprintf(out, out_bytes,
                       "cost\t%.0f\tmultiplies per output frame (read only)",
-                      d->mode == Mode::iir ? 5.0 * d->cascade.sections()
+                      d->mode == Mode::iir ? 5.0 * static_cast<double>(d->cascade.sections())
                                            : d->convolver.multiplies());
         return MP_OK;
     case 6: {
@@ -535,13 +548,12 @@ const MpDspVtbl g_vtbl = {
 
 MpResult MP_CALL module_init(const MpHost* host) noexcept
 {
-    g_host = host;
+    (void)host; // nothing here logs, so nothing here keeps the host
     return MP_OK;
 }
 
 void MP_CALL module_shutdown() noexcept
 {
-    g_host = nullptr;
 }
 
 const MpModuleDesc g_desc = {
@@ -556,6 +568,9 @@ const MpModuleDesc g_desc = {
     /* init        */ &module_init,
     /* shutdown    */ &module_shutdown,
     /* vtbl        */ &g_vtbl,
+    /* codecs      */ nullptr,
+    /* codec_count */ 0,
+    /* reserved    */ 0,
 };
 
 } // namespace

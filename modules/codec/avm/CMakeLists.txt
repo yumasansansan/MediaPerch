@@ -119,3 +119,7 @@ mediaperch_add_module(mp_codec_avm
 
 set_target_properties(mp_codec_avm PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+
+# `threads = 0` is one thread in avm, not "the library picks" -- see
+# modules/shared/decoder_threads.
+target_link_libraries(mp_codec_avm PRIVATE mediaperch_decoder_threads)

@@ -110,8 +110,15 @@ void Sha256::update(const void* data, std::size_t bytes) noexcept
     constexpr std::size_t chunk = 1u << 30;
     while (bytes > 0) {
         const ULONG now = static_cast<ULONG>(bytes < chunk ? bytes : chunk);
-        ::BCryptHashData(static_cast<BCRYPT_HASH_HANDLE>(hash_),
-                         const_cast<PUCHAR>(reinterpret_cast<const UCHAR*>(p)), now, 0);
+        // Checked, because a digest of most of the bytes is worse than none:
+        // `verify` exists to say whether what reached the device was what was
+        // sent, and a hash that silently skipped a chunk would say yes.
+        if (!BCRYPT_SUCCESS(::BCryptHashData(
+                static_cast<BCRYPT_HASH_HANDLE>(hash_),
+                const_cast<PUCHAR>(reinterpret_cast<const UCHAR*>(p)), now, 0))) {
+            failed_ = true;
+            return;
+        }
         p += now;
         bytes -= now;
     }
@@ -119,7 +126,7 @@ void Sha256::update(const void* data, std::size_t bytes) noexcept
 
 std::string Sha256::hex()
 {
-    if (hash_ == nullptr) {
+    if (hash_ == nullptr || failed_) {
         return {};
     }
     std::array<UCHAR, 32> digest{};

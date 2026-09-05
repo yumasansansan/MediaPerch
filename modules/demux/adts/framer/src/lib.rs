@@ -426,7 +426,7 @@ mod tests {
         let mut out = Vec::new();
         for i in 0..n {
             out.extend_from_slice(&header((7 + payload) as u32));
-            out.extend(std::iter::repeat(i as u8).take(payload));
+            out.extend(std::iter::repeat_n(i as u8, payload));
         }
         out
     }

@@ -34,6 +34,8 @@
 
 #include <mediaperch/module.h>
 
+#include "decoder_threads.hpp"
+
 #include <avm/avm_decoder.h>
 #include <avm/avmdx.h>
 
@@ -200,7 +202,8 @@ try {
     // That is a shape ABI v4 can state and v3 could not, and it is the reason
     // `container_bits` is read from the image rather than assumed.
     avm_codec_dec_cfg_t cfg{};
-    cfg.threads = 0; // avm picks
+    // Not zero: avm reads that as one thread. See modules/shared/decoder_threads.
+    cfg.threads = mp::decoder_threads();
     if (avm_codec_dec_init(&c->ctx, avm_codec_av2_dx(), &cfg, 0) != AVM_CODEC_OK) {
         log_line(MP_LOG_ERROR, "codec_avm: avm would not start");
         return MP_ERR_UNSUPPORTED;
@@ -320,7 +323,7 @@ try {
         c->started = false;
     }
     avm_codec_dec_cfg_t cfg{};
-    cfg.threads = 0;
+    cfg.threads = mp::decoder_threads();
     if (avm_codec_dec_init(&c->ctx, avm_codec_av2_dx(), &cfg, 0) != AVM_CODEC_OK) {
         return MP_ERR_INTERNAL;
     }

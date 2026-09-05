@@ -27,7 +27,7 @@ if(NOT EXISTS "${_utfcpp_root}/CMakeLists.txt")
 endif()
 
 if(NOT TARGET utf8cpp)
-    add_subdirectory("${_utfcpp_root}" "${CMAKE_BINARY_DIR}/external/utfcpp" EXCLUDE_FROM_ALL)
+    add_subdirectory("${_utfcpp_root}" "${CMAKE_BINARY_DIR}/external/utfcpp" EXCLUDE_FROM_ALL SYSTEM)
 endif()
 if(NOT TARGET utf8cpp::utf8cpp)
     add_library(utf8cpp::utf8cpp ALIAS utf8cpp)

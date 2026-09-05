@@ -270,9 +270,10 @@ void IpcServer::stop()
 std::size_t IpcServer::clients() const
 {
     const std::lock_guard lock{mutex_};
-    return std::count_if(clients_.begin(), clients_.end(), [](const auto& c) {
-        return !c->done.load(std::memory_order_acquire);
-    });
+    return static_cast<std::size_t>(
+        std::count_if(clients_.begin(), clients_.end(), [](const auto& c) {
+            return !c->done.load(std::memory_order_acquire);
+        }));
 }
 
 void IpcServer::sweep()

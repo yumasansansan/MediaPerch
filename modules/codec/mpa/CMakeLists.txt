@@ -57,7 +57,7 @@ set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(CMAKE_SKIP_INSTALL_RULES ON)
 
 add_subdirectory("${CMAKE_SOURCE_DIR}/external/mpg123/ports/cmake"
-                 "${CMAKE_BINARY_DIR}/external/mpg123" EXCLUDE_FROM_ALL)
+                 "${CMAKE_BINARY_DIR}/external/mpg123" EXCLUDE_FROM_ALL SYSTEM)
 
 # **mpg123's CMake sets its include paths with directory-scoped
 # `include_directories`, not on the target**, so `libmpg123` carries no usage

@@ -145,7 +145,6 @@ private:
     std::uint32_t period_frames_;
     std::uint32_t wire_frame_bytes_;
     std::uint32_t source_frame_bytes_;
-    std::uint32_t chunk_frames_;
     /// The most one `pump_once` can put in the ring. Without a chain that is
     /// one chunk; with one it is whatever the chain said it could produce,
     /// which for anything that upsamples is more. Both loops keep this much

@@ -100,11 +100,9 @@ public:
     {
         return index < items_.size() ? items_[index] : nullptr;
     }
-    [[nodiscard]] std::size_t opened() const noexcept { return highest_ + 1; }
 
 private:
     std::vector<mp::ISource*> items_;
-    std::size_t highest_ = 0;
 };
 
 /// Polls until something is true, because a fixed sleep in a test about threads

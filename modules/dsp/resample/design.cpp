@@ -393,7 +393,8 @@ bool remez_lowpass(std::size_t length, double passband_edge, double stopband_edg
     const std::size_t density = 16;
     const std::size_t points = density * extremals;
     const auto pass_points =
-        std::max<std::size_t>(4, static_cast<std::size_t>(points * pass_width / total));
+        std::max<std::size_t>(4, static_cast<std::size_t>(static_cast<double>(points) *
+                                                          pass_width / total));
     const std::size_t stop_points = std::max<std::size_t>(4, points - pass_points);
 
     std::vector<double> grid;

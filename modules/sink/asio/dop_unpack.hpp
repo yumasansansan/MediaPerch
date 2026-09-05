@@ -33,14 +33,19 @@ inline constexpr std::size_t k_dop_frame_bytes = 3;
 inline constexpr std::array<std::uint8_t, 256> make_reversed()
 {
     std::array<std::uint8_t, 256> table{};
-    for (int i = 0; i < 256; ++i) {
-        auto value = static_cast<std::uint8_t>(i);
+    // Walked rather than indexed: the analyzer could not follow a loop bound
+    // through the inner loop and reported every store as possibly out of
+    // range, and a table filled slot by slot has no index to be wrong about.
+    std::uint8_t value = 0;
+    for (std::uint8_t& slot : table) {
+        std::uint8_t remaining = value;
         std::uint8_t reversed = 0;
         for (int bit = 0; bit < 8; ++bit) {
-            reversed = static_cast<std::uint8_t>((reversed << 1) | (value & 1u));
-            value = static_cast<std::uint8_t>(value >> 1);
+            reversed = static_cast<std::uint8_t>((reversed << 1) | (remaining & 1u));
+            remaining = static_cast<std::uint8_t>(remaining >> 1);
         }
-        table[static_cast<std::size_t>(i)] = reversed;
+        slot = reversed;
+        ++value; // 255 wraps to 0 on the last pass, and nothing reads it after
     }
     return table;
 }

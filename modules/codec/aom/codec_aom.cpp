@@ -22,6 +22,8 @@
 
 #include <mediaperch/module.h>
 
+#include "decoder_threads.hpp"
+
 #include <aom/aom_decoder.h>
 #include <aom/aomdx.h>
 
@@ -176,7 +178,8 @@ try {
     c->info.size = sizeof(MpVideoInfo);
 
     aom_codec_dec_cfg_t cfg{};
-    cfg.threads = 0; // libaom picks
+    // Not zero: libaom reads that as one thread. See modules/shared/decoder_threads.
+    cfg.threads = mp::decoder_threads();
     cfg.allow_lowbitdepth = 1;
     if (aom_codec_dec_init(&c->ctx, aom_codec_av1_dx(), &cfg, 0) != AOM_CODEC_OK) {
         log_line(MP_LOG_ERROR, "codec_aom: libaom would not start");
@@ -310,7 +313,7 @@ try {
         c->started = false;
     }
     aom_codec_dec_cfg_t cfg{};
-    cfg.threads = 0;
+    cfg.threads = mp::decoder_threads();
     cfg.allow_lowbitdepth = 1;
     if (aom_codec_dec_init(&c->ctx, aom_codec_av1_dx(), &cfg, 0) != AOM_CODEC_OK) {
         return MP_ERR_INTERNAL;

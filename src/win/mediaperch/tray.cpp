@@ -7,7 +7,10 @@
 
 #include <shellapi.h>
 
+#include <algorithm>
 #include <filesystem>
+#include <iterator>
+#include <string_view>
 
 namespace mp::win {
 namespace {
@@ -38,6 +41,16 @@ std::wstring widen(const std::string& utf8)
     MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.size()), out.data(),
                         needed);
     return out;
+}
+
+/// Into the fixed tip buffer, cut to fit. `lstrcpynW` did this and the
+/// analyzer wants its result read, which is a null nobody can act on.
+void put_tip(NOTIFYICONDATAW& icon, std::wstring_view tip) noexcept
+{
+    const std::size_t room = std::size(icon.szTip) - 1;
+    const std::size_t n = tip.size() < room ? tip.size() : room;
+    std::copy_n(tip.data(), n, icon.szTip);
+    icon.szTip[n] = L'\0';
 }
 
 /// The last component of a path, which is what a tooltip has room for.
@@ -123,7 +136,7 @@ bool Tray::show(std::string& why)
     // an engine, and a missing icon file would be a worse failure than a plain
     // one.
     icon.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-    lstrcpynW(icon.szTip, L"MediaPerch", ARRAYSIZE(icon.szTip));
+    put_tip(icon, L"MediaPerch");
     if (Shell_NotifyIconW(NIM_ADD, &icon) == FALSE) {
         // A service, or a session with no Explorer. Not an error: the engine
         // does not need a desktop and never did.
@@ -174,7 +187,7 @@ void Tray::refresh()
     icon.hWnd = static_cast<HWND>(window_);
     icon.uID = k_icon_id;
     icon.uFlags = NIF_TIP;
-    lstrcpynW(icon.szTip, widen(tip).c_str(), ARRAYSIZE(icon.szTip));
+    put_tip(icon, widen(tip));
     Shell_NotifyIconW(NIM_MODIFY, &icon);
 }
 

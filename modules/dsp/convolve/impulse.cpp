@@ -41,7 +41,10 @@ bool load(const std::string& path, Response& out, std::string& why)
 {
     out = Response{};
 
-    drwav wav;
+    // Zeroed, so that the path where opening fails before drwav_init touches
+    // it is not a read of an indeterminate struct -- which it never was, and
+    // which the compiler cannot see.
+    drwav wav{};
 #if defined(_WIN32)
     const std::wstring wide = widen(path);
     const drwav_bool32 opened =

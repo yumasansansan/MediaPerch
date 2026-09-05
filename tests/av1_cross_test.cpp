@@ -36,6 +36,8 @@
 
 #include <mediaperch/module.h>
 
+#include "module_loader.hpp"
+
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
@@ -48,45 +50,10 @@
 #endif
 #include <windows.h>
 
+using mp::test::Module;
+
 namespace {
 
-struct Module {
-    Module(const char* path, MpKind kind)
-    {
-        auto* dll = ::LoadLibraryA(path);
-        if (dll == nullptr) {
-            return;
-        }
-        library = dll;
-        using Entry = const MpModuleDesc*(MP_CALL*)(std::uint32_t);
-        auto* entry = reinterpret_cast<Entry>(
-            reinterpret_cast<void*>(::GetProcAddress(dll, "mp_module_entry")));
-        if (entry == nullptr) {
-            return;
-        }
-        const MpModuleDesc* found = entry(MP_ABI_VERSION);
-        if (found == nullptr || found->kind != kind) {
-            return;
-        }
-        desc = found;
-        vtbl = found->vtbl;
-    }
-    ~Module()
-    {
-        if (library != nullptr) {
-            if (desc != nullptr && desc->shutdown != nullptr) {
-                desc->shutdown();
-            }
-            ::FreeLibrary(static_cast<HMODULE>(library));
-        }
-    }
-    Module(const Module&) = delete;
-    Module& operator=(const Module&) = delete;
-
-    void* library = nullptr;
-    const MpModuleDesc* desc = nullptr;
-    const void* vtbl = nullptr;
-};
 
 /// One decoded frame, copied out.
 ///
@@ -162,7 +129,8 @@ Decoded decode_all(const MpVideoCodecVtbl& codec, const MpDemuxVtbl& demux_vtbl,
     }
 
     std::vector<std::uint8_t> config;
-    demux.stream_config(stream, config);
+    // AV1 in an MP4 always has an av1C; a fixture without one is the wrong file.
+    REQUIRE(demux.stream_config(stream, config));
     MpVideoCodec* decoder = nullptr;
     if (codec.open(MP_CODEC_AV1, nullptr, config.data(),
                    static_cast<std::uint32_t>(config.size()), &decoder) != MP_OK) {

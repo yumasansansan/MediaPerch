@@ -111,8 +111,28 @@ if(MEDIAPERCH_TOOLCHAIN STREQUAL msvc)
     # -- warnings, and the definitions that change what a header means -------
     target_compile_options(mediaperch_flags INTERFACE
         /W4
+        # **Warnings are errors, everywhere this target reaches** -- which is
+        # every target outside external/, by `mediaperch_flags_everywhere`
+        # below. A warning that stays a warning is read once and then never,
+        # which is how thirteen `strcpy` deprecations and an ignored hash
+        # feed sat in the build log for as long as they did.
+        /WX
         /permissive-
+        # The analyzer's findings are errors too, under the same /WX. Its one
+        # false positive in this tree -- a null dereference reported for
+        # `new (std::nothrow) T{}` -- was written around, because a waiver is
+        # read as advice and the two findings beside it were real.
         /analyze
+        # **The analyzer reads external headers, and /external:W0 does not stop
+        # it.** A submodule added with `SYSTEM` has its headers passed as
+        # `/external:I`, and CMake adds `/external:W0` with them, which is what
+        # keeps libebml's sign conversions out of demux_mkv's build -- for the
+        # compiler. Measured: with /WX on, the analyzer still reported C6387
+        # from inside EbmlBinary.h (a memcpy after an unchecked malloc, real and
+        # not this tree's to fix) and failed the build. So the analyzer is told
+        # what the compiler already knew. This is the one flag here that exists
+        # for somebody else's code, and it says only "not theirs".
+        /analyze:external-
         /utf-8
         /Zc:__cplusplus
         /Zc:inline
@@ -169,18 +189,24 @@ if(MEDIAPERCH_TOOLCHAIN STREQUAL msvc)
         # thing to discard or to fold.
         "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:/Gy>"
         "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:/Gw>"
-        # Inline anything the compiler thinks is worth it. Here rather than
-        # rewritten into CMAKE_<LANG>_FLAGS_RELEASE because add_compile_options
-        # lands *after* those, so /Ob3 wins wherever it meets an /Ob2 -- and it
-        # meets one in every file of libFLAC, whose own CMakeLists prepends
-        # `/O2 /Ob2 /Oi /Ot /Oy` to the Release flags.
-        #
-        # That costs a D9025 per file, "'/Ob3' takes precedence over '/Ob2'",
-        # and the warning is correct and expected: /Ob3 is precisely what is
-        # wanted, and the only way to silence it is to patch a submodule or to
-        # inline less. This project would rather have the noise.
-        "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:/Ob3>"
     )
+
+    # Inline anything the compiler thinks is worth it, everywhere. Two lines,
+    # because there are two ways an /Ob2 gets onto a command line:
+    #
+    #   * CMake's own Release flags say `/O2 /Ob2 /DNDEBUG`. That /Ob2 is
+    #     replaced in the variable, so every file this tree compiles carries
+    #     one /Ob3 and nothing for it to override.
+    #   * libFLAC's CMakeLists prepends `/O2 /Ob2 /Oi /Ot /Oy` to the Release
+    #     flags inside its own directory, where the replacement cannot reach.
+    #     The global /Ob3 below lands after it and wins, at the cost of D9025
+    #     per libFLAC file -- measured: a command-line warning that /WX does
+    #     not promote, and libFLAC has no /WX in any case.
+    #
+    # The same flag twice is silent; measured as well.
+    string(REPLACE "/Ob2" "/Ob3" CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE}")
+    string(REPLACE "/Ob2" "/Ob3" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
+    add_compile_options("$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C,CXX>>:/Ob3>")
     # The instruction set, for the whole build including the submodules. A
     # library that dispatches internally still works: its baseline path simply
     # becomes AVX2 too, and this binary requires AVX2 regardless.
@@ -215,6 +241,7 @@ else()
     target_compile_options(mediaperch_flags INTERFACE
         -Wall
         -Wextra
+        -Werror
         -Wconversion
         -Wsign-conversion
         -Wshadow
@@ -327,3 +354,50 @@ if(MEDIAPERCH_LINK_MAP)
         add_link_options(LINKER:-Map=$<TARGET_FILE:$<TARGET_PROPERTY:NAME>>.map)
     endif()
 endif()
+
+# ---------------------------------------------------------------------------
+# Everything outside external/ gets the flags, without being asked to
+# ---------------------------------------------------------------------------
+#
+# `mediaperch_flags` used to be linked by each target that remembered to. The
+# ABI probes had not, and a target that forgets is a target with no warnings at
+# all -- which is invisible, because a clean build log and a silent one look
+# the same. So the root list file calls this last, and it walks every directory
+# configured from inside the source tree, skipping external/, and links the
+# flags into every target that compiles something. A target that already had
+# them gets them twice, which CMake collapses.
+#
+# **Somebody else's code compiled inside this tree is marked, not flagged.** A
+# few targets exist only to compile somebody else's source -- dr_wav's
+# implementation, four files of the VST3 SDK, the registry calls whose SDK
+# annotations the analyzer objects to -- and they carry the target property
+# MEDIAPERCH_EXTERNAL, which is the whole of their treatment: the flags are not
+# linked in, and nothing is added in their place. No warning level of their
+# own, no waived analyzer, no per-source options. The line between ours and
+# theirs is a target boundary, so that everything on our side of it is held to
+# the full set with no holes.
+function(mediaperch_flags_everywhere directory)
+    get_property(subdirectories DIRECTORY "${directory}" PROPERTY SUBDIRECTORIES)
+    foreach(subdirectory IN LISTS subdirectories)
+        file(RELATIVE_PATH relative "${CMAKE_SOURCE_DIR}" "${subdirectory}")
+        file(RELATIVE_PATH from_build "${CMAKE_BINARY_DIR}" "${subdirectory}")
+        # Outside the tree, under external/, or inside the build directory --
+        # which is where FetchContent unpacks Catch2, and which sits *under*
+        # the source tree here, so "outside the tree" alone did not exclude
+        # it: Catch2 got this tree's flags and its `main` did not survive.
+        if(relative MATCHES "^\\.\\." OR relative MATCHES "^external(/|$)"
+           OR NOT from_build MATCHES "^\\.\\.")
+            continue()
+        endif()
+        mediaperch_flags_everywhere("${subdirectory}")
+    endforeach()
+    get_property(targets DIRECTORY "${directory}" PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(target IN LISTS targets)
+        get_target_property(type "${target}" TYPE)
+        get_target_property(theirs "${target}" MEDIAPERCH_EXTERNAL)
+        if(type MATCHES "^(EXECUTABLE|STATIC_LIBRARY|SHARED_LIBRARY|MODULE_LIBRARY|OBJECT_LIBRARY)$"
+           AND NOT theirs)
+            target_link_libraries("${target}" PRIVATE mediaperch_flags)
+        endif()
+    endforeach()
+endfunction()

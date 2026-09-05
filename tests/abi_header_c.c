@@ -32,8 +32,13 @@ unsigned int mp_abi_probe_from_c(void)
     if (format.sample_rate != 44100u) {
         return 0u;
     }
-    if (MP_MAKE_VERSION(0, 1, 0) == 0u) {
-        return 0u;
+    {
+        /* volatile, so that this is a comparison made at run time rather
+         * than a constant folded and then reported as compared with one. */
+        volatile unsigned int version = MP_MAKE_VERSION(0, 1, 0);
+        if (version == 0u) {
+            return 0u;
+        }
     }
     return MP_ABI_VERSION;
 }

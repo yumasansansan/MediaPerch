@@ -35,29 +35,38 @@ if(NOT WIN32)
     return()
 endif()
 
+# **The four SDK sources every VST3 host and plugin here needs, compiled once
+# and as somebody else's code.** They used to be listed in three targets --
+# this module, the test plugin and the test binary -- and compiled with this
+# tree's warnings each time. MEDIAPERCH_EXTERNAL is the whole of their
+# treatment: see mediaperch_flags_everywhere in cmake/CompilerOptions.cmake.
+#
+# `SYSTEM` on the include path, as before: somebody else's headers, and their
+# warnings are not this tree's to fix. The VST3 headers have unscoped enums, a
+# `char[128]` in a struct and casts that this project's warning set would
+# refuse. PUBLIC, so that whoever links the SDK gets its headers the same way.
+#
+# `funknown.cpp` calls CoCreateGuid, which is the only thing in the SDK that
+# needs a library at all. The SDK's own switches: `DEVELOPMENT` off and
+# `RELEASE` on turns off its internal assertions and its allocation tracking,
+# which are for people writing plugins rather than for a host loading them.
+add_library(mediaperch_vst3_sdk STATIC
+    "${vst3}/pluginterfaces/base/funknown.cpp"
+    "${vst3}/pluginterfaces/base/coreiids.cpp"
+    "${vst3}/pluginterfaces/base/ustring.cpp"
+    "${vst3}/pluginterfaces/base/conststringtable.cpp")
+target_include_directories(mediaperch_vst3_sdk SYSTEM PUBLIC "${vst3}")
+target_link_libraries(mediaperch_vst3_sdk PUBLIC ole32)
+target_compile_definitions(mediaperch_vst3_sdk PUBLIC
+    "$<IF:$<CONFIG:Debug>,DEVELOPMENT=1,RELEASE=1>")
+set_target_properties(mediaperch_vst3_sdk PROPERTIES
+    MEDIAPERCH_EXTERNAL TRUE FOLDER "external")
+
 mediaperch_add_module(mp_dsp_vst3
     KIND dsp
     SOURCES
         dsp_vst3.cpp
         vst3_host.cpp
         vst3_iids.cpp
-        "${vst3}/pluginterfaces/base/funknown.cpp"
-        "${vst3}/pluginterfaces/base/coreiids.cpp"
-        "${vst3}/pluginterfaces/base/ustring.cpp"
-        "${vst3}/pluginterfaces/base/conststringtable.cpp")
-
-# `-isystem`, not `-I`: somebody else's headers, and their warnings are not this
-# tree's to fix. The VST3 headers have unscoped enums, a `char[128]` in a struct
-# and casts that this project's warning set would refuse.
-target_include_directories(mp_dsp_vst3 SYSTEM PRIVATE "${vst3}")
+    LINK mediaperch_vst3_sdk)
 target_include_directories(mp_dsp_vst3 PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-
-# `funknown.cpp` calls CoCreateGuid, which is the only thing in the SDK that
-# needs a library at all.
-target_link_libraries(mp_dsp_vst3 PRIVATE ole32)
-
-# The SDK's own switches. `DEVELOPMENT` off and `RELEASE` on turns off its
-# internal assertions and its allocation tracking, which are for people writing
-# plugins rather than for a host loading them.
-target_compile_definitions(mp_dsp_vst3 PRIVATE
-    "$<IF:$<CONFIG:Debug>,DEVELOPMENT=1,RELEASE=1>")

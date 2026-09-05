@@ -1096,7 +1096,7 @@ mod tests {
         impl W {
             fn put(&mut self, n: u32, v: u32) {
                 for i in (0..n).rev() {
-                    if self.bit % 8 == 0 {
+                    if self.bit.is_multiple_of(8) {
                         self.bytes.push(0);
                     }
                     if (v >> i) & 1 != 0 {

@@ -26,7 +26,6 @@
 
 namespace {
 
-const MpHost* g_host = nullptr;
 
 /// Vorbis channel order into WAVE order, indexed by channel count.
 ///
@@ -329,13 +328,12 @@ const MpCodecVtbl g_vtbl = {
 
 MpResult MP_CALL module_init(const MpHost* host) noexcept
 {
-    g_host = host;
+    (void)host; // nothing here logs, so nothing here keeps the host
     return MP_OK;
 }
 
 void MP_CALL module_shutdown() noexcept
 {
-    g_host = nullptr;
 }
 
 const MpCodec g_codecs[] = {MP_CODEC_VORBIS};

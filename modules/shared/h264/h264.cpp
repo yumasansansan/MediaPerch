@@ -51,7 +51,6 @@ public:
         left_ -= n;
         return true;
     }
-    [[nodiscard]] std::size_t left() const noexcept { return left_; }
 
 private:
     const std::uint8_t* p_;

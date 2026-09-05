@@ -127,3 +127,7 @@ mediaperch_add_module(mp_codec_aom
 
 set_target_properties(mp_codec_aom PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+
+# `threads = 0` is one thread in libaom, not "the library picks" -- see
+# modules/shared/decoder_threads.
+target_link_libraries(mp_codec_aom PRIVATE mediaperch_decoder_threads)

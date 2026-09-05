@@ -1150,6 +1150,18 @@ try {
     constants.transfer_gamma = 2.4f;
 
     if (ycbcr) {
+        // **Matrix code point 0 is identity: the planes are R, G and B in
+        // Y'CbCr clothing.** VP9 profiles 1 and 3 carry it as sRGB 4:4:4 and
+        // AV1 can say it too. `yuv_matrix_for` has no row for it and falls
+        // through to BT.709, which would draw such a stream in confidently
+        // wrong colours. Refused with a sentence until somebody brings a
+        // fixture and the plane-order swap it needs. Unspecified is 2, so an
+        // untagged stream is not caught by this.
+        if (v->stream.matrix == 0u && v->source_layout.chroma != MP_CHROMA_MONO) {
+            v->trouble = "the stream says its matrix is identity -- RGB planes -- "
+                         "which nothing here draws yet";
+            return MP_ERR_UNSUPPORTED;
+        }
         constants.has_chroma = v->source_layout.chroma == MP_CHROMA_MONO ? 0.0f : 1.0f;
         // Derived in double and rounded once, which is §9.10's rule and this
         // is where it pays: eight coefficients per matrix, all of them ratios

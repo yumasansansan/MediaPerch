@@ -329,9 +329,12 @@ public:
         // Two decimals, spelled out by hand: this plugin does not link a CRT
         // formatter for one string.
         const int hundredths = static_cast<int>(value * 100.0 + 0.5);
-        const char16_t digits[] = {u'0' + static_cast<char16_t>(hundredths / 100), u'.',
-                                   u'0' + static_cast<char16_t>((hundredths / 10) % 10),
-                                   u'0' + static_cast<char16_t>(hundredths % 10), 0};
+        // Cast on the outside: `u'0' + int` is an int, and an int narrowing
+        // into a char16_t in a braced list is an error to clang and a shrug
+        // to MSVC.
+        const char16_t digits[] = {static_cast<char16_t>(u'0' + hundredths / 100), u'.',
+                                   static_cast<char16_t>(u'0' + (hundredths / 10) % 10),
+                                   static_cast<char16_t>(u'0' + hundredths % 10), 0};
         copy_utf16(string, digits);
         return kResultOk;
     }
@@ -400,6 +403,19 @@ private:
 // The factory
 // --------------------------------------------------------------------------
 
+/// A bounded copy into one of the SDK's fixed character arrays. `strcpy` is
+/// what the SDK's own samples use and what /WX will not have: the CRT marks
+/// it deprecated, and this plugin is built with the tree's warnings.
+template <std::size_t N>
+void copy_ascii(char (&dst)[N], const char* src) noexcept
+{
+    std::size_t i = 0;
+    for (; i + 1 < N && src[i] != '\0'; ++i) {
+        dst[i] = src[i];
+    }
+    dst[i] = '\0';
+}
+
 class TestFactory final : public U::Implements<U::Directly<IPluginFactory2>> {
 public:
     tresult PLUGIN_API getFactoryInfo(PFactoryInfo* info) override
@@ -408,9 +424,9 @@ public:
             return kInvalidArgument;
         }
         *info = PFactoryInfo{};
-        std::strcpy(info->vendor, "MediaPerch");
-        std::strcpy(info->url, "https://github.com/yumasansansan/MediaPerch");
-        std::strcpy(info->email, "");
+        copy_ascii(info->vendor, "MediaPerch");
+        copy_ascii(info->url, "https://github.com/yumasansansan/MediaPerch");
+        copy_ascii(info->email, "");
         info->flags = PFactoryInfo::kUnicode;
         return kResultOk;
     }
@@ -425,15 +441,15 @@ public:
         if (index == 0) {
             std::memcpy(info->cid, k_component_cid.toTUID(), sizeof(TUID));
             info->cardinality = PClassInfo::kManyInstances;
-            std::strcpy(info->category, kVstAudioEffectClass);
-            std::strcpy(info->name, "MediaPerch Test Effect");
+            copy_ascii(info->category, kVstAudioEffectClass);
+            copy_ascii(info->name, "MediaPerch Test Effect");
             return kResultOk;
         }
         if (index == 1) {
             std::memcpy(info->cid, k_controller_cid.toTUID(), sizeof(TUID));
             info->cardinality = PClassInfo::kManyInstances;
-            std::strcpy(info->category, kVstComponentControllerClass);
-            std::strcpy(info->name, "MediaPerch Test Effect Controller");
+            copy_ascii(info->category, kVstComponentControllerClass);
+            copy_ascii(info->name, "MediaPerch Test Effect Controller");
             return kResultOk;
         }
         return kInvalidArgument;
@@ -451,13 +467,13 @@ public:
         *info = PClassInfo2{};
         std::memcpy(info->cid, one.cid, sizeof(TUID));
         info->cardinality = one.cardinality;
-        std::strcpy(info->category, one.category);
-        std::strcpy(info->name, one.name);
-        std::strcpy(info->vendor, "MediaPerch");
-        std::strcpy(info->version, "0.1.0");
-        std::strcpy(info->sdkVersion, kVstVersionString);
+        copy_ascii(info->category, one.category);
+        copy_ascii(info->name, one.name);
+        copy_ascii(info->vendor, "MediaPerch");
+        copy_ascii(info->version, "0.1.0");
+        copy_ascii(info->sdkVersion, kVstVersionString);
         if (index == 0) {
-            std::strcpy(info->subCategories, "Fx|Tools");
+            copy_ascii(info->subCategories, "Fx|Tools");
         }
         return kResultOk;
     }

@@ -373,7 +373,8 @@ struct MpDemux {
     /// Which track the block currently being handed out belongs to. Set by
     /// `next_block`, read by everything that has to know what it is holding.
     std::size_t reading = 0;
-    /// The audio track this module picked at open, which is what
+    /// The track this module picked at open -- the first audio track, or the
+    /// first of any kind when there is none -- which is what
     /// `MP_STREAM_DEFAULT` reports. Not the same question as what is selected
     /// now, and confusing the two made a host that selected the video track see
     /// the video track called the default one.

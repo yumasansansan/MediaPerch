@@ -14,7 +14,7 @@ if(NOT EXISTS "${CMAKE_SOURCE_DIR}/external/vorbis/CMakeLists.txt" OR NOT TARGET
 endif()
 
 add_subdirectory("${CMAKE_SOURCE_DIR}/external/vorbis"
-                 "${CMAKE_BINARY_DIR}/external/vorbis" EXCLUDE_FROM_ALL)
+                 "${CMAKE_BINARY_DIR}/external/vorbis" EXCLUDE_FROM_ALL SYSTEM)
 
 mediaperch_add_module(mp_codec_vorbis
     KIND codec

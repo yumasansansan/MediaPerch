@@ -211,16 +211,12 @@ if(TARGET mp_dsp_vst3)
     add_subdirectory(vst3_plugin)
     target_sources(mediaperch_tests PRIVATE vst3_test.cpp
                    ../modules/dsp/vst3/vst3_host.cpp
-                   ../modules/dsp/vst3/vst3_iids.cpp
-                   ../external/vst3sdk/pluginterfaces/base/funknown.cpp
-                   ../external/vst3sdk/pluginterfaces/base/coreiids.cpp
-                   ../external/vst3sdk/pluginterfaces/base/ustring.cpp
-                   ../external/vst3sdk/pluginterfaces/base/conststringtable.cpp)
+                   ../modules/dsp/vst3/vst3_iids.cpp)
     target_include_directories(mediaperch_tests PRIVATE ../modules/dsp/vst3)
-    target_include_directories(mediaperch_tests SYSTEM PRIVATE ../external/vst3sdk)
-    target_link_libraries(mediaperch_tests PRIVATE ole32)
+    # The SDK's own sources, from the one target that compiles them, which
+    # brings its include path, its definitions and ole32 along.
+    target_link_libraries(mediaperch_tests PRIVATE mediaperch_vst3_sdk)
     target_compile_definitions(mediaperch_tests PRIVATE
-        "$<IF:$<CONFIG:Debug>,DEVELOPMENT=1,RELEASE=1>"
         # Passed in rather than searched for: the path differs between single-
         # and multi-config generators, and a test that went looking would be
         # testing the search.

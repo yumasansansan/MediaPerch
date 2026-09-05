@@ -125,3 +125,7 @@ mediaperch_add_module(mp_codec_vpx
 # same argument external/dav1d's build records at more length.
 set_target_properties(mp_codec_vpx PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+
+# `threads = 0` is one thread in libvpx, not "the library picks" -- see
+# modules/shared/decoder_threads.
+target_link_libraries(mp_codec_vpx PRIVATE mediaperch_decoder_threads)

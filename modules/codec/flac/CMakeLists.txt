@@ -33,7 +33,7 @@ set(INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
 set(WITH_OGG OFF CACHE BOOL "" FORCE)
 
 add_subdirectory("${CMAKE_SOURCE_DIR}/external/flac"
-                 "${CMAKE_BINARY_DIR}/external/flac" EXCLUDE_FROM_ALL)
+                 "${CMAKE_BINARY_DIR}/external/flac" EXCLUDE_FROM_ALL SYSTEM)
 
 mediaperch_add_module(mp_codec_flac
     KIND codec

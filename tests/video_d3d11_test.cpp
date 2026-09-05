@@ -16,6 +16,8 @@
 
 #include <mediaperch/module.h>
 
+#include "module_loader.hpp"
+
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
@@ -34,6 +36,8 @@
 #include <d3d11.h>
 #include <dxgi.h>
 
+using mp::test::Module;
+
 namespace {
 
 /// The layouts these tests hand over, spelled by the ABI's own macros so that
@@ -41,52 +45,6 @@ namespace {
 constexpr MpPixelLayout k_bgra8 = MP_LAYOUT_BGRA8;
 constexpr MpPixelLayout k_nv12 = MP_LAYOUT_NV12;
 
-/// The module, loaded the way the engine loads it.
-struct Module {
-    Module()
-    {
-        auto* dll = ::LoadLibraryA(MEDIAPERCH_VIDEO_D3D11);
-        if (dll == nullptr) {
-            return;
-        }
-        library = dll;
-        using Entry = const MpModuleDesc*(MP_CALL*)(std::uint32_t);
-        auto* entry = reinterpret_cast<Entry>(
-            reinterpret_cast<void*>(::GetProcAddress(dll, "mp_module_entry")));
-        if (entry == nullptr) {
-            return;
-        }
-        const MpModuleDesc* found = entry(MP_ABI_VERSION);
-        if (found == nullptr || found->kind != MP_KIND_VIDEO) {
-            return;
-        }
-        desc = found;
-        vtbl = static_cast<const MpVideoVtbl*>(found->vtbl);
-    }
-    ~Module()
-    {
-        if (library != nullptr) {
-            // **`shutdown` before `FreeLibrary`, because that is what a host
-            // does.** `ModuleRegistry` calls `init` after loading and
-            // `shutdown` before unloading; a harness that skipped the second
-            // was not modelling the host, it was modelling a host with a bug.
-            // `codec_mft` had to stop Media Foundation from a static
-            // destructor because nothing here called its shutdown, and doing
-            // that during `FreeLibrary` deadlocks against the loader lock.
-            if (desc != nullptr && desc->shutdown != nullptr) {
-                desc->shutdown();
-            }
-            ::FreeLibrary(static_cast<HMODULE>(library));
-        }
-    }
-    Module(const Module&) = delete;
-    Module& operator=(const Module&) = delete;
-
-    void* library = nullptr;
-    /// Kept so the destructor can call `shutdown`, which is what a host does.
-    const MpModuleDesc* desc = nullptr;
-    const MpVideoVtbl* vtbl = nullptr;
-};
 
 /// The scRGB target is IEEE half, and DirectXMath is a dependency these tests
 /// do not otherwise want for one conversion.
@@ -290,10 +248,10 @@ std::vector<std::uint8_t> flat(std::uint32_t width, std::uint32_t height, std::u
 TEST_CASE("a presenter renders with no window, so the pixels can be checked",
           "[video][d3d11]")
 {
-    Module module;
-    REQUIRE(module.vtbl != nullptr);
+    Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
 
-    Presenter presenter{*module.vtbl, 64, 48};
+    Presenter presenter{*module.as<MpVideoVtbl>(), 64, 48};
     REQUIRE(presenter.ok());
     REQUIRE(presenter.configure() == "");
 
@@ -332,15 +290,15 @@ TEST_CASE("WARP renders the same bytes every time", "[video][d3d11]")
     // What makes any of this a measurement. Two presenters, two devices, two
     // renders of the same frame -- and if they differ there is nothing to
     // compare a colour pipeline against on anybody else's machine.
-    Module module;
-    REQUIRE(module.vtbl != nullptr);
+    Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
 
     const std::vector<std::uint8_t> source = flat(32, 32, 0x11, 0x99, 0xEE);
     std::vector<float> first;
     std::vector<float> second;
 
     for (std::vector<float>* into : {&first, &second}) {
-        Presenter presenter{*module.vtbl, 32, 32};
+        Presenter presenter{*module.as<MpVideoVtbl>(), 32, 32};
         REQUIRE(presenter.ok());
         REQUIRE(presenter.configure() == "");
         REQUIRE(presenter.present(source, 32, 32) == MP_OK);
@@ -358,10 +316,10 @@ TEST_CASE("the sRGB decode is the piecewise curve, not a 2.2 power",
     // piecewise segment is and where a power approximation is worst. So the
     // check is on a dark grey, and it is against the standard rather than
     // against what came out last time.
-    Module module;
-    REQUIRE(module.vtbl != nullptr);
+    Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
 
-    Presenter presenter{*module.vtbl, 16, 16};
+    Presenter presenter{*module.as<MpVideoVtbl>(), 16, 16};
     REQUIRE(presenter.ok());
     REQUIRE(presenter.configure() == "");
 
@@ -390,10 +348,10 @@ TEST_CASE("the sRGB decode is the piecewise curve, not a 2.2 power",
 
 TEST_CASE("a presenter refuses what it cannot do, and says so", "[video][d3d11]")
 {
-    Module module;
-    REQUIRE(module.vtbl != nullptr);
+    Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
 
-    Presenter presenter{*module.vtbl, 16, 16};
+    Presenter presenter{*module.as<MpVideoVtbl>(), 16, 16};
     REQUIRE(presenter.ok());
     REQUIRE(presenter.configure() == "");
 
@@ -407,7 +365,7 @@ TEST_CASE("a presenter refuses what it cannot do, and says so", "[video][d3d11]"
     frame.stride[0] = 16;
     frame.plane[1] = planes.data() + 16u * 16u;
     frame.stride[1] = 16;
-    CHECK(module.vtbl->present(presenter.handle(), &frame) == MP_OK);
+    CHECK(module.as<MpVideoVtbl>()->present(presenter.handle(), &frame) == MP_OK);
 
     // A plane that is not there, and a stride too short for the width it
     // claims, are both refused rather than read past. **A `texture` that is
@@ -415,30 +373,63 @@ TEST_CASE("a presenter refuses what it cannot do, and says so", "[video][d3d11]"
     // a caller that passes rubbish there has done what a caller passing rubbish
     // in `plane[0]` has done, which no amount of checking here can catch.
     frame.plane[1] = nullptr;
-    CHECK(module.vtbl->present(presenter.handle(), &frame) == MP_ERR_UNSUPPORTED);
+    CHECK(module.as<MpVideoVtbl>()->present(presenter.handle(), &frame) == MP_ERR_UNSUPPORTED);
     frame.plane[1] = planes.data() + 16u * 16u;
     frame.stride[0] = 4;
-    CHECK(module.vtbl->present(presenter.handle(), &frame) == MP_ERR_UNSUPPORTED);
+    CHECK(module.as<MpVideoVtbl>()->present(presenter.handle(), &frame) == MP_ERR_UNSUPPORTED);
+}
+
+TEST_CASE("an identity matrix is refused rather than drawn as BT.709", "[video][d3d11]")
+{
+    // Matrix code point 0 means the planes are R, G and B -- VP9 profiles 1
+    // and 3 carry sRGB that way. `yuv_matrix_for` has no row for it and falls
+    // through to BT.709, which is the wrong picture drawn confidently. Two
+    // is unspecified and takes the convention; zero is a statement, and the
+    // statement is one this presenter cannot honour yet.
+    Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
+
+    Presenter presenter{*module.as<MpVideoVtbl>(), 16, 16};
+    REQUIRE(presenter.ok());
+    presenter.info().matrix = 0;
+    REQUIRE(presenter.configure() == "");
+
+    std::vector<std::uint8_t> planes(16u * 16u * 3u / 2u, 0x80);
+    MpVideoFrame frame{};
+    frame.size = sizeof(frame);
+    frame.layout = k_nv12;
+    frame.width = 16;
+    frame.height = 16;
+    frame.plane[0] = planes.data();
+    frame.stride[0] = 16;
+    frame.plane[1] = planes.data() + 16u * 16u;
+    frame.stride[1] = 16;
+    CHECK(module.as<MpVideoVtbl>()->present(presenter.handle(), &frame) == MP_ERR_UNSUPPORTED);
+
+    // The same frame under the convention draws.
+    presenter.info().matrix = 2;
+    REQUIRE(presenter.configure() == "");
+    CHECK(module.as<MpVideoVtbl>()->present(presenter.handle(), &frame) == MP_OK);
 }
 
 TEST_CASE("what a person can set, and what it reports back", "[video][d3d11]")
 {
-    Module module;
-    REQUIRE(module.vtbl != nullptr);
+    Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
 
-    Presenter presenter{*module.vtbl, 16, 16};
+    Presenter presenter{*module.as<MpVideoVtbl>(), 16, 16};
     REQUIRE(presenter.ok());
 
-    CHECK(module.vtbl->set(presenter.handle(), "tonemap", "shader") == MP_OK);
-    CHECK(module.vtbl->set(presenter.handle(), "tonemap", "reinhard") == MP_ERR_INVALID);
-    CHECK(module.vtbl->set(presenter.handle(), "composited", "0") == MP_OK);
-    CHECK(module.vtbl->set(presenter.handle(), "nonsense", "1") == MP_ERR_UNSUPPORTED);
+    CHECK(module.as<MpVideoVtbl>()->set(presenter.handle(), "tonemap", "shader") == MP_OK);
+    CHECK(module.as<MpVideoVtbl>()->set(presenter.handle(), "tonemap", "reinhard") == MP_ERR_INVALID);
+    CHECK(module.as<MpVideoVtbl>()->set(presenter.handle(), "composited", "0") == MP_OK);
+    CHECK(module.as<MpVideoVtbl>()->set(presenter.handle(), "nonsense", "1") == MP_ERR_UNSUPPORTED);
     CHECK(presenter.described("tonemap") == "shader");
 
     REQUIRE(presenter.configure() == "");
     // The device is made by `configure`, so asking for a different one
     // afterwards is refused rather than silently ignored.
-    CHECK(module.vtbl->set(presenter.handle(), "device", "hardware") == MP_ERR_UNSUPPORTED);
+    CHECK(module.as<MpVideoVtbl>()->set(presenter.handle(), "device", "hardware") == MP_ERR_UNSUPPORTED);
 
     // The stream is SDR, so the tone mapper a person asked for is not in the
     // path -- and `applied` says what is actually happening rather than what
@@ -462,17 +453,17 @@ TEST_CASE("what presenting in FP16 costs, measured rather than assumed",
     // there and 27 times short at 16 bits. What this test does is establish
     // that the loss is exactly half's own quantisation and nothing else, so
     // that the number in plan.md §9.10 is a property of the code.
-    Module module;
-    REQUIRE(module.vtbl != nullptr);
+    Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
 
     const std::vector<std::uint8_t> source = flat(16, 16, 0x08, 0x80, 0xFF);
 
     std::vector<float> wide;
     std::vector<float> presented;
     for (int pass = 0; pass < 2; ++pass) {
-        Presenter presenter{*module.vtbl, 16, 16};
+        Presenter presenter{*module.as<MpVideoVtbl>(), 16, 16};
         REQUIRE(presenter.ok());
-        REQUIRE(module.vtbl->set(presenter.handle(), "precision",
+        REQUIRE(module.as<MpVideoVtbl>()->set(presenter.handle(), "precision",
                                  pass == 0 ? "fp32" : "fp16") == MP_OK);
         REQUIRE(presenter.configure() == "");
         CHECK(presenter.described("precision") == (pass == 0 ? "fp32" : "fp16"));
@@ -514,10 +505,10 @@ TEST_CASE("NV12 becomes RGB by the matrix the container named", "[video][d3d11][
     // luma weights -- not against whatever the shader produced last time. The
     // read-back is FP32, so the comparison is the arithmetic rather than a
     // quantisation of it.
-    Module module;
-    REQUIRE(module.vtbl != nullptr);
+    Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
 
-    Presenter presenter{*module.vtbl, 32, 32};
+    Presenter presenter{*module.as<MpVideoVtbl>(), 32, 32};
     REQUIRE(presenter.ok());
     presenter.info().matrix = 1; // BT.709
     presenter.info().transfer = 1;
@@ -546,7 +537,7 @@ TEST_CASE("NV12 becomes RGB by the matrix the container named", "[video][d3d11][
     frame.stride[0] = 32;
     frame.plane[1] = chroma.data();
     frame.stride[1] = 32;
-    REQUIRE(module.vtbl->present(presenter.handle(), &frame) == MP_OK);
+    REQUIRE(module.as<MpVideoVtbl>()->present(presenter.handle(), &frame) == MP_OK);
 
     const std::vector<float> shown = presenter.read_back();
     REQUIRE(shown.size() == 32u * 32u * 4u);
@@ -632,8 +623,8 @@ TEST_CASE("planar 4:2:0, 4:2:2 and 4:4:4 reach the same conversion",
     // No decoder in this tree produces planar yet -- dav1d is what will. The
     // frames are built here, which is exactly how the presenter was checked
     // before there was anything to decode at all.
-    Module module;
-    REQUIRE(module.vtbl != nullptr);
+    Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
 
     constexpr std::uint8_t k_y = 120;
     constexpr std::uint8_t k_cb = 90;
@@ -645,7 +636,7 @@ TEST_CASE("planar 4:2:0, 4:2:2 and 4:4:4 reach the same conversion",
         const MpPixelLayout layout = planar_layout(chroma, 8u);
         INFO("chroma " << static_cast<unsigned>(chroma));
 
-        Presenter presenter{*module.vtbl, 32, 32};
+        Presenter presenter{*module.as<MpVideoVtbl>(), 32, 32};
         REQUIRE(presenter.ok());
         presenter.info().matrix = 1; // BT.709
         presenter.info().transfer = 1;
@@ -669,7 +660,7 @@ TEST_CASE("planar 4:2:0, 4:2:2 and 4:4:4 reach the same conversion",
         frame.stride[1] = cw;
         frame.plane[2] = cr.data();
         frame.stride[2] = cw;
-        REQUIRE(module.vtbl->present(presenter.handle(), &frame) == MP_OK);
+        REQUIRE(module.as<MpVideoVtbl>()->present(presenter.handle(), &frame) == MP_OK);
 
         const std::vector<float> shown = presenter.read_back();
         REQUIRE(shown.size() == 32u * 32u * 4u);
@@ -690,10 +681,10 @@ TEST_CASE("4:0:0 is grey rather than whatever an unbound texture samples to",
     // made gives zero, and zero through `(c - 0.5) * chroma_scale` is a strong
     // green. So the shader is told there is no chroma rather than left to read
     // it, and grey means grey.
-    Module module;
-    REQUIRE(module.vtbl != nullptr);
+    Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
 
-    Presenter presenter{*module.vtbl, 16, 16};
+    Presenter presenter{*module.as<MpVideoVtbl>(), 16, 16};
     REQUIRE(presenter.ok());
     presenter.info().matrix = 1;
     presenter.info().transfer = 1;
@@ -709,7 +700,7 @@ TEST_CASE("4:0:0 is grey rather than whatever an unbound texture samples to",
     frame.height = 16;
     frame.plane[0] = luma.data();
     frame.stride[0] = 16;
-    REQUIRE(module.vtbl->present(presenter.handle(), &frame) == MP_OK);
+    REQUIRE(module.as<MpVideoVtbl>()->present(presenter.handle(), &frame) == MP_OK);
 
     const std::vector<float> shown = presenter.read_back();
     REQUIRE(shown.size() == 16u * 16u * 4u);
@@ -736,8 +727,8 @@ TEST_CASE("ten and twelve bits at the bottom of the container, not the top",
     // ten-bit 4:2:0 and a presenter that assumed either would be wrong about
     // the other by a factor of sixty-four. Here the bits are at the bottom,
     // which is the case that did not exist before v4.
-    Module module;
-    REQUIRE(module.vtbl != nullptr);
+    Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
 
     struct Case {
         std::uint32_t bits;
@@ -753,7 +744,7 @@ TEST_CASE("ten and twelve bits at the bottom of the container, not the top",
         CHECK(layout.container_bits == 16u);
         CHECK(layout.shift == 0u);
 
-        Presenter presenter{*module.vtbl, 16, 16};
+        Presenter presenter{*module.as<MpVideoVtbl>(), 16, 16};
         REQUIRE(presenter.ok());
         presenter.info().matrix = 1;
         presenter.info().transfer = 1;
@@ -774,7 +765,7 @@ TEST_CASE("ten and twelve bits at the bottom of the container, not the top",
         frame.stride[1] = 32;
         frame.plane[2] = cr.data();
         frame.stride[2] = 32;
-        REQUIRE(module.vtbl->present(presenter.handle(), &frame) == MP_OK);
+        REQUIRE(module.as<MpVideoVtbl>()->present(presenter.handle(), &frame) == MP_OK);
 
         const std::vector<float> shown = presenter.read_back();
         REQUIRE(shown.size() == 16u * 16u * 4u);
@@ -796,13 +787,13 @@ TEST_CASE("studio range and full range are not the same picture", "[video][d3d11
     // reads as a contrast setting rather than as a bug -- so the flag the
     // container carries has to reach the shader, and this is the test that it
     // does.
-    Module module;
-    REQUIRE(module.vtbl != nullptr);
+    Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
 
     std::vector<float> studio;
     std::vector<float> full;
     for (int pass = 0; pass < 2; ++pass) {
-        Presenter presenter{*module.vtbl, 16, 16};
+        Presenter presenter{*module.as<MpVideoVtbl>(), 16, 16};
         REQUIRE(presenter.ok());
         presenter.info().matrix = 1;
         presenter.info().transfer = 1;
@@ -822,7 +813,7 @@ TEST_CASE("studio range and full range are not the same picture", "[video][d3d11
         frame.stride[0] = 16;
         frame.plane[1] = chroma.data();
         frame.stride[1] = 16;
-        REQUIRE(module.vtbl->present(presenter.handle(), &frame) == MP_OK);
+        REQUIRE(module.as<MpVideoVtbl>()->present(presenter.handle(), &frame) == MP_OK);
         (pass == 0 ? studio : full) = presenter.read_back();
     }
     REQUIRE(!studio.empty());
@@ -844,8 +835,8 @@ TEST_CASE("video tagged BT.709 is decoded with BT.1886, not with sRGB",
     // lifts the shadows, which is the mirror image of the fault §9.2 records
     // Windows committing in the other direction, and it is invisible until
     // somebody puts two players side by side.
-    Module module;
-    REQUIRE(module.vtbl != nullptr);
+    Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
 
     const std::vector<std::uint8_t> source = flat(16, 16, 0x80, 0x80, 0x80);
     const float encoded = 0x80 / 255.0f;
@@ -853,7 +844,7 @@ TEST_CASE("video tagged BT.709 is decoded with BT.1886, not with sRGB",
     std::vector<float> as_srgb;
     std::vector<float> as_bt1886;
     for (int pass = 0; pass < 2; ++pass) {
-        Presenter presenter{*module.vtbl, 16, 16};
+        Presenter presenter{*module.as<MpVideoVtbl>(), 16, 16};
         REQUIRE(presenter.ok());
         presenter.info().transfer = pass == 0 ? 13u : 1u;
         REQUIRE(presenter.configure() == "");
@@ -880,10 +871,10 @@ TEST_CASE("a decoder's own texture is viewed rather than copied", "[video][d3d11
     // is a separate question and a separate test: this one asks for WARP,
     // which has no video device at all, and codec_mft_test.cpp takes the
     // hardware one.
-    Module module;
-    REQUIRE(module.vtbl != nullptr);
+    Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
 
-    Presenter presenter{*module.vtbl, 32, 32};
+    Presenter presenter{*module.as<MpVideoVtbl>(), 32, 32};
     REQUIRE(presenter.ok());
     presenter.info().matrix = 1;  // BT.709
     presenter.info().transfer = 1;
@@ -891,7 +882,7 @@ TEST_CASE("a decoder's own texture is viewed rather than copied", "[video][d3d11
 
     MpGraphicsDevice graphics{};
     graphics.size = sizeof(graphics);
-    REQUIRE(module.vtbl->get_device(presenter.handle(), &graphics) == MP_OK);
+    REQUIRE(module.as<MpVideoVtbl>()->get_device(presenter.handle(), &graphics) == MP_OK);
     CHECK(graphics.api == MP_GRAPHICS_D3D11);
     REQUIRE(graphics.device != nullptr);
     auto* device = static_cast<ID3D11Device*>(graphics.device);
@@ -942,7 +933,7 @@ TEST_CASE("a decoder's own texture is viewed rather than copied", "[video][d3d11
     frame.height = 32;
     frame.texture = texture;
     frame.texture_index = 1; // the slice that has the picture in it
-    REQUIRE(module.vtbl->present(presenter.handle(), &frame) == MP_OK);
+    REQUIRE(module.as<MpVideoVtbl>()->present(presenter.handle(), &frame) == MP_OK);
 
     const std::vector<float> shown = presenter.read_back();
     REQUIRE(shown.size() == 32u * 32u * 4u);
@@ -967,7 +958,7 @@ TEST_CASE("a decoder's own texture is viewed rather than copied", "[video][d3d11
 
     // And a slice past the end of the array is refused rather than read.
     frame.texture_index = 7;
-    CHECK(module.vtbl->present(presenter.handle(), &frame) == MP_ERR_UNSUPPORTED);
+    CHECK(module.as<MpVideoVtbl>()->present(presenter.handle(), &frame) == MP_ERR_UNSUPPORTED);
     CHECK(presenter.described("trouble").find("slice") != std::string::npos);
     frame.texture_index = 1;
 
@@ -985,7 +976,7 @@ TEST_CASE("a decoder's own texture is viewed rather than copied", "[video][d3d11
         MpVideoFrame unusable = frame;
         unusable.texture = unbindable;
         unusable.texture_index = 0;
-        CHECK(module.vtbl->present(presenter.handle(), &unusable) == MP_ERR_UNSUPPORTED);
+        CHECK(module.as<MpVideoVtbl>()->present(presenter.handle(), &unusable) == MP_ERR_UNSUPPORTED);
         CHECK(presenter.described("trouble").find("D3D11_BIND_SHADER_RESOURCE") !=
               std::string::npos);
         unbindable->Release();

@@ -50,7 +50,7 @@ if(MEDIAPERCH_ARCH STREQUAL "avx2")
 endif()
 
 add_subdirectory("${CMAKE_SOURCE_DIR}/external/opus"
-                 "${CMAKE_BINARY_DIR}/external/opus" EXCLUDE_FROM_ALL)
+                 "${CMAKE_BINARY_DIR}/external/opus" EXCLUDE_FROM_ALL SYSTEM)
 
 mediaperch_add_module(mp_codec_opus
     KIND codec

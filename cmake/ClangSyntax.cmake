@@ -81,12 +81,13 @@ if(MEDIAPERCH_BUILD_DIR)
         "-isystem" "${MEDIAPERCH_BUILD_DIR}/external/ogg/include")
 endif()
 
-# The warning set the tree builds with, minus the one a pure-C header cannot
-# satisfy: MP_MAKE_VERSION is a macro with C casts in it, and rewriting the ABI
-# header in C++ to please a C++ warning would be the tail wagging the dog.
+# The warning set the tree builds with, all of it. -Wold-style-cast used to
+# be left out because the ABI header's macros carried C casts; MP_CAST in the
+# header now spells a cast in whichever language is reading, so the check is
+# the full set and the header is held to it too.
 set(warnings
     -Wall -Wextra -Wconversion -Wsign-conversion -Wshadow -Wnon-virtual-dtor
-    -Wno-old-style-cast)
+    -Wold-style-cast)
 
 # Everything that does not need the Windows SDK or a submodule's headers. The
 # platform head, the sink and the two pipelines are left out on purpose: they are
@@ -99,7 +100,22 @@ set(sources
     modules/demux/wav/demux_wav.cpp
     modules/demux/flac/demux_flac.cpp
     modules/demux/mp4/demux_mp4.cpp
-    modules/demux/wavpack/demux_wavpack.cpp)
+    modules/demux/wavpack/demux_wavpack.cpp
+    # **The DSP modules are portable and were not here.** A sweep of the whole
+    # tree with the same flags found sign conversions in dsp_eq and a
+    # size_t-to-double in the resampler's filter design that this check would
+    # have caught the day they were written. impulse.cpp and autoeq.cpp read
+    # files through the Windows API and stay out; vst3 is a host and stays out.
+    modules/dsp/convolve/dsp_convolve.cpp
+    modules/dsp/eq/dsp_eq.cpp
+    modules/dsp/gain/dsp_gain.cpp
+    modules/dsp/mix/dsp_mix.cpp
+    modules/dsp/mix/mix.cpp
+    modules/dsp/replaygain/dsp_replaygain.cpp
+    modules/dsp/replaygain/loudness.cpp
+    modules/dsp/resample/design.cpp
+    modules/dsp/resample/dsp_resample.cpp
+    modules/dsp/resample/resample.cpp)
 
 # These need a header the build generates, so they are checked only when a build
 # directory is named.

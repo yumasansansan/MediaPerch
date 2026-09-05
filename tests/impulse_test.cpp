@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <fstream>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -69,10 +70,11 @@ std::string write_wav(const std::string& name, const std::vector<std::vector<dou
         }
     }
 
-    std::FILE* out = std::fopen(path.string().c_str(), "wb");
-    REQUIRE(out != nullptr);
-    std::fwrite(file.data(), 1, file.size(), out);
-    std::fclose(out);
+    std::ofstream out(path, std::ios::binary);
+    REQUIRE(out.is_open());
+    out.write(reinterpret_cast<const char*>(file.data()),
+              static_cast<std::streamsize>(file.size()));
+    REQUIRE(out.good());
     return path.string();
 }
 

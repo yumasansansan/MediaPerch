@@ -27,7 +27,7 @@ ProcessedGraph::ProcessedGraph(ISource& source, Sink& sink, const Format& wire,
     : source_(&source), sink_(&sink), wire_(wire), source_format_(source.format()),
       proc_(source.format(), wire, period_frames, convert, chain), hooks_(hooks),
       config_(config), period_frames_(period_frames), wire_frame_bytes_(frame_bytes(wire)),
-      source_frame_bytes_(frame_bytes(source.format())), chunk_frames_(period_frames),
+      source_frame_bytes_(frame_bytes(source.format())),
       pump_bytes_(proc_.output_bytes()),
       ring_(ring_bytes(period_frames, frame_bytes(wire), config.ring_periods, pump_bytes_))
 {

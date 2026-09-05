@@ -29,7 +29,9 @@ public:
     Sha256(Sha256&&) = delete;
     Sha256& operator=(Sha256&&) = delete;
 
-    [[nodiscard]] bool ok() const noexcept { return hash_ != nullptr; }
+    /// Whether there is a hash to feed. A feed that failed is remembered and
+    /// makes `hex` empty rather than the digest of whatever did get in.
+    [[nodiscard]] bool ok() const noexcept { return hash_ != nullptr && !failed_; }
 
     void update(const void* data, std::size_t bytes) noexcept;
 
@@ -43,6 +45,7 @@ public:
 private:
     void* algorithm_ = nullptr;
     void* hash_ = nullptr;
+    bool failed_ = false;
 };
 
 /// A WASAPI capture endpoint, taken exclusively, recording into memory.

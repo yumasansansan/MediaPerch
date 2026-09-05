@@ -122,6 +122,12 @@ TEST_CASE("every module built here loads at this tree's ABI version", "[abi][mod
         // A module that reports codecs must list them, and one that lists none
         // must say zero rather than pointing somewhere.
         CHECK((desc->codec_count == 0u) == (desc->codecs == nullptr));
+        // A codec that declares no codecs is invisible to a registry reading
+        // declarations -- which codec_mft was, for as long as every test
+        // reached it by naming its DLL.
+        if (desc->kind == MP_KIND_CODEC || desc->kind == MP_KIND_VCODEC) {
+            CHECK(desc->codec_count != 0u);
+        }
 
         // And a version this tree is not on gets nothing, which is the other
         // half of the same promise.

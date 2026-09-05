@@ -20,9 +20,17 @@ if(NOT EXISTS "${CMAKE_SOURCE_DIR}/external/asio/common/iasiodrv.h")
     return()
 endif()
 
+# The registry reading, on the other side of the MEDIAPERCH_EXTERNAL line --
+# see asio_registry.hpp. No flags of its own; that is the whole treatment.
+add_library(mediaperch_asio_registry STATIC asio_registry.cpp)
+target_include_directories(mediaperch_asio_registry PUBLIC "${CMAKE_CURRENT_LIST_DIR}")
+set_target_properties(mediaperch_asio_registry PROPERTIES
+    MEDIAPERCH_EXTERNAL TRUE FOLDER "external")
+
 mediaperch_add_module(mp_sink_asio
     KIND sink
-    SOURCES sink_asio.cpp)
+    SOURCES sink_asio.cpp
+    LINK mediaperch_asio_registry)
 
 # `-isystem`, not `-I`: these are somebody else's headers and their warnings are
 # not this tree's to fix. asio.h has a `char[512]` in a struct and casts that

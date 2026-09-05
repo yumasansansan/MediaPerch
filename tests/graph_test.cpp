@@ -47,8 +47,6 @@ public:
         return n;
     }
 
-    [[nodiscard]] const std::vector<std::uint8_t>& data() const noexcept { return data_; }
-
 private:
     mp::Format format_;
     std::vector<std::uint8_t> data_;

@@ -22,12 +22,6 @@
 #include <cstring>
 #include <new>
 
-namespace {
-
-const MpHost* g_host = nullptr;
-
-} // namespace
-
 struct MpDsp {
     double gain = 1.0;
     double gain_db = 0.0;
@@ -190,17 +184,17 @@ const MpDspVtbl g_vtbl = {
     /* set       */ &dsp_set,
     /* describe  */ &dsp_describe,
     /* reset     */ &dsp_reset,
+    /* get_latency */ nullptr, // none: what goes in comes out on the same call
 };
 
 MpResult MP_CALL module_init(const MpHost* host) noexcept
 {
-    g_host = host;
+    (void)host; // nothing here logs, so nothing here keeps the host
     return MP_OK;
 }
 
 void MP_CALL module_shutdown() noexcept
 {
-    g_host = nullptr;
 }
 
 const MpModuleDesc g_desc = {
@@ -215,6 +209,9 @@ const MpModuleDesc g_desc = {
     /* init        */ &module_init,
     /* shutdown    */ &module_shutdown,
     /* vtbl        */ &g_vtbl,
+    /* codecs      */ nullptr,
+    /* codec_count */ 0,
+    /* reserved    */ 0,
 };
 
 } // namespace

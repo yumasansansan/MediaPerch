@@ -182,7 +182,6 @@ private:
 class Runtime {
 public:
     Runtime() = default;
-    ~Runtime() = default;
     Runtime(const Runtime&) = delete;
     Runtime& operator=(const Runtime&) = delete;
 
@@ -652,6 +651,11 @@ try {
         return MP_ERR_INVALID;
     }
 
+    // A packet after a drain starts a new run of the stream, and the doubt
+    // `next_frame` applies to the end of a drain is for drains only -- left
+    // set, every mid-stream MP_END would cost four milliseconds of asking again.
+    c->draining = false;
+
     const std::uint8_t* payload = static_cast<const std::uint8_t*>(packet);
     std::size_t payload_bytes = bytes;
     if (c->codec == MP_CODEC_H264) {
@@ -930,6 +934,14 @@ void MP_CALL module_shutdown() noexcept
     g_host = nullptr;
 }
 
+// **Declared, because §4 rule 6 says capability is data.** This module had no
+// codec list at all: the registry in platform.cpp builds its resolution table
+// from `codecs`, so a host reading declarations believed nothing here decoded
+// H.264 -- and every test reached the module by naming its DLL, which is how
+// that stayed true for as long as it did. `probe` is still what says no to a
+// 4:2:2 or ten-bit stream; this is what says the module is worth asking.
+const MpCodec k_codecs[] = {MP_CODEC_H264, MP_CODEC_HEVC};
+
 const MpModuleDesc g_desc = {
     /* size        */ sizeof(MpModuleDesc),
     /* abi_version */ MP_ABI_VERSION,
@@ -942,6 +954,9 @@ const MpModuleDesc g_desc = {
     /* init        */ &module_init,
     /* shutdown    */ &module_shutdown,
     /* vtbl        */ &g_vtbl,
+    /* codecs      */ k_codecs,
+    /* codec_count */ 2,
+    /* reserved    */ 0,
 };
 
 } // namespace

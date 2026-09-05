@@ -16,6 +16,8 @@
 
 #include <mediaperch/module.h>
 
+#include "module_loader.hpp"
+
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
@@ -32,54 +34,10 @@
 
 #include <d3d11.h>
 
+using mp::test::Module;
+
 namespace {
 
-/// A module, loaded the way the engine loads one.
-struct Module {
-    Module(const char* path, MpKind kind)
-    {
-        auto* dll = ::LoadLibraryA(path);
-        if (dll == nullptr) {
-            return;
-        }
-        library = dll;
-        using Entry = const MpModuleDesc*(MP_CALL*)(std::uint32_t);
-        auto* entry = reinterpret_cast<Entry>(
-            reinterpret_cast<void*>(::GetProcAddress(dll, "mp_module_entry")));
-        if (entry == nullptr) {
-            return;
-        }
-        const MpModuleDesc* found = entry(MP_ABI_VERSION);
-        if (found == nullptr || found->kind != kind) {
-            return;
-        }
-        desc = found;
-        vtbl = found->vtbl;
-    }
-    ~Module()
-    {
-        if (library != nullptr) {
-            // **`shutdown` before `FreeLibrary`, because that is what a host
-            // does.** `ModuleRegistry` calls `init` after loading and
-            // `shutdown` before unloading; a harness that skipped the second
-            // was not modelling the host, it was modelling a host with a bug.
-            // `codec_mft` had to stop Media Foundation from a static
-            // destructor because nothing here called its shutdown, and doing
-            // that during `FreeLibrary` deadlocks against the loader lock.
-            if (desc != nullptr && desc->shutdown != nullptr) {
-                desc->shutdown();
-            }
-            ::FreeLibrary(static_cast<HMODULE>(library));
-        }
-    }
-    Module(const Module&) = delete;
-    Module& operator=(const Module&) = delete;
-
-    void* library = nullptr;
-    /// Kept so the destructor can call `shutdown`, which is what a host does.
-    const MpModuleDesc* desc = nullptr;
-    const void* vtbl = nullptr;
-};
 
 /// A minimal but real `avcC`: version 1, a profile, one SPS and one PPS, and a
 /// `lengthSizeMinusOne` of 3 meaning four-byte lengths.

@@ -22,6 +22,8 @@
 
 #include <mediaperch/module.h>
 
+#include "module_loader.hpp"
+
 #include <catch2/catch_test_macros.hpp>
 
 #include <string>
@@ -31,6 +33,8 @@
 #    define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+
+using mp::test::Module;
 
 namespace {
 
@@ -61,60 +65,6 @@ const char* mkv_path()
     return MEDIAPERCH_TEST_AV_MKV;
 }
 
-/// The demuxer's vtable, loaded the way the engine loads it.
-///
-/// Deliberately not through `mp::win::ModuleRegistry`: what is under test is
-/// the portable half against a module, and the registry belongs to the Windows
-/// head. What a module *is*, is a DLL exporting `mp_module_entry` -- and saying
-/// so in six lines is a better test of the ABI than borrowing the loader that
-/// already knows.
-struct Module {
-    explicit Module(const char* path)
-    {
-        auto* dll = ::LoadLibraryA(path);
-        if (dll == nullptr) {
-            return;
-        }
-        library = dll;
-        using Entry = const MpModuleDesc*(MP_CALL*)(std::uint32_t);
-        auto* entry = reinterpret_cast<Entry>(
-            reinterpret_cast<void*>(::GetProcAddress(dll, "mp_module_entry")));
-        if (entry == nullptr) {
-            return;
-        }
-        // **The version check is the break, made visible.** A module built
-        // against v2 answers null here, which is exactly what a bump is for.
-        const MpModuleDesc* found = entry(MP_ABI_VERSION);
-        if (found == nullptr || found->kind != MP_KIND_DEMUX) {
-            return;
-        }
-        desc = found;
-        vtbl = static_cast<const MpDemuxVtbl*>(found->vtbl);
-    }
-    ~Module()
-    {
-        if (library != nullptr) {
-            // **`shutdown` before `FreeLibrary`, because that is what a host
-            // does.** `ModuleRegistry` calls `init` after loading and
-            // `shutdown` before unloading; a harness that skipped the second
-            // was not modelling the host, it was modelling a host with a bug.
-            // `codec_mft` had to stop Media Foundation from a static
-            // destructor because nothing here called its shutdown, and doing
-            // that during `FreeLibrary` deadlocks against the loader lock.
-            if (desc != nullptr && desc->shutdown != nullptr) {
-                desc->shutdown();
-            }
-            ::FreeLibrary(static_cast<HMODULE>(library));
-        }
-    }
-    Module(const Module&) = delete;
-    Module& operator=(const Module&) = delete;
-
-    void* library = nullptr;
-    /// Kept so the destructor can call `shutdown`, which is what a host does.
-    const MpModuleDesc* desc = nullptr;
-    const MpDemuxVtbl* vtbl = nullptr;
-};
 
 /// Which stream is which in the fixture, found rather than assumed.
 struct Streams {
@@ -150,11 +100,11 @@ Streams find(const mp::Demux& demux)
 
 TEST_CASE("one demuxer serves two streams out of one file", "[abi][v3][demux]")
 {
-    Module module{mp4_module()};
-    REQUIRE(module.vtbl != nullptr);
+    Module module{mp4_module(), MP_KIND_DEMUX};
+    REQUIRE(module.as<MpDemuxVtbl>() != nullptr);
 
     mp::Demux demux;
-    REQUIRE(demux.open(*module.vtbl, av_path()) == MP_OK);
+    REQUIRE(demux.open(*module.as<MpDemuxVtbl>(), av_path()) == MP_OK);
     REQUIRE(demux.stream_count() == 2);
 
     const Streams at = find(demux);
@@ -250,11 +200,11 @@ TEST_CASE("float PCM in Matroska is named rather than refused",
     //
     // Big-endian integer PCM stays refused, and that one is real: it needs a
     // byte swap no module here performs.
-    Module module{mkv_module()};
-    REQUIRE(module.vtbl != nullptr);
+    Module module{mkv_module(), MP_KIND_DEMUX};
+    REQUIRE(module.as<MpDemuxVtbl>() != nullptr);
 
     mp::Demux demux;
-    REQUIRE(demux.open(*module.vtbl, MEDIAPERCH_TEST_PCM_F32_MKV) == MP_OK);
+    REQUIRE(demux.open(*module.as<MpDemuxVtbl>(), MEDIAPERCH_TEST_PCM_F32_MKV) == MP_OK);
     REQUIRE(demux.stream_count() == 1u);
 
     MpStreamInfo info{};
@@ -296,11 +246,11 @@ TEST_CASE("a Matroska with no audio in it still opens", "[abi][demux][mkv]")
     //
     // It stayed invisible because every video fixture here carried Opus beside
     // the picture. The AV2 one cannot: nothing muxes audio next to AV2 yet.
-    Module module{mkv_module()};
-    REQUIRE(module.vtbl != nullptr);
+    Module module{mkv_module(), MP_KIND_DEMUX};
+    REQUIRE(module.as<MpDemuxVtbl>() != nullptr);
 
     mp::Demux demux;
-    REQUIRE(demux.open(*module.vtbl, MEDIAPERCH_TEST_AV2) == MP_OK);
+    REQUIRE(demux.open(*module.as<MpDemuxVtbl>(), MEDIAPERCH_TEST_AV2) == MP_OK);
     REQUIRE(demux.stream_count() == 1u);
 
     MpStreamInfo info{};
@@ -346,13 +296,13 @@ TEST_CASE("a demuxer declares every codec it reports", "[abi][demux][declare]")
     // is the right way round, because an over-broad declaration costs a
     // registry one wasted load and an under-broad one loses a file.
     const auto check = [](const Module& module, const char* path) {
-        REQUIRE(module.vtbl != nullptr);
+        REQUIRE(module.as<MpDemuxVtbl>() != nullptr);
         REQUIRE(module.desc != nullptr);
         REQUIRE(module.desc->codecs != nullptr);
         REQUIRE(module.desc->codec_count > 0u);
 
         mp::Demux demux;
-        REQUIRE(demux.open(*module.vtbl, path) == MP_OK);
+        REQUIRE(demux.open(*module.as<MpDemuxVtbl>(), path) == MP_OK);
         REQUIRE(demux.stream_count() > 0u);
 
         for (std::uint32_t i = 0; i < demux.stream_count(); ++i) {
@@ -378,15 +328,15 @@ TEST_CASE("a demuxer declares every codec it reports", "[abi][demux][declare]")
 
     SECTION("MP4, whose video codecs went undeclared for months")
     {
-        Module module{mp4_module()};
+        Module module{mp4_module(), MP_KIND_DEMUX};
         check(module, av_path());
-        Module again{mp4_module()};
+        Module again{mp4_module(), MP_KIND_DEMUX};
         check(again, MEDIAPERCH_TEST_AV1);
     }
 
     SECTION("Matroska, which had declared no video codec at all")
     {
-        Module module{mkv_module()};
+        Module module{mkv_module(), MP_KIND_DEMUX};
         check(module, MEDIAPERCH_TEST_AV_MKV);
     }
 }
@@ -399,11 +349,11 @@ TEST_CASE("AV1 in an MP4 is named, and its av1C comes across verbatim",
     // entry and hand over the `av1C` record, and that is checkable on its own.
     // Same picture, same length and same audio as `av.mp4` -- SVT-AV1 instead
     // of x264 -- so the two files differ in the codec and in nothing else.
-    Module module{mp4_module()};
-    REQUIRE(module.vtbl != nullptr);
+    Module module{mp4_module(), MP_KIND_DEMUX};
+    REQUIRE(module.as<MpDemuxVtbl>() != nullptr);
 
     mp::Demux demux;
-    REQUIRE(demux.open(*module.vtbl, MEDIAPERCH_TEST_AV1) == MP_OK);
+    REQUIRE(demux.open(*module.as<MpDemuxVtbl>(), MEDIAPERCH_TEST_AV1) == MP_OK);
     REQUIRE(demux.stream_count() == 2);
 
     std::uint32_t video = 0;
@@ -461,11 +411,11 @@ TEST_CASE("a seek names the stream its frame is counted in", "[abi][v3][demux]")
     // were selected. **A host seeking by the audio clock names the audio
     // stream** -- and `frame` is in that stream's own rate, which is 44100 here
     // and 24000/1001 for the video, so the two numbers are not interchangeable.
-    Module module{mp4_module()};
-    REQUIRE(module.vtbl != nullptr);
+    Module module{mp4_module(), MP_KIND_DEMUX};
+    REQUIRE(module.as<MpDemuxVtbl>() != nullptr);
 
     mp::Demux demux;
-    REQUIRE(demux.open(*module.vtbl, av_path()) == MP_OK);
+    REQUIRE(demux.open(*module.as<MpDemuxVtbl>(), av_path()) == MP_OK);
     const Streams at = find(demux);
     REQUIRE(at.both);
 
@@ -512,13 +462,13 @@ TEST_CASE("the container's colour is read rather than guessed", "[abi][v3][video
     // The three code points are the reason `stream_video_info` exists. Nothing
     // else says whether the frames are BT.709 or BT.2020, or whether the
     // transfer is sRGB or PQ, and §9.1 turns on knowing before a frame is drawn.
-    Module module{mp4_module()};
-    REQUIRE(module.vtbl != nullptr);
+    Module module{mp4_module(), MP_KIND_DEMUX};
+    REQUIRE(module.as<MpDemuxVtbl>() != nullptr);
 
     SECTION("geometry, and the frame rate as the ratio it is")
     {
         mp::Demux demux;
-        REQUIRE(demux.open(*module.vtbl, av_path()) == MP_OK);
+        REQUIRE(demux.open(*module.as<MpDemuxVtbl>(), av_path()) == MP_OK);
         const Streams at = find(demux);
         REQUIRE(at.both);
 
@@ -553,7 +503,7 @@ TEST_CASE("the container's colour is read rather than guessed", "[abi][v3][video
         // about the two files is identical, so a difference here is the box
         // being read and nothing else.
         mp::Demux demux;
-        REQUIRE(demux.open(*module.vtbl, bt2020_path()) == MP_OK);
+        REQUIRE(demux.open(*module.as<MpDemuxVtbl>(), bt2020_path()) == MP_OK);
         const Streams at = find(demux);
         REQUIRE(at.both);
 
@@ -584,11 +534,11 @@ TEST_CASE("Matroska serves two tracks out of one pass as well", "[abi][v3][demux
     // a lace cursor and a frame rate that were both the one selected track's.
     // Whether the ABI's shape survives that is the question, and it is not the
     // same question MP4 answered.
-    Module module{mkv_module()};
-    REQUIRE(module.vtbl != nullptr);
+    Module module{mkv_module(), MP_KIND_DEMUX};
+    REQUIRE(module.as<MpDemuxVtbl>() != nullptr);
 
     mp::Demux demux;
-    REQUIRE(demux.open(*module.vtbl, mkv_path()) == MP_OK);
+    REQUIRE(demux.open(*module.as<MpDemuxVtbl>(), mkv_path()) == MP_OK);
     REQUIRE(demux.stream_count() == 2);
 
     const Streams at = find(demux);
@@ -768,10 +718,10 @@ TEST_CASE("a video packet says what its timestamp is counted in", "[abi][v3][vid
     // nothing revealed.
     SECTION("MP4 counts in the track's own timescale, which mdhd states")
     {
-        Module module{mp4_module()};
-        REQUIRE(module.vtbl != nullptr);
+        Module module{mp4_module(), MP_KIND_DEMUX};
+        REQUIRE(module.as<MpDemuxVtbl>() != nullptr);
         mp::Demux demux;
-        REQUIRE(demux.open(*module.vtbl, av_path()) == MP_OK);
+        REQUIRE(demux.open(*module.as<MpDemuxVtbl>(), av_path()) == MP_OK);
         const Streams at = find(demux);
         REQUIRE(at.both);
 
@@ -865,10 +815,10 @@ TEST_CASE("a video packet says what its timestamp is counted in", "[abi][v3][vid
 
     SECTION("Matroska counts in nanoseconds, because that is what it hands back")
     {
-        Module module{mkv_module()};
-        REQUIRE(module.vtbl != nullptr);
+        Module module{mkv_module(), MP_KIND_DEMUX};
+        REQUIRE(module.as<MpDemuxVtbl>() != nullptr);
         mp::Demux demux;
-        REQUIRE(demux.open(*module.vtbl, mkv_path()) == MP_OK);
+        REQUIRE(demux.open(*module.as<MpDemuxVtbl>(), mkv_path()) == MP_OK);
         const Streams at = find(demux);
         REQUIRE(at.both);
 
@@ -939,12 +889,12 @@ TEST_CASE("a video packet says what its timestamp is counted in", "[abi][v3][vid
         // exists to prevent and the one nothing would otherwise have caught.
         // Driven through the vtable rather than through mp::Demux, because
         // mp::Demux always asks for the size it was compiled with.
-        Module module{mp4_module()};
-        REQUIRE(module.vtbl != nullptr);
-        REQUIRE(module.vtbl->stream_video_info != nullptr);
+        Module module{mp4_module(), MP_KIND_DEMUX};
+        REQUIRE(module.as<MpDemuxVtbl>() != nullptr);
+        REQUIRE(module.as<MpDemuxVtbl>()->stream_video_info != nullptr);
 
         MpDemux* handle = nullptr;
-        REQUIRE(module.vtbl->open(av_path(), &handle) == MP_OK);
+        REQUIRE(module.as<MpDemuxVtbl>()->open(av_path(), &handle) == MP_OK);
         REQUIRE(handle != nullptr);
 
         struct Guarded {
@@ -958,12 +908,12 @@ TEST_CASE("a video packet says what its timestamp is counted in", "[abi][v3][vid
 
         // Stream 0 is the video track in this file, which the sections above
         // establish; asking the vtable directly means saying so here.
-        REQUIRE(module.vtbl->stream_video_info(handle, 0, &guarded.info) == MP_OK);
+        REQUIRE(module.as<MpDemuxVtbl>()->stream_video_info(handle, 0, &guarded.info) == MP_OK);
         CHECK(guarded.info.width == 128);
         // Not written, because the caller said its struct stops before it.
         CHECK(guarded.info.timescale == 0u);
         CHECK(guarded.canary == 0xFEEDFACEu);
 
-        module.vtbl->close(handle);
+        module.as<MpDemuxVtbl>()->close(handle);
     }
 }

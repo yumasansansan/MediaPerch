@@ -33,7 +33,6 @@
 
 namespace {
 
-const MpHost* g_host = nullptr;
 
 /// What to do about an impulse response whose gain is not one.
 enum class Normalise : std::uint32_t {
@@ -392,13 +391,12 @@ const MpDspVtbl g_vtbl = {
 
 MpResult MP_CALL module_init(const MpHost* host) noexcept
 {
-    g_host = host;
+    (void)host; // nothing here logs, so nothing here keeps the host
     return MP_OK;
 }
 
 void MP_CALL module_shutdown() noexcept
 {
-    g_host = nullptr;
 }
 
 const MpModuleDesc g_desc = {
@@ -413,6 +411,9 @@ const MpModuleDesc g_desc = {
     /* init        */ &module_init,
     /* shutdown    */ &module_shutdown,
     /* vtbl        */ &g_vtbl,
+    /* codecs      */ nullptr,
+    /* codec_count */ 0,
+    /* reserved    */ 0,
 };
 
 } // namespace

@@ -31,7 +31,6 @@
 
 namespace {
 
-const MpHost* g_host = nullptr;
 
 /// Reads a whole file, for `state`. Small by nature -- a VST3 state is a
 /// preset, not a sample library -- and capped so that pointing this at the
@@ -404,13 +403,12 @@ const MpDspVtbl g_vtbl = {
 
 MpResult MP_CALL module_init(const MpHost* host) noexcept
 {
-    g_host = host;
+    (void)host; // nothing here logs, so nothing here keeps the host
     return MP_OK;
 }
 
 void MP_CALL module_shutdown() noexcept
 {
-    g_host = nullptr;
 }
 
 const MpModuleDesc g_desc = {

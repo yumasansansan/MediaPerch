@@ -37,9 +37,9 @@ set(DISABLE_CMAKE_CONFIG ON CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 
 add_subdirectory("${CMAKE_SOURCE_DIR}/external/libebml"
-                 "${CMAKE_BINARY_DIR}/external/libebml" EXCLUDE_FROM_ALL)
+                 "${CMAKE_BINARY_DIR}/external/libebml" EXCLUDE_FROM_ALL SYSTEM)
 add_subdirectory("${CMAKE_SOURCE_DIR}/external/libmatroska"
-                 "${CMAKE_BINARY_DIR}/external/libmatroska" EXCLUDE_FROM_ALL)
+                 "${CMAKE_BINARY_DIR}/external/libmatroska" EXCLUDE_FROM_ALL SYSTEM)
 
 mediaperch_add_module(mp_demux_mkv
     KIND demux
