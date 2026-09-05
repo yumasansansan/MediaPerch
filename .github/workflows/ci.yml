@@ -99,9 +99,37 @@ jobs:
         with:
           submodules: true
 
+      # **dav1d builds with Meson and nothing else**, which makes it the one
+      # submodule here CMake cannot build -- see modules/codec/dav1d. The image
+      # has Ninja already and neither of the other two, so without this step
+      # `codec_dav1d` is skipped by its own guard, the build stays green, and
+      # the artifacts quietly have no AV1 decoder. A silent absence is exactly
+      # what this repository does not do elsewhere, so it is installed rather
+      # than shrugged at.
+      #
+      # Through the Miniconda the image ships rather than pip: both tools come
+      # from one channel, which is also how the development machine gets them.
+      # Before the developer environment on purpose -- that step captures PATH
+      # into GITHUB_ENV, and a PATH captured before an install is a PATH
+      # without it, which is the same reason the FFmpeg step in `quality` sits
+      # where it does.
+      - name: Meson and nasm, which build external/dav1d
+        run: |
+          & "$env:CONDA\Scripts\conda.exe" install -y -c conda-forge meson nasm
+          Add-Content -Path $env:GITHUB_PATH -Value "$env:CONDA\Scripts"
+          Add-Content -Path $env:GITHUB_PATH -Value "$env:CONDA\Library\bin"
+
       - name: MSVC developer environment
         shell: cmd
         run: ${{ env.VS_DEV_ENV }}
+
+      # Stated out loud, because the module is skipped silently when they are
+      # absent and a skipped decoder looks exactly like a passing build.
+      - name: Report the tools external/dav1d needs
+        run: |
+          meson --version
+          nasm -v
+          ninja --version
 
       - name: Configure
         run: cmake --preset ${{ matrix.preset }}
@@ -250,6 +278,15 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: true
+
+      # See the `msvc` job for why this is here and why it is before the
+      # developer environment. Without it the shipping build has no AV1
+      # decoder, and a size report that leaves one out is the wrong report.
+      - name: Meson and nasm, which build external/dav1d
+        run: |
+          & "$env:CONDA\Scripts\conda.exe" install -y -c conda-forge meson nasm
+          Add-Content -Path $env:GITHUB_PATH -Value "$env:CONDA\Scripts"
+          Add-Content -Path $env:GITHUB_PATH -Value "$env:CONDA\Library\bin"
 
       - name: MSVC developer environment
         shell: cmd

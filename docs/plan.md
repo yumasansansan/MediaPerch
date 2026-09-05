@@ -2014,21 +2014,91 @@ as `av.mp4`, in AV1 rather than H.264, so the two files differ in the codec and 
 else. SVT-AV1 encodes it: libaom is the reference and is minutes rather than seconds here,
 and what is under test is the container.
 
-**Not done, and it is not a coding question.** dav1d builds with Meson and nothing else —
-38 C sources of which 13 are compiled twice for the two bit depths, 47 nasm files, and no
-CMake anywhere in its tree. Every one of this tree's thirteen submodules is
-`add_subdirectory` and CMake. So there are three roads and they are worth naming before one
-is taken by accident:
+#### codec_dav1d, and the one submodule CMake cannot build
 
-| | Cost |
-|---|---|
-| **Meson through `ExternalProject_Add`** | a build-tool dependency, in the tree and in CI. Least code, tracks upstream, keeps the assembly — which is most of what makes dav1d dav1d |
-| **A CMakeLists of our own** | no new tool, and a port to maintain: the bitdepth templating and 47 nasm rules. Dropping the assembly to simplify would leave a decoder with dav1d's name and not its speed |
-| **Wait** | H.264's sequence header reader and the probe refusals it enables are entirely this tree's own code and need none of this |
+**Done.** `codec_dav1d` decodes AV1 through dav1d, and the chain runs end to end: `demux_mp4`
+reads the container, dav1d decodes to planes, `video_d3d11` converts by the matrix the
+container named, and `read_back` hands over single-precision linear light.
 
-The first is the recommendation. It is also the one that needs a decision rather than a
-commit: the only Python on the development machine is the one bundled with Inkscape, which
-has no `pip`, so installing Meson means installing Python first.
+**Meson, as an external project, and it is a real build dependency.** dav1d builds with
+Meson and nothing else — 38 C sources of which 13 are compiled twice for the two bit depths,
+47 nasm files, and no CMake anywhere in its tree — against thirteen submodules here that are
+all `add_subdirectory`. Writing a CMakeLists for it would mean reimplementing the bitdepth
+templating and the assembly rules and then maintaining them; dropping the assembly to make
+that tractable would leave a decoder with dav1d's name and not its speed, which is the only
+reason to prefer it over libaom. So `meson`, `ninja` and `nasm` are required, the module is
+skipped loudly when they are absent, and the tree still builds without an AV1 decoder — the
+shape every optional module here already takes. On the development machine they come from a
+micromamba environment, which is also how the Python problem was solved: the only Python on
+PATH was Inkscape's, with no `pip`.
+
+Three things this turned up that were not obvious from the outside:
+
+- **The release CRT, always, and §4 is what makes it safe.** dav1d is built once as a
+  release static library rather than once per configuration. That leaves a Debug MediaPerch
+  linking a release-CRT archive, which would be a mixed-runtime bug in ordinary code and is
+  not one here: the module is a DLL of its own and §4's rule that nothing is allocated
+  across the module boundary means no CRT object ever crosses it. The rule was written for
+  language interop and it paid for something else.
+- **ExternalProject does not look at the submodule.** It stamps its configure and build
+  steps and then trusts them, so a `git checkout` in `external/dav1d` leaves the built
+  library at whatever it was, with nothing saying so. That is not hypothetical: the first
+  build here was made while the submodule sat on master, stayed that way after it was pinned
+  to 1.5.4, and `vcs_version.h` reading `1.5.4-2-gaa09a630` was the only thing that admitted
+  the tests had run against two commits nobody had chosen. `BUILD_ALWAYS` is the fix and
+  costs almost nothing, because Meson's own Ninja notices that nothing changed and returns.
+- **Meson resolves wraps whether or not they are wanted, and writes into the source tree.**
+  dav1d carries `subprojects/checkasm.wrap`; `enable_tests=false` does not stop the wrap from
+  being resolved, so the first configure downloaded checkasm and a `.wraplock` *into the
+  submodule*, which then showed as untracked content in it and would have been a network
+  fetch during every CI configure. `--wrap-mode=nodownload` refuses the download and the
+  lock file is deleted afterwards -- removed rather than hidden behind
+  `submodule.<name>.ignore = untracked`, because a submodule that reports itself clean when
+  it is not is worth less than one that does not.
+- **`meson setup` needs a different argument depending on whether it has run before** —
+  `--reconfigure` for a configured directory, `--wipe` for a configured one it should
+  discard, and neither works on a fresh one. Emptying the directory first would settle it and
+  cannot be done from a script `ExternalProject` runs *inside* that directory, which is what
+  the first attempt did and why it failed. Asking is what is left, and
+  `meson-private/coredata.dat` is the file that answers.
+- **MEDIAPERCH_ARCH does not reach dav1d, and that is the right answer.** dav1d builds
+  every SIMD variant and picks one with CPUID, so the compiler's baseline never touches its
+  assembly. `dav1d_set_cpu_flags_mask` can cap it, and capping it was written and then
+  removed, because measuring what the call actually does answered the question that prompted
+  it — *does the AVX2 build then stop going through SSE code?*
+
+  **It does not.** dav1d's dispatch is a cascade of overwrites rather than a choice of one
+  tier: a DSP init assigns the SSSE3 functions, then overwrites the ones that have AVX2
+  versions, then the ones that have AVX-512 versions. `loop_filter_dsp_init_x86` is the
+  example to read — with AVX-512 and a slow gather, two of its four entries stay at AVX2 —
+  and every function with no AVX2 version keeps its SSE one and runs it. So an AVX2 build
+  goes through SSE code paths whatever the mask says, and nothing short of dav1d
+  implementing everything twice would change it.
+
+  What the mask did do, exactly: on the `avx2` build it set all six flags, which is dav1d's
+  default, so it was a no-op; on the `baseline` build it removed AVX2 and AVX-512, making
+  that build slower on a modern CPU for no correctness gain, since dav1d's assembly is
+  bit-exact against its C. The opposite of skipping wasted work, which is what it was for.
+
+  So dav1d is left to dispatch — which is what §CompilerOptions already records for
+  libFLAC, libmpg123, libopus and libwavpack. This tree compiles *its own* inner loops twice
+  because it controls that codegen; a library's own is not ours to pick.
+
+**CI installs them, and finding out that it did not is the reason.** The runner image has
+Ninja and neither of the other two, so the `find_program` guard fired and `codec_dav1d` was
+skipped in every leg -- the build stayed green and the artifacts quietly had no AV1 decoder,
+which is the kind of silent absence this repository does not accept anywhere else. Both
+tools now come from the Miniconda the image ships, rather than from pip, so they arrive from
+one channel and the same one the development machine uses. The step sits *before* the
+developer environment for the reason the FFmpeg step in `quality` does: that step captures
+PATH into `GITHUB_ENV`, and a PATH captured before an install is a PATH without it. A
+version report follows it, because a skipped module looks exactly like a passing build.
+
+**And it is the producer ABI v4 was written for.** dav1d hands back 4:0:0, 4:2:0, 4:2:2 and
+4:4:4 at 8, 10 and 12 bits, with the significant bits at the **bottom** of the container
+where P010 puts them at the top. Until now every planar frame the presenter had seen was
+built by hand in a test, which proves the arithmetic and not the join; `codec_dav1d_test.cpp`
+is where a real decoder's frames meet it.
 
 Four reasons one would be wanted beside `codec_mft`:
 
@@ -2214,6 +2284,7 @@ HDR state.
 | M5.9 | The structural cut: `src/engine` and `src/player` | **done.** The portable half was one library holding both the audio engine and the thing that decides what to play. §4 answers yes to "could this ABI carry a DAW's engine", and a DAW taking it would have taken the transport, the playlist, the INI schema and the IPC wire format with it. They are `src/player` now, and `src/engine` has no route to them: the include path is what enforces it, so reaching across is a compile error rather than a review comment. CI builds `mediaperch_engine` alone, which checks both cuts at once |
 | M5.75 | Path B is hashable, and a VST3 can be a stage in it | **done.** `mp::Processor` is `ProcessedGraph`'s arithmetic without the device, the ring or the threads, so `decode --path processed --gain --dsp` runs the chain and prints its SHA-256 -- the flags had been accepted and silently ignored, which is why nothing in this tree had ever compared the resampler between two builds. It found three bugs on the first run: `use_processed` could not see a gain, `Processor::reset` returned `MP_END` on success, and a seek left the noise shaper feeding back error from wherever the stream used to be. The baseline and AVX2 builds agree over 144 runs. `modules/dsp/vst3` hosts somebody else's plugin on `pluginterfaces` alone, with a VST3 written in `tests/` so the host is tested without one installed |
 | M5.95 | ABI v3: several streams from one file | **done.** `select` named one stream and `seek(frame)` meant "the selected one", which has no answer once a player wants audio and video out of one file -- and appending would have left both meaning something narrower than their names. So `select_streams`, `seek(stream, frame)`, `MpPacket::reserved` becoming `stream`, and `stream_video_info` appended for the three colour code points §9.1 turns on. Checked against `demux_mp4` reading a real MP4 with two tracks in it, which is the first test here that drives a module rather than a fake. `demux_mkv` serves several tracks too, which is what makes v3 an interface rather than one module's habit -- and clearing MP_PACKET_TIMED on a video packet that never had a position is what that second container found |
+| M6.1 | codec_dav1d | **done.** AV1 decoded by dav1d, end to end through demux_mp4 and video_d3d11, and the first decoder here to produce a planar frame -- so the presenter's planar path now has a producer rather than frames a test built by hand. Meson as an external project, which is a real build dependency and the first time CMake could not build a submodule; `meson`, `ninja` and `nasm` required, the module skipped loudly without them. dav1d is built once with the release CRT, which §4's no-allocation-across-the-boundary rule is what makes safe. MEDIAPERCH_ARCH is deliberately not plumbed through: capping dav1d with `dav1d_set_cpu_flags_mask` was written and removed once measurement showed the dispatch is a cascade of overwrites, so an AVX2 build runs SSE code for every function with no AVX2 version whatever the mask says -- leaving the call a no-op on the avx2 build and a slowdown on the baseline one. CI had neither meson nor nasm, so the module was being skipped in every leg with the build still green -- both now come from the image's Miniconda, in a step before the developer environment and followed by a version report, because a silently skipped decoder looks exactly like a passing build |
 | M6.0 | AV1 crosses the container | **done, and it is half of `codec_dav1d`.** MP_CODEC_AV1 appended, `demux_mp4` reading an `av01` sample entry, and the `av1C` record handed over verbatim -- read by asking the box to write itself, because Bento4 parses this one and keeps no raw bytes, and a record reassembled from parsed fields would be this module's opinion of the file rather than the file. `av1.mp4` is `av.mp4`'s picture and audio in AV1, differing in the codec and in nothing else. The decoder waits on a build decision rather than on code: dav1d is Meson-only, every submodule here is CMake, and the machine's only Python has no pip |
 | M5.99 | The presenter draws every shape v4 can describe | **done.** 4:0:0, 4:2:0, 4:2:2 and 4:4:4, planar or semi-planar, at 8 through 16 bits, with one matrix and one transfer that a two-plane and a three-plane entry point both reach. The subsamplings need no case: normalised coordinates make a half-width chroma plane and a full-width one the same call, so the general form is less code than the 4:2:0 special case it replaced. Two things the tests found rather than the reasoning: 4:0:0 fails as a strong green rather than as an error, because an unbound texture samples to zero and zero is not neutral chroma; and neutral chroma is 127.5, not 128, because half the full scale falls between two codes at every even depth -- the shader was right and the first test was not. Interleaved Y'CbCr is refused with a sentence |
 | M5.98 | ABI v4: a frame describes its pixels | **done.** MpPixelFormat was six DXGI names in a header meant to outlive Direct3D, and could not say 4:2:2, 4:4:4 or twelve bits at all -- while naming the combinations would have taken seventy-five enumerators. MpPixelLayout is six fields and the arithmetic over them, and `shift` is what earned the break: ten bits at the top of sixteen and ten at the bottom are the same depth and a factor of sixty-four apart, which v3's `bool ten_bit` had no way to be right about. The general formula reproduces the constant `yuv_matrix.cpp` carried, exactly, which is what makes it a refactor. Doing it before `codec_dav1d` rather than after cost one producer and one consumer, and turned up a ten-bit frame `codec_mft` had been labelling eight |

@@ -40,3 +40,6 @@
 [submodule "external/vst3sdk/pluginterfaces"]
 	path = external/vst3sdk/pluginterfaces
 	url = https://github.com/steinbergmedia/vst3_pluginterfaces.git
+[submodule "external/dav1d"]
+	path = external/dav1d
+	url = https://code.videolan.org/videolan/dav1d.git

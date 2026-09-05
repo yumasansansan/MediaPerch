@@ -115,6 +115,16 @@ if(TARGET mp_codec_mft AND TARGET mp_demux_mp4 AND TARGET mp_video_d3d11)
     add_dependencies(mediaperch_tests mp_codec_mft mp_video_d3d11)
 endif()
 
+# AV1 through dav1d, which is the first decoder in this tree to produce a
+# planar frame -- so it is where the presenter's planar path meets a real
+# producer rather than a frame a test built by hand.
+if(TARGET mp_codec_dav1d AND TARGET mp_demux_mp4 AND TARGET mp_video_d3d11)
+    target_sources(mediaperch_tests PRIVATE codec_dav1d_test.cpp)
+    target_compile_definitions(mediaperch_tests PRIVATE
+        "MEDIAPERCH_CODEC_DAV1D=\"$<TARGET_FILE:mp_codec_dav1d>\"")
+    add_dependencies(mediaperch_tests mp_codec_dav1d)
+endif()
+
 # The presenter, rendered off-screen on WARP and read back. Not a screenshot
 # somebody looks at: pixels, hashed, on the same path a display gets.
 if(TARGET mp_video_d3d11)
