@@ -293,7 +293,14 @@ IPacketFeed* PacketRouter::feed(std::uint32_t stream) noexcept
 bool PacketRouter::someone_is_full(const Queue* mine) const noexcept
 {
     for (const std::unique_ptr<Queue>& queue : queues_) {
-        if (queue.get() != mine && queue->bytes >= limits_.queued_bytes_per_stream) {
+        if (queue.get() == mine) {
+            continue;
+        }
+        // Both, not either: the bytes bound the memory and the floor keeps a
+        // file whose packets are large from blocking on every one of them. See
+        // PacketRouterLimits.
+        if (queue->bytes >= limits_.queued_bytes_per_stream &&
+            queue->waiting.size() >= limits_.queued_packets_floor) {
             return true;
         }
     }

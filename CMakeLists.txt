@@ -78,6 +78,16 @@ include(Rust)
 option(MEDIAPERCH_REQUIRE_FFMPEG
        "Fail the decode-quality test when FFmpeg is missing rather than skipping it" OFF)
 
+# **Two of the matrix's columns are not this tree's to promise.** `demux_ffmpeg`
+# runs whatever FFmpeg is installed and `demux_mf` asks Media Foundation, whose
+# codec set differs between a desktop and a server SKU -- so those two cells are
+# what *this machine* does, and a second machine measuring them differently is
+# information rather than a regression. Strict compares every column and is
+# right where the table is written; CI turns it off and still holds every column
+# whose behaviour is code in this repository.
+option(MEDIAPERCH_MATRIX_STRICT
+       "Compare every column of the format matrix, including the ones that delegate" ON)
+
 add_library(mediaperch_abi INTERFACE)
 add_library(MediaPerch::abi ALIAS mediaperch_abi)
 target_include_directories(mediaperch_abi INTERFACE "${CMAKE_CURRENT_LIST_DIR}/include")

@@ -254,6 +254,47 @@ TEST_CASE("a queue that fills says so rather than growing", "[packet][router]")
     CHECK(got_video.size() == 24);
 }
 
+TEST_CASE("a packet floor keeps a big-packet file moving", "[packet][router]")
+{
+    // **A byte cap alone is a resolution limit in disguise.** A keyframe out of
+    // a 16K stream is a good fraction of any fixed cap on its own, and a cap
+    // that one packet exceeds turns "wait for the other consumer" into "wait
+    // after every packet". The floor is what stops the cap acquiring a
+    // resolution: full means over the bytes *and* holding a few.
+    Module module{MEDIAPERCH_DEMUX_MP4, MP_KIND_DEMUX};
+    REQUIRE(module.as<MpDemuxVtbl>() != nullptr);
+
+    const auto reachable = [&](std::uint32_t floor) {
+        mp::Demux demux;
+        REQUIRE(demux.open(*module.as<MpDemuxVtbl>(), MEDIAPERCH_TEST_AV) == MP_OK);
+        const Streams at = find_streams(demux);
+        REQUIRE(at.both);
+        const std::uint32_t both[] = {at.audio, at.video};
+        REQUIRE(demux.select_streams(both) == MP_OK);
+
+        // One byte: every packet is over it, which is the shape of a file whose
+        // packets are larger than any cap somebody chose.
+        mp::PacketRouter::Limits limits;
+        limits.queued_bytes_per_stream = 1;
+        limits.queued_packets_floor = floor;
+        mp::PacketRouter router{demux, both, limits};
+        mp::IPacketFeed* video = router.feed(at.video);
+        REQUIRE(video != nullptr);
+
+        std::vector<Seen> got;
+        while (take(*video, got) == Got::packet) {
+        }
+        return got.size();
+    };
+
+    // With no floor the first queued packet is already over the cap, so the
+    // reader stops as soon as one of somebody else's packets turns up.
+    const std::size_t without = reachable(0);
+    // With one, that packet is allowed to wait and the reader gets further.
+    const std::size_t with = reachable(4);
+    CHECK(with > without);
+}
+
 TEST_CASE("a seek moves the file and empties what was read before it",
           "[packet][router]")
 {

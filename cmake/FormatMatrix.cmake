@@ -363,11 +363,70 @@ if(MEDIAPERCH_WRITE)
     return()
 endif()
 
-if(NOT filled STREQUAL readme)
+# **The last two columns delegate, and a second machine is entitled to differ
+# there.** `ffmpeg` is whatever FFmpeg is installed and `mf` is whatever Media
+# Foundation has -- a desktop SKU and a server SKU do not carry the same audio
+# codecs. Everything to their left is code in this repository and must agree
+# everywhere. `MEDIAPERCH_MATRIX_STRICT` is on where the table is written and
+# off in CI, and this is what off means: those two cells are blanked on both
+# sides before the comparison, so a difference in them is not a failure and a
+# difference anywhere else still is.
+function(mediaperch_comparable text out)
+    if(MEDIAPERCH_MATRIX_STRICT)
+        set(${out} "${text}" PARENT_SCOPE)
+        return()
+    endif()
+    set(result "")
+    string(REPLACE "\n" ";;;" as_list "${text}")
+    string(REPLACE ";;;" ";" as_list "${as_list}")
+    foreach(line IN LISTS as_list)
+        if(line MATCHES "^\\|.*\\|$" AND NOT line MATCHES "^\\|-")
+            string(REGEX REPLACE " [^|]*\\| [^|]*\\|$" " ~| ~|" line "${line}")
+        endif()
+        string(APPEND result "${line}\n")
+    endforeach()
+    set(${out} "${result}" PARENT_SCOPE)
+endfunction()
+
+mediaperch_comparable("${filled}" filled_comparable)
+mediaperch_comparable("${readme}" readme_comparable)
+
+if(NOT filled_comparable STREQUAL readme_comparable)
     file(WRITE "${W}/README.expected.md" "${filled}")
+
+    # **Say which rows**, because this is the one check whose failure can be
+    # reproduced only on the machine that saw it. "The table differs" sent a
+    # person to a file they do not have; the rows that differ fit in the log.
+    string(REGEX MATCHALL "\\|[^\n]*\\|" measured_rows "${filled}")
+    string(REGEX MATCHALL "\\|[^\n]*\\|" written_rows "${readme}")
+    list(LENGTH measured_rows measured_count)
+    list(LENGTH written_rows written_count)
+    set(differences "")
+    set(shown 0)
+    if(measured_count EQUAL written_count)
+        math(EXPR last "${measured_count} - 1")
+        foreach(i RANGE 0 ${last})
+            list(GET measured_rows ${i} measured_row)
+            list(GET written_rows ${i} written_row)
+            if(NOT measured_row STREQUAL written_row AND shown LESS 8)
+                string(APPEND differences "\n  README   ${written_row}"
+                                          "\n  measured ${measured_row}\n")
+                math(EXPR shown "${shown} + 1")
+            endif()
+        endforeach()
+    else()
+        set(differences "\n  the table has ${measured_count} rows here and "
+                        "${written_count} in the README\n")
+    endif()
+    if(differences STREQUAL "")
+        set(differences "\n  the rows are the same; the difference is in the prose "
+                        "around them\n")
+    endif()
+
     message(FATAL_ERROR
         "the format matrix in the README is not what this machine measures.\n"
-        "What it should say is in ${W}/README.expected.md, and\n"
+        "${differences}"
+        "\nWhat it should say is in ${W}/README.expected.md, and\n"
         "  cmake -D MEDIAPERCH_WRITE=ON ... -P cmake/FormatMatrix.cmake\n"
         "writes it. A table nobody generates is a table that is wrong.")
 endif()

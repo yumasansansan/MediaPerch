@@ -1570,6 +1570,18 @@ blocking would be a deadlock between two consumers on different threads. `VideoG
 it as `Step::repeated` — nothing is available, so the picture that is up stays up — which is
 the same thing it does when nothing is due.
 
+**And a byte cap alone is a resolution limit in disguise**, which is why there is a second
+number beside it. An eight-bit 4:2:0 frame at 16K is 190 MB uncompressed, so a keyframe out
+of one can be a good fraction of any fixed cap on its own — and a cap a single
+packet exceeds turns "wait for the other consumer" into "wait after every packet".
+Nothing above the decoder has a resolution in it, and the cap should not quietly acquire
+one. So a queue is full only when it is over the bytes **and** holding at least
+`queued_packets_floor` of them, which bounds what waits at about that many of the largest
+packet the file actually has rather than at a number chosen years earlier. Four: one is
+enough to keep the file moving, and four is few enough round trips to be quiet on an
+ordinary interleave — where the byte cap is what bites anyway, four audio packets
+being a few hundred bytes.
+
 The second front end earned its place again on the way: `Limits` was a nested struct with
 default member initializers used as a default argument, which MSVC accepts and clang refuses
 -- and `PassthroughConfig` carries a comment saying exactly that, from the last time. It is
@@ -1692,6 +1704,32 @@ half a refresh early beats half a refresh late when the alternative was a whole 
 
 Zero lead stays the default, and it is what a caller with no display wants: show a frame once
 it is due and not before, which is what every test that measures the arithmetic asks for.
+
+#### Why it is not zero, and what would make it smaller
+
+Half a refresh is quantisation, not error, and no clock removes it. A frame becomes due at a
+moment of its own choosing and can only be *shown* at a vertical blank, so unless the frame
+rate divides the refresh rate exactly **and** the two are in phase, there is nowhere to put
+the frame that is exactly right. 23.976 against 59.94 is five halves: every other frame lands
+half a refresh out however good the clock is. Being *late* by up to a whole refresh was a
+mistake and is fixed; being *out* by up to half of one is the display.
+
+Three things would make it smaller, and only one of them is a timing change:
+
+- **A refresh that is a multiple of the frame rate.** 24 fps on 120 Hz is one frame every five
+  refreshes with nothing left over. That is a display-mode change, which is what a player's
+  "match refresh rate to content" setting is.
+- **Variable refresh.** With VRR the display refreshes when a frame is presented, so the
+  quantisation disappears and what is left is the presentation jitter. A swap chain flag and a
+  mode, not a clock.
+- **Knowing the appearance instant instead of assuming it.** The lead is assumed to be one
+  refresh; `IDXGISwapChain::GetFrameStatistics` and `DwmGetCompositionTimingInfo` report the
+  QPC of a real present and the composition rate, which would replace the assumption with a
+  measurement. That removes whatever *systematic* part of the error the assumption carries. It
+  does not touch the quantisation, which is the half a refresh.
+
+So zero is not reachable at a fixed refresh rate, half a refresh is the floor, and the loop is
+at the floor.
 
 #### How large a picture, measured
 

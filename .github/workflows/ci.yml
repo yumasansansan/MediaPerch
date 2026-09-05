@@ -277,10 +277,16 @@ jobs:
       # job exists to use them. Release rather than Debug because the check
       # decodes about a minute of audio a dozen times over, and a Debug decoder
       # turns two minutes into twenty.
+      # MEDIAPERCH_MATRIX_STRICT=OFF because two of the matrix's columns are not
+      # this tree's to promise: `ffmpeg` is whatever FFmpeg is installed and
+      # `mf` is whatever Media Foundation has, and a Windows Server image does
+      # not carry the same audio codecs a desktop does. Every column whose
+      # behaviour is code in this repository is still held to the table.
       - name: Configure
         run: >
           cmake --preset ninja-msvc
           -D MEDIAPERCH_REQUIRE_FFMPEG=ON -D MEDIAPERCH_DIAGNOSTICS=ON
+          -D MEDIAPERCH_MATRIX_STRICT=OFF
 
       - name: Build
         run: cmake --build --preset ninja-msvc --config Release

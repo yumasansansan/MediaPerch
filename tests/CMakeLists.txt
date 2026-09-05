@@ -301,6 +301,7 @@ if(TARGET mediaperch_probe)
                 -D "MEDIAPERCH_PROBE=$<TARGET_FILE:mediaperch_probe>"
                 -D "MEDIAPERCH_WORK=${CMAKE_CURRENT_BINARY_DIR}/formats"
                 -D "MEDIAPERCH_README=${CMAKE_SOURCE_DIR}/README.md"
+                -D "MEDIAPERCH_MATRIX_STRICT=${MEDIAPERCH_MATRIX_STRICT}"
                 -D "MEDIAPERCH_REQUIRE_FFMPEG=${MEDIAPERCH_REQUIRE_FFMPEG}"
                 -P "${CMAKE_SOURCE_DIR}/cmake/FormatMatrix.cmake")
     set_tests_properties(format_matrix PROPERTIES TIMEOUT 600 LABELS quality)

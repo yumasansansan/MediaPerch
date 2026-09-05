@@ -200,6 +200,25 @@ struct PacketRouterLimits {
     /// video is a few -- and small enough that a file which is not sane says so
     /// rather than filling memory.
     std::size_t queued_bytes_per_stream = 32u * 1024u * 1024u;
+
+    /// How many packets may wait before the byte cap is allowed to bite.
+    ///
+    /// **A byte cap alone is a resolution limit in disguise.** An eight-bit
+    /// 4:2:0 frame at 16K is 190 MB uncompressed, so a keyframe out of one can
+    /// be a good fraction of the byte cap on its own -- and a cap that a single
+    /// packet exceeds turns "wait for the other consumer" into "wait after
+    /// every packet". The measured ceiling is Direct3D's 16384 and nothing
+    /// above the decoder has a resolution in it, so the cap should not quietly
+    /// acquire one either.
+    ///
+    /// So a queue is full only when it is over the bytes **and** holding at
+    /// least this many, which bounds what waits at about this many of the
+    /// largest packet the file has rather than at a number chosen years
+    /// earlier. Four, because one is enough for the file to keep moving and
+    /// four is few enough round trips to be quiet on an ordinary interleave --
+    /// where the byte cap is what bites anyway, four packets of audio being a
+    /// few hundred bytes.
+    std::uint32_t queued_packets_floor = 4;
 };
 
 class PacketRouter final {
@@ -298,8 +317,9 @@ private:
     };
 
     [[nodiscard]] Queue* find(std::uint32_t stream) noexcept;
-    /// Whether any queue other than `mine` is at its cap, which is when
-    /// reading another packet could push it further over.
+    /// Whether any queue other than `mine` is full -- over the byte cap *and*
+    /// past the packet floor -- which is when reading another packet could push
+    /// it further over.
     [[nodiscard]] bool someone_is_full(const Queue* mine) const noexcept;
     /// A vector with capacity, from the ones packets have already been in.
     [[nodiscard]] std::vector<std::uint8_t> spare();
