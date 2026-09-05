@@ -289,10 +289,19 @@ jobs:
       # the measuring commands -- from a skip into a failure, so the day either
       # stops being true is the day the job goes red rather than the day it
       # quietly starts checking nothing.
+      #
+      # **By label rather than by name, and format_matrix is why.** This step
+      # ran `-R decode_quality` and so was the only job with FFmpeg that did not
+      # run the other check needing it. Everywhere else format_matrix skips for
+      # want of FFmpeg -- 0.03 seconds against 24 on a machine that has it -- so
+      # the table in the README was only ever really measured by a person, and
+      # it went on claiming five modules worked for a day after they stopped
+      # loading at all. A label picks up the third quality check too, whatever
+      # it turns out to be.
       - name: Measure
         run: >
           ctest --preset ninja-msvc --build-config Release
-          -R decode_quality --output-on-failure --no-tests=error
+          -L quality --output-on-failure --no-tests=error
 
   # What actually ships: optimised, link-time optimised, no test suite and no
   # measuring apparatus. It is a separate job because it is a *different build* --

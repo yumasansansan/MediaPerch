@@ -767,13 +767,28 @@ designed:
   they parse and nothing about a host.
 - **`format_matrix` would have shown it in one line** -- and it needs FFmpeg and a corpus, so
   it skips in every CI leg that builds. It passes in 0.03 seconds there and takes 24 on a
-  machine that has them. The one job with FFmpeg runs `decode_quality` alone. So the table
-  that would have caught this is only ever really measured by a person.
+  machine that has them. The one job with FFmpeg ran `decode_quality` alone, by name. So the
+  table that would have caught this was only ever really measured by a person. That step
+  selects on the `quality` label now, which is what both checks already carried and what a
+  third one would carry too.
 
 `tests/module_abi_test.cpp` is what catches it now, and it deliberately names nothing: it
 walks the directory the modules are built into -- 34 DLLs -- and requires each to answer at
 MP_ABI_VERSION, to report that version back, and to refuse the versions either side. The
 module that falls behind is the one nobody remembered to name.
+
+It **collects** rather than asserting where it finds, which is the difference between one
+run and five: a REQUIRE inside the loop stops at the first module and says nothing about the
+rest. Put back to 3 deliberately, the sweep names all five in one failure --
+
+    modules that answered null at MP_ABI_VERSION 4:
+      mp_codec_aac.dll
+      mp_codec_alac.dll
+      mp_codec_dsd.dll
+      mp_demux_adts.dll
+      mp_demux_dsd.dll
+
+-- which is the measurement that says the check works, rather than the hope that it does.
 
 Two smaller checks broke the same way and are worth recording together, because the shape is
 the same -- a check that stops checking without going red:

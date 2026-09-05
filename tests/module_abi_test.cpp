@@ -57,6 +57,18 @@ std::vector<std::filesystem::path> modules()
     return found;
 }
 
+/// One name per line, so a failure reads as a list rather than as a sentence
+/// with commas in it.
+std::string listed(const std::vector<std::string>& names)
+{
+    std::string out;
+    for (const std::string& name : names) {
+        out += "\n  ";
+        out += name;
+    }
+    return out;
+}
+
 } // namespace
 
 TEST_CASE("every module built here loads at this tree's ABI version", "[abi][modules]")
@@ -66,24 +78,42 @@ TEST_CASE("every module built here loads at this tree's ABI version", "[abi][mod
     // having none to make, which is the failure mode a sweep like this has.
     REQUIRE(found.size() >= 10u);
 
+    // **Collected rather than asserted where they are found.** A REQUIRE inside
+    // the loop stops at the first module and says nothing about the rest, which
+    // would have reported one of the five the Rust mirror took down and left
+    // the other four to be found one rebuild at a time.
+    std::vector<std::string> refused;
+    std::vector<std::string> unusable;
+
     for (const auto& path : found) {
         const std::string name = path.filename().string();
         INFO(name);
 
         auto* dll = ::LoadLibraryW(path.c_str());
-        REQUIRE(dll != nullptr);
+        if (dll == nullptr) {
+            unusable.push_back(name + " would not load at all");
+            continue;
+        }
 
         using Entry = const MpModuleDesc*(MP_CALL*)(std::uint32_t);
         auto* entry = reinterpret_cast<Entry>(
             reinterpret_cast<void*>(::GetProcAddress(dll, "mp_module_entry")));
         // Every DLL in this directory is a module, so one without the export is
         // something that should not have been put here.
-        REQUIRE(entry != nullptr);
+        if (entry == nullptr) {
+            unusable.push_back(name + " exports no mp_module_entry");
+            ::FreeLibrary(dll);
+            continue;
+        }
 
         const MpModuleDesc* desc = entry(MP_ABI_VERSION);
         // **The line the Rust mirror would have failed.** A module that answers
         // null here is one the player silently does without.
-        REQUIRE(desc != nullptr);
+        if (desc == nullptr) {
+            refused.push_back(name);
+            ::FreeLibrary(dll);
+            continue;
+        }
         CHECK(desc->abi_version == MP_ABI_VERSION);
         CHECK(desc->size == sizeof(MpModuleDesc));
         CHECK(desc->id != nullptr);
@@ -102,5 +132,15 @@ TEST_CASE("every module built here loads at this tree's ABI version", "[abi][mod
             desc->shutdown();
         }
         ::FreeLibrary(dll);
+    }
+
+    {
+        INFO("modules that answered null at MP_ABI_VERSION " << MP_ABI_VERSION << ":"
+                                                             << listed(refused));
+        REQUIRE(refused.empty());
+    }
+    {
+        INFO("DLLs in the module directory that are not modules:" << listed(unusable));
+        REQUIRE(unusable.empty());
     }
 }
