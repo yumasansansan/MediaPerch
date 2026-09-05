@@ -224,6 +224,70 @@ TEST_CASE("one demuxer serves two streams out of one file", "[abi][v3][demux]")
     }
 }
 
+TEST_CASE("AV1 in an MP4 is named, and its av1C comes across verbatim",
+          "[abi][v3][demux][av1]")
+{
+    // **The container half of AV1, which is where it starts.** Nothing in this
+    // tree decodes AV1 yet; `demux_mp4` still has to recognise an `av01` sample
+    // entry and hand over the `av1C` record, and that is checkable on its own.
+    // Same picture, same length and same audio as `av.mp4` -- SVT-AV1 instead
+    // of x264 -- so the two files differ in the codec and in nothing else.
+    Module module{mp4_module()};
+    REQUIRE(module.vtbl != nullptr);
+
+    mp::Demux demux;
+    REQUIRE(demux.open(*module.vtbl, MEDIAPERCH_TEST_AV1) == MP_OK);
+    REQUIRE(demux.stream_count() == 2);
+
+    std::uint32_t video = 0;
+    bool found = false;
+    MpStreamInfo info{};
+    for (std::uint32_t i = 0; i < demux.stream_count(); ++i) {
+        if (demux.stream_info(i, info) && info.kind == MP_STREAM_VIDEO) {
+            video = i;
+            found = true;
+            break;
+        }
+    }
+    REQUIRE(found);
+    CHECK(info.codec == MP_CODEC_AV1);
+
+    MpVideoInfo geometry{};
+    geometry.size = sizeof(geometry);
+    REQUIRE(demux.video_info(video, geometry));
+    CHECK(geometry.width == 128u);
+    CHECK(geometry.height == 96u);
+
+    // **The record, verbatim, and the first byte is what says so.** An
+    // AV1CodecConfigurationRecord opens with a marker bit of 1 and a version of
+    // 1 in the low seven bits, which is 0x81 -- and Bento4 keeps no raw bytes
+    // for this box, so a record reassembled from its parsed fields would very
+    // likely also start 0x81 and be this module's opinion of the file rather
+    // than the file. The length is the second half of the check: a rebuilt
+    // four-byte record would not carry the sequence header OBU that follows.
+    std::vector<std::uint8_t> config;
+    REQUIRE(demux.stream_config(video, config));
+    REQUIRE(config.size() > 4u);
+    CHECK(config[0] == 0x81u);
+    // seq_profile is the top three bits of the second byte; Main is 0.
+    CHECK((config[1] >> 5) == 0u);
+
+    // And the packets come out. AV1 in an MP4 is already OBUs with their own
+    // sizes, so unlike H.264 there is no length-prefixed framing for a decoder
+    // to undo -- twenty-four samples, one a frame, the same as av.mp4.
+    const std::uint32_t only_video[] = {video};
+    REQUIRE(demux.select_streams(only_video) == MP_OK);
+    std::vector<std::uint8_t> buffer;
+    MpPacket packet{};
+    std::uint32_t packets = 0;
+    while (demux.read_packet(buffer, packet) == MP_OK) {
+        CHECK(packet.stream == video);
+        CHECK(packet.bytes > 0);
+        ++packets;
+    }
+    CHECK(packets == 24u);
+}
+
 TEST_CASE("a seek names the stream its frame is counted in", "[abi][v3][demux]")
 {
     // v2's `seek(frame)` meant "the selected stream" and had no answer once two

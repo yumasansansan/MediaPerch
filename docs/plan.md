@@ -1999,6 +1999,37 @@ What that buys is the thing §7 says about audio, arriving for video: the determ
 decoder is one in the tree, checkable the way `codec_alac` is, rather than a black box that
 a Windows update can change under a hash.
 
+#### The container half of AV1 is done; the library is a build-system question
+
+**Done:** `MP_CODEC_AV1` is appended, `demux_mp4` recognises an `av01` sample entry, and the
+`av1C` record crosses verbatim. Bento4 parses `av1C` into fields and — unlike `avcC` and
+`hvcC` — keeps no raw bytes for it, so the record is read the way `alac_config` reads the
+ALAC cookie: the box is asked to write itself and what follows the eight byte header is the
+record. Rebuilding it from the parsed fields would work and is the wrong shape, because the
+ABI says a codec gets the container's blob **verbatim** and a reassembled record is this
+module's opinion of the file rather than the file.
+
+`tests/data/mp4/av1.mp4` is the same 128x96, the same twenty-four frames and the same audio
+as `av.mp4`, in AV1 rather than H.264, so the two files differ in the codec and in nothing
+else. SVT-AV1 encodes it: libaom is the reference and is minutes rather than seconds here,
+and what is under test is the container.
+
+**Not done, and it is not a coding question.** dav1d builds with Meson and nothing else —
+38 C sources of which 13 are compiled twice for the two bit depths, 47 nasm files, and no
+CMake anywhere in its tree. Every one of this tree's thirteen submodules is
+`add_subdirectory` and CMake. So there are three roads and they are worth naming before one
+is taken by accident:
+
+| | Cost |
+|---|---|
+| **Meson through `ExternalProject_Add`** | a build-tool dependency, in the tree and in CI. Least code, tracks upstream, keeps the assembly — which is most of what makes dav1d dav1d |
+| **A CMakeLists of our own** | no new tool, and a port to maintain: the bitdepth templating and 47 nasm rules. Dropping the assembly to simplify would leave a decoder with dav1d's name and not its speed |
+| **Wait** | H.264's sequence header reader and the probe refusals it enables are entirely this tree's own code and need none of this |
+
+The first is the recommendation. It is also the one that needs a decision rather than a
+commit: the only Python on the development machine is the one bundled with Inkscape, which
+has no `pip`, so installing Meson means installing Python first.
+
 Four reasons one would be wanted beside `codec_mft`:
 
 - **Codecs Windows does not have.** AV1 needs Windows 11 and a Store extension; VVC has
@@ -2183,6 +2214,7 @@ HDR state.
 | M5.9 | The structural cut: `src/engine` and `src/player` | **done.** The portable half was one library holding both the audio engine and the thing that decides what to play. §4 answers yes to "could this ABI carry a DAW's engine", and a DAW taking it would have taken the transport, the playlist, the INI schema and the IPC wire format with it. They are `src/player` now, and `src/engine` has no route to them: the include path is what enforces it, so reaching across is a compile error rather than a review comment. CI builds `mediaperch_engine` alone, which checks both cuts at once |
 | M5.75 | Path B is hashable, and a VST3 can be a stage in it | **done.** `mp::Processor` is `ProcessedGraph`'s arithmetic without the device, the ring or the threads, so `decode --path processed --gain --dsp` runs the chain and prints its SHA-256 -- the flags had been accepted and silently ignored, which is why nothing in this tree had ever compared the resampler between two builds. It found three bugs on the first run: `use_processed` could not see a gain, `Processor::reset` returned `MP_END` on success, and a seek left the noise shaper feeding back error from wherever the stream used to be. The baseline and AVX2 builds agree over 144 runs. `modules/dsp/vst3` hosts somebody else's plugin on `pluginterfaces` alone, with a VST3 written in `tests/` so the host is tested without one installed |
 | M5.95 | ABI v3: several streams from one file | **done.** `select` named one stream and `seek(frame)` meant "the selected one", which has no answer once a player wants audio and video out of one file -- and appending would have left both meaning something narrower than their names. So `select_streams`, `seek(stream, frame)`, `MpPacket::reserved` becoming `stream`, and `stream_video_info` appended for the three colour code points §9.1 turns on. Checked against `demux_mp4` reading a real MP4 with two tracks in it, which is the first test here that drives a module rather than a fake. `demux_mkv` serves several tracks too, which is what makes v3 an interface rather than one module's habit -- and clearing MP_PACKET_TIMED on a video packet that never had a position is what that second container found |
+| M6.0 | AV1 crosses the container | **done, and it is half of `codec_dav1d`.** MP_CODEC_AV1 appended, `demux_mp4` reading an `av01` sample entry, and the `av1C` record handed over verbatim -- read by asking the box to write itself, because Bento4 parses this one and keeps no raw bytes, and a record reassembled from parsed fields would be this module's opinion of the file rather than the file. `av1.mp4` is `av.mp4`'s picture and audio in AV1, differing in the codec and in nothing else. The decoder waits on a build decision rather than on code: dav1d is Meson-only, every submodule here is CMake, and the machine's only Python has no pip |
 | M5.99 | The presenter draws every shape v4 can describe | **done.** 4:0:0, 4:2:0, 4:2:2 and 4:4:4, planar or semi-planar, at 8 through 16 bits, with one matrix and one transfer that a two-plane and a three-plane entry point both reach. The subsamplings need no case: normalised coordinates make a half-width chroma plane and a full-width one the same call, so the general form is less code than the 4:2:0 special case it replaced. Two things the tests found rather than the reasoning: 4:0:0 fails as a strong green rather than as an error, because an unbound texture samples to zero and zero is not neutral chroma; and neutral chroma is 127.5, not 128, because half the full scale falls between two codes at every even depth -- the shader was right and the first test was not. Interleaved Y'CbCr is refused with a sentence |
 | M5.98 | ABI v4: a frame describes its pixels | **done.** MpPixelFormat was six DXGI names in a header meant to outlive Direct3D, and could not say 4:2:2, 4:4:4 or twelve bits at all -- while naming the combinations would have taken seventy-five enumerators. MpPixelLayout is six fields and the arithmetic over them, and `shift` is what earned the break: ten bits at the top of sixteen and ten at the bottom are the same depth and a factor of sixty-four apart, which v3's `bool ten_bit` had no way to be right about. The general formula reproduces the constant `yuv_matrix.cpp` carried, exactly, which is what makes it a refactor. Doing it before `codec_dav1d` rather than after cost one producer and one consumer, and turned up a ten-bit frame `codec_mft` had been labelling eight |
 | M5.97 | Section 9.9: a video packet says what its timestamp is counted in | **done.** MpVideoInfo::timescale, appended -- the first time the size prefix earned its keep, and a test asks for the older size to check it. Answering it turned up three more: MP4 was reporting decode timestamps where Matroska reports presentation ones, MP_PACKET_SYNC was claimed on every packet including video, and the edit list was read for audio tracks only -- sixty milliseconds of A/V offset in the fixture. A video seek landed one frame late, so it subtracts the track's largest composition offset before a lookup that indexes decode time -- with a guard for Bento4 reading that offset unsigned |

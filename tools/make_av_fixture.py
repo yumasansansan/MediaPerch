@@ -18,10 +18,18 @@
 # the container is made to say it, by hand, which is also the only way the two
 # files differ in exactly one thing.
 #
+# `av1.mp4` is the same picture and the same audio in AV1 rather than H.264 --
+# an `av01` sample entry with an `av1C` record in it, which is the shape
+# `demux_mp4` has to recognise before anything can decode AV1 at all. It is the
+# same 128x96 and the same twenty-four frames, so a test can compare the two
+# containers rather than two different pictures. SVT-AV1 encodes it: libaom is
+# the reference and is minutes rather than seconds at these settings, and what
+# is under test is the container, not the encoder.
+#
 #   python tools/make_av_fixture.py
 #
-# Run from the repository root. Needs `ffmpeg` on PATH for the first file; the
-# second is made from the first and needs nothing.
+# Run from the repository root. Needs `ffmpeg` on PATH for the encoded files;
+# `av_bt2020.mp4` is made from `av.mp4` and needs nothing.
 
 import io
 import os
@@ -65,6 +73,21 @@ def retag(src, dst, primaries, transfer, matrix, full_range):
     io.open(dst, "wb").write(bytes(data))
 
 
+def build_av1(path):
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error",
+         "-f", "lavfi", "-i", "testsrc2=size=128x96:rate=24000/1001:duration=1",
+         "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=1",
+         # preset 10 and a high CRF because the file is committed and the test
+         # is about the container. -g 6 matches av.mp4 so both have the same
+         # keyframe spacing.
+         "-c:v", "libsvtav1", "-preset", "10", "-crf", "55",
+         "-pix_fmt", "yuv420p", "-g", "6",
+         "-c:a", "aac", "-b:a", "32k",
+         "-movflags", "+faststart+write_colr", path],
+        check=True)
+
+
 def build_mkv(path):
     # Opus rather than AAC, so the Matroska fixture also exercises the
     # BlockGroup path: the last block of an Opus track carries DiscardPadding,
@@ -86,8 +109,10 @@ def main():
     av = os.path.join(MP4, "av.mp4")
     build_av(av)
     retag(av, os.path.join(MP4, "av_bt2020.mp4"), *BT2020)
+    build_av1(os.path.join(MP4, "av1.mp4"))
     build_mkv(os.path.join(MKV, "av.mkv"))
-    for directory, name in ((MP4, "av.mp4"), (MP4, "av_bt2020.mp4"), (MKV, "av.mkv")):
+    for directory, name in ((MP4, "av.mp4"), (MP4, "av_bt2020.mp4"), (MP4, "av1.mp4"),
+                            (MKV, "av.mkv")):
         p = os.path.join(directory, name)
         print("%-16s %d bytes" % (name, os.path.getsize(p)))
     return 0

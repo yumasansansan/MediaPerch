@@ -312,6 +312,45 @@ bool alac_config(const AP4_SampleDescription& desc, std::vector<std::uint8_t>& o
     return true;
 }
 
+/// The AV1CodecConfigurationRecord, out of the `av1C` box inside an `av01`
+/// sample entry.
+///
+/// **Bento4 parses this one and does not keep its bytes.** `AP4_Av1cAtom`
+/// exposes every field -- profile, level, the bit-depth and chroma flags, the
+/// configuration OBUs -- but has no `GetRawBytes` the way `avcC` and `hvcC` do,
+/// so the record is read back the way `alac_config` reads its own: by asking
+/// the box to write itself and taking what follows the header.
+///
+/// Rebuilding the record from the parsed fields would work and is the wrong
+/// shape: the ABI says a codec gets the container's blob **verbatim**, and a
+/// record this module reassembled would be this module's opinion of the file
+/// rather than the file. `av1C` is not a full box, so what follows the eight
+/// byte header is the record itself, marker and version byte first.
+bool av1c_config(const AP4_SampleDescription& desc, std::vector<std::uint8_t>& out)
+{
+    auto& details = const_cast<AP4_AtomParent&>(desc.GetDetails());
+    AP4_Atom* box = details.GetChild(AP4_ATOM_TYPE_AV1C);
+    if (box == nullptr) {
+        return false;
+    }
+    auto* bytes = new (std::nothrow) AP4_MemoryByteStream();
+    if (bytes == nullptr) {
+        return false;
+    }
+    const std::unique_ptr<AP4_ByteStream, Releaser> owner(bytes);
+    if (AP4_FAILED(box->Write(*bytes))) {
+        return false;
+    }
+    constexpr AP4_Size k_header = 8; // no version and flags: av1C is not a full box
+    constexpr AP4_Size k_minimum = 4; // the record's four fixed bytes
+    if (bytes->GetDataSize() < k_header + k_minimum) {
+        return false;
+    }
+    const AP4_UI08* at = bytes->GetData() + k_header;
+    out.assign(at, bytes->GetData() + bytes->GetDataSize());
+    return true;
+}
+
 /// What `stsd` said, mapped onto an MpCodec and the blob the ABI defines for it.
 ///
 /// A demuxer that passed the fourcc straight through would make two containers
@@ -370,6 +409,9 @@ MpCodec codec_for(AP4_SampleDescription* desc, std::vector<std::uint8_t>& config
         }
         config.assign(raw.GetData(), raw.GetData() + raw.GetDataSize());
         return MP_CODEC_HEVC;
+    }
+    if (AP4_DYNAMIC_CAST(AP4_Av1SampleDescription, desc) != nullptr) {
+        return av1c_config(*desc, config) ? MP_CODEC_AV1 : MP_CODEC_UNKNOWN;
     }
 
     // Read perfectly, and carrying something nothing here names. That is a

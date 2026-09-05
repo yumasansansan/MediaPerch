@@ -262,7 +262,14 @@ enum {
     /* Video, decoded by an MP_KIND_VCODEC module. Numbered from 64 so that the
      * audio range has somewhere to grow that is not next to a video codec. */
     MP_CODEC_H264 = 64u,
-    MP_CODEC_HEVC = 65u
+    MP_CODEC_HEVC = 65u,
+    /* Appended rather than a break: an enumerator is the one thing this ABI
+     * has always been able to grow. **AV1 is the codec Windows cannot decode
+     * without a Store extension** and the one whose decoder is BSD-2 with a
+     * royalty-free patent grant behind it, which is why it is the first video
+     * codec here to get a decoder of this tree's own rather than the operating
+     * system's. See plan.md §9.8.2. */
+    MP_CODEC_AV1 = 66u
 };
 
 /* **What the configuration blob is, per codec.** A codec module is handed the
@@ -271,6 +278,12 @@ enum {
  *
  *   MP_CODEC_H264    the AVCDecoderConfigurationRecord -- an `avcC` body.
  *   MP_CODEC_HEVC    the HEVCDecoderConfigurationRecord -- an `hvcC` body.
+ *   MP_CODEC_AV1     the AV1CodecConfigurationRecord -- an `av1C` body, from
+ *                    its marker and version byte on, sequence header OBU and
+ *                    all. Unlike `avcC` there is no length-prefixed framing to
+ *                    undo: AV1 samples in an MP4 are already OBUs with their
+ *                    own sizes, so a decoder is handed the bytes and nothing
+ *                    is rewritten on the way.
  *   MP_CODEC_ALAC    the ALACSpecificConfig, 24 bytes big-endian.
  *   MP_CODEC_AAC_LC  the AudioSpecificConfig.
  *   MP_CODEC_OPUS    the OpusHead identification header, from its magic on.
