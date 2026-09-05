@@ -144,6 +144,39 @@ def build_webm(path, encoder):
         check=True)
 
 
+def build_av2(path):
+    # **AV2, which ffmpeg cannot encode**: there is one AV2 encoder in the world
+    # and it is avm's own, so this one fixture is made by a tool the other
+    # builders here do not need. MEDIAPERCH_AVMENC names it; without it the AV2
+    # fixture is left alone, since it is already in the tree and a person
+    # regenerating the MP4s has no reason to have built avm.
+    #
+    # WebM, with the CodecID avm itself writes -- see modules/demux/mkv, where
+    # V_AV2 is read for exactly that reason. Sixteen frames rather than
+    # twenty-four: the reference encoder is minutes where libvpx is seconds, and
+    # what is under test is a CodecID, a decoder and a planar frame.
+    avmenc = os.environ.get("MEDIAPERCH_AVMENC")
+    if not avmenc or not os.path.exists(avmenc):
+        print("%-16s skipped: set MEDIAPERCH_AVMENC to avm's encoder"
+              % os.path.basename(path))
+        return
+    y4m = path + ".y4m"
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error",
+         "-f", "lavfi", "-i", "testsrc2=size=128x96:rate=24000/1001:duration=1",
+         "-frames:v", "16", "-pix_fmt", "yuv420p", y4m],
+        check=True)
+    try:
+        subprocess.run(
+            [avmenc, "--codec=av2", "--webm", "--good", "--cpu-used=6",
+             "--passes=1", "--lag-in-frames=0", "--kf-max-dist=8",
+             "--end-usage=q", "--cq-level=45", "--threads=8",
+             "-o", path, y4m],
+            check=True)
+    finally:
+        os.remove(y4m)
+
+
 def build_mkv(path):
     # Opus rather than AAC, so the Matroska fixture also exercises the
     # BlockGroup path: the last block of an Opus track carries DiscardPadding,
@@ -171,10 +204,11 @@ def main():
     build_pcm_float_mkv(os.path.join(MKV, "pcm_f32.mkv"))
     build_webm(os.path.join(MKV, "vp9.webm"), "libvpx-vp9")
     build_webm(os.path.join(MKV, "vp8.webm"), "libvpx")
+    build_av2(os.path.join(MKV, "av2.webm"))
     for directory, name in ((MP4, "av.mp4"), (MP4, "av_bt2020.mp4"), (MP4, "av1.mp4"),
                             (MP4, "av1_grain.mp4"), (MKV, "av.mkv"),
                             (MKV, "pcm_f32.mkv"), (MKV, "vp9.webm"),
-                            (MKV, "vp8.webm")):
+                            (MKV, "vp8.webm"), (MKV, "av2.webm")):
         p = os.path.join(directory, name)
         print("%-16s %d bytes" % (name, os.path.getsize(p)))
     return 0

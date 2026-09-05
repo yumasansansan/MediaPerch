@@ -105,6 +105,17 @@ MpCodec codec_for(const std::string& id) noexcept
     if (id == "V_AV1") {
         return MP_CODEC_AV1;
     }
+    // **V_AV2 is not in Matroska's codec registry yet**, and this is here
+    // anyway: it is what avm's own muxer writes -- `webmenc.cc` calls
+    // `set_codec_id("V_AV2")` outright -- so it is what an AV2 file in a
+    // Matroska actually says today. Reading it is not the same as inventing
+    // it, and a demuxer that returned MP_CODEC_UNKNOWN for a string the
+    // reference implementation defines would be refusing to read the only AV2
+    // files there are. If the registry lands on a different spelling, this
+    // gains a line rather than changing one.
+    if (id == "V_AV2") {
+        return MP_CODEC_AV2;
+    }
     if (id == "V_MPEG4/ISO/AVC") {
         return MP_CODEC_H264;
     }
@@ -1038,8 +1049,19 @@ try {
         }
     }
     if (chosen == d->tracks.size()) {
-        log_fmt(MP_LOG_DEBUG, "%s carries no audio track", path);
-        return MP_ERR_UNSUPPORTED;
+        // **A file with no audio at all still opens**, which is the line
+        // `demux_mp4` already had and this one did not. A silent WebM is not an
+        // exotic thing -- it is what a screen recording, an animation and every
+        // AV2 stream anyone can encode today look like -- and refusing them
+        // here made a missing default-track rule read as a container this
+        // module could not parse. Found by the AV2 fixture, which is
+        // video-only because nothing muxes audio next to AV2 yet; the VP8 and
+        // VP9 fixtures both carry Opus, so it stayed invisible.
+        //
+        // Two demuxers answering the same question differently is the thing
+        // §12 exists to prevent, so this is `demux_mp4`'s answer rather than a
+        // second one.
+        chosen = 0;
     }
     d->selected = {chosen};
     d->reading = chosen;
@@ -1383,6 +1405,7 @@ const MpDemuxVtbl g_vtbl = {
 /// were not: the video ids were added to the table and not to this list, and a
 /// registry reading only this would have believed Matroska carried no video.
 const MpCodec g_codecs[] = {MP_CODEC_VP8,    MP_CODEC_VP9,    MP_CODEC_AV1,
+                            MP_CODEC_AV2,
                             MP_CODEC_H264,   MP_CODEC_HEVC,
                             MP_CODEC_FLAC,   MP_CODEC_VORBIS, MP_CODEC_OPUS,
                             MP_CODEC_AAC_LC, MP_CODEC_MP1,    MP_CODEC_MP2,

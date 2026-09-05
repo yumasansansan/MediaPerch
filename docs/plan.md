@@ -2327,6 +2327,93 @@ the decoder and the presenter today. The first stage that wants to -- film
 grain moved off dav1d, or a lookup table, or a scaler -- is what should bring
 the interface with it.
 
+### 9.8.4 AV2, and a decoder that is the only one
+
+**AV2 reached 1.0.0 on 2026-05-29.** The CHANGELOG has one line in it. dav2d
+exists -- a submodule here already -- and is where a player's AV2 decoder will
+come from, the way dav1d is for AV1; it has no module yet. So `codec_avm` is not
+a second opinion the way `codec_aom` is. It is the whole of AV2 support, and a
+breaking change in a 1.0.0-shaped research codebase is a thing to expect rather
+than to be surprised by. The submodule is pinned to the tag, and `BUILD_ALWAYS`
+is on for the reason external/dav1d records: an external project does not notice
+its own source moving.
+
+**It scores 40 anyway.** A reference implementation is correct and slow by
+construction. A host with one AV2 decoder picks it at 40 exactly as it would at
+100 -- a score only decides between rivals -- so scoring it 100 today would mean
+editing two modules later to say what is already true now.
+
+#### A media player very nearly acquired TensorFlow Lite
+
+avm carries two machine-learning tools, both **on by default**:
+`CONFIG_ML_PART_SPLIT` for partition search and `CONFIG_DIP_EXT_PRUNING` for
+intra mode pruning. Each forces `CONFIG_TENSORFLOW_LITE` on with it, and that
+block extracts and patches sixteen vendored tarballs -- TensorFlow Lite,
+abseil, XNNPACK, protobuf, Eigen, flatbuffers, ruy and the rest -- through
+`execute_process(COMMAND bash -c "... tar -xzf ...; patch -p1 < ...")`. On
+Windows that wants a Unix userland as well, which `modules/codec/vpx` has only
+just established as a dependency for one other module.
+
+**All of it is encoder-side, and that was read rather than assumed.** The whole
+TFLite block sits inside `if(CONFIG_AV2_ENCODER)` in avm's top-level
+CMakeLists, and what `CONFIG_DIP_EXT_PRUNING` adds to the *decoder* is one extra
+output from the intra predictor -- eleven downsampled edge pixels, written into
+`mbmi->intra_dip_features`, which the encoder's model reads and the decoder does
+not. It gates no syntax element. So the tools stay exactly at the reference's
+defaults, the encoder is off, and the decoder builds in **1.3 minutes** with no
+bash, no tar and no network.
+
+**And the fixture is what proves that reading instead of trusting it.** The
+encoder that produced `tests/data/mkv/av2.webm` was built with both ML tools
+*off* while the module's decoder has them *on*. Had they been bitstream tools
+rather than encoder search heuristics, the decoder would have failed on that
+stream. It decodes, so they are not.
+
+One hazard for anyone who does build avm's encoder on MSVC:
+`avm_dsp/x86/highbd_variance_avx2.c` took **48 CPU-minutes in one cl.exe and had
+not finished**. `-DENABLE_AVX2=0` skips it, and for a tool that encodes sixteen
+frames of 128x96 once, losing AVX2 costs nothing -- the encode is 16 seconds.
+That switch belongs to the fixture tool and not to the module, whose decoder
+build never touches the file.
+
+#### AV2 has no container binding yet, so this reads the one avm writes
+
+There is no ISOBMFF binding at 1.0.0. What there is, is avm's own muxer:
+`common/webmenc.cc` calls `set_codec_id("V_AV2")` outright and writes a
+four-byte `Av2Config` into Matroska's CodecPrivate. Neither is in Matroska's
+codec registry.
+
+Reading them is not the same as inventing them. `demux_mkv` gained a `V_AV2`
+line for the same reason it has the other five video ids: the alternative is
+returning MP_CODEC_UNKNOWN for a string the reference implementation defines,
+which would mean refusing to read the only AV2 files that exist. If the registry
+lands on a different spelling, that is a line gained rather than a line changed.
+The record is documented in `module.h` beside the others, including the part
+that makes it unlike `av1C`: `get_av2config_from_obu` states that it does not
+store the configuration OBUs, so an AV2 sequence header is only ever in the
+stream and a decoder handed the record has nothing to feed itself from it.
+
+#### Two things the AV2 fixture found
+
+**avm has no `allow_lowbitdepth`, so eight bits arrive in sixteen.** libaom's
+`aom_codec_dec_cfg_t` has that field and avm's does not: AV2's decoder always
+takes the high bit depth path. dav1d, libaom and libvpx all hand an eight-bit
+stream back in eight-bit planes; avm hands back sixteen with the samples at the
+bottom. **ABI v3 could not have described that** -- `bool ten_bit` had one
+question and two answers, and eight-in-sixteen is neither of them. v4 states it
+as three numbers, `mp_pixel_sample_scale` divides by the ratio, and the picture
+arrives right rather than sixty-four times too dark. M5.98 was argued for on
+paper; this is the first producer that would have broken without it.
+
+**`demux_mkv` refused every silent file.** `open` chose a default track by
+looking for audio and returned MP_ERR_UNSUPPORTED when it found none, so a
+screen recording, an animation, and every AV2 stream anybody can encode today
+all read as a container this module could not parse. `demux_mp4` has had the
+fallback line since it was written -- `d->selected = {0}; // a file with no
+audio at all still opens` -- which makes this exactly the divergence §12 exists
+to stop, sitting unnoticed because every video fixture in the tree carried Opus
+beside the picture. The AV2 one cannot: nothing muxes audio next to AV2 yet.
+
 ### 9.9 What a video packet's timestamp is counted in
 
 **Answered, and it took three more answers with it.** `MpPacket::frame` was documented as
@@ -2486,6 +2573,7 @@ HDR state.
 | M5.9 | The structural cut: `src/engine` and `src/player` | **done.** The portable half was one library holding both the audio engine and the thing that decides what to play. §4 answers yes to "could this ABI carry a DAW's engine", and a DAW taking it would have taken the transport, the playlist, the INI schema and the IPC wire format with it. They are `src/player` now, and `src/engine` has no route to them: the include path is what enforces it, so reaching across is a compile error rather than a review comment. CI builds `mediaperch_engine` alone, which checks both cuts at once |
 | M5.75 | Path B is hashable, and a VST3 can be a stage in it | **done.** `mp::Processor` is `ProcessedGraph`'s arithmetic without the device, the ring or the threads, so `decode --path processed --gain --dsp` runs the chain and prints its SHA-256 -- the flags had been accepted and silently ignored, which is why nothing in this tree had ever compared the resampler between two builds. It found three bugs on the first run: `use_processed` could not see a gain, `Processor::reset` returned `MP_END` on success, and a seek left the noise shaper feeding back error from wherever the stream used to be. The baseline and AVX2 builds agree over 144 runs. `modules/dsp/vst3` hosts somebody else's plugin on `pluginterfaces` alone, with a VST3 written in `tests/` so the host is tested without one installed |
 | M5.95 | ABI v3: several streams from one file | **done.** `select` named one stream and `seek(frame)` meant "the selected one", which has no answer once a player wants audio and video out of one file -- and appending would have left both meaning something narrower than their names. So `select_streams`, `seek(stream, frame)`, `MpPacket::reserved` becoming `stream`, and `stream_video_info` appended for the three colour code points §9.1 turns on. Checked against `demux_mp4` reading a real MP4 with two tracks in it, which is the first test here that drives a module rather than a fake. `demux_mkv` serves several tracks too, which is what makes v3 an interface rather than one module's habit -- and clearing MP_PACKET_TIMED on a video packet that never had a position is what that second container found |
+| M6.5 | codec_avm: AV2, by the only decoder it has | **done.** AV2 reached 1.0.0 on 2026-05-29 and avm is the whole of its support -- dav2d is a submodule with no module, so unlike libaom this is not a second opinion. It scores 40 all the same, because a score decides between rivals and dav2d should outrank it later without an edit. Two of avm's defaults would have made a media player build TensorFlow Lite: CONFIG_ML_PART_SPLIT and CONFIG_DIP_EXT_PRUNING force it on, and its block extracts and patches sixteen vendored tarballs through bash and tar. All encoder-side -- the block sits inside CONFIG_AV2_ENCODER, and what DIP pruning adds to the decoder is eleven edge pixels the encoder's model reads -- so the tools keep the reference's defaults, the encoder goes, and the decoder builds in 1.3 minutes. The fixture proves that reading rather than trusting it: its encoder was built with both tools off against a decoder that has them on. AV2 has no container binding yet, so demux_mkv reads V_AV2 and the four-byte Av2Config avm's own muxer writes. Two things fell out: avm has no allow_lowbitdepth, so eight bits arrive in a sixteen-bit container -- a shape ABI v3 could not have stated at all and the first producer that needed v4 rather than merely suiting it -- and demux_mkv turned out to refuse every file with no audio track in it, which demux_mp4 has never done |
 | M6.4 | codec_vpx: VP8 and VP9, by the reference implementation | **done.** Both, out of a WebM, through demux_mkv and video_d3d11 -- and the first time demux_mkv named a video codec at all, having returned MP_CODEC_UNKNOWN for every video track until now. The build is the finding: libvpx has neither CMake nor Meson, and its Windows build needs MSYS2 rather than merely preferring it. `libs.mk` hands the whole source list to `gen_msvs_vcxproj.sh` on one command line; a native make runs that through cmd.exe and its 8191-character limit truncates it silently, writing a plausible project whose archive then fails to link on `vpx_calloc` -- one of its own symbols. Measured by making the generator print its arguments: 223 of them, 7917 bytes, the last cut mid-word, and 7917 plus the options is 8191 exactly. Four explanations were believed and discarded before that, `SHELL=` included: the whole userland has to be MSYS2's, because libvpx's scripts use its sed and cut too. Under it the generator gets 319 arguments and the archive 157 objects rather than 110 |
 | M6.3 | codec_aom: a second AV1 decoder, to hold the first to its word | **done.** libaom decodes the same fixtures dav1d does and `av1_cross_test.cpp` requires the two to agree byte for byte, on a clean stream and on a grainy one -- which is a stronger statement than either decoder's own tests can make, and the reason to carry a reference implementation that scores 40 at probe and is not meant to play anything. Nesting its build is what it cost: libaom calls `enable_language(ASM_NASM)` from inside its own tree, which CMake will not honour there, and hoisting the call cascaded into wavpack's ASM_MASM and mpg123's -- so it is an external project, configured standalone, which is where it works first time. CMake also picked Strawberry Perl's YASM as the assembler until nasm was named outright |
 | M6.2 | H.264 declined before it is opened | **done.** An SPS reader in `avcc.cpp` -- Exp-Golomb over an RBSP with the emulation prevention bytes removed -- and a `probe` that scores 0 for any H.264 that is not 4:2:0 at eight bits, which is measured rather than assumed: this machine's D3D11 decoder profiles have no 4:2:2 or 4:4:4 entry and MF's software transform is 4:2:0 too. §7 needs the refusal at probe, because a decoder failing mid-file must not trigger a silent retry. It also found a deadlock waiting for a caller: codec_mft stopped Media Foundation from a static destructor, which runs during FreeLibrary under the loader lock while MFShutdown waits for threads that need it -- reproduced in twenty lines, fixed by moving it to `module_shutdown`, and only reachable at all because every test harness here had been loading modules without ever calling their shutdown |

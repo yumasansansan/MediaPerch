@@ -284,6 +284,46 @@ TEST_CASE("float PCM in Matroska is named rather than refused",
     CHECK(bytes == 8000u);
 }
 
+TEST_CASE("a Matroska with no audio in it still opens", "[abi][demux][mkv]")
+{
+    // **This module refused every silent file, and nothing had noticed.** open
+    // picked a default track by looking for audio and returned
+    // MP_ERR_UNSUPPORTED when it found none -- so a screen recording, an
+    // animation, and every AV2 stream anybody can encode today all read as a
+    // container this demuxer could not parse. `demux_mp4` has had the fallback
+    // line since it was written; two demuxers answering one question
+    // differently is what §12 exists to stop.
+    //
+    // It stayed invisible because every video fixture here carried Opus beside
+    // the picture. The AV2 one cannot: nothing muxes audio next to AV2 yet.
+    Module module{mkv_module()};
+    REQUIRE(module.vtbl != nullptr);
+
+    mp::Demux demux;
+    REQUIRE(demux.open(*module.vtbl, MEDIAPERCH_TEST_AV2) == MP_OK);
+    REQUIRE(demux.stream_count() == 1u);
+
+    MpStreamInfo info{};
+    REQUIRE(demux.stream_info(0, info));
+    CHECK(info.kind == MP_STREAM_VIDEO);
+    CHECK(info.codec == MP_CODEC_AV2);
+    // The only track there is, is the one to play. With audio present this
+    // module names the audio track instead, which is the same rule and not a
+    // special case for silence.
+    CHECK((info.flags & MP_STREAM_DEFAULT) != 0u);
+
+    const std::uint32_t only[] = {0};
+    REQUIRE(demux.select_streams(only) == MP_OK);
+    std::vector<std::uint8_t> buffer;
+    MpPacket packet{};
+    std::uint32_t packets = 0;
+    while (demux.read_packet(buffer, packet) == MP_OK) {
+        CHECK(packet.bytes != 0u);
+        ++packets;
+    }
+    CHECK(packets == 16u);
+}
+
 TEST_CASE("a demuxer declares every codec it reports", "[abi][demux][declare]")
 {
     // **§4 rule 6: capability declaration is data, not code** -- so a registry

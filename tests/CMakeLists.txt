@@ -133,6 +133,16 @@ if(TARGET mp_codec_vpx AND TARGET mp_demux_mkv AND TARGET mp_video_d3d11)
     add_dependencies(mediaperch_tests mp_codec_vpx)
 endif()
 
+# AV2, whose only decoder is the reference one. Nothing here cross-checks it,
+# because there is nothing yet to check it against -- dav2d is a submodule with
+# no module.
+if(TARGET mp_codec_avm AND TARGET mp_demux_mkv AND TARGET mp_video_d3d11)
+    target_sources(mediaperch_tests PRIVATE codec_avm_test.cpp)
+    target_compile_definitions(mediaperch_tests PRIVATE
+        "MEDIAPERCH_CODEC_AVM=\"$<TARGET_FILE:mp_codec_avm>\"")
+    add_dependencies(mediaperch_tests mp_codec_avm)
+endif()
+
 # **Two AV1 decoders, byte for byte**, which is the strongest check this tree
 # can make on a video decoder: AV1's decoding process is defined bit-exactly, so
 # dav1d and the reference must agree on every sample or one of them is wrong.
@@ -176,7 +186,8 @@ if(TARGET mp_demux_mp4 AND TARGET mp_demux_mkv)
         "MEDIAPERCH_TEST_AV_MKV=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mkv/av.mkv\""
         "MEDIAPERCH_TEST_PCM_F32_MKV=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mkv/pcm_f32.mkv\""
         "MEDIAPERCH_TEST_VP9=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mkv/vp9.webm\""
-        "MEDIAPERCH_TEST_VP8=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mkv/vp8.webm\"")
+        "MEDIAPERCH_TEST_VP8=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mkv/vp8.webm\""
+        "MEDIAPERCH_TEST_AV2=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mkv/av2.webm\"")
     add_dependencies(mediaperch_tests mp_demux_mp4 mp_demux_mkv)
 endif()
 

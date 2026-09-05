@@ -274,7 +274,13 @@ enum {
      * therefore one module. VP8 is here because reading only the newer of the
      * two would leave half the reason libvpx is a dependency. */
     MP_CODEC_VP8 = 67u,
-    MP_CODEC_VP9 = 68u
+    MP_CODEC_VP9 = 68u,
+    /* AV2, which reached 1.0.0 on 2026-05-29 and has exactly one decoder --
+     * the reference. dav2d is where a player's will come from. A codec with no
+     * fast decoder yet is still a codec, and the enumerator costs nothing;
+     * what it buys is that `demux_mkv` can say what a V_AV2 track holds
+     * instead of calling it unknown. See plan.md §9.8.4. */
+    MP_CODEC_AV2 = 69u
 };
 
 /* **What the configuration blob is, per codec.** A codec module is handed the
@@ -292,6 +298,13 @@ enum {
  *                    undo: AV1 samples in an MP4 are already OBUs with their
  *                    own sizes, so a decoder is handed the bytes and nothing
  *                    is rewritten on the way.
+ *   MP_CODEC_AV2     the Av2Config record -- four bytes, a marker and
+ *                    version byte then profile, level and bit depth. Unlike
+ *                    `av1C` it carries **no** configuration OBUs: avm's own
+ *                    muxer builds it with `get_av2config_from_obu`, which
+ *                    states that it does not store them. So an AV2 sequence
+ *                    header is only ever in the stream, and a decoder handed
+ *                    this record has nothing to feed itself from it.
  *   MP_CODEC_ALAC    the ALACSpecificConfig, 24 bytes big-endian.
  *   MP_CODEC_AAC_LC  the AudioSpecificConfig.
  *   MP_CODEC_OPUS    the OpusHead identification header, from its magic on.
