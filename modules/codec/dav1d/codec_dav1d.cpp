@@ -217,6 +217,14 @@ void read_sequence(MpVideoCodec* c, const Dav1dSequenceHeader& seq) noexcept
     }
     // Range is not part of the colour description and is always stated.
     c->info.flags = seq.color_range != 0 ? MP_VIDEO_FULL_RANGE : 0u;
+    // **The one processing stage that is normative and separable.** dav1d
+    // applies the grain by default, as every conformant decoder must, and says
+    // here whether there is any -- which is what a presenter would read before
+    // taking the synthesis onto the GPU, and what makes a cross-check against
+    // another decoder meaningful on a grainy stream.
+    if (seq.film_grain_present != 0) {
+        c->info.flags |= MP_VIDEO_FILM_GRAIN;
+    }
 
     // **Zero, and it means "unchanged" rather than "untimed" here.** dav1d
     // hands back the timestamp it was given, so whatever the demuxer counted

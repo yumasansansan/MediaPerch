@@ -497,7 +497,7 @@ typedef struct MpVideoInfo {
     uint32_t transfer;
     uint32_t matrix;
 
-    uint32_t flags; /* MP_VIDEO_FULL_RANGE */
+    uint32_t flags; /* MP_VIDEO_FULL_RANGE, MP_VIDEO_FILM_GRAIN */
 
     /* Ticks per second of `MpPacket::frame` and of `seek`'s `frame`, for this
      * stream. **The unit the timestamps are in**, which is the container's own:
@@ -520,7 +520,27 @@ enum {
      * range, which for 8-bit means 0..255 instead of 16..235. A container that
      * does not say leaves this clear, and studio range is the convention that
      * makes that safe. */
-    MP_VIDEO_FULL_RANGE = 1u << 0
+    MP_VIDEO_FULL_RANGE = 1u << 0,
+    /* **The stream declares film grain parameters**, which is the one piece of
+     * processing that is normative and separable at the same time.
+     *
+     * AV1 specifies grain synthesis as part of decoding -- a decoder that skips
+     * it is not producing the picture the standard describes -- and *also*
+     * gives every decoder a switch to skip it, because it is the one stage that
+     * is cheap to move. plan.md §9.8.2 wants it moved: it is embarrassingly
+     * parallel and belongs in a presenter rather than on the CPU. This flag is
+     * what a presenter would read to know there is anything to move.
+     *
+     * It is also what makes two decoders comparable. Grain is synthesised from
+     * a seed, so two conformant decoders agree on a grainy stream only if both
+     * apply it or neither does -- which is the one place a byte-for-byte
+     * cross-check can legitimately disagree, and therefore the one place a test
+     * has to know about.
+     *
+     * **Clear means "no grain, or nobody looked."** A demuxer does not parse
+     * sequence headers and leaves it clear; a decoder that reads one sets it.
+     * The same shape MpVideoInfo::timescale has on the codec side. */
+    MP_VIDEO_FILM_GRAIN = 1u << 1
 };
 
 typedef struct MpDemuxVtbl {

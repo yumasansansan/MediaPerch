@@ -164,6 +164,7 @@ if(TARGET mp_demux_mp4 AND TARGET mp_demux_mkv)
         "MEDIAPERCH_TEST_AV=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mp4/av.mp4\""
         "MEDIAPERCH_TEST_AV_BT2020=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mp4/av_bt2020.mp4\""
         "MEDIAPERCH_TEST_AV1=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mp4/av1.mp4\""
+        "MEDIAPERCH_TEST_AV1_GRAIN=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mp4/av1_grain.mp4\""
         "MEDIAPERCH_TEST_AV_MKV=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mkv/av.mkv\"")
     add_dependencies(mediaperch_tests mp_demux_mp4 mp_demux_mkv)
 endif()

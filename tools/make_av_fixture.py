@@ -26,6 +26,15 @@
 # the reference and is minutes rather than seconds at these settings, and what
 # is under test is the container, not the encoder.
 #
+# `av1_grain.mp4` is the same again with **film grain**, and it exists for the
+# one place two conformant decoders may legitimately disagree. Grain synthesis
+# is part of AV1's decoding process and is also the one stage every decoder can
+# be told to skip, so a byte-for-byte comparison of two decoders means something
+# different on a grainy stream than on a clean one -- and `av1.mp4` has none, so
+# without this the cross-check never touches the case. libaom encodes it,
+# because `-denoise-noise-level` is how grain parameters get into a stream at
+# all; dav1d confirms the result carries them.
+#
 #   python tools/make_av_fixture.py
 #
 # Run from the repository root. Needs `ffmpeg` on PATH for the encoded files;
@@ -88,6 +97,23 @@ def build_av1(path):
         check=True)
 
 
+def build_av1_grain(path):
+    # -denoise-noise-level removes noise from the source and puts the
+    # parameters to synthesise it back into the stream, which is exactly the
+    # film grain path. cpu-used 8 because libaom is the reference encoder and
+    # slow, and what is under test is the grain flag rather than the quality.
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error",
+         "-f", "lavfi", "-i", "testsrc2=size=128x96:rate=24000/1001:duration=1",
+         "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=1",
+         "-c:v", "libaom-av1", "-cpu-used", "8", "-crf", "45",
+         "-denoise-noise-level", "25",
+         "-pix_fmt", "yuv420p", "-g", "6",
+         "-c:a", "aac", "-b:a", "32k",
+         "-movflags", "+faststart+write_colr", path],
+        check=True)
+
+
 def build_mkv(path):
     # Opus rather than AAC, so the Matroska fixture also exercises the
     # BlockGroup path: the last block of an Opus track carries DiscardPadding,
@@ -110,9 +136,10 @@ def main():
     build_av(av)
     retag(av, os.path.join(MP4, "av_bt2020.mp4"), *BT2020)
     build_av1(os.path.join(MP4, "av1.mp4"))
+    build_av1_grain(os.path.join(MP4, "av1_grain.mp4"))
     build_mkv(os.path.join(MKV, "av.mkv"))
     for directory, name in ((MP4, "av.mp4"), (MP4, "av_bt2020.mp4"), (MP4, "av1.mp4"),
-                            (MKV, "av.mkv")):
+                            (MP4, "av1_grain.mp4"), (MKV, "av.mkv")):
         p = os.path.join(directory, name)
         print("%-16s %d bytes" % (name, os.path.getsize(p)))
     return 0

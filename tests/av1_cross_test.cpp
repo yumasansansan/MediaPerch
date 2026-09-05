@@ -19,6 +19,16 @@
 // against another. The half that is still missing is both against what was
 // encoded, which for a lossy codec is `compare` rather than a hash.
 //
+// **And it is run twice, because film grain is where two conformant decoders
+// may legitimately differ.** Grain synthesis is part of AV1's decoding process
+// -- a decoder that skips it is not producing the specified picture -- and is
+// also the one stage every decoder can be told to skip, so two decoders agree
+// on a grainy stream only if both apply it or neither does. `av1.mp4` has no
+// grain at all, so on its own this test never touched the case. `av1_grain.mp4`
+// does, and dav1d says so through MP_VIDEO_FILM_GRAIN, which is checked here
+// rather than assumed: a fixture regenerated without grain would otherwise
+// weaken this test silently.
+//
 // libaom is slow, and that does not matter here: twenty-four frames of 128x96
 // is a conformance check, not a playback measurement.
 
@@ -119,14 +129,23 @@ Frame copy_of(const MpVideoFrame& in)
     return out;
 }
 
-/// Every frame of the fixture, through one decoder.
-std::vector<Frame> decode_all(const MpVideoCodecVtbl& codec, const MpDemuxVtbl& demux_vtbl,
-                              const char* path)
-{
+/// Everything one decoder made of one file: the frames, and what it said about
+/// the stream.
+struct Decoded {
     std::vector<Frame> frames;
+    MpVideoInfo info{};
+    bool have_info = false;
+};
+
+/// Every frame of the fixture, through one decoder.
+Decoded decode_all(const MpVideoCodecVtbl& codec, const MpDemuxVtbl& demux_vtbl,
+                   const char* path)
+{
+    Decoded out;
+    std::vector<Frame>& frames = out.frames;
     mp::Demux demux;
     if (demux.open(demux_vtbl, path) != MP_OK) {
-        return frames;
+        return out;
     }
     std::uint32_t stream = 0;
     MpStreamInfo info{};
@@ -139,7 +158,7 @@ std::vector<Frame> decode_all(const MpVideoCodecVtbl& codec, const MpDemuxVtbl& 
         }
     }
     if (!found || info.codec != MP_CODEC_AV1) {
-        return frames;
+        return out;
     }
 
     std::vector<std::uint8_t> config;
@@ -147,7 +166,7 @@ std::vector<Frame> decode_all(const MpVideoCodecVtbl& codec, const MpDemuxVtbl& 
     MpVideoCodec* decoder = nullptr;
     if (codec.open(MP_CODEC_AV1, nullptr, config.data(),
                    static_cast<std::uint32_t>(config.size()), &decoder) != MP_OK) {
-        return frames;
+        return out;
     }
 
     const std::uint32_t only_video[] = {stream};
@@ -178,8 +197,11 @@ std::vector<Frame> decode_all(const MpVideoCodecVtbl& codec, const MpDemuxVtbl& 
     codec.flush(decoder);
     drain();
 
+    out.info.size = sizeof(out.info);
+    out.have_info = codec.get_format(decoder, &out.info) == MP_OK;
+
     codec.close(decoder);
-    return frames;
+    return out;
 }
 
 } // namespace
@@ -195,50 +217,68 @@ TEST_CASE("dav1d and the reference decoder agree on every sample",
     REQUIRE(aom_module.vtbl != nullptr);
 
     const auto& demux_vtbl = *static_cast<const MpDemuxVtbl*>(demux_module.vtbl);
-    const std::vector<Frame> fast = decode_all(
-        *static_cast<const MpVideoCodecVtbl*>(dav1d_module.vtbl), demux_vtbl,
-        MEDIAPERCH_TEST_AV1);
-    const std::vector<Frame> reference = decode_all(
-        *static_cast<const MpVideoCodecVtbl*>(aom_module.vtbl), demux_vtbl,
-        MEDIAPERCH_TEST_AV1);
+    const auto& fast_vtbl = *static_cast<const MpVideoCodecVtbl*>(dav1d_module.vtbl);
+    const auto& reference_vtbl = *static_cast<const MpVideoCodecVtbl*>(aom_module.vtbl);
 
-    REQUIRE(fast.size() == 24u);
-    REQUIRE(reference.size() == fast.size());
+    struct Fixture {
+        const char* path;
+        bool grain;
+        const char* what;
+    };
+    const Fixture fixtures[] = {
+        {MEDIAPERCH_TEST_AV1, false, "no film grain"},
+        {MEDIAPERCH_TEST_AV1_GRAIN, true, "film grain"},
+    };
 
-    for (std::size_t f = 0; f < fast.size(); ++f) {
-        INFO("frame " << f);
-        const Frame& a = fast[f];
-        const Frame& b = reference[f];
+    for (const Fixture& fixture : fixtures) {
+        INFO(fixture.what);
+        const Decoded fast = decode_all(fast_vtbl, demux_vtbl, fixture.path);
+        const Decoded reference = decode_all(reference_vtbl, demux_vtbl, fixture.path);
 
-        // **The layout has to match before the samples can be compared**, and
-        // it is worth checking rather than assuming: two decoders that
-        // disagreed about the chroma subsampling would still produce planes
-        // that could be memcmp'd, and the comparison would be meaningless.
-        REQUIRE(a.width == b.width);
-        REQUIRE(a.height == b.height);
-        REQUIRE(a.layout.chroma == b.layout.chroma);
-        REQUIRE(a.layout.bits == b.layout.bits);
-        REQUIRE(a.layout.container_bits == b.layout.container_bits);
-        REQUIRE(a.layout.shift == b.layout.shift);
+        REQUIRE(fast.frames.size() == 24u);
+        REQUIRE(reference.frames.size() == fast.frames.size());
 
-        for (std::uint32_t p = 0; p < mp_pixel_planes(&a.layout); ++p) {
-            INFO("plane " << p);
-            REQUIRE(a.planes[p].size() == b.planes[p].size());
-            REQUIRE(!a.planes[p].empty());
-            // One assertion for the whole plane rather than one per sample:
-            // Catch2 counts assertions, and a byte-by-byte loop over 442
-            // kilobytes would drown every other number in the run.
-            const bool same = std::memcmp(a.planes[p].data(), b.planes[p].data(),
-                                          a.planes[p].size()) == 0;
-            CHECK(same);
+        // **The fixture is checked rather than trusted.** A grain fixture
+        // regenerated without grain would leave this test looking exactly as
+        // green while covering nothing, so dav1d is asked what the stream
+        // actually declares. libaom does not report it and is not asked.
+        REQUIRE(fast.have_info);
+        const bool says_grain = (fast.info.flags & MP_VIDEO_FILM_GRAIN) != 0;
+        CHECK(says_grain == fixture.grain);
+
+        for (std::size_t f = 0; f < fast.frames.size(); ++f) {
+            INFO("frame " << f);
+            const Frame& a = fast.frames[f];
+            const Frame& b = reference.frames[f];
+
+            // **The layout has to match before the samples can be compared**,
+            // and it is worth checking rather than assuming: two decoders that
+            // disagreed about the chroma subsampling would still produce planes
+            // that could be memcmp'd, and the comparison would be meaningless.
+            REQUIRE(a.width == b.width);
+            REQUIRE(a.height == b.height);
+            REQUIRE(a.layout.chroma == b.layout.chroma);
+            REQUIRE(a.layout.bits == b.layout.bits);
+            REQUIRE(a.layout.container_bits == b.layout.container_bits);
+            REQUIRE(a.layout.shift == b.layout.shift);
+
+            for (std::uint32_t p = 0; p < mp_pixel_planes(&a.layout); ++p) {
+                INFO("plane " << p);
+                REQUIRE(a.planes[p].size() == b.planes[p].size());
+                REQUIRE(!a.planes[p].empty());
+                // One assertion for the whole plane rather than one per
+                // sample: Catch2 counts assertions, and a byte-by-byte loop
+                // over 442 kilobytes would drown every other number in the run.
+                const bool same = std::memcmp(a.planes[p].data(), b.planes[p].data(),
+                                              a.planes[p].size()) == 0;
+                CHECK(same);
+            }
+
+            // The timestamps travel a different route through each decoder:
+            // dav1d carries them on its `Dav1dData`, libaom on `user_priv`.
+            // Getting one of those wrong would show as A/V drift and nothing
+            // else.
+            CHECK(a.pts == b.pts);
         }
-    }
-
-    // And the timestamps, which travel a different route through each decoder:
-    // dav1d carries them on its `Dav1dData`, libaom on `user_priv`. Getting one
-    // of those wrong would show as A/V drift and nothing else.
-    for (std::size_t f = 0; f < fast.size(); ++f) {
-        INFO("frame " << f);
-        CHECK(fast[f].pts == reference[f].pts);
     }
 }

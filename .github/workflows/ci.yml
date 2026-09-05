@@ -109,15 +109,20 @@ jobs:
       #
       # Through the Miniconda the image ships rather than pip: both tools come
       # from one channel, which is also how the development machine gets them.
+      # **Into a named environment rather than base**, for the same reason a
+      # person would: base is shared, and a job that installs into it has an
+      # opinion about every other job on the image. The name is the one
+      # modules/codec/dav1d/CMakeLists.txt tells a person to create.
       # Before the developer environment on purpose -- that step captures PATH
       # into GITHUB_ENV, and a PATH captured before an install is a PATH
       # without it, which is the same reason the FFmpeg step in `quality` sits
       # where it does.
       - name: Meson and nasm, which build external/dav1d
         run: |
-          & "$env:CONDA\Scripts\conda.exe" install -y -c conda-forge meson nasm
-          Add-Content -Path $env:GITHUB_PATH -Value "$env:CONDA\Scripts"
-          Add-Content -Path $env:GITHUB_PATH -Value "$env:CONDA\Library\bin"
+          & "$env:CONDA\Scripts\conda.exe" create -y -n mediaperch-build -c conda-forge meson nasm
+          $root = "$env:CONDA\envs\mediaperch-build"
+          Add-Content -Path $env:GITHUB_PATH -Value "$root\Scripts"
+          Add-Content -Path $env:GITHUB_PATH -Value "$root\Library\bin"
 
       - name: MSVC developer environment
         shell: cmd
@@ -284,9 +289,10 @@ jobs:
       # decoder, and a size report that leaves one out is the wrong report.
       - name: Meson and nasm, which build external/dav1d
         run: |
-          & "$env:CONDA\Scripts\conda.exe" install -y -c conda-forge meson nasm
-          Add-Content -Path $env:GITHUB_PATH -Value "$env:CONDA\Scripts"
-          Add-Content -Path $env:GITHUB_PATH -Value "$env:CONDA\Library\bin"
+          & "$env:CONDA\Scripts\conda.exe" create -y -n mediaperch-build -c conda-forge meson nasm
+          $root = "$env:CONDA\envs\mediaperch-build"
+          Add-Content -Path $env:GITHUB_PATH -Value "$root\Scripts"
+          Add-Content -Path $env:GITHUB_PATH -Value "$root\Library\bin"
 
       - name: MSVC developer environment
         shell: cmd
