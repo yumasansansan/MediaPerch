@@ -389,6 +389,78 @@ std::vector<ModuleRegistry::DemuxChoice> ModuleRegistry::demuxers_for(
     return ranked;
 }
 
+const MpVideoVtbl* ModuleRegistry::video(std::string_view id) const
+{
+    const MpVideoVtbl* best = nullptr;
+    std::uint32_t best_priority = 0;
+    for (const auto& module : modules_) {
+        const MpModuleDesc& desc = module->desc();
+        if (desc.kind != MP_KIND_VIDEO) {
+            continue;
+        }
+        const auto* vtbl = static_cast<const MpVideoVtbl*>(desc.vtbl);
+        if (vtbl == nullptr || vtbl->size < sizeof(MpVideoVtbl)) {
+            continue;
+        }
+        if (!id.empty()) {
+            if (id == desc.id) {
+                return vtbl;
+            }
+            continue;
+        }
+        if (best == nullptr || desc.priority > best_priority) {
+            best = vtbl;
+            best_priority = desc.priority;
+        }
+    }
+    return id.empty() ? best : nullptr;
+}
+
+const MpVideoCodecVtbl* ModuleRegistry::video_codec_for(MpCodec codec, MpGraphicsApi api,
+                                                        const std::uint8_t* config,
+                                                        std::uint32_t config_bytes) const
+{
+    const MpVideoCodecVtbl* best = nullptr;
+    std::uint32_t best_score = 0;
+    std::uint32_t best_priority = 0;
+
+    for (const auto& module : modules_) {
+        const MpModuleDesc& desc = module->desc();
+        if (desc.kind != MP_KIND_VCODEC) {
+            continue;
+        }
+        const auto* vtbl = static_cast<const MpVideoCodecVtbl*>(desc.vtbl);
+        if (vtbl == nullptr || vtbl->size < sizeof(MpVideoCodecVtbl)) {
+            continue;
+        }
+        // The declaration first, exactly as `codec_for` does and for the same
+        // reason: a module that listed its codecs has already answered.
+        if (desc.size >= offsetof(MpModuleDesc, codec_count) + sizeof(std::uint32_t) &&
+            desc.codecs != nullptr && desc.codec_count != 0) {
+            const auto* end = desc.codecs + desc.codec_count;
+            if (std::find(desc.codecs, end, codec) == end) {
+                continue;
+            }
+        }
+        std::uint32_t score = 0;
+        if (vtbl->probe != nullptr) {
+            vtbl->probe(codec, api, config, config_bytes, &score);
+        } else {
+            score = 100;
+        }
+        if (score == 0) {
+            continue;
+        }
+        if (best == nullptr || score > best_score ||
+            (score == best_score && desc.priority > best_priority)) {
+            best = vtbl;
+            best_score = score;
+            best_priority = desc.priority;
+        }
+    }
+    return best;
+}
+
 const MpCodecVtbl* ModuleRegistry::codec_for(MpCodec codec, const std::uint8_t* config,
                                              std::uint32_t config_bytes) const
 {

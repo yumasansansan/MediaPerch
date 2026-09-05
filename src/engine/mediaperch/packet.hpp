@@ -84,6 +84,13 @@ public:
     /// To `frame` of `stream`, in that stream's own rate. Moves every selected
     /// stream, because one file has one position.
     MpResult seek(std::uint32_t stream, std::uint64_t frame);
+    /// Whether this module implements seeking at all. A stream arriving down a
+    /// pipe has no `seek` in its vtable, and asking is how a source reports
+    /// that rather than failing one later.
+    [[nodiscard]] bool can_seek() const noexcept
+    {
+        return vtbl_ != nullptr && vtbl_->seek != nullptr;
+    }
     /// What the container says about a video stream. False for an audio stream,
     /// and false on a demuxer with no video in it.
     [[nodiscard]] bool video_info(std::uint32_t index, MpVideoInfo& out) const;
@@ -229,6 +236,15 @@ public:
     /// to do itself.
     void clear() noexcept;
 
+    /// The demuxer, for the questions that are not reading.
+    ///
+    /// **`stream_info`, `stream_config`, `video_info` and the rest describe the
+    /// file and move nothing**, so asking them behind the router's back is
+    /// harmless and forcing them through it would only be a second spelling.
+    /// `read_packet` and `seek` are the two that move the position, and those
+    /// are the router's -- calling them here is what this class exists to stop.
+    [[nodiscard]] Demux& demux() noexcept { return *demux_; }
+
     struct Stats {
         /// Waiting for a consumer that has not asked.
         std::size_t queued_bytes = 0;
@@ -327,6 +343,21 @@ public:
     bool open(const MpDemuxVtbl& demux, const char* path, const FindCodec& find_codec,
               std::string& why);
 
+    /// Reads one stream through a router that somebody else opened.
+    ///
+    /// **The same source, fed differently.** Everything below this class --
+    /// the gapless edit, the seek warm-up, the trim -- is the same code and the
+    /// same behaviour; what changes is where the packets come from, which is
+    /// what §4's one-file-one-position asks for when audio and video are both
+    /// being read. `stream` must be one the router was given, and the caller
+    /// has already selected it on the demuxer.
+    ///
+    /// A stream flagged `MP_STREAM_SELF_DECODES` is refused here: a demuxer
+    /// that decodes for itself hands over frames rather than packets, and there
+    /// is nothing for a router to route.
+    bool open(PacketRouter& router, std::uint32_t stream, const FindCodec& find_codec,
+              std::string& why);
+
     [[nodiscard]] const Format& format() const noexcept override { return format_; }
     std::size_t read(void* dst, std::size_t bytes) override;
 
@@ -339,13 +370,22 @@ public:
     [[nodiscard]] bool self_decoded() const noexcept { return self_decodes_; }
 
 private:
+    /// The half of `open` that is the same whoever supplies the packets.
+    bool finish_open(Demux& demux, std::uint32_t index, const FindCodec& find_codec,
+                     std::string& why);
     /// Fills `pcm_` with at least one packet's worth, or reports the end.
     bool pump();
     /// After a seek: forget, then feed what precedes the target so the codec's
     /// state is warm before anything is kept.
     void warm_up(std::uint64_t target);
 
+    /// This class's own demuxer, opened by the `open` that takes a path. Unused
+    /// when a router is feeding it: then the file belongs to whoever opened it.
     Demux demux_;
+    /// Where packets come from and what moves the file, when they are not this
+    /// class's own demuxer's. Both null or both set.
+    PacketRouter* router_ = nullptr;
+    IPacketFeed* feed_ = nullptr;
     Codec codec_;
     MpStreamInfo stream_{};
     Format format_{};

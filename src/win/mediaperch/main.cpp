@@ -9,6 +9,10 @@
 
 #include "mediaperch/platform.hpp"
 
+#include "mediaperch/display.hpp"
+#include "mediaperch/display_win.hpp"
+#include "mediaperch/video.hpp"
+
 #include "mediaperch/compare.hpp"
 #include "mediaperch/dsp.hpp"
 #include "mediaperch/engine_host.hpp"
@@ -29,12 +33,14 @@
 #include "mediaperch/sink.hpp"
 #include "mediaperch/verify.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <conio.h>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -51,6 +57,10 @@ struct Options {
     std::vector<std::string> files;
     /// Keys during playback, for the transport that now exists.
     bool interactive = false;
+    /// `show` only: do not open a sink, and pace the picture on the wall
+    /// clock. For a file with no audio, and for a machine whose device
+    /// refuses every format -- which is a real thing and not a hypothetical.
+    bool no_audio = false;
     std::string raw;
     std::string decoder_id; // empty = let the probe decide
     std::string capture; // capture endpoint id; empty = find one by name
@@ -388,6 +398,7 @@ bool parse(int argc, char** argv, Options& out)
             usage();
             std::exit(0);
         } else if (arg == "devices" || arg == "negotiate" || arg == "play" ||
+                   arg == "show" ||
                    arg == "verify" || arg == "decode" || arg == "modules" ||
                    arg == "compare" || arg == "loudness" || arg == "claims") {
             out.command = arg;
@@ -570,6 +581,8 @@ bool parse(int argc, char** argv, Options& out)
                     out.sink_id = "sink_" + out.sink_id;
                 }
             }
+        } else if (arg == "--no-audio") {
+            out.no_audio = true;
         } else if (arg == "--shared") {
             out.shared = true;
         } else if (arg == "--loopback") {
@@ -1416,6 +1429,278 @@ bool switch_path(Options& current, const RunOutcome& run, mp::Queue& queue)
                 static_cast<unsigned long long>(run.position),
                 static_cast<double>(run.position) / queue.format().sample_rate);
     return true;
+}
+
+/// `show`: one file, one window, and §8 deciding when each frame goes up.
+///
+/// **One process, one window**, which is §9.7.1's MP_SURFACE_WINDOW case and
+/// the one a tool has. The engine deliberately does not do this: a headless
+/// engine that creates windows is not headless, and the daemon's picture will
+/// cross to a shell as a DirectComposition surface instead. This is
+/// mediaperch-probe, which is one program looking at one file, and it is how
+/// the video path gets looked at before there is a shell to look through.
+///
+/// The shape is the whole of what has been built: one demuxer, a router
+/// feeding both halves, the audio graph that owns the master clock, and a
+/// display loop that reads that clock and pumps the video graph against it.
+int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
+         const Options& options)
+{
+    if (options.files.empty()) {
+        std::fprintf(stderr, "show needs a file: --file <path>\n");
+        return 1;
+    }
+    const std::string& path = options.files.front();
+
+    // A demuxer that claims the container. Best first, and the next one when
+    // the best declines what is inside -- the same rule `open_source` follows.
+    mp::Demux demux;
+    const MpDemuxVtbl* demux_vtbl = nullptr;
+    for (const auto& choice : registry.demuxers_for(path, options.decoder_id)) {
+        if (demux.open(*choice.vtbl, path.c_str()) == MP_OK) {
+            demux_vtbl = choice.vtbl;
+            std::printf("container  %s\n", choice.desc->id);
+            break;
+        }
+        demux.close();
+    }
+    if (demux_vtbl == nullptr) {
+        std::fprintf(stderr, "nothing here reads %s\n", path.c_str());
+        return 1;
+    }
+
+    std::uint32_t audio_stream = 0;
+    std::uint32_t video_stream = 0;
+    bool have_audio = false;
+    bool have_video = false;
+    MpStreamInfo audio_info{};
+    MpStreamInfo video_info{};
+    for (std::uint32_t i = 0; i < demux.stream_count(); ++i) {
+        MpStreamInfo info{};
+        if (!demux.stream_info(i, info)) {
+            continue;
+        }
+        if (info.kind == MP_STREAM_AUDIO && !have_audio) {
+            audio_stream = i;
+            audio_info = info;
+            have_audio = true;
+        }
+        if (info.kind == MP_STREAM_VIDEO && !have_video) {
+            video_stream = i;
+            video_info = info;
+            have_video = true;
+        }
+    }
+    if (!have_video) {
+        std::fprintf(stderr, "%s has no video in it -- `play` is the command for that\n",
+                     path.c_str());
+        return 1;
+    }
+
+    MpVideoInfo picture{};
+    picture.size = sizeof(picture);
+    if (!demux.video_info(video_stream, picture) || picture.width == 0) {
+        std::fprintf(stderr, "the container would not describe its video stream\n");
+        return 1;
+    }
+
+    // **One demuxer, two consumers.** §4: one file has one position, so the
+    // audio and the video come out of the same read and a seek moves both.
+    std::vector<std::uint32_t> selected;
+    if (have_audio) {
+        selected.push_back(audio_stream);
+    }
+    selected.push_back(video_stream);
+    if (demux.select_streams(selected) != MP_OK) {
+        std::fprintf(stderr, "the container would not serve those streams together\n");
+        return 1;
+    }
+    mp::PacketRouter router{demux, selected};
+
+    // ---- the window, before the presenter, because the presenter wants an HWND
+    mp::win::VideoWindow window;
+    std::string why;
+    if (!window.open(path, picture.display_width != 0 ? picture.display_width : picture.width,
+                     picture.display_height != 0 ? picture.display_height : picture.height,
+                     why)) {
+        std::fprintf(stderr, "%s\n", why.c_str());
+        return 1;
+    }
+
+    const MpVideoVtbl* video_vtbl = registry.video();
+    if (video_vtbl == nullptr) {
+        std::fprintf(stderr, "no presenter module is loaded\n");
+        return 1;
+    }
+    mp::Presenter presenter;
+    if (presenter.open(*video_vtbl, window.handle()) != MP_OK ||
+        presenter.configure(picture) != MP_OK) {
+        std::fprintf(stderr, "the presenter would not take that picture\n");
+        return 1;
+    }
+
+    // §9.8.1: the decoder is handed the presenter's device rather than making
+    // one, so a hardware decoder's textures are ones this presenter can sample.
+    MpGraphicsDevice device{};
+    const bool have_device = presenter.get_device(device) == MP_OK;
+
+    std::vector<std::uint8_t> config;
+    (void)demux.stream_config(video_stream, config);
+    const MpVideoCodecVtbl* codec_vtbl = registry.video_codec_for(
+        video_info.codec, have_device ? MP_GRAPHICS_D3D11 : MP_GRAPHICS_NONE,
+        config.empty() ? nullptr : config.data(), static_cast<std::uint32_t>(config.size()));
+    if (codec_vtbl == nullptr) {
+        std::fprintf(stderr, "nothing here decodes that video codec\n");
+        return 1;
+    }
+    mp::VideoDecoder decoder;
+    if (decoder.open(*codec_vtbl, video_info.codec, have_device ? &device : nullptr,
+                     config.empty() ? nullptr : config.data(),
+                     static_cast<std::uint32_t>(config.size())) != MP_OK) {
+        std::fprintf(stderr, "the video decoder would not open this stream\n");
+        return 1;
+    }
+    std::printf("picture    %ux%u", picture.width, picture.height);
+    if (picture.fps_den != 0) {
+        std::printf(" at %.3f fps", static_cast<double>(picture.fps_num) / picture.fps_den);
+    }
+    std::printf("\n");
+
+    mp::IPacketFeed* video_feed = router.feed(video_stream);
+    if (video_feed == nullptr) {
+        std::fprintf(stderr, "the router has no feed for the video stream\n");
+        return 1;
+    }
+    mp::VideoGraph video_graph{*video_feed, decoder, presenter, picture};
+
+    // ---- the audio half, which is where the master clock comes from
+    mp::PacketSource audio_source;
+    std::unique_ptr<mp::PassthroughGraph> exact;
+    std::unique_ptr<mp::ProcessedGraph> processed;
+    std::unique_ptr<mp::IAudioClockSource> audio_clock;
+    mp::Sink sink;
+
+    if (have_audio && !options.no_audio) {
+        const mp::PacketSource::FindCodec find = [&registry](MpCodec codec,
+                                                             const std::uint8_t* blob,
+                                                             std::uint32_t blob_bytes) {
+            return registry.codec_for(codec, blob, blob_bytes);
+        };
+        if (!audio_source.open(router, audio_stream, find, why)) {
+            std::fprintf(stderr, "%s\n", why.c_str());
+            return 1;
+        }
+        std::string device_id;
+        if (!device_id_for(sink_vtbl, options, device_id)) {
+            return 1;
+        }
+        sink = open_sink(sink_vtbl, device_id, options.shared);
+        if (!sink) {
+            return 1;
+        }
+        const auto negotiated =
+            mp::negotiate_best(sink, audio_source.format(), options.path);
+        if (!negotiated.ok) {
+            report_refusal(negotiated);
+            return 1;
+        }
+        std::uint32_t period = 0;
+        if (sink.period_frames(period) != MP_OK || period == 0) {
+            std::fprintf(stderr, "the device did not report a buffer size\n");
+            return 1;
+        }
+        std::printf("audio      %s\n", mp::describe(negotiated.accepted).c_str());
+        if (mp::use_processed(options.path, negotiated.fidelity, options.gain != 1.0)) {
+            processed = std::make_unique<mp::ProcessedGraph>(
+                audio_source, sink, negotiated.accepted, period, mp::ConvertConfig{});
+            if (processed->start() != MP_OK) {
+                std::fprintf(stderr, "the audio graph would not start\n");
+                return 1;
+            }
+            audio_clock =
+                std::make_unique<mp::GraphClock<mp::ProcessedGraph>>(*processed);
+        } else {
+            exact = std::make_unique<mp::PassthroughGraph>(
+                audio_source, sink, negotiated.accepted, period, negotiated.fidelity);
+            if (exact->start() != MP_OK) {
+                std::fprintf(stderr, "the audio graph would not start\n");
+                return 1;
+            }
+            audio_clock = std::make_unique<mp::GraphClock<mp::PassthroughGraph>>(*exact);
+        }
+    }
+
+    if (audio_clock == nullptr) {
+        // **There is no master clock, and this says so rather than pretending.**
+        // §8's clock is the audio device: a crystal that is actually producing
+        // the sound somebody is listening to. A file with no audio track has
+        // none, and neither does a run that was told not to open one. The
+        // picture still has to go up at some rate, so the performance counter
+        // stands in -- and the line below is there because a person watching
+        // needs to know which of the two they are looking at.
+        std::printf("clock      the wall clock -- %s, so there is nothing to follow\n",
+                    have_audio ? "--no-audio was asked for" : "this file has no audio");
+        auto wall = std::make_unique<mp::win::WallClock>(48000);
+        wall->start();
+        audio_clock = std::move(wall);
+    }
+
+    // ---- the display loop
+    std::unique_ptr<mp::win::VBlankClock> vblank = mp::win::VBlankClock::open(window.handle());
+    mp::win::TickClock ticks;
+    mp::IFrameClock* frames = vblank != nullptr ? static_cast<mp::IFrameClock*>(vblank.get())
+                                                : static_cast<mp::IFrameClock*>(&ticks);
+    if (vblank != nullptr && vblank->refresh_hz() > 0.0) {
+        std::printf("display    %.0f Hz, paced on its vertical blank\n",
+                    vblank->refresh_hz());
+    } else {
+        std::printf("display    no output to wait on; pacing on a timer\n");
+    }
+    std::printf("\nclose the window to stop.\n");
+    std::fflush(stdout);
+
+    mp::DisplayLoop loop{video_graph, *audio_clock, *frames};
+    std::atomic<bool> done{false};
+    // **The loop is not on this thread**, because `WaitForVBlank` blocks for a
+    // whole refresh and a message queue nobody drains for sixteen milliseconds
+    // is a window Windows calls unresponsive.
+    std::thread painter{[&] {
+        loop.run();
+        done.store(true, std::memory_order_release);
+    }};
+
+    while (!done.load(std::memory_order_acquire) && window.pump_messages()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{4});
+    }
+    if (vblank != nullptr) {
+        vblank->cancel();
+    }
+    ticks.cancel();
+    painter.join();
+
+    if (exact) {
+        exact->stop();
+    }
+    if (processed) {
+        processed->stop();
+    }
+
+    const mp::VideoGraph::Stats stats = video_graph.stats();
+    const mp::DisplayLoop::Stats turns = loop.stats();
+    std::printf("\nframes     %llu shown, %llu dropped, %llu decoded\n",
+                static_cast<unsigned long long>(stats.shown),
+                static_cast<unsigned long long>(stats.dropped),
+                static_cast<unsigned long long>(stats.decoded));
+    std::printf("worst      %.1f ms late\n", stats.worst_late_seconds * -1000.0);
+    std::printf("turns      %llu, %llu of them with no clock to read\n",
+                static_cast<unsigned long long>(turns.turns),
+                static_cast<unsigned long long>(turns.without_clock));
+    if (video_graph.error() != MP_OK) {
+        std::fprintf(stderr, "the video stopped: %s\n",
+                     mp::result_name(video_graph.error()));
+        return 1;
+    }
+    return 0;
 }
 
 int play(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
@@ -2761,6 +3046,9 @@ int main(int argc, char** argv)
     }
     if (options.command == "negotiate") {
         return negotiate(sink, options);
+    }
+    if (options.command == "show") {
+        return show(sink, registry, options);
     }
     if (options.command == "play") {
         return play(sink, registry, options);

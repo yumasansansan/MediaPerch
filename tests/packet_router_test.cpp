@@ -315,3 +315,96 @@ TEST_CASE("a seek moves the file and empties what was read before it",
     std::vector<Seen> got_audio;
     CHECK(take(*audio, got_audio) == Got::packet);
 }
+
+// --------------------------------------------------------------------------
+// And the audio side, reading through it
+// --------------------------------------------------------------------------
+
+#if defined(MEDIAPERCH_CODEC_OPUS) && defined(MEDIAPERCH_DEMUX_MKV) && \
+    defined(MEDIAPERCH_TEST_AV_MKV)
+
+namespace {
+
+/// Everything a source hands out, in awkwardly sized bites so that the answer
+/// cannot depend on how it was asked for.
+std::vector<std::uint8_t> drain(mp::ISource& source, std::size_t bite = 997)
+{
+    std::vector<std::uint8_t> out;
+    std::vector<std::uint8_t> chunk(bite);
+    for (;;) {
+        const std::size_t got = source.read(chunk.data(), chunk.size());
+        if (got == 0) {
+            break;
+        }
+        out.insert(out.end(), chunk.begin(),
+                   chunk.begin() + static_cast<std::ptrdiff_t>(got));
+    }
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("a source reading through the router decodes what one with its own "
+          "demuxer does",
+          "[packet][router]")
+{
+    // **The equivalence again, one layer up.** The packets were already shown
+    // to be the same; this says the whole of `PacketSource` -- the gapless
+    // edit, the trim, the packet buffer that grows -- is the same code doing
+    // the same thing, and that only where the packets come from changed.
+    Module demux_module{MEDIAPERCH_DEMUX_MKV, MP_KIND_DEMUX};
+    Module codec_module{MEDIAPERCH_CODEC_OPUS, MP_KIND_CODEC};
+    REQUIRE(demux_module.as<MpDemuxVtbl>() != nullptr);
+    REQUIRE(codec_module.as<MpCodecVtbl>() != nullptr);
+
+    const MpCodecVtbl* codec_vtbl = codec_module.as<MpCodecVtbl>();
+    const mp::PacketSource::FindCodec find =
+        [codec_vtbl](MpCodec codec, const std::uint8_t*, std::uint32_t) {
+            return codec == MP_CODEC_OPUS ? codec_vtbl : nullptr;
+        };
+
+    // Its own demuxer, which is what every audio-only run does today.
+    std::vector<std::uint8_t> alone_pcm;
+    mp::Format alone_format{};
+    {
+        mp::PacketSource source;
+        std::string why;
+        INFO(why);
+        REQUIRE(source.open(*demux_module.as<MpDemuxVtbl>(), MEDIAPERCH_TEST_AV_MKV, find,
+                            why));
+        alone_format = source.format();
+        alone_pcm = drain(source);
+    }
+    REQUIRE(!alone_pcm.empty());
+
+    // The same audio, out of a demuxer that video is reading too.
+    mp::Demux demux;
+    REQUIRE(demux.open(*demux_module.as<MpDemuxVtbl>(), MEDIAPERCH_TEST_AV_MKV) == MP_OK);
+    const Streams at = find_streams(demux);
+    REQUIRE(at.both);
+    const std::uint32_t both[] = {at.audio, at.video};
+    REQUIRE(demux.select_streams(both) == MP_OK);
+    mp::PacketRouter router{demux, both};
+
+    mp::PacketSource routed;
+    std::string why;
+    INFO(why);
+    REQUIRE(routed.open(router, at.audio, find, why));
+    CHECK(routed.format() == alone_format);
+
+    // The video side is not asking, so every video packet in the file waits --
+    // which is what the cap is for and, at its default, what this file fits
+    // inside easily.
+    const std::vector<std::uint8_t> routed_pcm = drain(routed);
+    CHECK(routed_pcm == alone_pcm);
+    CHECK(router.stats().queued_packets > 0);
+
+    // And a stream the router was not given is refused rather than opened on
+    // the demuxer behind its back.
+    mp::PacketSource stray;
+    std::string stray_why;
+    CHECK_FALSE(stray.open(router, 999, find, stray_why));
+    CHECK(!stray_why.empty());
+}
+
+#endif

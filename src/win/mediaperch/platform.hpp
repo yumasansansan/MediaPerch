@@ -252,6 +252,19 @@ public:
     [[nodiscard]] const MpCodecVtbl* codec_for(MpCodec codec, const std::uint8_t* config,
                                                std::uint32_t config_bytes) const;
 
+    /// The presenter, by id or by priority. `mp::Sink`'s question for pictures.
+    [[nodiscard]] const MpVideoVtbl* video(std::string_view id = {}) const;
+
+    /// Which module decodes this video codec, on this graphics API.
+    ///
+    /// **The API is part of the question**, which is what separates this from
+    /// `codec_for`: a decoder that can hand a D3D11 presenter a texture it can
+    /// sample scores differently from one that cannot, and §9.8.1 is why. A
+    /// software decoder answers the same whatever is asked.
+    [[nodiscard]] const MpVideoCodecVtbl* video_codec_for(MpCodec codec, MpGraphicsApi api,
+                                                          const std::uint8_t* config,
+                                                          std::uint32_t config_bytes) const;
+
 private:
     std::vector<std::unique_ptr<LoadedModule>> modules_;
 };

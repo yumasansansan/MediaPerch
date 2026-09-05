@@ -30,6 +30,8 @@ add_executable(mediaperch_tests
     # §8's clock, which reads no clock: a test hands it one that runs fast,
     # or slow, or has stopped, and checks what the video side was told.
     avsync_test.cpp
+    # And the loop that drives it, with both clocks made of numbers.
+    display_loop_test.cpp
     player_test.cpp
     property_test.cpp
     protocol_test.cpp
@@ -208,6 +210,14 @@ if(TARGET mp_demux_mp4 AND TARGET mp_demux_mkv)
     # One demuxer, two consumers, and the position they share -- which needs
     # a real file with two streams in it, so it lives with the fixtures.
     target_sources(mediaperch_tests PRIVATE packet_router_test.cpp)
+    # An audio codec module, so the router can be checked against the thing it
+    # feeds: a source reading through it decodes to the same bytes as one with a
+    # demuxer of its own.
+    if(TARGET mp_codec_opus)
+        target_compile_definitions(mediaperch_tests PRIVATE
+            "MEDIAPERCH_CODEC_OPUS=\"$<TARGET_FILE:mp_codec_opus>\"")
+        add_dependencies(mediaperch_tests mp_codec_opus)
+    endif()
     add_dependencies(mediaperch_tests mp_demux_mp4 mp_demux_mkv)
 endif()
 

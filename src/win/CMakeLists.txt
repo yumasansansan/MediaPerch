@@ -5,6 +5,9 @@
 # allowed to include <windows.h> outside a module.
 
 add_library(mediaperch_win STATIC
+    # The two clocks section 8's loop needs, and a window to draw into.
+    mediaperch/display_win.cpp
+    mediaperch/display_win.hpp
     mediaperch/engine_host.cpp
     mediaperch/engine_host.hpp
     mediaperch/ipc_client.cpp
@@ -24,7 +27,7 @@ add_library(MediaPerch::win ALIAS mediaperch_win)
 target_include_directories(mediaperch_win PUBLIC "${CMAKE_CURRENT_LIST_DIR}")
 target_link_libraries(mediaperch_win
     PUBLIC MediaPerch::player
-    PRIVATE mediaperch_flags mediaperch_waveformat avrt ole32 bcrypt shell32)
+    PRIVATE mediaperch_flags mediaperch_waveformat avrt ole32 bcrypt shell32 dxgi user32)
 
 set_target_properties(mediaperch_win PROPERTIES FOLDER "win")
 

@@ -1589,6 +1589,75 @@ uses 512 and stops part way through, which is what it meant to test. And a seek 
 second lands on frame zero, because that fixture's only sync sample is its first frame —
 §9.9's rule that a seek lands at or before the target, not a router that failed to move.
 
+#### The loop that calls it, and the window it draws into
+
+**Done, and a picture goes up.** `src/engine/mediaperch/display.hpp` is the loop --
+`IFrameClock`, `IAudioClockSource` and `DisplayLoop` -- and `src/win/mediaperch/display_win`
+is the two clocks and a window.
+
+**Two clocks, and they are not the same one.** The audio device says where the sound is;
+the display says when a picture may be drawn. Neither derives from the other -- a 60 Hz
+display and a 24 fps film share no factor, and the sound card's crystal is not the monitor's
+-- so the loop takes both and the policy between them is what is tested. `IFrameClock`
+answers *when* and *what time it is* in one object, because they are one clock: the tick a
+frame is drawn at is the tick the audio position must be extrapolated to, and taking them
+from two sources puts a scheduling delay between them.
+
+`VBlankClock` waits on `IDXGIOutput::WaitForVBlank`, on the output that actually contains the
+window rather than the first the adapter enumerates -- which on two monitors at different
+rates is the difference between pacing to the right display and pacing to a neighbour. It
+makes its own DXGI factory, because the presenter has one and does not hand it out; the
+alternative is an ABI addition to reach the swap chain, which is what
+`GetFrameLatencyWaitableObject` would want and is the better source the day something needs
+it. `TickClock` is the fallback and is not a bad one: a flip-model swap chain presented with
+a sync interval of zero does not tear, so a loop that wakes often enough is smooth without
+knowing when the display refreshes.
+
+**The loop is not on the thread that owns the window**, and that is not a preference:
+`WaitForVBlank` blocks for a whole refresh, and a message queue nobody drains for sixteen
+milliseconds is a window Windows calls unresponsive. So the picture is painted on its own
+thread and the main thread pumps messages.
+
+**A seek is what the loop watches for.** It re-reads the graph's `clock_spec` every turn --
+two atomic loads -- and reconfigures when the anchor moved, which costs one turn of no clock
+rather than one turn of the wrong one. A device that stops answering does *not* cost the
+clock: the last reading is still the best answer there is, and a loop that forgot it would
+blank the picture on one missed read.
+
+#### `mediaperch-probe show`
+
+One file, one window, and §8 deciding when each frame goes up: one demuxer, the router
+feeding both halves, the audio graph that owns the master clock, and the display loop reading
+it. **One process, one window** -- §9.7.1's `MP_SURFACE_WINDOW` case, which is what a tool
+has. The engine deliberately does not do this, for the reason §9.7.1 settles: a headless
+engine that creates windows is not headless, and the daemon's picture will cross to a shell
+as a DirectComposition surface instead. This is how the video path gets looked at before
+there is a shell to look through.
+
+Measured on this machine, all four decoders through one path:
+
+| file | decoder | frames | dropped | turns | worst late |
+|---|---|---|---|---|---|
+| `av.mp4` | codec_mft | 24 | 0 | 65 | 13.6 ms |
+| `av1.mp4` | codec_dav1d | 24 | 0 | 60 | 12.3 ms |
+| `vp9.webm` | codec_vpx | 24 | 0 | 59 | 17.0 ms |
+| `av2.webm` | codec_avm | 16 | 0 | 40 | 10.7 ms |
+
+Sixty turns for a one-second file on a 60 Hz display is the loop doing exactly what it says.
+The worst-late figures are all inside one refresh, which is the floor: a frame due in the
+middle of a refresh is shown at the end of it, and no clock can do better than the display's
+own granularity. `av2.webm` states no frame rate -- Matroska wrote no default duration -- so
+the pacer measured the interval from the timestamps, which is the path that exists for
+exactly that.
+
+**`--no-audio`, and what it admits.** §8's clock is the audio device, and a file with no audio
+track has none; neither does a run on a machine whose endpoint refuses every format, which is
+not hypothetical -- this one did while the above was measured. `WallClock` counts the
+performance counter and reports it as though a device were playing, the program says which of
+the two clocks it is using, and the header says plainly that it is not §8's. What it costs is
+what §8 was avoiding: the counter and the display are not the same crystal either. What it
+does not cost is anything a person can hear, because there is nothing to hear.
+
 For audio-only playback the clock is used for gapless boundaries and for the position
 readout, and nothing else reads it.
 
@@ -2821,6 +2890,7 @@ HDR state.
 | M5.99 | The presenter draws every shape v4 can describe | **done.** 4:0:0, 4:2:0, 4:2:2 and 4:4:4, planar or semi-planar, at 8 through 16 bits, with one matrix and one transfer that a two-plane and a three-plane entry point both reach. The subsamplings need no case: normalised coordinates make a half-width chroma plane and a full-width one the same call, so the general form is less code than the 4:2:0 special case it replaced. Two things the tests found rather than the reasoning: 4:0:0 fails as a strong green rather than as an error, because an unbound texture samples to zero and zero is not neutral chroma; and neutral chroma is 127.5, not 128, because half the full scale falls between two codes at every even depth -- the shader was right and the first test was not. Interleaved Y'CbCr is refused with a sentence |
 | M5.98 | ABI v4: a frame describes its pixels | **done.** MpPixelFormat was six DXGI names in a header meant to outlive Direct3D, and could not say 4:2:2, 4:4:4 or twelve bits at all -- while naming the combinations would have taken seventy-five enumerators. MpPixelLayout is six fields and the arithmetic over them, and `shift` is what earned the break: ten bits at the top of sixteen and ten at the bottom are the same depth and a factor of sixty-four apart, which v3's `bool ten_bit` had no way to be right about. The general formula reproduces the constant `yuv_matrix.cpp` carried, exactly, which is what makes it a refactor. Doing it before `codec_dav1d` rather than after cost one producer and one consumer, and turned up a ten-bit frame `codec_mft` had been labelling eight |
 | M5.97 | Section 9.9: a video packet says what its timestamp is counted in | **done.** MpVideoInfo::timescale, appended -- the first time the size prefix earned its keep, and a test asks for the older size to check it. Answering it turned up three more: MP4 was reporting decode timestamps where Matroska reports presentation ones, MP_PACKET_SYNC was claimed on every packet including video, and the edit list was read for audio tracks only -- sixty milliseconds of A/V offset in the fixture. A video seek landed one frame late, so it subtracts the track's largest composition offset before a lookup that indexes decode time -- with a guard for Bento4 reading that offset unsigned |
+| M6.10 | The display loop, and a window with a picture in it | **done.** DisplayLoop in the engine and two clocks in the head: IFrameClock answers when a frame may be drawn and what time it is, in one object because they are one clock -- the tick a frame is drawn at is the tick the audio position is extrapolated to. VBlankClock waits on the output the window is actually on rather than the adapter's first, TickClock is the fallback, and the loop runs on its own thread because WaitForVBlank blocks a whole refresh and a message queue nobody drains for sixteen milliseconds is an unresponsive window. It re-reads the graph's clock_spec every turn and reconfigures when a seek moved the anchor, and a device that stops answering keeps its last reading rather than blanking the picture. `mediaperch-probe show` is the whole of it wired up -- one demuxer, the router feeding both halves, the audio graph that owns the clock, a window, and the loop -- which is §9.7.1's one-process-one-window case and is deliberately not in the engine. Measured on this machine with all four decoders: 24 shown and none dropped through codec_mft, dav1d and libvpx, 16 through avm, sixty turns for a one-second file on a 60 Hz display, and every worst-late figure inside one refresh, which is the floor. --no-audio pages in a wall clock for a file with no audio track and says so, because §8's clock is the audio device and there was none -- this machine's endpoint refused every format while that was measured |
 | M6.9 | One demuxer, and the position two consumers share | **done.** PacketRouter reads one demuxer once and hands each selected stream an IPacketFeed, which fills the hole VideoGraph was written around without changing a line of it. The ABI header already said what is wrong with the alternative: two file positions that a seek has to move separately and land on the same moment. So seek here is one call that moves the file and empties every queue, because a seek that left them would hand a consumer packets from before it. The queues are the only buffering and most packets miss them -- a consumer asking for its own stream has the demuxer read straight into its own buffer, serving a queued packet is a vector swap, and the vectors are recycled so a 4K keyframe costs no allocation. A per-stream cap answers MP_ERR_BUSY rather than growing, because dropping would be silent corruption and blocking would be a deadlock between two threads; VideoGraph reads that as its repeated, which is what it already does when nothing is due. Checked by equivalence: what each stream gets through the router is what it would have got from a demuxer of its own, packet for packet and byte for byte, with one file position. Two assertions that first test made were wrong and both were the fixture -- av.mp4's whole audio track is four kilobytes in forty-four packets, so a four-kilobyte cap fills only after the file ends, and a seek to half a second lands on frame zero because that fixture's only sync sample is its first |
 | M6.8 | The video graph: decode, pace, present | **done.** VideoDecoder and Presenter behind their vtables -- mp::Sink for pictures -- and VideoGraph, which holds one frame, asks §8's pacer and presents. One frame and no queue, because a decoded frame is valid until the next call on the codec that produced it and a queue would have to copy what §9.8.1 went to some trouble not to copy; the lookahead is inside the decoder, which reorders B-frames and since M6.6 uses every core. No thread of its own either: the audio graphs own one because the device's event paces them, and video's pace is the display's, which belongs to the head. A drop does not cost a refresh -- one pump lets go of every frame whose time has passed, because letting one go per refresh would never catch the clock. After the first frame the decoder is asked what it actually produced and the presenter reconfigured where the bitstream disagrees with the container, except for the timescale and the frame rate, which a decoder never re-times. Packets arrive through IPacketFeed rather than from a demuxer, which is a hole with a name: §4 says one file has one position, so audio and video must share one demuxer, and the router that would do that is what comes next. Checked on demux_mp4 + codec_dav1d + video_d3d11 with a clock somebody chose: 24 shown and none dropped at the right speed with nothing more than a millisecond late, twelve dropped and twelve shown half a second behind with the picture still right at the end, and five hundred polls of a stopped clock holding it |
 | M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse. **Started**: MP_KIND_VIDEO has a vtable, `video_d3d11` renders BGRA8 into a flip-model scRGB target or an off-screen one, and `read_back` makes the result a hash rather than a screenshot somebody looks at. §9's colour decisions are a separate testable header. NV12, P010 and the tone mappers wait for the decoder that produces frames for them |

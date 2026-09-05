@@ -99,6 +99,9 @@ set(sources
     # The video graph is portable too: it drives modules through their
     # vtables and has no idea what a window is.
     src/engine/mediaperch/video.cpp
+    # And the loop that drives it, whose clocks are injected for exactly
+    # this reason.
+    src/engine/mediaperch/display.cpp
     modules/shared/transform/transform.cpp
     modules/shared/biquad/biquad.cpp
     modules/shared/convolve/convolve.cpp

@@ -420,6 +420,29 @@ void PacketRouter::clear() noexcept
     stats_.queued_packets = 0;
 }
 
+bool PacketSource::open(PacketRouter& router, std::uint32_t stream,
+                        const FindCodec& find_codec, std::string& why)
+{
+    Demux& demux = router.demux();
+    if (!demux.stream_info(stream, stream_)) {
+        why = "the container would not describe that stream";
+        return false;
+    }
+    if ((stream_.flags & MP_STREAM_SELF_DECODES) != 0) {
+        // Nothing to route: such a demuxer hands over frames, and a second
+        // consumer of the same file would be asking it for two things at once.
+        why = "that stream is decoded by the demuxer itself, which a router cannot feed";
+        return false;
+    }
+    feed_ = router.feed(stream);
+    if (feed_ == nullptr) {
+        why = "that stream was not given to the router";
+        return false;
+    }
+    router_ = &router;
+    return finish_open(demux, stream, find_codec, why);
+}
+
 bool PacketSource::open(const MpDemuxVtbl& demux, const char* path,
                         const FindCodec& find_codec, std::string& why)
 {
@@ -441,6 +464,12 @@ bool PacketSource::open(const MpDemuxVtbl& demux, const char* path,
         return false;
     }
 
+    return finish_open(demux_, index, find_codec, why);
+}
+
+bool PacketSource::finish_open(Demux& demux, std::uint32_t index,
+                               const FindCodec& find_codec, std::string& why)
+{
     self_decodes_ = (stream_.flags & MP_STREAM_SELF_DECODES) != 0;
     if (!self_decodes_) {
         // **Looked up, not tried.** A container that says `MP_CODEC_ALAC` and a
@@ -450,7 +479,7 @@ bool PacketSource::open(const MpDemuxVtbl& demux, const char* path,
         // The configuration first, because the lookup needs it: a codec module
         // decides from the blob whether this is a stream it can take.
         std::vector<std::uint8_t> config;
-        (void)demux_.stream_config(index, config);
+        (void)demux.stream_config(index, config);
         const std::uint8_t* blob = config.empty() ? nullptr : config.data();
         const auto blob_bytes = static_cast<std::uint32_t>(config.size());
 
@@ -489,7 +518,7 @@ bool PacketSource::open(const MpDemuxVtbl& demux, const char* path,
     // of a file and an uncapped one would decide how much this holds in memory:
     // the held-back frames live here until the packets run out.
     trim_ = stream_.trim_frames <= format_.sample_rate ? stream_.trim_frames : 0;
-    seekable_ = demux.seek != nullptr;
+    seekable_ = demux.can_seek();
     return true;
 }
 
@@ -531,7 +560,15 @@ bool PacketSource::pump()
 
     for (;;) {
         MpPacket packet{};
-        const MpResult r = demux_.read_packet(packet_, packet);
+        const MpResult r = feed_ != nullptr ? feed_->next(packet_, packet)
+                                           : demux_.read_packet(packet_, packet);
+        if (r == MP_ERR_BUSY) {
+            // Another consumer of the same file has to read first. Not the end
+            // and not an error: there is simply nothing yet, and a decode
+            // thread that returns nothing is one the ring survives.
+            pcm_.clear();
+            return false;
+        }
         if (r == MP_END || (r == MP_OK && packet.bytes == 0)) {
             // The end of the packets is not the end of the audio: a codec may
             // still be holding a frame.
@@ -683,7 +720,11 @@ bool PacketSource::seek(std::uint64_t frame)
     // The edit is measured from the start of the *stream*, so a seek past it
     // has nothing left to discard and a seek before it still does.
     const std::uint64_t absolute = frame + stream_.skip_frames;
-    if (demux_.seek(stream_.index, absolute) != MP_OK) {
+    // One file has one position, so a routed source moves the router: it is the
+    // thing that empties what was read before the seek, on every stream.
+    const MpResult moved = router_ != nullptr ? router_->seek(stream_.index, absolute)
+                                              : demux_.seek(stream_.index, absolute);
+    if (moved != MP_OK) {
         return false;
     }
     warm_up(frame);
