@@ -148,8 +148,22 @@ public:
         std::uint64_t dropped = 0;
         /// Frames the decoder produced. `shown + dropped` once the stream ends.
         std::uint64_t decoded = 0;
-        /// The worst a shown frame was late by, in seconds. Never positive: a
-        /// frame is not shown early.
+        /// How late a frame was, in seconds, at the moment it was decided
+        /// about. Never positive: a frame is not shown early.
+        ///
+        /// **Between the frame's timestamp and where the clock said the stream
+        /// was**, sampled when the caller woke -- not when the pixels reached
+        /// the display, which is another refresh later and is the compositor's
+        /// business. So this measures scheduling: how long after a frame became
+        /// due the loop got round to it.
+        ///
+        /// Two things make it up and they are worth apart. The **first** frame
+        /// carries however long the clock had been running before anything was
+        /// decoded, which is a startup offset and not a pacing error. The
+        /// **worst after that** is the steady state, and its floor is one
+        /// display refresh: a frame due in the middle of a refresh cannot be
+        /// decided about until the end of it.
+        double first_late_seconds = 0.0;
         double worst_late_seconds = 0.0;
     };
     [[nodiscard]] Stats stats() const noexcept { return stats_; }

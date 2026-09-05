@@ -1691,7 +1691,13 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
                 static_cast<unsigned long long>(stats.shown),
                 static_cast<unsigned long long>(stats.dropped),
                 static_cast<unsigned long long>(stats.decoded));
-    std::printf("worst      %.1f ms late\n", stats.worst_late_seconds * -1000.0);
+    std::printf("first      %.1f ms late -- the clock ran while it was being decoded\n",
+                stats.first_late_seconds * -1000.0);
+    std::printf("worst      %.1f ms late after that, against a %.1f ms refresh\n",
+                stats.worst_late_seconds * -1000.0,
+                vblank != nullptr && vblank->refresh_hz() > 0.0
+                    ? 1000.0 / vblank->refresh_hz()
+                    : 0.0);
     std::printf("turns      %llu, %llu of them with no clock to read\n",
                 static_cast<unsigned long long>(turns.turns),
                 static_cast<unsigned long long>(turns.without_clock));

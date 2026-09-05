@@ -1636,19 +1636,42 @@ there is a shell to look through.
 
 Measured on this machine, all four decoders through one path:
 
-| file | decoder | frames | dropped | turns | worst late |
-|---|---|---|---|---|---|
-| `av.mp4` | codec_mft | 24 | 0 | 65 | 13.6 ms |
-| `av1.mp4` | codec_dav1d | 24 | 0 | 60 | 12.3 ms |
-| `vp9.webm` | codec_vpx | 24 | 0 | 59 | 17.0 ms |
-| `av2.webm` | codec_avm | 16 | 0 | 40 | 10.7 ms |
+| file | decoder | frames | dropped | turns | first late | worst after |
+|---|---|---|---|---|---|---|
+| `av.mp4` | codec_mft | 24 | 0 | 63 | 16.0 ms | 15.8 ms |
+| `av1.mp4` | codec_dav1d | 24 | 0 | 60 | 8.5 ms | 16.6 ms |
+| `vp9.webm` | codec_vpx | 24 | 0 | 60 | 8.3 ms | 16.6 ms |
+| `av2.webm` | codec_avm | 16 | 0 | 40 | -- | -- |
 
 Sixty turns for a one-second file on a 60 Hz display is the loop doing exactly what it says.
-The worst-late figures are all inside one refresh, which is the floor: a frame due in the
-middle of a refresh is shown at the end of it, and no clock can do better than the display's
-own granularity. `av2.webm` states no frame rate -- Matroska wrote no default duration -- so
-the pacer measured the interval from the timestamps, which is the path that exists for
-exactly that.
+`av2.webm` states no frame rate -- Matroska wrote no default duration -- so the pacer measured
+the interval from the timestamps, which is the path that exists for exactly that.
+
+#### What "late" is, and where it comes from
+
+It is **the frame's timestamp minus where the master clock said the stream was**, sampled at
+the instant the loop woke and decided about that frame. Not when the pixels reached the
+display: `present` hands the frame to the swap chain and the compositor shows it at the next
+vertical blank after that, which is another refresh nobody here measures and DWM does not
+report.
+
+Reported as two numbers because it is two things, and only one of them is a pacing error:
+
+- **The first frame** carries however long the clock had been running before anything was
+  decoded. In these runs that is `--no-audio`'s doing: `WallClock` starts before the loop, so
+  the setup and the first decode happen on its time. With a real audio device it does not
+  arise -- the device's position starts at zero with the stream.
+- **Everything after that** is the steady state, and the measurement is the whole answer:
+  **16.6 ms against a 16.7 ms refresh**. It is display granularity and nothing else. A frame
+  that becomes due a tenth of a millisecond after a vertical blank cannot be decided about
+  until the next one, so "up to one refresh late" is the floor of a loop that decides at
+  refresh boundaries. codec_mft's 15.8 ms is the same number on a run whose turns did not
+  land quite the same way.
+
+**Which names the improvement.** Deciding for the *next* refresh rather than for the instant
+of waking -- showing a frame that will become due before the next vertical blank -- turns "up
+to one refresh late" into "half a refresh either side". That is a change to the pacer's
+threshold, it needs the refresh interval passed in, and it is not made yet.
 
 **`--no-audio`, and what it admits.** §8's clock is the audio device, and a file with no audio
 track has none; neither does a run on a machine whose endpoint refuses every format, which is
