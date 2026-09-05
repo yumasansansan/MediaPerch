@@ -39,6 +39,10 @@ public:
     /// Blocks until the display will take another frame. False when it cannot
     /// say -- a display that went away, or a loop that should stop.
     virtual bool wait() = 0;
+    /// What the display says it refreshes at, in seconds, or zero when it did
+    /// not say. A starting point only: `DisplayLoop` measures the real one,
+    /// because a display that calls itself 60 Hz is usually 59.94.
+    [[nodiscard]] virtual double nominal_interval() const { return 0.0; }
     /// The counter `ClockReading::ticks` is stamped with.
     [[nodiscard]] virtual std::uint64_t now() const = 0;
     /// Its ticks per second.
@@ -117,6 +121,16 @@ public:
         std::uint64_t without_clock = 0;
         /// Turns where the anchor moved -- a start, or a seek.
         std::uint64_t reanchored = 0;
+        /// The display's refresh, as measured from the turns themselves. Zero
+        /// until two turns have happened.
+        ///
+        /// **Measured rather than asked**, because a mode that says 60 Hz is
+        /// 59.94 and the difference is a frame every seventeen minutes -- the
+        /// same rounding §9.9 refuses for a container's frame rate. Taken as
+        /// the shortest gap seen rather than the average: a gap can only be
+        /// lengthened by a turn that was late, so the shortest is the one that
+        /// was not.
+        double refresh_seconds = 0.0;
     };
     [[nodiscard]] Stats stats() const noexcept { return stats_; }
     [[nodiscard]] const AvClock& clock() const noexcept { return clock_; }
@@ -125,6 +139,9 @@ private:
     /// Re-reads the graph's fixed facts and notices when the anchor moved,
     /// which is what a seek does. Cheap: two atomic loads.
     void refresh_spec();
+    /// Learns the display's refresh from the gaps between turns, and tells the
+    /// pacer how far ahead to decide.
+    void learn_refresh(std::uint64_t ticks);
 
     VideoGraph* graph_;
     IAudioClockSource* audio_;
@@ -132,6 +149,8 @@ private:
     AvClock clock_;
     ClockSpec spec_{};
     bool configured_ = false;
+    std::uint64_t last_tick_ = 0;
+    bool have_last_tick_ = false;
     Stats stats_{};
 };
 

@@ -305,10 +305,15 @@ VideoGraph::Step VideoGraph::pump(double audible_seconds)
         }
         if (stats_.shown == 0) {
             stats_.first_late_seconds = decision.error_seconds;
-        } else if (decision.error_seconds < stats_.worst_late_seconds) {
+        } else {
             // From the second frame on, so that a startup offset is not
             // reported as a pacing error -- see Stats.
-            stats_.worst_late_seconds = decision.error_seconds;
+            if (decision.error_seconds < stats_.worst_late_seconds) {
+                stats_.worst_late_seconds = decision.error_seconds;
+            }
+            if (decision.error_seconds > stats_.worst_early_seconds) {
+                stats_.worst_early_seconds = decision.error_seconds;
+            }
         }
         ++stats_.shown;
         return Step::shown;

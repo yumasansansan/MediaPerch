@@ -116,6 +116,10 @@ public:
     /// §9.9 measured has to be subtracted.
     void set_skew_seconds(double seconds) noexcept { pacer_.set_skew_seconds(seconds); }
 
+    /// How long after a decision the frame will be on screen. See
+    /// `VideoPacer::set_lead_seconds`; `DisplayLoop` measures it and sets it.
+    void set_lead_seconds(double seconds) noexcept { pacer_.set_lead_seconds(seconds); }
+
     enum class Step {
         /// A frame was presented.
         shown,
@@ -165,6 +169,11 @@ public:
         /// decided about until the end of it.
         double first_late_seconds = 0.0;
         double worst_late_seconds = 0.0;
+        /// The other side of it. Zero without a lead, because a frame is not
+        /// shown before its time when the question is "is it due now"; with one
+        /// the two together are the spread, and the claim they check is that it
+        /// is half a refresh either side rather than a whole one on one side.
+        double worst_early_seconds = 0.0;
     };
     [[nodiscard]] Stats stats() const noexcept { return stats_; }
     [[nodiscard]] MpResult error() const noexcept { return error_; }

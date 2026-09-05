@@ -226,6 +226,48 @@ TEST_CASE("a frame is shown when its time comes, and not before", "[avsync][pace
     }
 }
 
+TEST_CASE("with a lead, a frame is put on the nearest refresh", "[avsync][pacer]")
+{
+    // **The measured improvement, pinned.** A decision made at a vertical blank
+    // shows a frame at the *next* one, so asking "is it due now" answers the
+    // wrong question and costs up to a whole refresh -- measured at 16.6 ms
+    // against a 16.7 ms refresh, which is the floor of that question rather
+    // than of the clock. With the lead given, the frame chosen is the one whose
+    // time the presentation instant is nearest to, and the error straddles zero
+    // instead of sitting on one side of it: 8.4 ms late to 8.1 ms early on the
+    // same machine, against a 16.3 ms refresh.
+    constexpr double refresh = 1.0 / 60.0;
+    mp::VideoPacer pacer;
+    pacer.configure(1000, 25, 1); // milliseconds, 40 ms a frame
+    pacer.set_lead_seconds(refresh);
+
+    // A frame due at one second. The clock is read at the decision; the frame
+    // appears `refresh` later.
+    constexpr std::uint64_t pts = 1000;
+
+    // Still more than half a refresh away from the next presentation: waiting
+    // puts it nearer than showing it now would.
+    CHECK(pacer.decide(pts, 1.0 - refresh - refresh).fate == mp::FrameFate::repeat);
+
+    // Within half a refresh of this presentation, so this one is the nearest.
+    // **Shown early**, which the old rule could never do and which is the whole
+    // of the improvement: half a refresh early beats half a refresh late,
+    // because the alternative was a whole one.
+    const auto early = pacer.decide(pts, 1.0 - refresh - refresh * 0.4);
+    CHECK(early.fate == mp::FrameFate::show);
+    CHECK(early.error_seconds == Approx(refresh * 0.4));
+}
+
+TEST_CASE("without a lead nothing is shown before its time", "[avsync][pacer]")
+{
+    // The default, and what a caller with no display wants: the arithmetic
+    // tests above, and anything measuring rather than presenting.
+    mp::VideoPacer pacer;
+    pacer.configure(1000, 25, 1);
+    CHECK(pacer.decide(1000, 0.999).fate == mp::FrameFate::repeat);
+    CHECK(pacer.decide(1000, 1.0).fate == mp::FrameFate::show);
+}
+
 TEST_CASE("a container that states no rate has one measured from it",
           "[avsync][pacer]")
 {

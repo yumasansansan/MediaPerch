@@ -33,6 +33,10 @@ public:
     bool wait() override;
     [[nodiscard]] std::uint64_t now() const override { return qpc_now(); }
     [[nodiscard]] std::uint64_t rate() const override { return qpc_rate(); }
+    [[nodiscard]] double nominal_interval() const override
+    {
+        return static_cast<double>(period_us_) / 1e6;
+    }
 
     /// Stops the loop that is waiting on it. Safe from another thread.
     void cancel() noexcept { cancelled_ = true; }
@@ -71,6 +75,10 @@ public:
     bool wait() override;
     [[nodiscard]] std::uint64_t now() const override { return qpc_now(); }
     [[nodiscard]] std::uint64_t rate() const override { return qpc_rate(); }
+    [[nodiscard]] double nominal_interval() const override
+    {
+        return refresh_hz_ > 0.0 ? 1.0 / refresh_hz_ : 0.0;
+    }
 
     void cancel() noexcept { cancelled_ = true; }
 

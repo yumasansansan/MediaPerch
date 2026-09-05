@@ -49,6 +49,29 @@ void DisplayLoop::refresh_spec()
     configured_ = true;
 }
 
+void DisplayLoop::learn_refresh(std::uint64_t ticks)
+{
+    const std::uint64_t rate = frames_->rate();
+    if (have_last_tick_ && ticks > last_tick_ && rate != 0) {
+        const double gap = static_cast<double>(ticks - last_tick_) /
+                           static_cast<double>(rate);
+        // A gap shorter than half a millisecond is not a display and a gap
+        // longer than a fifth of a second is a turn that was starved; neither
+        // says anything about the refresh.
+        if (gap > 0.0005 && gap < 0.2 &&
+            (stats_.refresh_seconds == 0.0 || gap < stats_.refresh_seconds)) {
+            stats_.refresh_seconds = gap;
+        }
+    }
+    last_tick_ = ticks;
+    have_last_tick_ = true;
+
+    // Until two turns have happened, whatever the display said about itself.
+    const double interval =
+        stats_.refresh_seconds != 0.0 ? stats_.refresh_seconds : frames_->nominal_interval();
+    graph_->set_lead_seconds(interval);
+}
+
 bool DisplayLoop::once(DisplayStep& out)
 {
     out = DisplayStep{};
@@ -56,6 +79,11 @@ bool DisplayLoop::once(DisplayStep& out)
         return false;
     }
     ++stats_.turns;
+    // Once, and used for both: the tick a frame is drawn at is the tick the
+    // audio position is extrapolated to, and reading the counter twice would
+    // put the difference between two reads in between them.
+    const std::uint64_t tick = frames_->now();
+    learn_refresh(tick);
 
     refresh_spec();
     ClockReading reading{};
@@ -73,7 +101,7 @@ bool DisplayLoop::once(DisplayStep& out)
     }
 
     out.had_clock = true;
-    out.step = graph_->pump(clock_.audible_seconds(frames_->now()));
+    out.step = graph_->pump(clock_.audible_seconds(tick));
     return out.step != VideoGraph::Step::finished &&
            out.step != VideoGraph::Step::failed;
 }

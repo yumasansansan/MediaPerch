@@ -160,6 +160,28 @@ public:
     void configure(std::uint32_t timescale, std::uint32_t fps_num,
                    std::uint32_t fps_den) noexcept;
 
+    /// How long after this decision the frame will actually be on screen.
+    ///
+    /// **A decision made at a vertical blank shows a frame at the next one.**
+    /// `present` hands the frame to the swap chain and the compositor puts it
+    /// up at the following blank, so a loop that asked "is it due now" was
+    /// really asking the wrong question: what matters is whether the frame is
+    /// due at the moment it will appear. Answering the wrong one costs up to a
+    /// whole refresh, every time, and it was measured -- 16.6 ms against a
+    /// 16.7 ms refresh, which is the floor of a loop deciding at blank
+    /// boundaries and asking about the blank it is standing on.
+    ///
+    /// With the interval given, "up to one refresh late" becomes "half a
+    /// refresh either side", because the frame chosen is the one whose time
+    /// the presentation instant is nearest to -- `decide` rounds to the
+    /// nearest presentation rather than flooring to the next one, and half a
+    /// lead is what "nearest" means when presentations are a lead apart.
+    ///
+    /// Zero is the default and means "now", which is right for a caller with
+    /// no display -- a test, or anything measuring the arithmetic rather than
+    /// a picture.
+    void set_lead_seconds(double seconds) noexcept { lead_ = seconds; }
+
     /// How far the video timeline is from the audio one, in seconds.
     ///
     /// **Not hypothetical.** §9.9 found sixty milliseconds of it in this tree's
@@ -175,8 +197,10 @@ public:
 
     struct Decision {
         FrameFate fate = FrameFate::show;
-        /// Positive when the frame is early, negative when it is late. The
-        /// number a person wants when asking why playback looks wrong.
+        /// Positive when the frame is early, negative when it is late,
+        /// **measured against the moment it will be on screen** -- which is
+        /// `lead_seconds` after the decision. With a lead set it straddles
+        /// zero; with none it is never positive for a frame that was shown.
         double error_seconds = 0.0;
     };
 
@@ -203,6 +227,7 @@ private:
     std::uint32_t fps_num_ = 0;
     std::uint32_t fps_den_ = 0;
     double skew_ = 0.0;
+    double lead_ = 0.0;
     double measured_ = 0.0;
     std::uint64_t last_pts_ = 0;
     bool have_last_ = false;

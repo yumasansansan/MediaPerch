@@ -118,9 +118,17 @@ VideoPacer::Decision VideoPacer::decide(std::uint64_t pts_ticks,
     }
 
     const double due = stream_seconds(pts_ticks, timescale_) + skew_;
-    out.error_seconds = due - audible_seconds;
+    // Against where the clock will be when this frame is visible, not where it
+    // is now. See `set_lead_seconds`.
+    out.error_seconds = due - (audible_seconds + lead_);
 
-    if (out.error_seconds > 0.0) {
+    // **Rounded to the nearest presentation, not floored to the next one.**
+    // A caller with a lead will present again one lead later, so a frame due
+    // less than half a lead after this presentation is nearer to this one than
+    // to that one -- and waiting would put it a whole refresh late rather than
+    // half a refresh early. With no lead this is `error > 0`, which is what a
+    // caller with no display wants: show it once it is due and not before.
+    if (out.error_seconds > lead_ * 0.5) {
         // Its turn has not come. Nothing is recorded: the caller will ask
         // again about this same frame, and the picture on screen stays up.
         out.fate = FrameFate::repeat;

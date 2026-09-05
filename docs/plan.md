@@ -1668,10 +1668,57 @@ Reported as two numbers because it is two things, and only one of them is a paci
   refresh boundaries. codec_mft's 15.8 ms is the same number on a run whose turns did not
   land quite the same way.
 
-**Which names the improvement.** Deciding for the *next* refresh rather than for the instant
-of waking -- showing a frame that will become due before the next vertical blank -- turns "up
-to one refresh late" into "half a refresh either side". That is a change to the pacer's
-threshold, it needs the refresh interval passed in, and it is not made yet.
+**Made, and measured again.** `VideoPacer::set_lead_seconds` is how long after a decision the
+frame will be on screen, and `decide` now measures against that instant rather than against
+the moment of waking -- and rounds to the *nearest* presentation rather than flooring to the
+next one, because a frame due less than half a refresh after this presentation is nearer to
+this one than to the one after it. `DisplayLoop` measures the refresh from the gaps between
+its own turns and sets the lead; measured rather than asked, because a mode that calls itself
+60 Hz is 59.94 and that is a frame every seventeen minutes -- the same rounding §9.9 refuses
+for a container's frame rate. Taken as the shortest gap seen: a gap can only be lengthened by
+a turn that was late, so the shortest is the one that was not.
+
+| file | before | after | refresh measured |
+|---|---|---|---|
+| `av.mp4` | 15.8 ms late | 8.4 late .. 8.1 early | 16.33 ms |
+| `av1.mp4` | 16.6 ms late | 4.3 late .. 5.6 early | 16.49 ms |
+| `vp9.webm` | 16.6 ms late | 2.4 late .. 7.7 early | 16.47 ms |
+| `av2.webm` | -- | 2.2 late .. 7.5 early | 16.41 ms |
+
+The worst of them is 8.4 ms against a 16.3 ms refresh, which is half a refresh to the
+millisecond: the claim and the measurement are the same number. A frame is now sometimes
+shown *early*, which the old rule could not do and which is the whole of the improvement --
+half a refresh early beats half a refresh late when the alternative was a whole one.
+
+Zero lead stays the default, and it is what a caller with no display wants: show a frame once
+it is due and not before, which is what every test that measures the arithmetic asks for.
+
+#### How large a picture, measured
+
+The presenter was asked to configure and to take one frame at each of ten sizes, on WARP and
+on the hardware:
+
+| | up to 16384 wide | 16385 wide |
+|---|---|---|
+| WARP | configure and present | configure ok, **present refused** |
+| hardware | configure and present | **configure refused** |
+
+**16384 is Direct3D 11's texture limit**, not this tree's and not this machine's, and it is
+comfortably past 16K DCI at 15360x8640. So 5K, 6K, 8K, 10K and 12K are all simply pictures as
+far as everything above the decoder is concerned; nothing here has a resolution in it.
+
+What runs out first is elsewhere, and the numbers are worth having:
+
+- **Memory per frame**, measured at eight-bit 4:2:0: 12 MB at 4K, 47 MB at 8K, **190 MB at
+  16K**. Ten bits doubles it. A decoder's reference pool is eight to sixteen of those, so 16K
+  ten-bit is three to six gigabytes before anything is presented.
+- **Codec levels** cap lower than the presenter does. HEVC's highest level allows 35,651,584
+  luma samples -- 8192x4352 -- so a conformant HEVC stream cannot reach 16K at all.
+- **`PacketRouter`'s cap** is 32 MB per stream by default, and a single 16K keyframe could be
+  larger than that. It still works: the cap is exceeded by at most the one packet that
+  discovers it, because a packet already read cannot be put back.
+
+
 
 **`--no-audio`, and what it admits.** §8's clock is the audio device, and a file with no audio
 track has none; neither does a run on a machine whose endpoint refuses every format, which is
