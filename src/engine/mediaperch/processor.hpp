@@ -79,6 +79,12 @@ public:
     /// "altered" are not the same word.
     [[nodiscard]] bool lossy() const noexcept { return converter_.lossy(); }
 
+    /// The chain's latency, in frames of the bus it runs on. Zero without a
+    /// chain. §8 needs it: what is audible is this far behind what the device
+    /// position says, because the frames leaving the endpoint went through
+    /// the chain and a linear-phase stage delayed them.
+    [[nodiscard]] std::uint32_t latency_frames() const noexcept;
+
     /// Forgets the chain's history, for a seek, and puts the drain back so
     /// the end of the stream is found again. False when a stage refused --
     /// which the graph ignores, because a chain that would not forget is still

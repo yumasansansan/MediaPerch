@@ -27,6 +27,11 @@ Processor::Processor(const Format& source, const Format& wire, std::uint32_t chu
     }
 }
 
+std::uint32_t Processor::latency_frames() const noexcept
+{
+    return chain_ != nullptr ? chain_->latency_frames() : 0u;
+}
+
 bool Processor::possible() const noexcept
 {
     if (!converter_.possible() || source_frame_bytes_ == 0 || wire_frame_bytes_ == 0 ||

@@ -93,6 +93,9 @@ set(warnings
 # platform head, the sink and the two pipelines are left out on purpose: they are
 # Windows-only by definition, and MSVC is the compiler they are written for.
 set(sources
+    # §8's clock. Portable by construction -- it reads no clock and calls
+    # nothing -- which is exactly the kind of file this check exists for.
+    src/engine/mediaperch/avsync.cpp
     modules/shared/transform/transform.cpp
     modules/shared/biquad/biquad.cpp
     modules/shared/convolve/convolve.cpp

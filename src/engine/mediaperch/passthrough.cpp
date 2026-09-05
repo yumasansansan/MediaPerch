@@ -323,6 +323,33 @@ std::uint64_t PassthroughGraph::position_frames() const noexcept
     return played_base_.load(std::memory_order_relaxed) + scaled;
 }
 
+ClockSpec PassthroughGraph::clock_spec() const noexcept
+{
+    ClockSpec out;
+    out.wire_rate = wire_.sample_rate;
+    out.source_rate = source_format_.sample_rate;
+    out.tick_rate = 0; // the caller's counter, not this graph's
+    out.latency_frames = 0; // Path A has no chain in it, by construction;
+    // The pair the position accounting has always kept: at the device frame
+    // that had been written when the run began or the last seek landed, the
+    // source was at `played_base_`.
+    out.origin_device_frame = rendered_base_.load(std::memory_order_relaxed);
+    out.origin_source_frame = played_base_.load(std::memory_order_relaxed);
+    return out;
+}
+
+bool PassthroughGraph::read_clock(ClockReading& out) noexcept
+{
+    std::uint64_t frames = 0;
+    std::uint64_t ticks = 0;
+    if (sink_ == nullptr || sink_->position(frames, ticks) != MP_OK) {
+        return false;
+    }
+    out.device_frames = frames;
+    out.ticks = ticks;
+    return true;
+}
+
 bool PassthroughGraph::seek(std::uint64_t frame)
 {
     if (!source_->seekable()) {

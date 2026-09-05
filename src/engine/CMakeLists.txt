@@ -19,6 +19,8 @@
 # cmake/CorePurity.cmake as a test rather than as a guideline.
 
 add_library(mediaperch_engine STATIC
+    mediaperch/avsync.cpp
+    mediaperch/avsync.hpp
     mediaperch/compare.cpp
     mediaperch/compare.hpp
     mediaperch/convert.cpp

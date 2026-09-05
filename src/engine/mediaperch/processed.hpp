@@ -91,10 +91,30 @@ public:
     /// seek a caller has to guess about.
     [[nodiscard]] bool seek(std::uint64_t frame);
 
-    /// Which source frame the device is playing now -- not which one the
-    /// decoder has reached, which is a ring's worth ahead of what anybody can
-    /// hear.
+    /// Which source frame the device has been *given* -- not which one the
+    /// decoder has reached, which is a ring's worth further ahead.
+    ///
+    /// **Given, not played**, and the difference is up to one device buffer.
+    /// That is deliberate and design.md's "the resume point" is where it is
+    /// argued: this number exists so a run interrupted by a device being pulled
+    /// out can come back to where it was, and the device that could have said
+    /// what it actually played is the one that just disappeared. For anything
+    /// that needs what is *audible* -- §8's clock, and video against it -- use
+    /// `clock_spec` and `read_clock`.
     [[nodiscard]] std::uint64_t position_frames() const noexcept;
+    /// §8's master clock, as far as this graph can state it.
+    ///
+    /// A graph is the one thing that knows all of it: it owns the sink, it
+    /// knows what the file counts in and what the device counts in, it built
+    /// the chain, and it has kept the anchor since gapless was written.
+    /// `AvClock` is what turns this plus a reading into a time.
+    [[nodiscard]] ClockSpec clock_spec() const noexcept;
+
+    /// One reading of the device's clock. False when the sink module has none
+    /// -- and then there is no master clock, so nothing may be synchronised to
+    /// it. `mp::Sink::position` says why that is a question rather than a zero.
+    [[nodiscard]] bool read_clock(ClockReading& out) noexcept;
+
 
     /// Where the source already is, before anything plays.
     ///

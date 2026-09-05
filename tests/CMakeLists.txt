@@ -27,6 +27,9 @@ add_executable(mediaperch_tests
     # ABI v4's arithmetic: no GPU, no decoder, no file -- which is what makes
     # it a check on the ABI rather than on this machine.
     pixel_layout_test.cpp
+    # §8's clock, which reads no clock: a test hands it one that runs fast,
+    # or slow, or has stopped, and checks what the video side was told.
+    avsync_test.cpp
     player_test.cpp
     property_test.cpp
     protocol_test.cpp

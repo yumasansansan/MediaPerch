@@ -52,6 +52,14 @@ struct FakeSinkRules {
     /// maps `AUDCLNT_E_DEVICE_INVALIDATED` and `AUDCLNT_E_RESOURCES_INVALIDATED`
     /// to, and it is the only error a host is expected to recover from.
     MpResult loss_result = MP_ERR_DEVICE_LOST;
+    /// Whether this device has §8's clock at all.
+    ///
+    /// Off by default, and the default is the interesting case as much as the
+    /// other one: a sink module that does not implement `get_position` leaves
+    /// the vtable entry null, and a host that assumed a clock would read one
+    /// through a null pointer. So the fake leaves it null too, and a test that
+    /// wants a clock says so and then drives it with `set_clock`.
+    bool has_clock = false;
 };
 
 class FakeSink {
@@ -67,6 +75,21 @@ public:
         vtbl_.wait = &FakeSink::wait_thunk;
         vtbl_.acquire = &FakeSink::acquire_thunk;
         vtbl_.commit = &FakeSink::commit_thunk;
+        if (rules_.has_clock) {
+            vtbl_.get_position = &FakeSink::get_position_thunk;
+        }
+    }
+
+    /// What the device says it has played, and the tick it says so at. A test
+    /// drives this by hand: a clock nobody controls is one no assertion can be
+    /// made against, and every question §8 asks -- what happens when it runs
+    /// fast, when it runs slow, when it stops -- is a question about a number
+    /// somebody chose.
+    void set_clock(std::uint64_t device_frames, std::uint64_t ticks) noexcept
+    {
+        const std::lock_guard lock{mutex_};
+        clock_frames_ = device_frames;
+        clock_ticks_ = ticks;
     }
 
     /// A `mp::Sink` pointing at this object. Non-owning: `close` is a no-op, so
@@ -95,6 +118,19 @@ public:
 
 private:
     static FakeSink& self(MpSink* s) noexcept { return *reinterpret_cast<FakeSink*>(s); }
+
+    static MpResult MP_CALL get_position_thunk(MpSink* s, std::uint64_t* frames,
+                                               std::uint64_t* ticks)
+    {
+        if (frames == nullptr || ticks == nullptr) {
+            return MP_ERR_INVALID;
+        }
+        FakeSink& me = self(s);
+        const std::lock_guard lock{me.mutex_};
+        *frames = me.clock_frames_;
+        *ticks = me.clock_ticks_;
+        return MP_OK;
+    }
 
     static MpResult MP_CALL negotiate_thunk(MpSink* s, const MpFormat* want, MpFormat* out)
     {
@@ -166,6 +202,8 @@ private:
     }
 
     MpSinkVtbl vtbl_{};
+    std::uint64_t clock_frames_ = 0;
+    std::uint64_t clock_ticks_ = 0;
     FakeSinkRules rules_;
     std::vector<Format> offered_;
     Format accepted_{};
