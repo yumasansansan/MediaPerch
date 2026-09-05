@@ -40,7 +40,3 @@ abi/probe_rust/target/
 __pycache__/
 *.pyc
 
-# libvpx is configured beside its source because its project generator drops
-# files when the path back to the source has several ".." in it. See
-# modules/codec/vpx/vpx_build.cmake for the measurement.
-/external/libvpx-build/

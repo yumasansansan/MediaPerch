@@ -124,6 +124,15 @@ if(TARGET mp_codec_dav1d AND TARGET mp_demux_mp4 AND TARGET mp_video_d3d11)
     add_dependencies(mediaperch_tests mp_codec_dav1d)
 endif()
 
+# VP8 and VP9 through the reference implementation, out of the container both
+# were designed for. Also the first exercise of demux_mkv naming a video codec.
+if(TARGET mp_codec_vpx AND TARGET mp_demux_mkv AND TARGET mp_video_d3d11)
+    target_sources(mediaperch_tests PRIVATE codec_vpx_test.cpp)
+    target_compile_definitions(mediaperch_tests PRIVATE
+        "MEDIAPERCH_CODEC_VPX=\"$<TARGET_FILE:mp_codec_vpx>\"")
+    add_dependencies(mediaperch_tests mp_codec_vpx)
+endif()
+
 # **Two AV1 decoders, byte for byte**, which is the strongest check this tree
 # can make on a video decoder: AV1's decoding process is defined bit-exactly, so
 # dav1d and the reference must agree on every sample or one of them is wrong.
@@ -165,7 +174,9 @@ if(TARGET mp_demux_mp4 AND TARGET mp_demux_mkv)
         "MEDIAPERCH_TEST_AV1=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mp4/av1.mp4\""
         "MEDIAPERCH_TEST_AV1_GRAIN=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mp4/av1_grain.mp4\""
         "MEDIAPERCH_TEST_AV_MKV=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mkv/av.mkv\""
-        "MEDIAPERCH_TEST_PCM_F32_MKV=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mkv/pcm_f32.mkv\"")
+        "MEDIAPERCH_TEST_PCM_F32_MKV=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mkv/pcm_f32.mkv\""
+        "MEDIAPERCH_TEST_VP9=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mkv/vp9.webm\""
+        "MEDIAPERCH_TEST_VP8=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mkv/vp8.webm\"")
     add_dependencies(mediaperch_tests mp_demux_mp4 mp_demux_mkv)
 endif()
 

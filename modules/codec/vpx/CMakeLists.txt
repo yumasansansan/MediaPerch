@@ -3,51 +3,28 @@
 # libvpx: VP8 and VP9, by the reference implementation.
 #
 # **Both decoders, and the reference argument is why.** §7 records it for audio:
-# for a codec whose reference implementation *is* what the codec means, the
-# reference is worth a dependency -- which is how libFLAC, libvorbis and libopus
-# got here, lossy ones included. libvpx is that for VP8 and VP9. It is also the
-# decoder this tree can hold another against, the way `av1_cross_test.cpp` holds
-# dav1d against libaom, the day a second VP9 decoder exists.
+# where a reference implementation *is* what the codec means, it is worth a
+# dependency -- which is how libFLAC, libvorbis and libopus got here, the lossy
+# ones included. libvpx is that for VP8 and VP9. VP8 is not an afterthought:
+# reading only the newer of the two would leave half the reason it is here.
 #
-# VP9 is not a receding format on the evidence: this machine's GPU carries
-# VP9_PROFILE0 and VP9_10BIT_PROFILE2 in its fixed-function block, and Microsoft
-# ships a VP9 extension. That makes `codec_mft` a possible second opinion rather
-# than a reason to skip the reference.
+# VP9 is not a receding format on the evidence either. This machine's GPU
+# carries VP9_PROFILE0 and VP9_10BIT_PROFILE2 in its fixed-function block and
+# Microsoft ships a VP9 extension, which makes `codec_mft` a possible second
+# opinion the day someone wants one -- the way libaom is dav1d's.
 #
-# **Three tools in sequence, and none of them new.** libvpx has neither CMake
-# nor Meson: `configure` is a POSIX shell script, `make` generates Visual Studio
-# project files from what it produced, and MSBuild builds them. The shell is Git
-# for Windows' -- git is already a hard requirement here, so MSYS2 is not
-# needed and was never needed. NASM is the same one external/dav1d and
-# external/aom use. GNU make is the one addition, and nmake cannot stand in:
-# libvpx's makefiles use `ifeq`, `$(foreach)` and pattern rules, and its README
-# says GNU make in as many words.
+# **MSYS2, and it is a real dependency.** libvpx has neither CMake nor Meson:
+# `configure` is a POSIX shell script, `make` generates Visual Studio projects
+# from what it produced, and MSBuild builds them. That much is only awkward. The
+# part that is not optional is *which* Unix: a native Windows make runs the
+# generator through cmd.exe and its 8191-character limit silently truncates the
+# source list, producing an archive that cannot resolve its own `vpx_calloc`.
+# vpx_build.sh carries the measurement. MSYS2's make runs the same command
+# through its own bash and the list fits.
 #
-# The build itself is vpx_build.cmake, which is where the mechanics are.
-
-# **Off by default, because it does not link yet.** Everything below runs:
-# configure produces makefiles, make generates a Visual Studio solution, MSBuild
-# builds it, and `vpxmd.lib` appears. What comes out is **incomplete** -- 73
-# objects holding only `vp8_*` and `vp9_*`, with `vpx_dsp`, `vpx_mem`,
-# `vpx_ports` and `vpx_scale` missing, so the archive cannot even resolve its
-# own `vpx_calloc`. The same libvpx configured by hand in a directory beside its
-# source produces 109 objects and links.
-#
-# So the difference is either the options added since that first attempt
-# (`--disable-unit-tests --disable-webm-io --disable-libyuv`) or the deep
-# relative path from this build directory back to external/libvpx, which
-# libvpx's project generator prints an "Ignored files list" about. **Which of
-# the two is not yet established**, and guessing at a build system is how the
-# libaom nesting cost three attempts.
-#
-# Gated rather than deleted: the module, the ABI values and the Matroska codec
-# ids are all written and are not the part that is unfinished.
-option(MEDIAPERCH_BUILD_VPX
-    "Build codec_vpx. Off: libvpx's generated solution produces an incomplete library and the cause is not yet established -- see modules/codec/vpx." OFF)
-
-if(NOT MEDIAPERCH_BUILD_VPX)
-    return()
-endif()
+# So this is the one submodule whose build wants a second Unix userland rather
+# than one more tool. It is skipped, loudly, when that is not there, and the
+# tree still builds -- with no VP8 or VP9 decoder, which is what that costs.
 
 set(vpx_src "${CMAKE_SOURCE_DIR}/external/libvpx")
 
@@ -66,20 +43,30 @@ if(NOT MSVC)
     return()
 endif()
 
-find_program(MEDIAPERCH_BASH NAMES bash bash.exe
-    HINTS "$ENV{ProgramFiles}/Git/bin" "$ENV{ProgramW6432}/Git/bin"
-    DOC "A POSIX shell for libvpx's configure. Git for Windows ships one.")
-find_program(MEDIAPERCH_MAKE NAMES make make.exe mingw32-make mingw32-make.exe
-    DOC "GNU make, which turns libvpx's configure output into a solution.")
+# **MSYS2's bash by name.** Git for Windows ships a bash and it is not the same
+# thing: it has no make at all, and its sed and cut are not the ones libvpx's
+# scripts were written against. NO_DEFAULT_PATH so that finding Git's instead is
+# impossible rather than unlikely.
+find_program(MEDIAPERCH_MSYS_BASH
+    NAMES bash.exe
+    HINTS "C:/msys64/usr/bin" "C:/msys32/usr/bin" "$ENV{MSYS2_ROOT}/usr/bin"
+    NO_DEFAULT_PATH
+    DOC "MSYS2's bash, which is the only environment libvpx's Windows build works in.")
+find_program(MEDIAPERCH_MSYS_MAKE
+    NAMES make.exe
+    HINTS "C:/msys64/usr/bin" "C:/msys32/usr/bin" "$ENV{MSYS2_ROOT}/usr/bin"
+    NO_DEFAULT_PATH
+    DOC "MSYS2's make. A native Windows make truncates libvpx's project generation.")
 find_program(MEDIAPERCH_NASM NAMES nasm nasm.exe
     DOC "NASM, which assembles libvpx. external/dav1d and external/aom need it too.")
 
-if(NOT MEDIAPERCH_BASH OR NOT MEDIAPERCH_MAKE OR NOT MEDIAPERCH_NASM)
+if(NOT MEDIAPERCH_MSYS_BASH OR NOT MEDIAPERCH_MSYS_MAKE OR NOT MEDIAPERCH_NASM)
     message(WARNING
-        "libvpx needs a POSIX shell, GNU make and nasm, and at least one is "
-        "missing. Skipping codec_vpx -- the tree still builds and simply has no "
-        "VP8 or VP9 decoder. Git for Windows provides the shell; see "
-        "modules/codec/dav1d/CMakeLists.txt for the other two.")
+        "libvpx needs MSYS2 -- its bash and its make, not Git for Windows' -- and "
+        "nasm. At least one is missing, so codec_vpx is skipped. The tree still "
+        "builds and simply has no VP8 or VP9 decoder. `pacman -S make` inside "
+        "MSYS2 is the usual gap; see modules/codec/vpx/vpx_build.sh for why a "
+        "native make will not do.")
     return()
 endif()
 
@@ -97,31 +84,23 @@ endif()
 
 include(ExternalProject)
 
-# **Beside the source rather than under build/**, which is unlike every other
-# external here and is forced: see vpx_build.cmake for the measurement. One
-# directory for every configuration, because libvpx is built once as Release
-# and dispatches on the CPU at run time -- two presets building at the same
-# moment would contend for it, which CI does not do because its legs are
-# separate runners.
-set(vpx_prefix "${CMAKE_SOURCE_DIR}/external/libvpx-build")
+set(vpx_prefix "${CMAKE_BINARY_DIR}/external/libvpx")
 set(vpx_library "${vpx_prefix}/x64/Release/vpxmd.lib")
 
 ExternalProject_Add(vpx_external
     SOURCE_DIR "${vpx_src}"
     BINARY_DIR "${vpx_prefix}"
     CONFIGURE_COMMAND "${CMAKE_COMMAND}" -E true
-    BUILD_COMMAND "${CMAKE_COMMAND}"
-        "-Dbash=${MEDIAPERCH_BASH}"
-        "-Dmake=${MEDIAPERCH_MAKE}"
-        "-Dsrc=${vpx_src}"
-        "-Dbuild=${vpx_prefix}"
-        "-Dtarget=${vpx_target}"
-        "-Dchecks=$<BOOL:${MEDIAPERCH_DECODER_CHECKS}>"
-        -P "${CMAKE_CURRENT_SOURCE_DIR}/vpx_build.cmake"
+    BUILD_COMMAND "${MEDIAPERCH_MSYS_BASH}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/vpx_build.sh"
+        "${vpx_src}" "${vpx_prefix}" "${vpx_target}"
+        "$<IF:$<BOOL:${MEDIAPERCH_DECODER_CHECKS}>,1,0>"
     INSTALL_COMMAND "${CMAKE_COMMAND}" -E true
     BUILD_BYPRODUCTS "${vpx_library}"
-    # Everything is in the build step, so it is the one that has to run: see
-    # vpx_build.cmake, and modules/codec/dav1d for what not re-running cost.
+    # Everything is in the build step, so it is the one that has to run -- and
+    # the submodule can move under an external project without ExternalProject
+    # noticing, which cost a set of measurements against the wrong commit in
+    # modules/codec/dav1d.
     BUILD_ALWAYS ON
     USES_TERMINAL_BUILD OFF
     LOG_BUILD ON

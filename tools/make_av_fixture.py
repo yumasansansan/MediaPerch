@@ -130,6 +130,20 @@ def build_pcm_float_mkv(path):
         check=True)
 
 
+def build_webm(path, encoder):
+    # **VP8 and VP9 in WebM**, which is the container both were designed for and
+    # the one `demux_mkv` names them in. Small on purpose: what is under test is
+    # a CodecID, a decoder and a planar frame, not a picture.
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error",
+         "-f", "lavfi", "-i", "testsrc2=size=128x96:rate=24000/1001:duration=1",
+         "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1",
+         "-c:v", encoder, "-b:v", "60k", "-deadline", "realtime", "-cpu-used", "8",
+         "-pix_fmt", "yuv420p", "-g", "6",
+         "-c:a", "libopus", "-b:a", "32k", path],
+        check=True)
+
+
 def build_mkv(path):
     # Opus rather than AAC, so the Matroska fixture also exercises the
     # BlockGroup path: the last block of an Opus track carries DiscardPadding,
@@ -155,9 +169,12 @@ def main():
     build_av1_grain(os.path.join(MP4, "av1_grain.mp4"))
     build_mkv(os.path.join(MKV, "av.mkv"))
     build_pcm_float_mkv(os.path.join(MKV, "pcm_f32.mkv"))
+    build_webm(os.path.join(MKV, "vp9.webm"), "libvpx-vp9")
+    build_webm(os.path.join(MKV, "vp8.webm"), "libvpx")
     for directory, name in ((MP4, "av.mp4"), (MP4, "av_bt2020.mp4"), (MP4, "av1.mp4"),
                             (MP4, "av1_grain.mp4"), (MKV, "av.mkv"),
-                            (MKV, "pcm_f32.mkv")):
+                            (MKV, "pcm_f32.mkv"), (MKV, "vp9.webm"),
+                            (MKV, "vp8.webm")):
         p = os.path.join(directory, name)
         print("%-16s %d bytes" % (name, os.path.getsize(p)))
     return 0

@@ -124,17 +124,43 @@ jobs:
           Add-Content -Path $env:GITHUB_PATH -Value "$root\Scripts"
           Add-Content -Path $env:GITHUB_PATH -Value "$root\Library\bin"
 
+      # **libvpx needs MSYS2, and the image already carries one.** C:\msys64 is
+      # there and deliberately not on PATH, which is the arrangement
+      # modules/codec/vpx wants anyway: it finds that bash and that make by
+      # name, and PATH stays a Windows PATH rather than one where `find` and
+      # `sort` are suddenly somebody else's. What the image does not carry is
+      # make, and without it codec_vpx skips itself and the artifacts have no
+      # VP8 or VP9 decoder -- the same silent absence the step above exists to
+      # prevent.
+      #
+      # `pacman -S` on its own first, because the image's databases were synced
+      # when it was built. `-Sy` is a partial upgrade and only worth risking if
+      # that fails.
+      - name: make, from the MSYS2 the image already has
+        run: |
+          $pacman = "C:\msys64\usr\bin\pacman.exe"
+          $installed = $false
+          try {
+              & $pacman -S --noconfirm --needed --disable-download-timeout make
+              $installed = $LASTEXITCODE -eq 0
+          } catch { }
+          if (-not $installed) {
+              & $pacman -Sy --noconfirm --disable-download-timeout
+              & $pacman -S --noconfirm --needed --disable-download-timeout make
+          }
+
       - name: MSVC developer environment
         shell: cmd
         run: ${{ env.VS_DEV_ENV }}
 
-      # Stated out loud, because the module is skipped silently when they are
-      # absent and a skipped decoder looks exactly like a passing build.
-      - name: Report the tools external/dav1d needs
+      # Stated out loud, because these modules skip themselves silently when a
+      # tool is absent and a skipped decoder looks exactly like a passing build.
+      - name: Report the tools the external decoders need
         run: |
           meson --version
           nasm -v
           ninja --version
+          & "C:\msys64\usr\bin\make.exe" --version | Select-Object -First 1
 
       - name: Configure
         run: cmake --preset ${{ matrix.preset }}
@@ -293,6 +319,31 @@ jobs:
           $root = "$env:CONDA\envs\mediaperch-build"
           Add-Content -Path $env:GITHUB_PATH -Value "$root\Scripts"
           Add-Content -Path $env:GITHUB_PATH -Value "$root\Library\bin"
+
+      # **libvpx needs MSYS2, and the image already carries one.** C:\msys64 is
+      # there and deliberately not on PATH, which is the arrangement
+      # modules/codec/vpx wants anyway: it finds that bash and that make by
+      # name, and PATH stays a Windows PATH rather than one where `find` and
+      # `sort` are suddenly somebody else's. What the image does not carry is
+      # make, and without it codec_vpx skips itself and the artifacts have no
+      # VP8 or VP9 decoder -- the same silent absence the step above exists to
+      # prevent.
+      #
+      # `pacman -S` on its own first, because the image's databases were synced
+      # when it was built. `-Sy` is a partial upgrade and only worth risking if
+      # that fails.
+      - name: make, from the MSYS2 the image already has
+        run: |
+          $pacman = "C:\msys64\usr\bin\pacman.exe"
+          $installed = $false
+          try {
+              & $pacman -S --noconfirm --needed --disable-download-timeout make
+              $installed = $LASTEXITCODE -eq 0
+          } catch { }
+          if (-not $installed) {
+              & $pacman -Sy --noconfirm --disable-download-timeout
+              & $pacman -S --noconfirm --needed --disable-download-timeout make
+          }
 
       - name: MSVC developer environment
         shell: cmd

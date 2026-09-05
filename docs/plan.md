@@ -2204,6 +2204,69 @@ conversion is a shader here. AV1 film grain synthesis is the other obvious one: 
 on the CPU, it is embarrassingly parallel, and a presenter is where it would belong -- which
 is an argument for the split this ABI already makes rather than against it.
 
+#### codec_vpx: VP8 and VP9, and the one build that wants a second Unix
+
+**Done.** Both codecs, out of a WebM, through `demux_mkv`, `codec_vpx` and `video_d3d11`.
+libvpx is the reference implementation for both, which is §7's argument for libFLAC and the
+Xiph libraries applied to video: where a reference implementation *is* what the codec means,
+it is worth a dependency. VP8 is decoded on its own account rather than as a by-product --
+reading only the newer of the two would leave half the reason libvpx is here at all.
+
+VP9 is not a receding format on the evidence either. This machine's GPU carries VP9_PROFILE0
+and VP9_10BIT_PROFILE2 in its fixed-function block and Microsoft ships a VP9 extension, which
+makes `codec_mft` a possible second opinion the day someone wants one -- the way libaom is
+dav1d's.
+
+It is also the first exercise of something `demux_mkv` did not have. Every video track in a
+Matroska came back `MP_CODEC_UNKNOWN` until this work: the container this tree splits best
+was the one it could decode least, which under §12's container-first resolution means a
+demuxer that parses perfectly and hands over a payload nothing can claim.
+
+**The build needed MSYS2, and the reason took four wrong answers to reach.** libvpx has
+neither CMake nor Meson: `configure` is a POSIX shell script, `make` generates Visual Studio
+projects from what it wrote, and MSBuild builds those. That much is only awkward. What is not
+optional is *which* Unix.
+
+`libs.mk` hands the entire source list to `gen_msvs_vcxproj.sh` on one command line. A native
+Windows GNU make runs that through cmd.exe, whose limit is 8191 characters; the list is about
+11,800. **Nothing reports it.** The truncated command exits zero, writes a plausible project,
+and produces an archive that fails at link time on symbols from its own objects.
+
+Ground truth came from making the generator print its own arguments: 223 of them, 7917 bytes,
+the last cut mid-word at `../libvpx/vpx_dsp/x86/inv_txfm`, and 7917 plus the leading options
+is 8191 exactly. Which files fall off is not arbitrary either -- `libs.mk` names vp8, vp9,
+vpx and vpx_dsp in explicit filter clauses and sweeps the rest up in a filter-out clause
+last, so what is lost is always vpx_mem, vpx_ports, vpx_scale and vpx_util. `vpx_calloc` was
+the symbol that reported it, several steps downstream of the fault.
+
+Four things were believed before that measurement and none survived it: that the submodule
+was at the wrong version, that the build directory's path was too deep, that the command
+being measured was the one that failed, and that `SHELL=` or `MAKESHELL=` pointing a native
+make at a POSIX shell would be enough. The last is the closest to right and still wrong: the
+whole userland has to be MSYS2's, because libvpx's scripts use its `sed`, `cut` and `cygpath`
+too. Under MSYS2's make the generator receives 319 arguments and the archive goes from 110
+objects to 157.
+
+So this is the one submodule whose build wants a second Unix userland rather than one more
+tool, and it is skipped loudly when that is absent -- the same guard `codec_dav1d` has, for
+the same reason. CI's image carries MSYS2 at `C:\msys64` and deliberately keeps it off PATH,
+which is the arrangement this wants anyway: `modules/codec/vpx` finds that bash and that make
+by name, with `NO_DEFAULT_PATH` so that finding Git for Windows' bash instead is impossible
+rather than unlikely. `make` is the one thing the image does not carry, and one `pacman` line
+is the whole difference.
+
+**Configured for what this tree can describe rather than for what libvpx defaults to.**
+`--enable-vp9-highbitdepth` is off by default and is what makes VP9 profiles 2 and 3 -- ten
+and twelve bits, 4:2:2 and 4:4:4 -- readable at all; leaving it off would let ABI v4 describe
+depths this decoder then refused to produce. The encoders, `webm-io` and `libyuv` all go:
+nothing here encodes, containers are demuxers here, and colour conversion is a shader.
+`--enable-coefficient-range-checking` makes the decoder check its own intermediate transform
+coefficients, which is what a build being fuzzed or audited wants and not what a shipping one
+does, so it follows `MEDIAPERCH_DECODER_CHECKS` rather than being on or off for everybody.
+
+`--enable-postproc` is the one that is off for a reason larger than this module, and §9.8.3
+is where that goes.
+
 ### 9.8.3 The stage the video side does not have
 
 **Audio is three stages and video is two.**
@@ -2423,6 +2486,8 @@ HDR state.
 | M5.9 | The structural cut: `src/engine` and `src/player` | **done.** The portable half was one library holding both the audio engine and the thing that decides what to play. §4 answers yes to "could this ABI carry a DAW's engine", and a DAW taking it would have taken the transport, the playlist, the INI schema and the IPC wire format with it. They are `src/player` now, and `src/engine` has no route to them: the include path is what enforces it, so reaching across is a compile error rather than a review comment. CI builds `mediaperch_engine` alone, which checks both cuts at once |
 | M5.75 | Path B is hashable, and a VST3 can be a stage in it | **done.** `mp::Processor` is `ProcessedGraph`'s arithmetic without the device, the ring or the threads, so `decode --path processed --gain --dsp` runs the chain and prints its SHA-256 -- the flags had been accepted and silently ignored, which is why nothing in this tree had ever compared the resampler between two builds. It found three bugs on the first run: `use_processed` could not see a gain, `Processor::reset` returned `MP_END` on success, and a seek left the noise shaper feeding back error from wherever the stream used to be. The baseline and AVX2 builds agree over 144 runs. `modules/dsp/vst3` hosts somebody else's plugin on `pluginterfaces` alone, with a VST3 written in `tests/` so the host is tested without one installed |
 | M5.95 | ABI v3: several streams from one file | **done.** `select` named one stream and `seek(frame)` meant "the selected one", which has no answer once a player wants audio and video out of one file -- and appending would have left both meaning something narrower than their names. So `select_streams`, `seek(stream, frame)`, `MpPacket::reserved` becoming `stream`, and `stream_video_info` appended for the three colour code points §9.1 turns on. Checked against `demux_mp4` reading a real MP4 with two tracks in it, which is the first test here that drives a module rather than a fake. `demux_mkv` serves several tracks too, which is what makes v3 an interface rather than one module's habit -- and clearing MP_PACKET_TIMED on a video packet that never had a position is what that second container found |
+| M6.4 | codec_vpx: VP8 and VP9, by the reference implementation | **done.** Both, out of a WebM, through demux_mkv and video_d3d11 -- and the first time demux_mkv named a video codec at all, having returned MP_CODEC_UNKNOWN for every video track until now. The build is the finding: libvpx has neither CMake nor Meson, and its Windows build needs MSYS2 rather than merely preferring it. `libs.mk` hands the whole source list to `gen_msvs_vcxproj.sh` on one command line; a native make runs that through cmd.exe and its 8191-character limit truncates it silently, writing a plausible project whose archive then fails to link on `vpx_calloc` -- one of its own symbols. Measured by making the generator print its arguments: 223 of them, 7917 bytes, the last cut mid-word, and 7917 plus the options is 8191 exactly. Four explanations were believed and discarded before that, `SHELL=` included: the whole userland has to be MSYS2's, because libvpx's scripts use its sed and cut too. Under it the generator gets 319 arguments and the archive 157 objects rather than 110 |
+| M6.3 | codec_aom: a second AV1 decoder, to hold the first to its word | **done.** libaom decodes the same fixtures dav1d does and `av1_cross_test.cpp` requires the two to agree byte for byte, on a clean stream and on a grainy one -- which is a stronger statement than either decoder's own tests can make, and the reason to carry a reference implementation that scores 40 at probe and is not meant to play anything. Nesting its build is what it cost: libaom calls `enable_language(ASM_NASM)` from inside its own tree, which CMake will not honour there, and hoisting the call cascaded into wavpack's ASM_MASM and mpg123's -- so it is an external project, configured standalone, which is where it works first time. CMake also picked Strawberry Perl's YASM as the assembler until nasm was named outright |
 | M6.2 | H.264 declined before it is opened | **done.** An SPS reader in `avcc.cpp` -- Exp-Golomb over an RBSP with the emulation prevention bytes removed -- and a `probe` that scores 0 for any H.264 that is not 4:2:0 at eight bits, which is measured rather than assumed: this machine's D3D11 decoder profiles have no 4:2:2 or 4:4:4 entry and MF's software transform is 4:2:0 too. §7 needs the refusal at probe, because a decoder failing mid-file must not trigger a silent retry. It also found a deadlock waiting for a caller: codec_mft stopped Media Foundation from a static destructor, which runs during FreeLibrary under the loader lock while MFShutdown waits for threads that need it -- reproduced in twenty lines, fixed by moving it to `module_shutdown`, and only reachable at all because every test harness here had been loading modules without ever calling their shutdown |
 | M6.1 | codec_dav1d | **done.** AV1 decoded by dav1d, end to end through demux_mp4 and video_d3d11, and the first decoder here to produce a planar frame -- so the presenter's planar path now has a producer rather than frames a test built by hand. Meson as an external project, which is a real build dependency and the first time CMake could not build a submodule; `meson`, `ninja` and `nasm` required, the module skipped loudly without them. dav1d is built once with the release CRT, which §4's no-allocation-across-the-boundary rule is what makes safe. MEDIAPERCH_ARCH is deliberately not plumbed through: capping dav1d with `dav1d_set_cpu_flags_mask` was written and removed once measurement showed the dispatch is a cascade of overwrites, so an AVX2 build runs SSE code for every function with no AVX2 version whatever the mask says -- leaving the call a no-op on the avx2 build and a slowdown on the baseline one. CI had neither meson nor nasm, so the module was being skipped in every leg with the build still green -- both now come from the image's Miniconda, in a step before the developer environment and followed by a version report, because a silently skipped decoder looks exactly like a passing build |
 | M6.0 | AV1 crosses the container | **done, and it is half of `codec_dav1d`.** MP_CODEC_AV1 appended, `demux_mp4` reading an `av01` sample entry, and the `av1C` record handed over verbatim -- read by asking the box to write itself, because Bento4 parses this one and keeps no raw bytes, and a record reassembled from parsed fields would be this module's opinion of the file rather than the file. `av1.mp4` is `av.mp4`'s picture and audio in AV1, differing in the codec and in nothing else. The decoder waits on a build decision rather than on code: dav1d is Meson-only, every submodule here is CMake, and the machine's only Python has no pip |
