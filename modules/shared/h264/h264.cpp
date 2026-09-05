@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-#include "avcc.hpp"
+#include "h264.hpp"
 
 #include <cstring>
 

@@ -11,7 +11,7 @@
 // `demux_mp4`, which is what makes it an end-to-end check of the split plan.md
 // §9.8 argues for rather than of one module in isolation.
 
-#include "avcc.hpp"
+#include "h264.hpp"
 #include "mediaperch/packet.hpp"
 
 #include <mediaperch/module.h>

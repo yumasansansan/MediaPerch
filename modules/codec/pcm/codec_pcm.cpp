@@ -20,6 +20,27 @@
 //    bit-exactness used to be a property of one module behaving itself.
 //    Here it is a property of the code: a memcpy has no other behaviour.
 //
+// **A memcpy is enough, and "enough" is the part worth saying.** Calling this
+// "the codec that is a memcpy" invites the conclusion that it therefore handles
+// only integers -- which is wrong, and cost `demux_mkv` its float PCM for a
+// while: `A_PCM/FLOAT/IEEE` was refused on exactly that reasoning while
+// `demux_wav` had been reporting float WAV as MP_CODEC_PCM all along.
+//
+// What the bytes *are* travels in `MpFormat::sample_type`, not in the copy, and
+// converting them is the graph's job at both ends: `src/engine/negotiation.cpp`
+// offers the source format to the device and `src/engine/repack.cpp` rearranges
+// integer containers losslessly when it will take a different one, while Path B
+// reads every sample type -- s16 through f64 -- into an f64 bus in
+// `src/engine/convert.cpp`. So thirty-two and sixty-four bit float reach a
+// device exactly as sixteen-bit integer does, and this file is a memcpy for all
+// of them.
+//
+// That is also why there is no second PCM module for the processed path. The
+// conversion is not per codec: `convert.cpp` reads FLAC's twenty-four bit and
+// MP3's float through the same function, so a converting `codec_pcm` would be a
+// copy of it that only one codec could use. The split that exists -- Path A
+// against Path B -- is about the graph, which is where it belongs.
+//
 // The format is the container's. PCM's configuration blob is empty -- there is
 // nothing a codec could be configured *with* -- so `get_format` declines to
 // answer and `MpStreamInfo::format` stands, which is what the ABI says of

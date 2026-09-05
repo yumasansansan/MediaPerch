@@ -27,3 +27,6 @@ endif()
 
 # What a bit depth means, shared rather than copied a seventh time.
 target_link_libraries(mp_demux_wav PRIVATE mediaperch_pcm_format)
+
+# The host's log, shared rather than copied a thirteenth time.
+target_link_libraries(mp_demux_wav PRIVATE mediaperch_module_log)

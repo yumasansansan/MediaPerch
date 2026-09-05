@@ -52,3 +52,6 @@ endif()
 
 # What a bit depth means, shared rather than copied a seventh time.
 target_link_libraries(mp_codec_flac PRIVATE mediaperch_pcm_format)
+
+# The host's log, shared rather than copied a thirteenth time.
+target_link_libraries(mp_codec_flac PRIVATE mediaperch_module_log)

@@ -30,6 +30,8 @@
 
 #include <mediaperch/module.h>
 
+#include "module_log.hpp"
+
 #include "pcm_format.hpp"
 
 #include <FLAC/stream_decoder.h>
@@ -46,15 +48,13 @@ const MpHost* g_host = nullptr;
 
 void log_fmt(MpLogLevel level, const char* format, ...) noexcept
 {
-    if (g_host == nullptr || g_host->log == nullptr) {
-        return;
-    }
-    char buffer[512];
+    // The body is modules/shared/module_log: twelve copies of it had drifted to
+    // three buffer sizes. Only the wrapper stays, because a `...` function
+    // cannot forward to another one -- the va_list has to be made here.
     va_list args;
     va_start(args, format);
-    std::vsnprintf(buffer, sizeof(buffer), format, args);
+    mp::log::vfmt(g_host, level, format, args);
     va_end(args);
-    g_host->log(g_host->ctx, level, buffer);
 }
 
 /// How many bytes a sample of `bits` occupies. Shared -- see

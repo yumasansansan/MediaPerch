@@ -8,3 +8,5 @@ mediaperch_add_module(mp_demux_ffmpeg
     KIND demux
     SOURCES demux_ffmpeg.cpp)
 
+# The host's log, shared rather than copied a thirteenth time.
+target_link_libraries(mp_demux_ffmpeg PRIVATE mediaperch_module_log)

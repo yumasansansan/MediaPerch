@@ -19,8 +19,8 @@
 // separate; the emitting is identical, which is why `Annex` takes them as a
 // sequence rather than as SPS and PPS.
 
-#ifndef MEDIAPERCH_CODEC_MFT_AVCC_HPP
-#define MEDIAPERCH_CODEC_MFT_AVCC_HPP
+#ifndef MEDIAPERCH_SHARED_H264_HPP
+#define MEDIAPERCH_SHARED_H264_HPP
 
 #include <cstddef>
 #include <cstdint>
@@ -106,4 +106,4 @@ struct SpsInfo {
 
 } // namespace mp::mft
 
-#endif // MEDIAPERCH_CODEC_MFT_AVCC_HPP
+#endif // MEDIAPERCH_SHARED_H264_HPP

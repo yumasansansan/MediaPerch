@@ -30,3 +30,6 @@ mediaperch_add_module(mp_sink_asio
 target_include_directories(mp_sink_asio SYSTEM PRIVATE
     "${CMAKE_SOURCE_DIR}/external/asio/common")
 target_link_libraries(mp_sink_asio PRIVATE ole32)
+
+# The host's log, shared rather than copied a thirteenth time.
+target_link_libraries(mp_sink_asio PRIVATE mediaperch_module_log)

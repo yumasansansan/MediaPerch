@@ -32,6 +32,8 @@
 
 #include <mediaperch/module.h>
 
+#include "module_log.hpp"
+
 #include <Ap4.h>
 #include <Ap4ColrAtom.h>
 #include <Ap4CttsAtom.h>
@@ -58,15 +60,13 @@ const MpHost* g_host = nullptr;
 
 void log_fmt(MpLogLevel level, const char* format, ...) noexcept
 {
-    if (g_host == nullptr || g_host->log == nullptr) {
-        return;
-    }
-    char line[512];
+    // The body is modules/shared/module_log: twelve copies of it had drifted to
+    // three buffer sizes. Only the wrapper stays, because a `...` function
+    // cannot forward to another one -- the va_list has to be made here.
     va_list args;
     va_start(args, format);
-    std::vsnprintf(line, sizeof(line), format, args);
+    mp::log::vfmt(g_host, level, format, args);
     va_end(args);
-    g_host->log(g_host->ctx, level, line);
 }
 
 /// Stream operations one `open` may spend, and one packet or seek may spend.

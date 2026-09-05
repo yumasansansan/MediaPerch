@@ -2204,6 +2204,66 @@ conversion is a shader here. AV1 film grain synthesis is the other obvious one: 
 on the CPU, it is embarrassingly parallel, and a presenter is where it would belong -- which
 is an argument for the split this ABI already makes rather than against it.
 
+### 9.8.3 The stage the video side does not have
+
+**Audio is three stages and video is two.**
+
+    audio:  demux -> codec -> DSP -> sink
+    video:  demux -> vcodec ->  ?  -> video
+
+`MP_KIND_DSP` sits between a codec and a sink, and §5 is built on what that
+separation buys: Path A has no DSP in it at all and is bit-exact by
+construction, Path B has whatever a person put there and **says so**. Neither
+the decoder nor the sink can quietly process anything, because processing is
+somebody else's module.
+
+The video side has no equivalent, and the absence has already been felt twice.
+
+- **libvpx's `--enable-postproc`** is deblocking and denoising *inside the
+  decoder*. Switching it on changes what the decoder returns, which means a
+  conformant decoder stops producing the specified picture and
+  `av1_cross_test.cpp`'s whole method -- two implementations agreeing byte for
+  byte -- stops working. It is off, and the reason it is off is that there is
+  nowhere else to put it.
+- **AV1 film grain synthesis** is the case §9.8.2 already argues about: it is
+  embarrassingly parallel and belongs on the GPU rather than in dav1d's CPU
+  loop. `MP_VIDEO_FILM_GRAIN` exists so that something downstream can know
+  there is anything to move. There is nothing downstream.
+
+And the reason to want one is not tidiness: the video engine is meant to carry
+colour grading, which is a chain of stages a person assembles -- exactly what
+`modules/dsp` is for audio.
+
+**What it would have to be, and where it differs from the audio one.**
+
+`MpDspVtbl` processes a deinterleaved `double` bus: planar, one pointer per
+channel, frames in and frames out with a stated latency. A video stage cannot
+copy that shape, for one reason that decides the whole design:
+
+> **It has to be able to run on the presenter's device.**
+
+A CPU stage taking planes and returning planes would force GPU decode -> system
+memory -> GPU, which is the round trip §9.8.1's whole texture-adoption argument
+exists to avoid. So a video DSP takes an `MpGraphicsDevice` the way
+`MpVideoCodecVtbl::open` does, and `probe` takes an `MpGraphicsApi` so a host
+can tell which stages will run on the device it has and which would drag a
+frame back through memory.
+
+The rest follows the audio shape: `configure` states what comes in and what
+goes out, because a stage may change the layout -- a grader that works in
+4:4:4 is entitled to say so and let the host decide whether to insert it.
+`process` takes one frame and produces one, with the output valid until the
+next call, which is the promise a decoder already makes. `set` and `describe`
+are the same pair every other kind has.
+
+**Not added yet, and that is the rule rather than laziness.** §15 says not to
+add an interface until the second implementation of it exists, and §4 records
+that a kind number with no vtable and no module is the mistake this tree made
+once with `MP_ENCODING_DSD` and reverted. Nothing here processes video between
+the decoder and the presenter today. The first stage that wants to -- film
+grain moved off dav1d, or a lookup table, or a scaler -- is what should bring
+the interface with it.
+
 ### 9.9 What a video packet's timestamp is counted in
 
 **Answered, and it took three more answers with it.** `MpPacket::frame` was documented as

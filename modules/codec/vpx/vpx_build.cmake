@@ -65,8 +65,27 @@ if(NOT EXISTS "${build}/config.mk")
         list(APPEND options --enable-coefficient-range-checking)
     endif()
 
-    # A relative path to configure, because it is run from the build directory
-    # and a Windows drive letter is not a path a POSIX shell reads the same way.
+    # **A relative path with one `..` in it, and that is not a style choice.**
+    #
+    # libvpx's Visual Studio project generator drops source files when the path
+    # from the build directory to the source has several `..` segments. Measured
+    # on one source tree with nothing else changed:
+    #
+    #     ../libvpx/configure                 110 objects, links
+    #     ../../../external/libvpx/configure   75 objects, does not
+    #     ../../../../vpx117/configure         83 objects, does not
+    #
+    # A Windows absolute path is worse (61) and an MSYS one is worse again --
+    # `make` is a native program and cannot resolve `/c/...` at all. What
+    # survives is the shape libvpx is built with everywhere: a build directory
+    # beside the source. So the build happens in external/libvpx-build, which is
+    # the one thing in this tree built inside the source tree rather than under
+    # build/, and it is there because the alternative is a library missing a
+    # quarter of itself.
+    #
+    # Nothing detects the truncation on its own: the archive appears, it is
+    # eight megabytes, and it fails at link time on symbols from its own
+    # objects. That is why the numbers above are written down.
     file(RELATIVE_PATH from_build "${build}" "${src}/configure")
 
     execute_process(

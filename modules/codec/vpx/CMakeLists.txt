@@ -97,18 +97,24 @@ endif()
 
 include(ExternalProject)
 
-set(vpx_prefix "${CMAKE_BINARY_DIR}/external/libvpx")
-set(vpx_library "${vpx_prefix}/build/x64/Release/vpxmd.lib")
+# **Beside the source rather than under build/**, which is unlike every other
+# external here and is forced: see vpx_build.cmake for the measurement. One
+# directory for every configuration, because libvpx is built once as Release
+# and dispatches on the CPU at run time -- two presets building at the same
+# moment would contend for it, which CI does not do because its legs are
+# separate runners.
+set(vpx_prefix "${CMAKE_SOURCE_DIR}/external/libvpx-build")
+set(vpx_library "${vpx_prefix}/x64/Release/vpxmd.lib")
 
 ExternalProject_Add(vpx_external
     SOURCE_DIR "${vpx_src}"
-    BINARY_DIR "${vpx_prefix}/build"
+    BINARY_DIR "${vpx_prefix}"
     CONFIGURE_COMMAND "${CMAKE_COMMAND}" -E true
     BUILD_COMMAND "${CMAKE_COMMAND}"
         "-Dbash=${MEDIAPERCH_BASH}"
         "-Dmake=${MEDIAPERCH_MAKE}"
         "-Dsrc=${vpx_src}"
-        "-Dbuild=${vpx_prefix}/build"
+        "-Dbuild=${vpx_prefix}"
         "-Dtarget=${vpx_target}"
         "-Dchecks=$<BOOL:${MEDIAPERCH_DECODER_CHECKS}>"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/vpx_build.cmake"

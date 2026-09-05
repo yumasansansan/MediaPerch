@@ -158,6 +158,8 @@ if(MEDIAPERCH_BUILD_PLATFORM)
 
     add_subdirectory(modules/dsp/gain)
     add_subdirectory(modules/dsp/resample)
+    add_subdirectory(modules/shared/module_log)
+    add_subdirectory(modules/shared/h264)
     add_subdirectory(modules/shared/pcm_format)
     add_subdirectory(modules/shared/transform)
     add_subdirectory(modules/shared/biquad)

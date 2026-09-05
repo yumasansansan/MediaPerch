@@ -11,3 +11,6 @@ target_link_libraries(mp_demux_mf PRIVATE mfplat mfreadwrite mfuuid ole32 propsy
 
 # What a bit depth means, shared rather than copied a seventh time.
 target_link_libraries(mp_demux_mf PRIVATE mediaperch_pcm_format)
+
+# The host's log, shared rather than copied a thirteenth time.
+target_link_libraries(mp_demux_mf PRIVATE mediaperch_module_log)

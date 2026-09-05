@@ -35,7 +35,7 @@
 // NV12 in memory. The second is deterministic, which is what makes a decoded
 // frame something a test can hash rather than look at.
 
-#include "avcc.hpp"
+#include "h264.hpp"
 
 #include <mediaperch/module.h>
 

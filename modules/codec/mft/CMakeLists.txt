@@ -17,7 +17,10 @@ mediaperch_add_module(mp_codec_mft
     KIND codec
     SOURCES
         codec_mft.cpp
-        avcc.cpp)
+)
 
 target_include_directories(mp_codec_mft PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(mp_codec_mft PRIVATE mfplat mfuuid ole32 d3d11)
+
+# H.264's bitstream, which is not Media Foundation's and never was.
+target_link_libraries(mp_codec_mft PRIVATE mediaperch_h264)

@@ -49,3 +49,6 @@ if(TARGET ap4)
     endif()
     set_target_properties(ap4 PROPERTIES FOLDER "external")
 endif()
+
+# The host's log, shared rather than copied a thirteenth time.
+target_link_libraries(mp_demux_mp4 PRIVATE mediaperch_module_log)

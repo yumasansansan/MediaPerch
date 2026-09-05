@@ -17,3 +17,6 @@ mediaperch_add_module(mp_demux_mpa
     KIND demux
     SOURCES demux_mpa.cpp
     LINK libmpg123)
+
+# The host's log, shared rather than copied a thirteenth time.
+target_link_libraries(mp_demux_mpa PRIVATE mediaperch_module_log)

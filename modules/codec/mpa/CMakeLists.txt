@@ -85,3 +85,6 @@ foreach(_ext IN ITEMS libmpg123 libsyn123 compat compat_str)
         set_target_properties(${_ext} PROPERTIES FOLDER "external")
     endif()
 endforeach()
+
+# The host's log, shared rather than copied a thirteenth time.
+target_link_libraries(mp_codec_mpa PRIVATE mediaperch_module_log)

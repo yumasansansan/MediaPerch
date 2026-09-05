@@ -42,3 +42,6 @@ if(TARGET ogg)
     endif()
     set_target_properties(ogg PROPERTIES FOLDER "external")
 endif()
+
+# The host's log, shared rather than copied a thirteenth time.
+target_link_libraries(mp_demux_ogg PRIVATE mediaperch_module_log)
