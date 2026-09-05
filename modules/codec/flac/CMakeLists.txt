@@ -49,3 +49,6 @@ if(TARGET FLAC)
     endif()
     set_target_properties(FLAC PROPERTIES FOLDER "external")
 endif()
+
+# What a bit depth means, shared rather than copied a seventh time.
+target_link_libraries(mp_codec_flac PRIVATE mediaperch_pcm_format)

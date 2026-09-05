@@ -32,6 +32,8 @@
 
 #include <mediaperch/module.h>
 
+#include "pcm_format.hpp"
+
 #include <ebml/EbmlHead.h>
 #include <ebml/EbmlStream.h>
 #include <ebml/EbmlVoid.h>
@@ -87,6 +89,28 @@ constexpr std::uint64_t k_default_scale = 1000000;
 /// codecs, and this is where that is said once.
 MpCodec codec_for(const std::string& id) noexcept
 {
+    // **The video ids, which this table did not have at all.** Every video
+    // track came back MP_CODEC_UNKNOWN, so a WebM was a container this tree
+    // could split and nothing could decode -- which reads exactly like a
+    // missing decoder rather than a missing line here.
+    //
+    // VP8 and VP9 carry no CodecPrivate in Matroska; H.264, HEVC and AV1 do,
+    // and `stream_config` hands it over the same way it does for MP4.
+    if (id == "V_VP8") {
+        return MP_CODEC_VP8;
+    }
+    if (id == "V_VP9") {
+        return MP_CODEC_VP9;
+    }
+    if (id == "V_AV1") {
+        return MP_CODEC_AV1;
+    }
+    if (id == "V_MPEG4/ISO/AVC") {
+        return MP_CODEC_H264;
+    }
+    if (id == "V_MPEGH/ISO/HEVC") {
+        return MP_CODEC_HEVC;
+    }
     if (id == "A_FLAC") {
         return MP_CODEC_FLAC;
     }
@@ -111,12 +135,21 @@ MpCodec codec_for(const std::string& id) noexcept
     if (id == "A_ALAC") {
         return MP_CODEC_ALAC;
     }
-    // **Only the little-endian integer spelling becomes MP_CODEC_PCM.** The
-    // other two are named as themselves so a file holding them is refused by
-    // the codec lookup rather than played as noise: `codec_pcm` is a memcpy,
-    // and a big-endian or float stream needs a conversion that no module here
-    // performs. Naming them is what sends such a file to FFmpeg with a reason.
-    if (id == "A_PCM/INT/LIT") {
+    // **Little-endian integer and float both become MP_CODEC_PCM; big-endian
+    // does not.**
+    //
+    // This used to refuse float as well, on the argument that `codec_pcm` is a
+    // memcpy. That argument does not hold: a memcpy is correct for float too,
+    // and what the bytes are is carried by `MpFormat::sample_type` rather than
+    // by the copy. `demux_wav` has reported float WAV as MP_CODEC_PCM with
+    // MP_SAMPLE_F32 or F64 all along, so refusing it here made Matroska the odd
+    // one out for no reason either path could see -- and Path B's bus is f64,
+    // which is where a float stream was going anyway.
+    //
+    // Big-endian is a different case and stays refused. It needs a byte swap,
+    // no module here performs one, and naming it as itself is what sends such a
+    // file to FFmpeg with a reason rather than playing it as noise.
+    if (id == "A_PCM/INT/LIT" || id == "A_PCM/FLOAT/IEEE") {
         return MP_CODEC_PCM;
     }
     if (id == "A_AC3" || id.rfind("A_AC3/", 0) == 0) {
@@ -230,32 +263,20 @@ bool flac_config(const std::uint8_t* p, std::size_t bytes, std::vector<std::uint
     return false;
 }
 
-/// The smallest container that holds `bits`, in bytes, or 0 if none does.
+/// How many bytes a sample of `bits` occupies. Shared -- see
+/// modules/shared/pcm_format, and the drift that put it there.
 std::uint32_t container_for(std::uint32_t bits) noexcept
 {
-    if (bits == 0 || bits > 32) {
-        return 0;
-    }
-    if (bits <= 16) {
-        return 2;
-    }
-    if (bits <= 24) {
-        return 3;
-    }
-    return 4;
+    return mp::pcm::container_for(bits);
 }
 
+/// The sample type for `valid` significant bits in a `container`-byte slot.
+///
+/// **Its own copy of this used to live here**, as it did in five other modules,
+/// and the copies had drifted -- see modules/shared/pcm_format.
 MpSampleType sample_type_for(std::uint32_t container, std::uint32_t valid) noexcept
 {
-    if (valid == 0 || valid > container * 8) {
-        return MP_SAMPLE_NONE;
-    }
-    switch (container) {
-    case 2: return MP_SAMPLE_S16;
-    case 3: return MP_SAMPLE_S24_PACKED;
-    case 4: return valid <= 24 ? MP_SAMPLE_S24_IN_32 : MP_SAMPLE_S32;
-    default: return MP_SAMPLE_NONE;
-    }
+    return mp::pcm::sample_type_for(container, valid);
 }
 
 /// A Matroska track, as far as this module reads one.
@@ -529,7 +550,20 @@ void read_track_entry(MpDemux* d, KaxTrackEntry& entry)
     // audio has no codec to ask, so what Matroska's BitDepth says is the whole
     // of it -- the same shape `demux_wav` has, for the same reason.
     t.format.sample_type = MP_SAMPLE_NONE;
-    if (t.codec == MP_CODEC_PCM) {
+    if (t.codec == MP_CODEC_PCM && t.codec_id == "A_PCM/FLOAT/IEEE") {
+        // **Float has no valid_bits.** The field says how many of a container's
+        // bits carry the signal, which is a question about integers: an IEEE
+        // float uses all of its bits and none of them are a magnitude. Zero is
+        // what `demux_wav` puts there for the same reason.
+        t.format.valid_bits = 0;
+        if (bits == 64) {
+            t.format.sample_type = MP_SAMPLE_F64;
+        } else if (bits == 32) {
+            t.format.sample_type = MP_SAMPLE_F32;
+        } else {
+            log_fmt(MP_LOG_WARN, "%u-bit float is not a format IEEE defines", bits);
+        }
+    } else if (t.codec == MP_CODEC_PCM) {
         const std::uint32_t container = container_for(bits);
         t.format.valid_bits = bits;
         t.format.sample_type = sample_type_for(container, bits);
@@ -1344,7 +1378,13 @@ const MpDemuxVtbl g_vtbl = {
 /// decodes is still worth naming: "an MKV carrying DTS" is a better answer than
 /// "an MKV I cannot read", and it is what sends the file to FFmpeg with a
 /// reason attached.
-const MpCodec g_codecs[] = {MP_CODEC_FLAC,   MP_CODEC_VORBIS, MP_CODEC_OPUS,
+/// **Exactly what `codec_for` can return**, and the two are checked against each
+/// other by `demux_v3_test.cpp` rather than kept in step by hand -- which they
+/// were not: the video ids were added to the table and not to this list, and a
+/// registry reading only this would have believed Matroska carried no video.
+const MpCodec g_codecs[] = {MP_CODEC_VP8,    MP_CODEC_VP9,    MP_CODEC_AV1,
+                            MP_CODEC_H264,   MP_CODEC_HEVC,
+                            MP_CODEC_FLAC,   MP_CODEC_VORBIS, MP_CODEC_OPUS,
                             MP_CODEC_AAC_LC, MP_CODEC_MP1,    MP_CODEC_MP2,
                             MP_CODEC_MP3,    MP_CODEC_ALAC,   MP_CODEC_PCM,
                             MP_CODEC_AC3,    MP_CODEC_EAC3,   MP_CODEC_DTS,

@@ -24,3 +24,6 @@ if(MSVC)
 else()
     set_source_files_properties(dr_wav_impl.c PROPERTIES COMPILE_OPTIONS "-w")
 endif()
+
+# What a bit depth means, shared rather than copied a seventh time.
+target_link_libraries(mp_demux_wav PRIVATE mediaperch_pcm_format)

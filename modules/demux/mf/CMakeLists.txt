@@ -9,3 +9,5 @@ mediaperch_add_module(mp_demux_mf
 
 target_link_libraries(mp_demux_mf PRIVATE mfplat mfreadwrite mfuuid ole32 propsys)
 
+# What a bit depth means, shared rather than copied a seventh time.
+target_link_libraries(mp_demux_mf PRIVATE mediaperch_pcm_format)

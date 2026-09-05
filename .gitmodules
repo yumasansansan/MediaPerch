@@ -52,3 +52,6 @@
 [submodule "external/avm"]
 	path = external/avm
 	url = https://github.com/AOMediaCodec/avm.git
+[submodule "external/libvpx"]
+	path = external/libvpx
+	url = https://github.com/webmproject/libvpx.git

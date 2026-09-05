@@ -32,6 +32,20 @@ endif()
 
 option(MEDIAPERCH_BUILD_TESTS "Build the test suite" ON)
 option(MEDIAPERCH_BUILD_FUZZERS "Build the libFuzzer targets (Clang only)" OFF)
+
+# **The reference decoders' own validity checks, off by default.**
+#
+# libvpx can be told to check that intermediate transform coefficients stay in
+# range, and libaom has neighbours of the same kind. They cost speed and they
+# are exactly what a build being fuzzed or audited wants, so they are a switch
+# rather than a preset: `asan`, a future decoder-fuzzing preset, or a person
+# with a suspicious file can all turn them on, and nothing that ships has them.
+#
+# Deliberately not tied to MEDIAPERCH_BUILD_FUZZERS: that preset builds no
+# modules at all -- MEDIAPERCH_BUILD_PLATFORM is OFF there -- so a decoder
+# switch keyed on it would never reach a decoder.
+option(MEDIAPERCH_DECODER_CHECKS
+    "Build the reference decoders with their internal validity checks on" OFF)
 option(MEDIAPERCH_BUILD_PLATFORM "Build the platform head and the modules" ON)
 # The ABI probes from plan.md §2: a module in C, and one in Rust that cargo
 # builds separately. Off because they are evidence rather than product -- see
@@ -144,6 +158,7 @@ if(MEDIAPERCH_BUILD_PLATFORM)
 
     add_subdirectory(modules/dsp/gain)
     add_subdirectory(modules/dsp/resample)
+    add_subdirectory(modules/shared/pcm_format)
     add_subdirectory(modules/shared/transform)
     add_subdirectory(modules/shared/biquad)
     add_subdirectory(modules/shared/convolve)
@@ -155,6 +170,7 @@ if(MEDIAPERCH_BUILD_PLATFORM)
     add_subdirectory(modules/codec/mft)
     add_subdirectory(modules/codec/dav1d)
     add_subdirectory(modules/codec/aom)
+    add_subdirectory(modules/codec/vpx)
     add_subdirectory(modules/video/d3d11)
     if(MEDIAPERCH_BUILD_ABI_PROBES)
         add_subdirectory(abi/probe_c)

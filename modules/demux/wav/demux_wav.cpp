@@ -24,6 +24,8 @@
 
 #include <mediaperch/module.h>
 
+#include "pcm_format.hpp"
+
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -55,33 +57,20 @@ void log_fmt(MpLogLevel level, const char* format, ...) noexcept
     log(level, buffer);
 }
 
-/// The smallest container that holds `bits`, in bytes, or 0 if none does.
+/// How many bytes a sample of `bits` occupies. Shared -- see
+/// modules/shared/pcm_format, and the drift that put it there.
 std::uint32_t container_for(std::uint32_t bits) noexcept
 {
-    if (bits == 0 || bits > 32) {
-        return 0;
-    }
-    if (bits <= 16) {
-        return 2;
-    }
-    if (bits <= 24) {
-        return 3;
-    }
-    return 4;
+    return mp::pcm::container_for(bits);
 }
 
-/// Mirrors `mp::canonical_for`. Kept in step by the ABI test, not by hope.
+/// The sample type for `valid` significant bits in a `container`-byte slot.
+///
+/// **Its own copy of this used to live here**, as it did in five other modules,
+/// and the copies had drifted -- see modules/shared/pcm_format.
 MpSampleType sample_type_for(std::uint32_t container, std::uint32_t valid) noexcept
 {
-    if (valid == 0 || valid > container * 8) {
-        return MP_SAMPLE_NONE;
-    }
-    switch (container) {
-    case 2: return MP_SAMPLE_S16;
-    case 3: return MP_SAMPLE_S24_PACKED;
-    case 4: return valid <= 24 ? MP_SAMPLE_S24_IN_32 : MP_SAMPLE_S32;
-    default: return MP_SAMPLE_NONE;
-    }
+    return mp::pcm::sample_type_for(container, valid);
 }
 
 // The ABI carries paths as UTF-8. On Windows that has to become UTF-16 before it

@@ -1116,7 +1116,11 @@ void MP_CALL module_shutdown() noexcept
 
 /// What it can produce, as data. A container carries what it carries, so this
 /// is what a report may say rather than what the file will hold.
-const MpCodec g_codecs[] = {MP_CODEC_ALAC, MP_CODEC_AAC_LC};
+/// **Exactly what `codec_for` can return.** This said ALAC and AAC long after
+/// the video ones were added, which is the drift `demux_v3_test.cpp` now
+/// watches for: a declaration nobody checks is a declaration that goes stale.
+const MpCodec g_codecs[] = {MP_CODEC_ALAC, MP_CODEC_AAC_LC, MP_CODEC_H264,
+                            MP_CODEC_HEVC, MP_CODEC_AV1};
 
 const MpModuleDesc g_desc = {
     /* size        */ sizeof(MpModuleDesc),
@@ -1131,7 +1135,7 @@ const MpModuleDesc g_desc = {
     /* shutdown    */ &module_shutdown,
     /* vtbl        */ &g_vtbl,
     /* codecs      */ g_codecs,
-    /* codec_count */ 2,
+    /* codec_count */ static_cast<std::uint32_t>(sizeof(g_codecs) / sizeof(g_codecs[0])),
     /* reserved    */ 0,
 };
 

@@ -269,7 +269,12 @@ enum {
      * royalty-free patent grant behind it, which is why it is the first video
      * codec here to get a decoder of this tree's own rather than the operating
      * system's. See plan.md §9.8.2. */
-    MP_CODEC_AV1 = 66u
+    MP_CODEC_AV1 = 66u,
+    /* VP8 and VP9, whose reference implementation is one library and is
+     * therefore one module. VP8 is here because reading only the newer of the
+     * two would leave half the reason libvpx is a dependency. */
+    MP_CODEC_VP8 = 67u,
+    MP_CODEC_VP9 = 68u
 };
 
 /* **What the configuration blob is, per codec.** A codec module is handed the
@@ -278,6 +283,9 @@ enum {
  *
  *   MP_CODEC_H264    the AVCDecoderConfigurationRecord -- an `avcC` body.
  *   MP_CODEC_HEVC    the HEVCDecoderConfigurationRecord -- an `hvcC` body.
+ *   MP_CODEC_VP8     empty, and MP_CODEC_VP9 usually is: Matroska carries no
+ *   MP_CODEC_VP9     CodecPrivate for either, and libvpx needs none. MP4's
+ *                    `vpcC` exists and says only what the bitstream repeats.
  *   MP_CODEC_AV1     the AV1CodecConfigurationRecord -- an `av1C` body, from
  *                    its marker and version byte on, sequence header OBU and
  *                    all. Unlike `avcC` there is no length-prefixed framing to

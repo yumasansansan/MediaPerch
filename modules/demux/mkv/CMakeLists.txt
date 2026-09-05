@@ -57,3 +57,6 @@ foreach(_ext IN ITEMS ebml matroska)
         set_target_properties(${_ext} PROPERTIES FOLDER "external")
     endif()
 endforeach()
+
+# What a bit depth means, shared rather than copied a seventh time.
+target_link_libraries(mp_demux_mkv PRIVATE mediaperch_pcm_format)

@@ -114,6 +114,22 @@ def build_av1_grain(path):
         check=True)
 
 
+def build_pcm_float_mkv(path):
+    # **Float PCM in Matroska**, which this tree refused to name until the
+    # reasoning was looked at: `codec_pcm` is a memcpy and a memcpy is correct
+    # for float, so the only thing that had ever stopped it was a comment.
+    # `demux_wav` had been reporting float WAV as MP_CODEC_PCM all along.
+    #
+    # Deliberately tiny -- a quarter second of mono at 8 kHz -- because
+    # uncompressed audio is committed at its full size and what is under test is
+    # one CodecID and one sample type.
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error",
+         "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=8000:duration=0.25",
+         "-c:a", "pcm_f32le", path],
+        check=True)
+
+
 def build_mkv(path):
     # Opus rather than AAC, so the Matroska fixture also exercises the
     # BlockGroup path: the last block of an Opus track carries DiscardPadding,
@@ -138,8 +154,10 @@ def main():
     build_av1(os.path.join(MP4, "av1.mp4"))
     build_av1_grain(os.path.join(MP4, "av1_grain.mp4"))
     build_mkv(os.path.join(MKV, "av.mkv"))
+    build_pcm_float_mkv(os.path.join(MKV, "pcm_f32.mkv"))
     for directory, name in ((MP4, "av.mp4"), (MP4, "av_bt2020.mp4"), (MP4, "av1.mp4"),
-                            (MP4, "av1_grain.mp4"), (MKV, "av.mkv")):
+                            (MP4, "av1_grain.mp4"), (MKV, "av.mkv"),
+                            (MKV, "pcm_f32.mkv")):
         p = os.path.join(directory, name)
         print("%-16s %d bytes" % (name, os.path.getsize(p)))
     return 0

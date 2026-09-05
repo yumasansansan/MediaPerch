@@ -73,3 +73,6 @@ if(TARGET wavpack)
     endif()
     set_target_properties(wavpack PROPERTIES FOLDER "external")
 endif()
+
+# What a bit depth means, shared rather than copied a seventh time.
+target_link_libraries(mp_demux_wavpack PRIVATE mediaperch_pcm_format)

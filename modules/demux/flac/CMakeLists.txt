@@ -20,3 +20,6 @@ mediaperch_add_module(mp_demux_flac
     KIND demux
     SOURCES demux_flac.cpp
     LINK FLAC)
+
+# What a bit depth means, shared rather than copied a seventh time.
+target_link_libraries(mp_demux_flac PRIVATE mediaperch_pcm_format)

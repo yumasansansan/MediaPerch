@@ -237,6 +237,120 @@ TEST_CASE("one demuxer serves two streams out of one file", "[abi][v3][demux]")
     }
 }
 
+TEST_CASE("float PCM in Matroska is named rather than refused",
+          "[abi][demux][pcm]")
+{
+    // **A comment was the only thing stopping this.** `codec_for` refused
+    // `A_PCM/FLOAT` on the argument that `codec_pcm` is a memcpy -- but a
+    // memcpy is correct for float, and what the bytes are is carried by
+    // `MpFormat::sample_type` rather than by the copy. `demux_wav` had been
+    // reporting float WAV as MP_CODEC_PCM with MP_SAMPLE_F32 the whole time, so
+    // Matroska was the odd one out for a reason neither path could see. Path B's
+    // bus is f64, which is where a float stream was going anyway.
+    //
+    // Big-endian integer PCM stays refused, and that one is real: it needs a
+    // byte swap no module here performs.
+    Module module{mkv_module()};
+    REQUIRE(module.vtbl != nullptr);
+
+    mp::Demux demux;
+    REQUIRE(demux.open(*module.vtbl, MEDIAPERCH_TEST_PCM_F32_MKV) == MP_OK);
+    REQUIRE(demux.stream_count() == 1u);
+
+    MpStreamInfo info{};
+    REQUIRE(demux.stream_info(0, info));
+    CHECK(info.kind == MP_STREAM_AUDIO);
+    CHECK(info.codec == MP_CODEC_PCM);
+    CHECK(info.format.sample_type == MP_SAMPLE_F32);
+    CHECK(info.format.sample_rate == 8000u);
+    CHECK(info.format.channels == 1u);
+    // **Zero, and not 32.** `valid_bits` says how many of a container's bits
+    // carry the signal, which is a question about integers -- an IEEE float
+    // uses all of its bits and none of them are a magnitude. `demux_wav` puts
+    // zero there for the same reason.
+    CHECK(info.format.valid_bits == 0u);
+
+    // And it reads: a codec named but not delivered would be worse than one
+    // refused.
+    const std::uint32_t only[] = {0};
+    REQUIRE(demux.select_streams(only) == MP_OK);
+    std::vector<std::uint8_t> buffer;
+    MpPacket packet{};
+    std::uint64_t bytes = 0;
+    while (demux.read_packet(buffer, packet) == MP_OK) {
+        bytes += packet.bytes;
+    }
+    // A quarter second of mono float at 8 kHz is 2000 samples of four bytes.
+    CHECK(bytes == 8000u);
+}
+
+TEST_CASE("a demuxer declares every codec it reports", "[abi][demux][declare]")
+{
+    // **§4 rule 6: capability declaration is data, not code** -- so a registry
+    // can build its resolution table without loading and initialising every
+    // module. `MpModuleDesc::codecs` is that data, and nothing had been
+    // checking it against what the modules actually say at run time.
+    //
+    // Both were stale when this was written. `demux_mkv` listed fourteen audio
+    // codecs and no video ones, months after its table learned to name H.264
+    // and the day after it learned VP8, VP9 and AV1; `demux_mp4` still said
+    // ALAC and AAC. A registry reading only the declaration would have
+    // concluded that neither container carries video at all -- and nothing
+    // would have failed, because every path that matters asks
+    // `MpStreamInfo::codec` instead. A declaration nobody checks is a
+    // declaration that goes stale.
+    //
+    // This is the cheap half of the check: every codec these fixtures actually
+    // produce has to appear in the list. It cannot prove the list has no extra
+    // entries -- a module may name codecs no fixture here contains -- and that
+    // is the right way round, because an over-broad declaration costs a
+    // registry one wasted load and an under-broad one loses a file.
+    const auto check = [](const Module& module, const char* path) {
+        REQUIRE(module.vtbl != nullptr);
+        REQUIRE(module.desc != nullptr);
+        REQUIRE(module.desc->codecs != nullptr);
+        REQUIRE(module.desc->codec_count > 0u);
+
+        mp::Demux demux;
+        REQUIRE(demux.open(*module.vtbl, path) == MP_OK);
+        REQUIRE(demux.stream_count() > 0u);
+
+        for (std::uint32_t i = 0; i < demux.stream_count(); ++i) {
+            MpStreamInfo info{};
+            REQUIRE(demux.stream_info(i, info));
+            INFO("stream " << i << " reports codec " << info.codec);
+            if (info.codec == MP_CODEC_UNKNOWN) {
+                // A stream carrying something this module cannot name is read
+                // and reported as unnamed, which is a sentence a host can act
+                // on -- and is not something to declare.
+                continue;
+            }
+            bool declared = false;
+            for (std::uint32_t c = 0; c < module.desc->codec_count; ++c) {
+                if (module.desc->codecs[c] == info.codec) {
+                    declared = true;
+                    break;
+                }
+            }
+            CHECK(declared);
+        }
+    };
+
+    SECTION("MP4, whose video codecs went undeclared for months")
+    {
+        Module module{mp4_module()};
+        check(module, av_path());
+        Module again{mp4_module()};
+        check(again, MEDIAPERCH_TEST_AV1);
+    }
+
+    SECTION("Matroska, which had declared no video codec at all")
+    {
+        Module module{mkv_module()};
+        check(module, MEDIAPERCH_TEST_AV_MKV);
+    }
+}
+
 TEST_CASE("AV1 in an MP4 is named, and its av1C comes across verbatim",
           "[abi][v3][demux][av1]")
 {

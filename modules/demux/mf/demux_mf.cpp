@@ -38,6 +38,8 @@
 
 #include <mediaperch/module.h>
 
+#include "pcm_format.hpp"
+
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -106,17 +108,13 @@ std::wstring widen(const char* utf8)
     return out;
 }
 
+/// The sample type for `valid` significant bits in a `container`-byte slot.
+///
+/// **Its own copy of this used to live here**, as it did in five other modules,
+/// and the copies had drifted -- see modules/shared/pcm_format.
 MpSampleType sample_type_for(std::uint32_t container, std::uint32_t valid) noexcept
 {
-    if (valid == 0 || valid > container * 8) {
-        return MP_SAMPLE_NONE;
-    }
-    switch (container) {
-    case 2: return MP_SAMPLE_S16;
-    case 3: return MP_SAMPLE_S24_PACKED;
-    case 4: return valid <= 24 ? MP_SAMPLE_S24_IN_32 : MP_SAMPLE_S32;
-    default: return MP_SAMPLE_NONE;
-    }
+    return mp::pcm::sample_type_for(container, valid);
 }
 
 bool has(const std::uint8_t* head, std::size_t bytes, const char* magic, std::size_t offset)

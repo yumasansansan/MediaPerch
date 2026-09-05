@@ -37,6 +37,8 @@
 
 #include <mediaperch/module.h>
 
+#include "pcm_format.hpp"
+
 #include <wavpack.h>
 
 #include <cstdarg>
@@ -181,14 +183,13 @@ WavpackStreamReader64 g_reader = {
 /// `codec_dsd` needs and `demux_dsd` guarantees the same way.
 constexpr std::uint32_t k_packet_frames = 4096;
 
-MpSampleType sample_type_for(unsigned container, unsigned valid) noexcept
+/// The sample type for `valid` significant bits in a `container`-byte slot.
+///
+/// **Its own copy of this used to live here**, as it did in five other modules,
+/// and the copies had drifted -- see modules/shared/pcm_format.
+MpSampleType sample_type_for(std::uint32_t container, std::uint32_t valid) noexcept
 {
-    switch (container) {
-    case 2: return valid <= 16 ? MP_SAMPLE_S16 : MP_SAMPLE_NONE;
-    case 3: return valid <= 24 ? MP_SAMPLE_S24_PACKED : MP_SAMPLE_NONE;
-    case 4: return valid <= 24 ? MP_SAMPLE_S24_IN_32 : MP_SAMPLE_S32;
-    default: return MP_SAMPLE_NONE;
-    }
+    return mp::pcm::sample_type_for(container, valid);
 }
 
 } // namespace
