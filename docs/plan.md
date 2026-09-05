@@ -2014,6 +2014,85 @@ as `av.mp4`, in AV1 rather than H.264, so the two files differ in the codec and 
 else. SVT-AV1 encodes it: libaom is the reference and is minutes rather than seconds here,
 and what is under test is the container.
 
+#### codec_aom: the reference, and what nesting a third-party build costs
+
+**Done.** libaom decodes the same fixture dav1d does, and `av1_cross_test.cpp` holds the two
+against each other **byte for byte**. AV1's decoding process is defined bit-exactly, so a
+conformant decoder has one right answer for every sample -- which makes two independent
+implementations agreeing on 442 kilobytes a far stronger statement than anything a single
+decoder's own tests can make. `codec_dav1d_test.cpp` rules out a cleared buffer and a dropped
+chroma plane; this rules out being subtly, consistently wrong. It is §12's method for audio
+arriving for video.
+
+libaom scores 40 against dav1d's 100 and is not meant to play anything. A reference decoder
+is slow because clarity is what makes it a reference, and §7's rule that an explicit choice
+wins outright is how a person asks for the reference answer.
+
+**And `add_subdirectory` was the wrong answer for a library that builds with CMake**, which
+took three tries to establish. libaom calls `enable_language(ASM_NASM)` from inside its own
+tree, and CMake requires that call in the highest directory common to every target using the
+language; nested, it generates a build with no rule to assemble anything --
+`CMAKE_ASM_NASM_COMPILE_OBJECT` missing, nine times. Hoisting the call to this tree's top
+level fixed that and started a cascade, because two other submodules do the same thing in
+their own corners: external/wavpack enables ASM_MASM and external/mpg123's `project` line
+asks for ASM. Enabling those at the top level too got as far as `MSVC_RUNTIME_LIBRARY value
+'MultiThreadedDebugDLL' not known for this ASM compiler` **from inside wavpack**, which had
+been configuring perfectly well until this tree started enabling languages on its behalf.
+
+The same libaom configured standalone works under both Ninja generators first time, which is
+what located it: the fault is the nesting and nothing else. So libaom is an external project
+with its own CMake invocation, its own assembler and its own runtime setting, and this
+tree's language configuration is exactly what it was. `enable_language` is a global act, and
+a submodule's build is not this tree's to hoist.
+
+Two more things worth recording:
+
+- **CMake takes the first assembler it finds**, which on the development machine is the YASM
+  inside a Perl distribution -- identified as YASM, with no compile rule, and the same nine
+  errors with no hint about which program it meant. NASM is named rather than searched for.
+- **libaom cannot answer `get_format` before the first frame**, unlike dav1d: there is no
+  public way to parse a sequence header without decoding. It returns MP_ERR_BUSY, and a host
+  that needs the geometry earlier asks the demuxer, which read it out of the container.
+
+#### H.264 is declined before it is opened, and MFShutdown deadlocked
+
+**Done.** `avcc.cpp` reads a sequence parameter set -- Exp-Golomb over an RBSP, with the
+emulation prevention bytes taken back out -- and stops after `profile_idc`,
+`chroma_format_idc` and the two bit depths. `codec_mft`'s `probe` scores **0** for anything
+that is not 4:2:0 at eight bits, and `open` refuses it a second time with a sentence.
+
+That is where the refusal has to happen. §7's rule is that a decoder failing mid-file must
+not trigger a silent retry with another backend, which only works if the declining is early
+enough for a host to look elsewhere -- and the `avcC` carries the answer before a decoder is
+opened. What it declines is measured rather than assumed: enumerating this machine's D3D11
+decoder profiles gives `H264_VLD_NOFGT` and no 4:2:2 or 4:4:4 entry, and Media Foundation's
+software transform is 4:2:0 too.
+
+A config that cannot be read leaves the score alone. "I could not tell" is not evidence of a
+format that cannot be decoded, and refusing on it would decline files that work.
+
+The tests write the SPS bit by bit rather than pasting a hex blob, so the syntax is stated
+where a reader can check it against the standard and the Exp-Golomb coding is exercised in
+both directions.
+
+**And it found a deadlock that had been waiting for a caller.** `codec_mft` started Media
+Foundation from a lazy static and stopped it from that static's destructor -- which runs
+during `FreeLibrary`, under the loader lock, while `MFShutdown` waits for Media Foundation's
+worker threads, which need that lock to exit. Reproduced in twenty lines outside any test
+framework: load the module, call `open` so that MF starts and then fails before activating a
+transform, call `FreeLibrary`. It hangs. Create and release a transform first and it does
+not, which is why the fault survived until a `probe` that declines a stream gave `open` its
+first way to fail after MFStartup.
+
+Two halves to the fix, and both were real:
+
+- `MFShutdown` moved to `module_shutdown`, which is what the ABI has it for -- the host calls
+  it before unloading, off the loader lock.
+- **The test harness was not modelling the host.** `ModuleRegistry` calls `init` after
+  loading and `shutdown` before unloading; every `Module` helper in `tests/` did neither, so
+  no test had ever exercised the shutdown path. They call it now, which is what let the
+  MFShutdown move to where it belongs rather than being worked around.
+
 #### codec_dav1d, and the one submodule CMake cannot build
 
 **Done.** `codec_dav1d` decodes AV1 through dav1d, and the chain runs end to end: `demux_mp4`
@@ -2284,6 +2363,7 @@ HDR state.
 | M5.9 | The structural cut: `src/engine` and `src/player` | **done.** The portable half was one library holding both the audio engine and the thing that decides what to play. §4 answers yes to "could this ABI carry a DAW's engine", and a DAW taking it would have taken the transport, the playlist, the INI schema and the IPC wire format with it. They are `src/player` now, and `src/engine` has no route to them: the include path is what enforces it, so reaching across is a compile error rather than a review comment. CI builds `mediaperch_engine` alone, which checks both cuts at once |
 | M5.75 | Path B is hashable, and a VST3 can be a stage in it | **done.** `mp::Processor` is `ProcessedGraph`'s arithmetic without the device, the ring or the threads, so `decode --path processed --gain --dsp` runs the chain and prints its SHA-256 -- the flags had been accepted and silently ignored, which is why nothing in this tree had ever compared the resampler between two builds. It found three bugs on the first run: `use_processed` could not see a gain, `Processor::reset` returned `MP_END` on success, and a seek left the noise shaper feeding back error from wherever the stream used to be. The baseline and AVX2 builds agree over 144 runs. `modules/dsp/vst3` hosts somebody else's plugin on `pluginterfaces` alone, with a VST3 written in `tests/` so the host is tested without one installed |
 | M5.95 | ABI v3: several streams from one file | **done.** `select` named one stream and `seek(frame)` meant "the selected one", which has no answer once a player wants audio and video out of one file -- and appending would have left both meaning something narrower than their names. So `select_streams`, `seek(stream, frame)`, `MpPacket::reserved` becoming `stream`, and `stream_video_info` appended for the three colour code points §9.1 turns on. Checked against `demux_mp4` reading a real MP4 with two tracks in it, which is the first test here that drives a module rather than a fake. `demux_mkv` serves several tracks too, which is what makes v3 an interface rather than one module's habit -- and clearing MP_PACKET_TIMED on a video packet that never had a position is what that second container found |
+| M6.2 | H.264 declined before it is opened | **done.** An SPS reader in `avcc.cpp` -- Exp-Golomb over an RBSP with the emulation prevention bytes removed -- and a `probe` that scores 0 for any H.264 that is not 4:2:0 at eight bits, which is measured rather than assumed: this machine's D3D11 decoder profiles have no 4:2:2 or 4:4:4 entry and MF's software transform is 4:2:0 too. §7 needs the refusal at probe, because a decoder failing mid-file must not trigger a silent retry. It also found a deadlock waiting for a caller: codec_mft stopped Media Foundation from a static destructor, which runs during FreeLibrary under the loader lock while MFShutdown waits for threads that need it -- reproduced in twenty lines, fixed by moving it to `module_shutdown`, and only reachable at all because every test harness here had been loading modules without ever calling their shutdown |
 | M6.1 | codec_dav1d | **done.** AV1 decoded by dav1d, end to end through demux_mp4 and video_d3d11, and the first decoder here to produce a planar frame -- so the presenter's planar path now has a producer rather than frames a test built by hand. Meson as an external project, which is a real build dependency and the first time CMake could not build a submodule; `meson`, `ninja` and `nasm` required, the module skipped loudly without them. dav1d is built once with the release CRT, which §4's no-allocation-across-the-boundary rule is what makes safe. MEDIAPERCH_ARCH is deliberately not plumbed through: capping dav1d with `dav1d_set_cpu_flags_mask` was written and removed once measurement showed the dispatch is a cascade of overwrites, so an AVX2 build runs SSE code for every function with no AVX2 version whatever the mask says -- leaving the call a no-op on the avx2 build and a slowdown on the baseline one. CI had neither meson nor nasm, so the module was being skipped in every leg with the build still green -- both now come from the image's Miniconda, in a step before the developer environment and followed by a version report, because a silently skipped decoder looks exactly like a passing build |
 | M6.0 | AV1 crosses the container | **done, and it is half of `codec_dav1d`.** MP_CODEC_AV1 appended, `demux_mp4` reading an `av01` sample entry, and the `av1C` record handed over verbatim -- read by asking the box to write itself, because Bento4 parses this one and keeps no raw bytes, and a record reassembled from parsed fields would be this module's opinion of the file rather than the file. `av1.mp4` is `av.mp4`'s picture and audio in AV1, differing in the codec and in nothing else. The decoder waits on a build decision rather than on code: dav1d is Meson-only, every submodule here is CMake, and the machine's only Python has no pip |
 | M5.99 | The presenter draws every shape v4 can describe | **done.** 4:0:0, 4:2:0, 4:2:2 and 4:4:4, planar or semi-planar, at 8 through 16 bits, with one matrix and one transfer that a two-plane and a three-plane entry point both reach. The subsamplings need no case: normalised coordinates make a half-width chroma plane and a full-width one the same call, so the general form is less code than the 4:2:0 special case it replaced. Two things the tests found rather than the reasoning: 4:0:0 fails as a strong green rather than as an error, because an unbound texture samples to zero and zero is not neutral chroma; and neutral chroma is 127.5, not 128, because half the full scale falls between two codes at every even depth -- the shader was right and the first test was not. Interleaved Y'CbCr is refused with a sentence |

@@ -61,6 +61,16 @@ struct Module {
     ~Module()
     {
         if (library != nullptr) {
+            // **`shutdown` before `FreeLibrary`, because that is what a host
+            // does.** `ModuleRegistry` calls `init` after loading and
+            // `shutdown` before unloading; a harness that skipped the second
+            // was not modelling the host, it was modelling a host with a bug.
+            // `codec_mft` had to stop Media Foundation from a static
+            // destructor because nothing here called its shutdown, and doing
+            // that during `FreeLibrary` deadlocks against the loader lock.
+            if (desc != nullptr && desc->shutdown != nullptr) {
+                desc->shutdown();
+            }
             ::FreeLibrary(static_cast<HMODULE>(library));
         }
     }

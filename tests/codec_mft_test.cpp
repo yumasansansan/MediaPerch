@@ -49,15 +49,26 @@ struct Module {
         if (entry == nullptr) {
             return;
         }
-        const MpModuleDesc* desc = entry(MP_ABI_VERSION);
-        if (desc == nullptr || desc->kind != kind) {
+        const MpModuleDesc* found = entry(MP_ABI_VERSION);
+        if (found == nullptr || found->kind != kind) {
             return;
         }
-        vtbl = desc->vtbl;
+        desc = found;
+        vtbl = found->vtbl;
     }
     ~Module()
     {
         if (library != nullptr) {
+            // **`shutdown` before `FreeLibrary`, because that is what a host
+            // does.** `ModuleRegistry` calls `init` after loading and
+            // `shutdown` before unloading; a harness that skipped the second
+            // was not modelling the host, it was modelling a host with a bug.
+            // `codec_mft` had to stop Media Foundation from a static
+            // destructor because nothing here called its shutdown, and doing
+            // that during `FreeLibrary` deadlocks against the loader lock.
+            if (desc != nullptr && desc->shutdown != nullptr) {
+                desc->shutdown();
+            }
             ::FreeLibrary(static_cast<HMODULE>(library));
         }
     }
@@ -65,6 +76,8 @@ struct Module {
     Module& operator=(const Module&) = delete;
 
     void* library = nullptr;
+    /// Kept so the destructor can call `shutdown`, which is what a host does.
+    const MpModuleDesc* desc = nullptr;
     const void* vtbl = nullptr;
 };
 
@@ -83,7 +96,253 @@ std::vector<std::uint8_t> made_up_avcc(std::uint8_t length_size_minus_one = 3)
     };
 }
 
+/// An SPS, written bit by bit -- which is how a test gets to state the syntax
+/// rather than paste a hex blob nobody can check against the standard.
+class SpsWriter {
+public:
+    SpsWriter()
+    {
+        // The NAL header: forbidden_zero_bit 0, nal_ref_idc 3, nal_unit_type 7.
+        bytes_.push_back(0x67);
+    }
+
+    void u(std::uint32_t count, std::uint32_t value)
+    {
+        for (std::uint32_t i = count; i-- > 0;) {
+            put((value >> i) & 1u);
+        }
+    }
+
+    /// Unsigned Exp-Golomb, the encoder side of what `parse_sps` decodes.
+    void ue(std::uint32_t value)
+    {
+        std::uint32_t bits = 0;
+        while ((value + 1u) >> (bits + 1u) != 0) {
+            ++bits;
+        }
+        u(bits, 0);
+        u(1, 1);
+        u(bits, (value + 1u) - (1u << bits));
+    }
+
+    [[nodiscard]] std::vector<std::uint8_t> done()
+    {
+        // rbsp_trailing_bits: a one, then zeroes to the byte.
+        u(1, 1);
+        while (bit_ != 0) {
+            put(0);
+        }
+        return bytes_;
+    }
+
+private:
+    void put(std::uint32_t bit)
+    {
+        if (bit_ == 0) {
+            bytes_.push_back(0);
+            bit_ = 8;
+        }
+        --bit_;
+        if (bit != 0) {
+            bytes_.back() |= static_cast<std::uint8_t>(1u << bit_);
+        }
+    }
+
+    std::vector<std::uint8_t> bytes_;
+    std::uint32_t bit_ = 0;
+};
+
+/// One SPS of the shape the high profiles carry.
+std::vector<std::uint8_t> made_up_sps(std::uint32_t profile_idc,
+                                      std::uint32_t chroma_format_idc = 1,
+                                      std::uint32_t bit_depth_luma_minus8 = 0,
+                                      std::uint32_t bit_depth_chroma_minus8 = 0)
+{
+    SpsWriter w;
+    w.u(8, profile_idc);
+    w.u(8, 0);  // constraint flags and two reserved bits
+    w.u(8, 31); // level_idc
+    w.ue(0);    // seq_parameter_set_id
+    // Only the profiles that carry these fields write them; the rest infer
+    // 4:2:0 and eight bits, which is what the parser must do too.
+    if (profile_idc == 100 || profile_idc == 110 || profile_idc == 122 ||
+        profile_idc == 244) {
+        w.ue(chroma_format_idc);
+        if (chroma_format_idc == 3) {
+            w.u(1, 0); // separate_colour_plane_flag
+        }
+        w.ue(bit_depth_luma_minus8);
+        w.ue(bit_depth_chroma_minus8);
+        w.u(1, 0); // qpprime_y_zero_transform_bypass_flag
+        w.u(1, 0); // seq_scaling_matrix_present_flag
+    }
+    w.ue(4); // log2_max_frame_num_minus4, past what the parser reads
+    return w.done();
+}
+
+/// An `avcC` carrying one SPS and one PPS.
+std::vector<std::uint8_t> avcc_with(const std::vector<std::uint8_t>& sps)
+{
+    std::vector<std::uint8_t> out{0x01, 0x64, 0x00, 0x1F, 0xFF, 0xE1};
+    out.push_back(static_cast<std::uint8_t>(sps.size() >> 8));
+    out.push_back(static_cast<std::uint8_t>(sps.size() & 0xFFu));
+    out.insert(out.end(), sps.begin(), sps.end());
+    out.push_back(0x01); // one PPS
+    out.insert(out.end(), {0x00, 0x03, 0x68, 0xEB, 0xE3});
+    return out;
+}
+
 } // namespace
+
+TEST_CASE("a sequence parameter set says what shape its pixels are",
+          "[codec][mft][avcc][sps]")
+{
+    // **Read so that a stream can be declined**, which is the whole point: every
+    // H.264 decoder behind Media Foundation is 8-bit 4:2:0, and the high
+    // profiles reach further. No MF, no GPU and no file -- bits in, four fields
+    // out.
+    using mp::mft::parse_sps;
+
+    SECTION("Baseline and Main infer 4:2:0 at eight bits")
+    {
+        // The fields are simply absent from the syntax for these profiles, so a
+        // parser that read them anyway would be reading the next field along.
+        for (std::uint32_t profile : {66u, 77u, 88u}) {
+            const std::vector<std::uint8_t> sps = made_up_sps(profile);
+            const mp::mft::SpsInfo got = parse_sps(sps.data(), sps.size());
+            INFO("profile " << profile);
+            REQUIRE(got.valid);
+            CHECK(got.profile_idc == profile);
+            CHECK(got.chroma_format_idc == 1u);
+            CHECK(got.bit_depth_luma == 8u);
+            CHECK(got.bit_depth_chroma == 8u);
+        }
+    }
+
+    SECTION("High states them, and states 4:2:0 at eight")
+    {
+        const std::vector<std::uint8_t> sps = made_up_sps(100, 1, 0, 0);
+        const mp::mft::SpsInfo got = parse_sps(sps.data(), sps.size());
+        REQUIRE(got.valid);
+        CHECK(got.chroma_format_idc == 1u);
+        CHECK(got.bit_depth_luma == 8u);
+    }
+
+    SECTION("the shapes nothing here decodes")
+    {
+        struct Case {
+            std::uint32_t profile;
+            std::uint32_t chroma;
+            std::uint32_t luma_minus8;
+            std::uint32_t want_chroma;
+            std::uint32_t want_bits;
+        };
+        // High 10, High 4:2:2, High 4:4:4 Predictive, and 4:4:4 at twelve --
+        // which is the corner of H.264 a grading tool actually meets.
+        const Case cases[] = {{110u, 1u, 2u, 1u, 10u},
+                              {122u, 2u, 2u, 2u, 10u},
+                              {244u, 3u, 0u, 3u, 8u},
+                              {244u, 3u, 4u, 3u, 12u}};
+        for (const Case& c : cases) {
+            const std::vector<std::uint8_t> sps =
+                made_up_sps(c.profile, c.chroma, c.luma_minus8, c.luma_minus8);
+            const mp::mft::SpsInfo got = parse_sps(sps.data(), sps.size());
+            INFO("profile " << c.profile << " chroma " << c.chroma);
+            REQUIRE(got.valid);
+            CHECK(got.chroma_format_idc == c.want_chroma);
+            CHECK(got.bit_depth_luma == c.want_bits);
+            CHECK(got.bit_depth_chroma == c.want_bits);
+        }
+    }
+
+    SECTION("emulation prevention bytes are taken back out")
+    {
+        // **The failure this guards against is a plausible wrong answer.** A
+        // NAL unit may not contain 00 00 00..03, so an encoder inserts a 03
+        // after any 00 00 that would make one -- and a reader that does not
+        // remove it shifts every bit after the first occurrence by eight.
+        std::vector<std::uint8_t> sps = made_up_sps(100, 3, 4, 4);
+        const mp::mft::SpsInfo clean = parse_sps(sps.data(), sps.size());
+        REQUIRE(clean.valid);
+
+        // Put a 00 00 03 in, after the fields under test, and check nothing
+        // moved. The 03 is what an encoder would have written.
+        sps.insert(sps.end(), {0x00, 0x00, 0x03, 0x01});
+        const mp::mft::SpsInfo escaped = parse_sps(sps.data(), sps.size());
+        REQUIRE(escaped.valid);
+        CHECK(escaped.chroma_format_idc == clean.chroma_format_idc);
+        CHECK(escaped.bit_depth_luma == clean.bit_depth_luma);
+    }
+
+    SECTION("what it declines")
+    {
+        // A PPS rather than an SPS: nal_unit_type 8.
+        std::vector<std::uint8_t> pps = made_up_sps(100);
+        pps[0] = 0x68;
+        CHECK_FALSE(parse_sps(pps.data(), pps.size()).valid);
+
+        // Truncated in the middle of the fields it reads.
+        const std::vector<std::uint8_t> sps = made_up_sps(244, 3, 4, 4);
+        CHECK_FALSE(parse_sps(sps.data(), 3).valid);
+
+        CHECK_FALSE(parse_sps(nullptr, 16).valid);
+
+        // An Exp-Golomb code longer than a u32 can hold is a corrupt file
+        // asking for a shift nobody should perform.
+        const std::vector<std::uint8_t> zeros(16, 0x00);
+        std::vector<std::uint8_t> runaway{0x67};
+        runaway.insert(runaway.end(), zeros.begin(), zeros.end());
+        CHECK_FALSE(parse_sps(runaway.data(), runaway.size()).valid);
+    }
+}
+
+TEST_CASE("codec_mft declines the H.264 it cannot decode, before it is opened",
+          "[codec][mft][sps]")
+{
+    // **§7's rule needs this to happen at probe.** A decoder that fails
+    // mid-file must not trigger a silent retry with another backend, so the
+    // declining has to be early enough that a host can still look elsewhere --
+    // and the `avcC` carries the answer before anything is opened.
+    Module codec_module{MEDIAPERCH_CODEC_MFT, MP_KIND_VCODEC};
+    REQUIRE(codec_module.vtbl != nullptr);
+    const auto* codec = static_cast<const MpVideoCodecVtbl*>(codec_module.vtbl);
+
+    const auto score_for = [&](const std::vector<std::uint8_t>& sps) {
+        const std::vector<std::uint8_t> config = avcc_with(sps);
+        std::uint32_t score = 0;
+        REQUIRE(codec->probe(MP_CODEC_H264, MP_GRAPHICS_NONE, config.data(),
+                             static_cast<std::uint32_t>(config.size()), &score) == MP_OK);
+        return score;
+    };
+
+    // What it does decode.
+    CHECK(score_for(made_up_sps(66)) == 80u);          // Baseline
+    CHECK(score_for(made_up_sps(100, 1, 0, 0)) == 80u); // High, 4:2:0 8-bit
+
+    // And what it does not. Measured rather than assumed: enumerating this
+    // machine's D3D11 decoder profiles gives H264_VLD_NOFGT and no 4:2:2 or
+    // 4:4:4 entry, and the software transform is 4:2:0 too.
+    CHECK(score_for(made_up_sps(110, 1, 2, 2)) == 0u); // High 10
+    CHECK(score_for(made_up_sps(122, 2, 0, 0)) == 0u); // High 4:2:2
+    CHECK(score_for(made_up_sps(244, 3, 0, 0)) == 0u); // High 4:4:4 Predictive
+    CHECK(score_for(made_up_sps(244, 3, 4, 4)) == 0u); // and at twelve bits
+
+    // **A config it cannot read is not evidence of a format it cannot decode.**
+    // Refusing on "I could not tell" would decline files that work, so a
+    // missing or unparseable record leaves the score where it was.
+    std::uint32_t score = 0;
+    REQUIRE(codec->probe(MP_CODEC_H264, MP_GRAPHICS_NONE, nullptr, 0, &score) == MP_OK);
+    CHECK(score == 80u);
+
+    // Opening one anyway is refused with a sentence rather than a wrong
+    // picture -- the second line of defence, the way the api check is.
+    const std::vector<std::uint8_t> config = avcc_with(made_up_sps(244, 3, 4, 4));
+    MpVideoCodec* decoder = nullptr;
+    CHECK(codec->open(MP_CODEC_H264, nullptr, config.data(),
+                      static_cast<std::uint32_t>(config.size()),
+                      &decoder) == MP_ERR_UNSUPPORTED);
+}
+
 
 TEST_CASE("an avcC is read, or refused, and never guessed at", "[video][avcc]")
 {

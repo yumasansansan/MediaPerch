@@ -56,15 +56,26 @@ struct Module {
         if (entry == nullptr) {
             return;
         }
-        const MpModuleDesc* desc = entry(MP_ABI_VERSION);
-        if (desc == nullptr || desc->kind != MP_KIND_VIDEO) {
+        const MpModuleDesc* found = entry(MP_ABI_VERSION);
+        if (found == nullptr || found->kind != MP_KIND_VIDEO) {
             return;
         }
-        vtbl = static_cast<const MpVideoVtbl*>(desc->vtbl);
+        desc = found;
+        vtbl = static_cast<const MpVideoVtbl*>(found->vtbl);
     }
     ~Module()
     {
         if (library != nullptr) {
+            // **`shutdown` before `FreeLibrary`, because that is what a host
+            // does.** `ModuleRegistry` calls `init` after loading and
+            // `shutdown` before unloading; a harness that skipped the second
+            // was not modelling the host, it was modelling a host with a bug.
+            // `codec_mft` had to stop Media Foundation from a static
+            // destructor because nothing here called its shutdown, and doing
+            // that during `FreeLibrary` deadlocks against the loader lock.
+            if (desc != nullptr && desc->shutdown != nullptr) {
+                desc->shutdown();
+            }
             ::FreeLibrary(static_cast<HMODULE>(library));
         }
     }
@@ -72,6 +83,8 @@ struct Module {
     Module& operator=(const Module&) = delete;
 
     void* library = nullptr;
+    /// Kept so the destructor can call `shutdown`, which is what a host does.
+    const MpModuleDesc* desc = nullptr;
     const MpVideoVtbl* vtbl = nullptr;
 };
 

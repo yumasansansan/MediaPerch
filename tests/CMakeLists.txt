@@ -125,6 +125,16 @@ if(TARGET mp_codec_dav1d AND TARGET mp_demux_mp4 AND TARGET mp_video_d3d11)
     add_dependencies(mediaperch_tests mp_codec_dav1d)
 endif()
 
+# **Two AV1 decoders, byte for byte**, which is the strongest check this tree
+# can make on a video decoder: AV1's decoding process is defined bit-exactly, so
+# dav1d and the reference must agree on every sample or one of them is wrong.
+if(TARGET mp_codec_aom AND TARGET mp_codec_dav1d AND TARGET mp_demux_mp4)
+    target_sources(mediaperch_tests PRIVATE av1_cross_test.cpp)
+    target_compile_definitions(mediaperch_tests PRIVATE
+        "MEDIAPERCH_CODEC_AOM=\"$<TARGET_FILE:mp_codec_aom>\"")
+    add_dependencies(mediaperch_tests mp_codec_aom)
+endif()
+
 # The presenter, rendered off-screen on WARP and read back. Not a screenshot
 # somebody looks at: pixels, hashed, on the same path a display gets.
 if(TARGET mp_video_d3d11)

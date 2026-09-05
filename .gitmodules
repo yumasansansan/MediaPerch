@@ -43,3 +43,12 @@
 [submodule "external/dav1d"]
 	path = external/dav1d
 	url = https://code.videolan.org/videolan/dav1d.git
+[submodule "external/dav2d"]
+	path = external/dav2d
+	url = https://code.videolan.org/videolan/dav2d.git
+[submodule "external/aom"]
+	path = external/aom
+	url = https://aomedia.googlesource.com/aom
+[submodule "external/avm"]
+	path = external/avm
+	url = https://github.com/AOMediaCodec/avm.git

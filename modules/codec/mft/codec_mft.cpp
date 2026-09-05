@@ -73,6 +73,48 @@ const MpHost* g_host = nullptr;
 constexpr MpPixelLayout k_nv12 = MP_LAYOUT_NV12;
 constexpr MpPixelLayout k_p010 = MP_LAYOUT_P010;
 
+/// **What this decoder can actually decode, asked of the container's bytes.**
+///
+/// Everything behind Media Foundation is 8-bit 4:2:0. The fixed-function block
+/// says so itself -- enumerating this machine's decoder profiles gives
+/// `H264_VLD_NOFGT` and no 4:2:2 or 4:4:4 entry at all -- and the software
+/// transform is the same. H.264's high profiles reach 4:2:2, 4:4:4 and fourteen
+/// bits, and a decoder handed one of those either fails somewhere unhelpful or
+/// produces a picture that is quietly wrong.
+///
+/// The `avcC` carries the sequence parameter set, so this is answerable
+/// **before anything is opened**. That is what §7's rule needs: a decoder that
+/// fails mid-file must not trigger a silent retry with another backend, so the
+/// declining has to happen at `probe` where a host can still look elsewhere.
+///
+/// True for a stream with no configuration record, and for one whose SPS will
+/// not parse. Neither is evidence of a format this cannot read, and refusing on
+/// "I could not tell" would decline files that work.
+bool within_reach(MpCodec codec, const std::uint8_t* config, std::uint32_t config_bytes)
+{
+    if (codec != MP_CODEC_H264 || config == nullptr || config_bytes == 0) {
+        return true;
+    }
+    const mp::mft::SpsInfo sps = mp::mft::sps_of(mp::mft::parse_avcc(config, config_bytes));
+    if (!sps.valid) {
+        return true;
+    }
+    return sps.chroma_format_idc == 1 && sps.bit_depth_luma == 8 &&
+           sps.bit_depth_chroma == 8;
+}
+
+/// The same thing, as a sentence for a log or for `describe`.
+std::string out_of_reach(const mp::mft::SpsInfo& sps)
+{
+    static const char* const k_chroma[] = {"4:0:0", "4:2:0", "4:2:2", "4:4:4"};
+    std::string why = "this stream is H.264 ";
+    why += k_chroma[sps.chroma_format_idc < 4 ? sps.chroma_format_idc : 1];
+    why += " at ";
+    why += std::to_string(sps.bit_depth_luma);
+    why += " bits, and Media Foundation decodes 4:2:0 at 8";
+    return why;
+}
+
 void log_line(MpLogLevel level, const char* msg) noexcept
 {
     if (g_host != nullptr && g_host->log != nullptr) {
@@ -110,23 +152,55 @@ private:
     T* p_ = nullptr;
 };
 
-/// `MFStartup` once for the module, and `MFShutdown` when it unloads. Both are
-/// reference counted by MF itself, but calling them per decoder would mean a
-/// playlist starting and stopping Media Foundation between tracks.
+/// `MFStartup` once for the module, and `MFShutdown` when the **host says so**.
+///
+/// Started lazily, because a host that plays only music should not start Media
+/// Foundation at all, and per decoder rather than per module would mean a
+/// playlist starting and stopping it between tracks.
+///
+/// **Stopped from `module_shutdown` and never from a destructor**, and that is
+/// not tidiness. `MFShutdown` waits for Media Foundation's worker threads, and
+/// a static destructor in a DLL runs during `FreeLibrary` -- under the loader
+/// lock, which those threads need in order to exit. It deadlocks.
+///
+/// Reproduced in twenty lines outside any test framework: load this module,
+/// call `open` so that Media Foundation starts, have it return an error before
+/// any transform is activated, and call `FreeLibrary`. It hangs. Create and
+/// release a transform first and it does not, which is why the fault survived
+/// until a `probe` that declines a stream gave `open` its first way to fail
+/// after MFStartup. `module_shutdown` is what the ABI has for exactly this: the
+/// host calls it before unloading, off the loader lock.
+///
+/// A host that unloads without calling it leaks a started Media Foundation into
+/// a process that is ending, which is the better of the two failures by a wide
+/// margin.
 class Runtime {
 public:
-    Runtime() { ok_ = SUCCEEDED(::MFStartup(MF_VERSION, MFSTARTUP_LITE)); }
-    ~Runtime()
+    Runtime() = default;
+    ~Runtime() = default;
+    Runtime(const Runtime&) = delete;
+    Runtime& operator=(const Runtime&) = delete;
+
+    [[nodiscard]] bool ok()
+    {
+        if (!tried_) {
+            tried_ = true;
+            ok_ = SUCCEEDED(::MFStartup(MF_VERSION, MFSTARTUP_LITE));
+        }
+        return ok_;
+    }
+
+    void stop()
     {
         if (ok_) {
             ::MFShutdown();
         }
+        ok_ = false;
+        tried_ = false;
     }
-    Runtime(const Runtime&) = delete;
-    Runtime& operator=(const Runtime&) = delete;
-    [[nodiscard]] bool ok() const noexcept { return ok_; }
 
 private:
+    bool tried_ = false;
     bool ok_ = false;
 };
 
@@ -412,8 +486,13 @@ MpResult MP_CALL codec_probe(MpCodec codec, MpGraphicsApi api, const std::uint8_
     if (api != MP_GRAPHICS_NONE && api != MP_GRAPHICS_D3D11) {
         return MP_OK;
     }
-    (void)config;
-    (void)config_bytes;
+    // **Declined here rather than discovered later.** A high-profile H.264
+    // stream -- 4:2:2, 4:4:4, ten bits and up -- is not something anything
+    // behind Media Foundation decodes, and the `avcC` says so before a decoder
+    // is opened. See `within_reach`.
+    if (!within_reach(codec, config, config_bytes)) {
+        return MP_OK;
+    }
     // Not 100: this is the operating system's decoder, and a module that
     // decodes the same stream itself should be preferred where one exists, the
     // same way `demux_mf` scores below every reader that splits properly.
@@ -450,6 +529,16 @@ try {
         if (!c->avcc.valid) {
             log_line(MP_LOG_DEBUG, "codec_mft: no usable avcC in the stream configuration");
             return MP_ERR_FORMAT;
+        }
+        // The second line of defence, the way the `api` check below is: `probe`
+        // said this already, and a host that opened anyway gets a sentence
+        // rather than a wrong picture.
+        const mp::mft::SpsInfo sps = mp::mft::sps_of(c->avcc);
+        if (sps.valid && (sps.chroma_format_idc != 1 || sps.bit_depth_luma != 8 ||
+                          sps.bit_depth_chroma != 8)) {
+            c->trouble = out_of_reach(sps);
+            log_line(MP_LOG_DEBUG, ("codec_mft: " + c->trouble).c_str());
+            return MP_ERR_UNSUPPORTED;
         }
     }
 
@@ -797,6 +886,10 @@ MpResult MP_CALL module_init(const MpHost* host) noexcept
 
 void MP_CALL module_shutdown() noexcept
 {
+    // See `Runtime`: this is where Media Foundation is stopped, because the
+    // only other place -- a destructor at DLL unload -- deadlocks against the
+    // loader lock.
+    runtime().stop();
     g_host = nullptr;
 }
 
