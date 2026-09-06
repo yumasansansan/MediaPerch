@@ -186,6 +186,12 @@ public:
         return std::strtod(row.c_str() + at + 5, nullptr);
     }
 
+    /// §9.7.1's surface, asked for before `configure`.
+    [[nodiscard]] MpResult surface(const char* which)
+    {
+        return vtbl_->set(handle_, "surface", which);
+    }
+
     /// The tone mapper by name, so a test measuring a transfer can say that it
     /// is measuring only a transfer.
     [[nodiscard]] MpResult tonemap(const char* name)
@@ -781,4 +787,41 @@ TEST_CASE("10K, 12K and 16K, which is where the platform says no",
         CHECK(shown == MP_OK);
         CHECK(presenter.described("encoding") == "linear scRGB");
     }
+}
+
+TEST_CASE("the engine renders into a surface and still has no window",
+          "[video][hdr]")
+{
+    // **§9.7.1's decision, exercised from the engine's side.** A headless
+    // engine that created windows would not be headless, and a presenter
+    // drawing into a window owned by a process that may be killed at any moment
+    // has to survive that killing anyway -- so the frame crosses the boundary
+    // instead of the window crossing it. The half this can test is the half
+    // that lives here: a composition surface handle, a swap chain on it, and a
+    // picture presented into it, with no HWND anywhere.
+    mp::test::Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
+
+    Presenter presenter{*module.as<MpVideoVtbl>(), 64, 48};
+    REQUIRE(presenter.ok());
+    REQUIRE(presenter.surface("composition") == MP_OK);
+
+    const std::string trouble = presenter.configure();
+    if (!trouble.empty()) {
+        WARN("no composition surface on this machine: " << trouble);
+        return;
+    }
+
+    // The handle is reported as a number because that is what crosses a process
+    // boundary: a shell duplicates it out of an IPC message and asks
+    // DirectComposition for a surface over it.
+    const std::string where = presenter.described("surface");
+    INFO("surface row: " << where);
+    CHECK(where.rfind("composition 0x", 0) == 0);
+    CHECK(where != "composition 0x0");
+
+    // And it presents. Not read back: a flip-model chain's back buffer is the
+    // shell's to composite and this process is deliberately not looking at it.
+    REQUIRE(presenter.present(0x20, 0x40, 0x80) == MP_OK);
+    CHECK(presenter.described("frames") == "1");
 }

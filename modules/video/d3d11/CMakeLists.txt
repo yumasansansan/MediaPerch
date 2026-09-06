@@ -27,4 +27,7 @@ target_include_directories(mp_video_d3d11 PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 # which is how the SDR white level is asked for -- DXGI does not know it.
 # d2d1 for the `d2d` tone map provider, and dxguid because the effect's CLSID
 # is a GUID somebody has to define -- the header only declares it.
-target_link_libraries(mp_video_d3d11 PRIVATE d3d11 dxgi d3dcompiler user32 d2d1 dxguid)
+# dcomp for one entry point: DCompositionCreateSurfaceHandle, which is a free
+# function and needs no composition device. §9.7.1 chose this shape precisely so
+# that the engine links that and builds no visual tree.
+target_link_libraries(mp_video_d3d11 PRIVATE d3d11 dxgi d3dcompiler user32 d2d1 dxguid dcomp)

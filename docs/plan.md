@@ -3007,7 +3007,39 @@ a window owned by another:
                                                    the picture
 ```
 
-**What comes with the video path, and is easy to forget.** Two things are waiting on this
+#### The engine half, built
+
+**`video_d3d11` renders into a composition surface handle now**, and still has no window:
+`set("surface", "composition")` before `configure`, and the chain is
+`IDXGIFactoryMedia::CreateSwapChainForCompositionSurfaceHandle` over a handle from
+`DCompositionCreateSurfaceHandle`. That free function is the whole reason this shape was
+chosen over the alternatives — it needs no composition device, so the engine links one entry
+point from `dcomp.dll` and builds no visual tree at all.
+
+Three things it decides, each of which would be awkward to change later:
+
+- **The handle is reported as a number**, in the `surface` row. It has to cross a process
+  boundary and a shell duplicates it by value out of an IPC message, so a number is what it
+  is; a settings surface carrying a `HANDLE` any other way would be pretending it is not one.
+- **Premultiplied alpha, not ignored.** A shell composites this over whatever else it is
+  drawing. Opaque is right for a full-window video and wrong the moment anything is behind it,
+  and the shell cannot change its mind afterwards.
+- **A handle this process made is a handle this process closes.** The shell's duplicate is the
+  shell's; leaking ours would keep a composition surface alive after the presenter that owned
+  it is gone.
+
+The test asks for the surface, configures, presents, and checks the handle is a real one —
+without reading anything back, because a flip-model chain's back buffer is the shell's to
+composite and this process is deliberately not looking at it. **The other half needs a
+shell**: `CreateSurfaceFromHandle`, a visual, a target on an `HWND` and a `Commit`, which is
+M8's work and is where *the shell can die mid-frame* becomes a test rather than a claim.
+
+One aside worth keeping: the SDK's own `dcomp.h` does not compile under this tree's warning
+set. `IDCompositionVisual3::SetTransform` hides its base's overloads rather than overriding
+them, which is C4263 and C4264, and it is suppressed around that one include and popped
+immediately so that ours stay errors.
+
+**What else comes with the video path, and is easy to forget.** Two things are waiting on this
 section rather than on any decision of their own, and neither is visible from here unless it is
 written down:
 

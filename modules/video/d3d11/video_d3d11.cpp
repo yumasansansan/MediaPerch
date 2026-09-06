@@ -110,6 +110,15 @@
 #include <d3dcompiler.h>
 #include <d2d1_1.h>
 #include <d2d1effects_2.h>
+// **The SDK's own header, not held to our warning set.** `dcomp.h` declares
+// `IDCompositionVisual3::SetTransform` overloads that hide the base class's
+// rather than override them, which is C4263 and C4264 and is a fact about
+// Windows rather than about this file. Suppressed exactly here and popped
+// immediately, so ours still are errors.
+#pragma warning(push)
+#pragma warning(disable : 4263 4264)
+#include <dcomp.h>
+#pragma warning(pop)
 #include <dxgi1_6.h>
 
 namespace {
@@ -673,6 +682,17 @@ mp::video::Display probe_display(IDXGIFactory2* factory, HWND window)
 } // namespace
 
 struct MpVideo {
+    ~MpVideo()
+    {
+        // **A handle this process made is a handle this process closes.** A
+        // shell duplicates it into its own; the duplicate is the shell's to
+        // close and this one is ours, and leaking it would keep a composition
+        // surface alive after the presenter that owned it is gone.
+        if (composition != nullptr) {
+            ::CloseHandle(composition);
+        }
+    }
+
     Com<ID3D11Device> device;
     Com<ID3D11DeviceContext> context;
     Com<IDXGIFactory2> factory;
@@ -737,6 +757,19 @@ struct MpVideo {
     MpPixelLayout source_layout{};
 
     HWND window = nullptr;
+    /// **§9.7.1: the frame crosses the boundary, not the window.**
+    ///
+    /// A composition surface handle, made by `DCompositionCreateSurfaceHandle`
+    /// and presented into by a swap chain `IDXGIFactoryMedia` builds on it. A
+    /// shell in another process calls `CreateSurfaceFromHandle` on the same
+    /// handle, puts it in a visual and commits; this process has no window, no
+    /// visual tree and no toolkit, which is what makes a headless engine
+    /// headless.
+    ///
+    /// Null unless `surface` was set to `composition`. The two are exclusive:
+    /// an HWND chain draws into a window this process owns, which is the thing
+    /// §9.7.1 decided against for an engine and is right for the probe.
+    HANDLE composition = nullptr;
     bool warp = false;
     /// Off-screen only: single precision unless a caller asks for the format a
     /// display would actually get. A swap chain has no say -- FP16 is the most
@@ -1426,6 +1459,31 @@ DXGI_COLOR_SPACE_TYPE colour_space_of(const mp::video::Plan& plan) noexcept
                : DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
 }
 
+/// One composition surface handle, made once and kept for this presenter's
+/// life.
+///
+/// **`DCompositionCreateSurfaceHandle` is a free function and needs no
+/// composition device**, which is the whole reason §9.7.1 chose this over the
+/// alternatives: the engine links one entry point from `dcomp.dll` and builds
+/// no visual tree. The visual, the target and the `Commit` are the shell's.
+bool make_composition_handle(MpVideo* v, std::string& why)
+{
+    if (v->composition != nullptr) {
+        return true;
+    }
+    // COMPOSITIONOBJECT | ALL_ACCESS is what a surface handle is opened with;
+    // the shell duplicates it into its own process and asks DirectComposition
+    // for a surface over it.
+    const HRESULT hr = ::DCompositionCreateSurfaceHandle(
+        COMPOSITIONOBJECT_ALL_ACCESS, nullptr, &v->composition);
+    if (FAILED(hr) || v->composition == nullptr) {
+        why = "DirectComposition would not make a surface handle";
+        v->composition = nullptr;
+        return false;
+    }
+    return true;
+}
+
 /// The swap chain, or the texture that stands in for one.
 bool make_target(MpVideo* v, std::string& why)
 {
@@ -1436,7 +1494,55 @@ bool make_target(MpVideo* v, std::string& why)
 
     const DXGI_FORMAT format = target_format_of(v);
 
-    if (v->window != nullptr) {
+    if (v->composition != nullptr) {
+        // **The same chain a window would get, minus the window.** Flip model
+        // is not optional here either -- a composition surface takes nothing
+        // else -- and the format and colour space are decided exactly as they
+        // are for an HWND, because what a shell composites is what a display
+        // would have been sent.
+        DXGI_SWAP_CHAIN_DESC1 desc{};
+        desc.Width = v->width;
+        desc.Height = v->height;
+        desc.Format = dxgi_format_of(v->plan);
+        desc.SampleDesc.Count = 1;
+        desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        desc.BufferCount = 2;
+        desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+        // **Premultiplied, not ignored.** A shell composites this over whatever
+        // it is drawing; an opaque surface would be right for a full-window
+        // video and wrong the moment anything is behind it, and the shell
+        // cannot change its mind afterwards.
+        desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+
+        Com<IDXGIFactoryMedia> media;
+        if (FAILED(v->factory->QueryInterface(__uuidof(IDXGIFactoryMedia),
+                                              reinterpret_cast<void**>(media.put())))) {
+            why = "this DXGI has no factory for composition surfaces";
+            return false;
+        }
+        if (FAILED(media->CreateSwapChainForCompositionSurfaceHandle(
+                v->device.get(), v->composition, &desc, nullptr, v->swap_chain.put()))) {
+            why = "the composition surface would not take a swap chain";
+            return false;
+        }
+
+        Com<IDXGISwapChain3> chain3;
+        if (SUCCEEDED(v->swap_chain->QueryInterface(
+                __uuidof(IDXGISwapChain3), reinterpret_cast<void**>(chain3.put())))) {
+            const DXGI_COLOR_SPACE_TYPE space = colour_space_of(v->plan);
+            UINT support = 0;
+            if (SUCCEEDED(chain3->CheckColorSpaceSupport(space, &support)) &&
+                (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) != 0) {
+                chain3->SetColorSpace1(space);
+            }
+        }
+        set_hdr_metadata(v);
+        if (FAILED(v->swap_chain->GetBuffer(0, __uuidof(ID3D11Texture2D),
+                                            reinterpret_cast<void**>(v->target.put())))) {
+            why = "no back buffer on the composition chain";
+            return false;
+        }
+    } else if (v->window != nullptr) {
         DXGI_SWAP_CHAIN_DESC1 desc{};
         desc.Width = v->width;
         desc.Height = v->height;
@@ -2167,6 +2273,36 @@ try {
         }
         return v->device ? MP_ERR_UNSUPPORTED : MP_OK;
     }
+    if (std::strcmp(key, "surface") == 0) {
+        // **§9.7.1's decision, as a setting.** `window` is what the probe wants
+        // -- one program looking at one file -- and `composition` is what an
+        // engine wants: a surface handle a shell in another process
+        // composites, so a headless engine stays headless and a shell that is
+        // killed takes nothing with it. Asked before `configure`, because it
+        // decides what kind of chain there is.
+        if (v->device) {
+            v->trouble = "the surface is decided before the first configure";
+            return MP_ERR_BUSY;
+        }
+        if (std::strcmp(value, "composition") == 0) {
+            if (v->window != nullptr) {
+                v->trouble = "this presenter was opened on a window, and the "
+                             "composition surface is for one that has none";
+                return MP_ERR_INVALID;
+            }
+            std::string why;
+            if (!make_composition_handle(v, why)) {
+                v->trouble = why;
+                return MP_ERR_UNSUPPORTED;
+            }
+            return MP_OK;
+        }
+        if (std::strcmp(value, "window") == 0) {
+            v->composition = nullptr;
+            return MP_OK;
+        }
+        return MP_ERR_INVALID;
+    }
     if (std::strcmp(key, "precision") == 0) {
         // Off-screen only, and it is the difference between measuring the
         // pipeline and measuring what a display gets. Both are worth doing:
@@ -2212,8 +2348,18 @@ try {
                       v->composited ? 1 : 0);
         return MP_OK;
     case 3:
-        std::snprintf(out, out_bytes, "surface\t%s\twhere it draws (read only)",
-                      v->window != nullptr ? "a window" : "off-screen");
+        // **The handle is a number on purpose.** It has to cross a process
+        // boundary, and a shell duplicates it by value out of an IPC message;
+        // printing it is how a settings surface carries one.
+        if (v->composition != nullptr) {
+            std::snprintf(out, out_bytes,
+                          "surface\tcomposition 0x%llx\twhere it draws (read only)",
+                          static_cast<unsigned long long>(
+                              reinterpret_cast<std::uintptr_t>(v->composition)));
+        } else {
+            std::snprintf(out, out_bytes, "surface\t%s\twhere it draws (read only)",
+                          v->window != nullptr ? "a window" : "off-screen");
+        }
         return MP_OK;
     case 4:
         // **Three numbers rather than one word.** §9.6's boost is a function of
