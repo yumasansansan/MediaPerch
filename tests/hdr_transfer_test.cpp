@@ -734,3 +734,51 @@ TEST_CASE("8K, which nothing here had ever been asked for", "[video][hdr][slow]"
     INFO("expected " << want.g << ", first was " << pixels[1]);
     CHECK(wrong == 0);
 }
+
+TEST_CASE("10K, 12K and 16K, which is where the platform says no",
+          "[video][hdr][slow]")
+{
+    // §9.8.2 argued that nothing above the decoder has a resolution in it and
+    // that Direct3D 11's 16384 texture limit is comfortably past 16K DCI. This
+    // asks. **Configure and present only**: reading a 16K frame back is a
+    // gigabyte through the test's own hands and would measure the harness.
+    //
+    // Memory is what runs out, and it runs out predictably: the target is
+    // width x height x 4 channels x 2 bytes at half precision, and there is a
+    // staging texture of the same size behind it. 16K DCI is 1.06 GB each.
+    mp::test::Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
+
+    struct Size {
+        std::uint32_t width;
+        std::uint32_t height;
+        const char* name;
+    };
+    for (const Size size : {Size{10240, 5760, "10K"}, Size{12288, 6912, "12K"},
+                            Size{15360, 8640, "16K DCI"}}) {
+        Presenter presenter{*module.as<MpVideoVtbl>(), size.width, size.height};
+        REQUIRE(presenter.ok());
+        REQUIRE(presenter.precision("fp16") == MP_OK);
+        presenter.info().transfer = 16;  // PQ, so the deep path is what is asked
+        REQUIRE(presenter.tonemap("shader") == MP_OK);
+
+        const std::string trouble = presenter.configure();
+        INFO(size.name << " is " << size.width << "x" << size.height);
+        if (!trouble.empty()) {
+            // A machine that will not give two gigabytes of texture is a fact
+            // about the machine, and saying which size it stopped at is more
+            // useful than a skip.
+            WARN(size.name << " would not configure: " << trouble);
+            continue;
+        }
+        // Ten-bit, which is what a stream at these sizes would be.
+        const MpResult shown = presenter.present_grey(700, 10);
+        if (shown != MP_OK) {
+            WARN(size.name << " configured and would not present: MpResult "
+                           << static_cast<unsigned>(shown));
+            continue;
+        }
+        CHECK(shown == MP_OK);
+        CHECK(presenter.described("encoding") == "linear scRGB");
+    }
+}

@@ -44,6 +44,33 @@ set(forbidden_includes
 # harder to grep for later.
 set(forbidden_macros "_WIN32" "_MSC_VER" "__linux__" "__APPLE__" "__unix__")
 
+# **Half precision is a presentation format, not an arithmetic.**
+#
+# DXGI's ceiling for a flip-model swap chain is RGBA16F -- 8-bit UNORM, 10-bit
+# UNORM and half, and nothing above -- so what reaches a Windows display is
+# rounded to eleven significant bits at the last step. That is the platform's
+# limit and it belongs to the platform: the arithmetic that gets there is single
+# precision in the shader and binary64 on the audio side, and the portable half
+# never touches a half at all.
+#
+# Which is a claim, so this checks it. A presenter on a dedicated video output
+# would quantise from RGBA32F straight into the card's own integer format and
+# never see one; a core that had learnt to compute in half would have made that
+# impossible for everybody.
+#
+# `MP_LAYOUT_RGBA16F` in the ABI is a *name* and is deliberately allowed to
+# exist there -- a vocabulary that could not spell a format no platform here
+# happens to use would be a worse vocabulary. What is banned is computing in it.
+set(forbidden_types
+    "min16float"
+    "float16_t"
+    "_Float16"
+    "__fp16"
+    "XMHALF"
+    "PackedVector"
+    "R16G16B16A16_FLOAT"
+)
+
 set(sources "")
 foreach(dir IN LISTS MEDIAPERCH_CORE_DIR)
     # **A directory that is not there is the failure, not an empty answer.**
@@ -86,6 +113,13 @@ foreach(source IN LISTS sources)
                 list(APPEND violations "${source}:${line_number}: platform conditional -- ${line}")
             endif()
         endforeach()
+
+        foreach(type IN LISTS forbidden_types)
+            if(line MATCHES "${type}")
+                list(APPEND violations
+                     "${source}:${line_number}: half precision in the core -- ${line}")
+            endif()
+        endforeach()
     endforeach()
 endforeach()
 
@@ -101,4 +135,6 @@ if(violations)
         "Whatever needs the OS belongs in a platform head or a module.")
 endif()
 
-message(STATUS "core purity: ${source_count} files, no OS headers, no platform conditionals")
+message(STATUS
+        "core purity: ${source_count} files, no OS headers, no platform conditionals, "
+        "no half precision")

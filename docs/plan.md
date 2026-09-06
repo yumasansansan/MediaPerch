@@ -2018,10 +2018,10 @@ on the hardware:
 comfortably past 16K DCI at 15360x8640. So 5K, 6K, 8K, 10K and 12K are all simply pictures as
 far as everything above the decoder is concerned; nothing here has a resolution in it.
 
-**8K is no longer only an argument.** §9.7.2 has it measured both ways — every pixel of a
-7680x4320 ten-bit PQ frame through the presenter, and the whole player against a generated
-fixture, where M6's acceptance holds with no flags. The claim above was true; it is now also
-checked.
+**None of that is only an argument any more.** §9.7.2 has 8K measured both ways — every pixel
+of a 7680x4320 ten-bit PQ frame through the presenter, and the whole player against a
+generated fixture, where M6's acceptance holds with no flags — and 10K, 12K and 16K DCI
+configure and present. The claim above was true; it is now also checked.
 
 What runs out first is elsewhere, and the numbers are worth having:
 
@@ -2431,6 +2431,29 @@ carries it — about one percent after the transfer, which is enough to fail a t
 say nothing about the transfer. That is true of real content and is a *matrix* question. A
 test about the transfer takes the chroma out and lets `has_chroma` be zero.
 
+##### Where half precision is, and where it is not
+
+Worth stating plainly, because the question *is everything before the display wider than half?*
+has a yes and a set of places the yes rests on:
+
+- **The shader is single precision.** HLSL `float` is 32-bit, and the compile does **not** pass
+  `D3DCOMPILE_PARTIAL_PRECISION`, which is the flag that would let the compiler drop to 16.
+  It is not only asserted: the twelve-bit test below resolves one code step, which half cannot
+  at that magnitude, so a shader that had been reduced would fail it.
+- **The audio side is binary64** by construction (§5), and nothing about a picture touches it.
+- **`fp16` appears in three places and none of them is the core**: `MP_LAYOUT_RGBA16F` in the
+  ABI, which is a *name*; `modules/video/d3d11`, which is where DXGI's ceiling lives; and the
+  tests that measure the difference. `cmake/CorePurity.cmake` now checks this the way it
+  already checks for OS headers — `min16float`, `float16_t`, `_Float16`, `__fp16`, `XMHALF`,
+  `PackedVector` and `R16G16B16A16_FLOAT` are violations in `src/engine` and `src/player`.
+  **A claim that only holds because nobody has broken it yet is not a claim**, and the check
+  is what makes a presenter on some other platform still able to quantise from RGBA32F
+  straight into its own integer format.
+
+The one place half is unavoidable is the last write on Windows: a flip-model swap chain takes
+8-bit UNORM, 10-bit UNORM or RGBA16F and nothing above. That is the platform's limit, it
+belongs to the platform, and the measurement below is of exactly that step.
+
 ##### The arithmetic is wider than the format a display gets, measured
 
 §9.10 says it and now something checks it. Two twelve-bit codes one step apart, rendered
@@ -2452,6 +2475,19 @@ claim that is true until somebody tries.
 - **Through the presenter**: a ten-bit PQ frame at 8K, and **every pixel** checked rather than
   the first — a presenter that got the size wrong draws a correct corner and a wrong edge,
   and one pixel would agree with it. Under a second, at half precision, and it passes.
+- **And 10K, 12K and 16K DCI**, which the argument above said were *simply pictures*: all
+  three configure and present, on WARP, at ten-bit PQ, in eight seconds together. Configure
+  and present only — reading a 16K frame back is a gigabyte through the test's own hands
+  and would be measuring the harness. What runs out first is memory and it runs out
+  predictably: the target is width × height × 4 × 2 bytes at half precision and there is a
+  staging texture behind it, so 16K DCI is 1.06 GB each.
+
+| | configure | present |
+|---|---|---|
+| 10240×5760 | yes | yes |
+| 12288×6912 | yes | yes |
+| 15360×8640 | yes | yes |
+
 - **Through the whole player**, on a generated fixture (`tests/data/make_8k_hevc.cmake`,
   eleven megabytes, `ultrafast` because 33 megapixels a frame is where an encode stops being
   minutes):
