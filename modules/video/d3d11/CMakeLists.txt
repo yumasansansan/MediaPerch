@@ -23,4 +23,6 @@ mediaperch_add_module(mp_video_d3d11
         yuv_matrix.cpp)
 
 target_include_directories(mp_video_d3d11 PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(mp_video_d3d11 PRIVATE d3d11 dxgi d3dcompiler)
+# user32 for MonitorFromWindow and the CCD API's GetDisplayConfigBufferSizes,
+# which is how the SDR white level is asked for -- DXGI does not know it.
+target_link_libraries(mp_video_d3d11 PRIVATE d3d11 dxgi d3dcompiler user32)

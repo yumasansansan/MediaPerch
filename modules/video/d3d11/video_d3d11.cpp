@@ -87,6 +87,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <memory>
 #include <new>
 #include <string>
@@ -99,6 +100,10 @@
 #    define NOMINMAX
 #endif
 #include <windows.h>
+
+// `QueryDisplayConfig` and the SDR white level: the CCD API, which is where
+// Windows keeps what DXGI has no idea about.
+#include <wingdi.h>
 
 #include <d3d11_1.h>
 #include <d3d11_4.h>
@@ -177,9 +182,20 @@ cbuffer Constants : register(b0)
     float4 yuv;           // r_v, g_u, g_v, b_u -- see yuv_matrix.hpp
 
     float sample_scale;   // mp_pixel_sample_scale: where the bits sit, not how many
-    float transfer_gamma; // 2.4 for BT.1886, unused when srgb_piecewise is 1
-    float srgb_piecewise; // 1 = the sRGB curve, 0 = a pure power
+    float transfer_gamma; // 2.4 for BT.1886, used only by transfer_kind 1
+    float transfer_kind;  // 0 sRGB, 1 a pure power, 2 PQ, 3 HLG
     float has_chroma;     // 0 for 4:0:0, where there is no chroma plane to read
+
+    float hlg_peak;       // §9.9.1: the OOTF's system gamma is a function of it
+    float tone_peak;      // the display's white in nits, or 0 for no tone mapping
+    float pad0;
+    float pad1;
+
+    // Source primaries to the buffer's, in linear light. Identity unless they
+    // differ, which is the usual case and costs three dots either way.
+    float4 gamut0;
+    float4 gamut1;
+    float4 gamut2;
 };
 
 struct Vertex {
@@ -204,7 +220,7 @@ Vertex vs_main(uint id : SV_VertexID)
 // specify and it is what the picture was graded on -- decoding video with the
 // sRGB curve instead lifts the shadows, which is the mirror image of the fault
 // §9.2 records Windows committing in the other direction.
-float3 to_linear(float3 c)
+float3 sdr_to_linear(float3 c)
 {
     // Clamped, then abs: a UNORM texture cannot be negative, but the compiler
     // cannot prove it and pow of a negative base is undefined -- which is what
@@ -213,7 +229,96 @@ float3 to_linear(float3 c)
     c = saturate(c);
     float3 piecewise = c <= 0.04045 ? c / 12.92 : pow(abs((c + 0.055) / 1.055), 2.4);
     float3 power = pow(abs(c), transfer_gamma);
-    return lerp(power, piecewise, srgb_piecewise);
+    return lerp(power, piecewise, transfer_kind < 0.5 ? 1.0 : 0.0);
+}
+
+// ST.2084's constants, as the standard writes them: ratios of small integers,
+// not decimals somebody typed.
+static const float k_pq_m1 = 0.1593017578125;  // 2610 / 16384
+static const float k_pq_m2 = 78.84375;         // 2523 / 4096 * 128
+static const float k_pq_c1 = 0.8359375;        // 3424 / 4096
+static const float k_pq_c2 = 18.8515625;       // 2413 / 4096 * 32
+static const float k_pq_c3 = 18.6875;          // 2392 / 4096 * 32
+
+/// **PQ states absolute nits** (§9.9.1), so this returns them: 0 to 10000.
+float3 pq_to_nits(float3 e)
+{
+    float3 p = pow(abs(saturate(e)), 1.0 / k_pq_m2);
+    float3 num = max(p - k_pq_c1, 0.0);
+    float3 den = max(k_pq_c2 - k_pq_c3 * p, 1e-6);
+    return 10000.0 * pow(abs(num / den), 1.0 / k_pq_m1);
+}
+
+float3 nits_to_pq(float3 nits)
+{
+    float3 y = pow(abs(max(nits, 0.0) / 10000.0), k_pq_m1);
+    return pow(abs((k_pq_c1 + k_pq_c2 * y) / (1.0 + k_pq_c3 * y)), k_pq_m2);
+}
+
+/// **HLG is scene-referred and PQ is not**, which §9.9.1 is entirely about: the
+/// inverse OETF gives a scene signal, and the OOTF turns it into display light
+/// with a system gamma derived from *the display's* peak. The same code values
+/// are deliberately a different picture on a 600-nit panel and a 1000-nit one.
+float3 hlg_to_nits(float3 e, float peak)
+{
+    const float a = 0.17883277;
+    const float b = 0.28466892;  // 1 - 4a
+    const float c = 0.55991073;  // 0.5 - a * ln(4a)
+    e = saturate(e);
+    float3 scene = e <= 0.5 ? (e * e) / 3.0 : (exp((e - c) / a) + b) / 12.0;
+    // BT.2020's luma coefficients, because HLG's OOTF is defined on BT.2100,
+    // whose primaries are BT.2020's.
+    float y = dot(scene, float3(0.2627, 0.6780, 0.0593));
+    float gamma = 1.2 + 0.42 * log10(max(peak, 1.0) / 1000.0);
+    return peak * pow(max(y, 1e-6), gamma - 1.0) * scene;
+}
+
+/// **BT.2390's EETF**, which is what §9.2 says those bug reports have been
+/// asking Microsoft for: a Hermite roll-off applied in the PQ domain, so the
+/// knee is where the eye's sensitivity is rather than where the arithmetic is
+/// convenient. Black is left at zero -- a lift belongs to a display that cannot
+/// reach it, and this one is being asked to reach less light, not more.
+float3 tone_map_bt2390(float3 nits, float peak)
+{
+    float3 e = nits_to_pq(nits);
+    float max_pq = nits_to_pq(float3(peak, peak, peak)).x;
+    float ks = 1.5 * max_pq - 0.5;
+    float3 t = saturate((e - ks) / max(1.0 - ks, 1e-6));
+    float3 t2 = t * t;
+    float3 t3 = t2 * t;
+    float3 knee = (2.0 * t3 - 3.0 * t2 + 1.0) * ks +
+                  (t3 - 2.0 * t2 + t) * (1.0 - ks) +
+                  (-2.0 * t3 + 3.0 * t2) * max_pq;
+    float3 mapped = e < ks ? e : knee;
+    return pq_to_nits(mapped);
+}
+
+/// The transfer the stream stated, into linear scRGB units where 1.0 is 80
+/// nits. **SDR content is scaled and HDR content is not**: §9.6's boost exists
+/// because scRGB 1.0 is scene-referred, and PQ already says how many nits it
+/// means.
+float3 decode(float3 c)
+{
+    if (transfer_kind > 2.5) {
+        return hlg_to_nits(c, hlg_peak) / 80.0;
+    }
+    if (transfer_kind > 1.5) {
+        return pq_to_nits(c) / 80.0;
+    }
+    return sdr_to_linear(c) * sdr_scale;
+}
+
+/// Tone mapping and then the gamut, in that order: the roll-off is defined on
+/// the source's own primaries and moving them first would map the wrong
+/// luminances.
+float3 to_scrgb(float3 c)
+{
+    float3 light = decode(c);
+    if (tone_peak > 0.0) {
+        light = tone_map_bt2390(light * 80.0, tone_peak) / 80.0;
+    }
+    return float3(dot(gamut0.xyz, light), dot(gamut1.xyz, light),
+                  dot(gamut2.xyz, light));
 }
 
 float4 ps_rgba(Vertex input) : SV_Target
@@ -222,7 +327,7 @@ float4 ps_rgba(Vertex input) : SV_Target
     // **The target is scRGB, which is linear.** An sRGB texture sampled without
     // decoding would be presented as though its gamma were already gone, which
     // is the washed-out picture people mistake for a tone mapping problem.
-    return float4(to_linear(texel.rgb) * sdr_scale, texel.a);
+    return float4(to_scrgb(texel.rgb), texel.a);
 }
 
 // **The conversion, given samples that have already been read.** Both pixel
@@ -245,7 +350,7 @@ float4 convert(float y, float u, float v)
     float3 encoded = float3(y + yuv.x * v,
                             y - yuv.y * u - yuv.z * v,
                             y + yuv.w * u);
-    return float4(to_linear(encoded) * sdr_scale, 1.0);
+    return float4(to_scrgb(encoded), 1.0);
 }
 
 float4 ps_nv12(Vertex input) : SV_Target
@@ -286,9 +391,185 @@ struct Constants {
 
     float sample_scale = 1.0f;
     float transfer_gamma = 2.4f;
-    float srgb_piecewise = 1.0f;
+    float transfer_kind = 0.0f;
     float has_chroma = 1.0f;
+
+    float hlg_peak = 1000.0f;
+    float tone_peak = 0.0f;
+    float pad0 = 0.0f;
+    float pad1 = 0.0f;
+
+    float gamut0[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+    float gamut1[4] = {0.0f, 1.0f, 0.0f, 0.0f};
+    float gamut2[4] = {0.0f, 0.0f, 1.0f, 0.0f};
 };
+
+/// BT.2020 primaries to BT.709's, in linear light.
+///
+/// **Needed the moment PQ works**, because HDR content is graded on BT.2100 and
+/// scRGB is BT.709: presenting one as the other is oversaturation, and it is
+/// the kind that looks like a deliberate choice rather than a fault.
+constexpr float k_bt2020_to_bt709[9] = {
+    1.6605f,  -0.5876f, -0.0728f,
+    -0.1246f, 1.1329f,  -0.0083f,
+    -0.0182f, -0.1006f, 1.1187f,
+};
+
+/// How much of the window is on this output, in pixels.
+///
+/// §9.4: **the output with the greatest intersection with the window**, not
+/// `IDXGISwapChain::GetContainingOutput` -- that one returns a stale output, and
+/// the obvious fix of recreating the swap chain flashes black.
+std::uint64_t overlap(const RECT& window, const RECT& output) noexcept
+{
+    const LONG left = window.left > output.left ? window.left : output.left;
+    const LONG top = window.top > output.top ? window.top : output.top;
+    const LONG right = window.right < output.right ? window.right : output.right;
+    const LONG bottom = window.bottom < output.bottom ? window.bottom : output.bottom;
+    if (right <= left || bottom <= top) {
+        return 0;
+    }
+    return static_cast<std::uint64_t>(right - left) *
+           static_cast<std::uint64_t>(bottom - top);
+}
+
+/// The output the window is mostly on, or the first one when there is no
+/// window to be on. False when there is none to be had.
+///
+/// An out-parameter rather than a return, because `Com` has no move: it is a
+/// deliberately small wrapper and widening it to hold a loop's shape would be
+/// the tail wagging the dog.
+bool output_for(IDXGIFactory2* factory, HWND window, Com<IDXGIOutput6>& six)
+{
+    RECT want{};
+    const bool have_window = window != nullptr && GetWindowRect(window, &want) != 0;
+
+    // Chosen by index and fetched once, for the reason above.
+    UINT best_adapter = 0;
+    UINT best_output = 0;
+    std::uint64_t best_area = 0;
+    bool found = false;
+
+    for (UINT a = 0;; ++a) {
+        Com<IDXGIAdapter1> adapter;
+        if (FAILED(factory->EnumAdapters1(a, adapter.put()))) {
+            break;
+        }
+        for (UINT o = 0;; ++o) {
+            Com<IDXGIOutput> output;
+            if (FAILED(adapter->EnumOutputs(o, output.put()))) {
+                break;
+            }
+            DXGI_OUTPUT_DESC desc{};
+            if (FAILED(output->GetDesc(&desc))) {
+                continue;
+            }
+            // With no window there is nothing to intersect, so the first output
+            // stands in -- which is what an off-screen render wants and is why
+            // it is not an error.
+            const std::uint64_t area =
+                have_window ? overlap(want, desc.DesktopCoordinates) : 1;
+            if (!found || area > best_area) {
+                best_adapter = a;
+                best_output = o;
+                best_area = area;
+                found = true;
+            }
+        }
+        if (!have_window && found) {
+            break;
+        }
+    }
+
+    if (!found) {
+        return false;
+    }
+    Com<IDXGIAdapter1> adapter;
+    Com<IDXGIOutput> output;
+    if (FAILED(factory->EnumAdapters1(best_adapter, adapter.put())) ||
+        FAILED(adapter->EnumOutputs(best_output, output.put()))) {
+        return false;
+    }
+    if (FAILED(output->QueryInterface(__uuidof(IDXGIOutput6),
+                                      reinterpret_cast<void**>(six.put())))) {
+        six.reset();
+        return false;
+    }
+    return true;
+}
+
+/// The SDR reference white of the path this monitor is on, in nits.
+///
+/// **§9.6 is the one that will look wrong first**, and this is the number it
+/// needs: on an HDR display scRGB 1.0 is 80 nits and is scene-referred, so an
+/// OSD or an SDR film drawn at 1.0 sits dim and grey next to the video. The
+/// boost has been plumbed to the pixel shader since the presenter was written
+/// and was always 1, because nobody made this call.
+///
+/// The CCD API rather than DXGI, because DXGI has no idea: `IDXGIOutput6`
+/// reports the colour space and the luminance range and says nothing about
+/// where the user put the SDR slider. `src/win/refresh_win.cpp` walks the same
+/// API for the refresh rate; this walks it again rather than sharing, because a
+/// module gets a host vtable and not the head's code (§3).
+float sdr_white_of(HWND window)
+{
+    if (window == nullptr) {
+        return 80.0f;
+    }
+    HMONITOR monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
+    MONITORINFOEXW info{};
+    info.cbSize = sizeof(info);
+    if (monitor == nullptr || GetMonitorInfoW(monitor, &info) == 0) {
+        return 80.0f;
+    }
+
+    UINT32 paths = 0;
+    UINT32 modes = 0;
+    if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &paths, &modes) != ERROR_SUCCESS) {
+        return 80.0f;
+    }
+    std::vector<DISPLAYCONFIG_PATH_INFO> path_list(paths);
+    std::vector<DISPLAYCONFIG_MODE_INFO> mode_list(modes);
+    if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &paths, path_list.data(), &modes,
+                           mode_list.data(), nullptr) != ERROR_SUCCESS) {
+        return 80.0f;
+    }
+    path_list.resize(paths);
+
+    for (const DISPLAYCONFIG_PATH_INFO& path : path_list) {
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME source{};
+        source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+        source.header.size = sizeof(source);
+        source.header.adapterId = path.sourceInfo.adapterId;
+        source.header.id = path.sourceInfo.id;
+        if (DisplayConfigGetDeviceInfo(&source.header) != ERROR_SUCCESS) {
+            continue;
+        }
+        // The GDI device name is what a monitor handle and a display path have
+        // in common. Everything else about them is two different vocabularies
+        // for the same hardware.
+        if (std::wcscmp(source.viewGdiDeviceName, info.szDevice) != 0) {
+            continue;
+        }
+        DISPLAYCONFIG_SDR_WHITE_LEVEL white{};
+        white.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
+        white.header.size = sizeof(white);
+        white.header.adapterId = path.targetInfo.adapterId;
+        white.header.id = path.targetInfo.id;
+        if (DisplayConfigGetDeviceInfo(&white.header) != ERROR_SUCCESS) {
+            return 80.0f;
+        }
+        // **1000 is the unit, and it is not nits.** The field is the SDR white
+        // level in units of 1/1000 of 80 nits, so 1000 means 80 -- the scRGB
+        // reference, a scale of exactly one. A monitor whose slider is at the
+        // top reports something like 6250, which is 500 nits.
+        if (white.SDRWhiteLevel == 0) {
+            return 80.0f;
+        }
+        return static_cast<float>(white.SDRWhiteLevel) * 80.0f / 1000.0f;
+    }
+    return 80.0f;
+}
 
 /// What §9.4 could work out, given a device and a window. Kept separate from
 /// the plan so the plan stays testable.
@@ -299,22 +580,8 @@ mp::video::Display probe_display(IDXGIFactory2* factory, HWND window)
         return display;
     }
 
-    // **The output with the greatest intersection with the window**, which §9.4
-    // says to use rather than `IDXGISwapChain::GetContainingOutput` -- that one
-    // returns a stale output, and the obvious fix of recreating the swap chain
-    // flashes black. With no window there is nothing to intersect, so the first
-    // output of the first adapter stands in.
-    Com<IDXGIAdapter1> adapter;
-    if (FAILED(factory->EnumAdapters1(0, adapter.put()))) {
-        return display;
-    }
-    Com<IDXGIOutput> output;
-    if (FAILED(adapter->EnumOutputs(0, output.put()))) {
-        return display;
-    }
     Com<IDXGIOutput6> output6;
-    if (FAILED(output->QueryInterface(__uuidof(IDXGIOutput6),
-                                      reinterpret_cast<void**>(output6.put())))) {
+    if (!output_for(factory, window, output6)) {
         return display;
     }
 
@@ -335,10 +602,10 @@ mp::video::Display probe_display(IDXGIFactory2* factory, HWND window)
         display.peak_nits = desc.MaxLuminance;
     }
 
-    (void)window;
-    // The SDR white level comes from QueryDisplayConfig, which needs the
-    // window's monitor to pick a path. Without one the scRGB reference stands,
-    // and 80 nits is a scale of exactly one rather than a guess.
+    // Asked of the monitor the window is on, which is why it comes last and
+    // why it takes the window rather than the output: DXGI has no idea where
+    // the user put the SDR slider.
+    display.sdr_white_nits = sdr_white_of(window);
     return display;
 }
 
@@ -1145,9 +1412,53 @@ try {
     // is the reference display EOTF those standards specify and what the
     // picture was graded on. Decoding video with the sRGB curve instead lifts
     // the shadows, which is the mirror image of §9.2's complaint.
+    //
+    // **And the two HDR curves, which the plan has been deciding about since
+    // before the shader could do either.** `Convert` is what says which:
+    // `hlg_to_linear` is HLG's inverse OETF *and* its OOTF, and `to_linear`
+    // over a PQ stream is ST.2084. A stream reaching a PQ buffer unchanged
+    // (`Convert::none`) needs no curve here at all, and the plan only sends PQ
+    // there.
     const std::uint32_t transfer = mp::video::assumed_transfer(v->stream);
-    constants.srgb_piecewise = transfer == mp::video::k_transfer_srgb ? 1.0f : 0.0f;
     constants.transfer_gamma = 2.4f;
+    if (v->plan.convert == mp::video::Convert::hlg_to_linear) {
+        constants.transfer_kind = 3.0f;
+    } else if (transfer == mp::video::k_transfer_pq &&
+               v->plan.convert != mp::video::Convert::none) {
+        constants.transfer_kind = 2.0f;
+    } else if (transfer == mp::video::k_transfer_srgb) {
+        constants.transfer_kind = 0.0f;
+    } else {
+        constants.transfer_kind = 1.0f;
+    }
+    constants.hlg_peak = v->plan.hlg_peak_nits;
+
+    // **Ours, and only ours.** §9.3 keeps four names and this shader is one of
+    // them; `driver` and `d2d` are other people's code on other passes, and a
+    // pixel shader that quietly tone-mapped when one of those was chosen would
+    // be two mappers in the path. Zero means the shader does nothing, which is
+    // also what an HDR display gets.
+    constants.tone_peak =
+        v->plan.tone_mapping && v->plan.tone_map == mp::video::ToneMap::shader
+            ? v->display.sdr_white_nits
+            : 0.0f;
+
+    // **The gamut, when the buffer's primaries are not the stream's.** HDR is
+    // graded on BT.2100, whose primaries are BT.2020's, and scRGB is BT.709: a
+    // PQ or HLG stream presented without this is oversaturated in the way that
+    // looks like a decision rather than a fault. A PQ buffer is BT.2020 already
+    // and needs nothing.
+    const std::uint32_t primaries = mp::video::assumed_primaries(v->stream);
+    if (primaries == mp::video::k_primaries_bt2020 &&
+        v->plan.encoding == mp::video::Encoding::linear) {
+        for (int row = 0; row < 3; ++row) {
+            float* into = row == 0 ? constants.gamut0
+                                   : (row == 1 ? constants.gamut1 : constants.gamut2);
+            for (int col = 0; col < 3; ++col) {
+                into[col] = k_bt2020_to_bt709[row * 3 + col];
+            }
+        }
+    }
 
     if (ycbcr) {
         // **Matrix code point 0 is identity: the planes are R, G and B in
@@ -1386,8 +1697,16 @@ try {
                       v->window != nullptr ? "a window" : "off-screen");
         return MP_OK;
     case 4:
-        std::snprintf(out, out_bytes, "display\t%s\twhat it turned out to be (read only)",
-                      v->display.hdr ? "HDR" : "SDR");
+        // **Three numbers rather than one word.** §9.6's boost is a function of
+        // the first, §9.9.1's HLG OOTF of the second, and until both were
+        // printed the only way to tell a display that was asked from one that
+        // was assumed was to read the source.
+        std::snprintf(out, out_bytes,
+                      "display\t%s, white %.0f nits, peak %.0f nits"
+                      "\twhat it turned out to be (read only)",
+                      v->display.hdr ? "HDR" : "SDR",
+                      static_cast<double>(v->display.sdr_white_nits),
+                      static_cast<double>(v->display.peak_nits));
         return MP_OK;
     case 5:
         std::snprintf(out, out_bytes,

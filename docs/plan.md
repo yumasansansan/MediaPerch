@@ -2367,13 +2367,71 @@ be checked by a test on a machine whose GPU does that differently. `shader` is a
 on top of step 3, it is thirty lines, and it is **testable off-screen against the formula**.
 The default stays `driver` either way.
 
-**6. HDR static metadata, which needs an ABI append.** `IDXGISwapChain4::SetHDRMetaData` and
+**6. HDR static metadata, which needs an ABI append. Not built.** `IDXGISwapChain4::SetHDRMetaData` and
 `VideoProcessorSetStreamHDRMetaData` both want the mastering display's primaries, its
 luminance range, MaxCLL and MaxFALL. **`MpVideoInfo` carries none of them** — it has
 primaries, transfer and matrix, which say how to *decode*, and nothing that says what the
 content was graded on. So this step begins with a size-prefixed append, the way
 `MpVideoCodecVtbl::set` did, and the demuxers and decoders that can fill it (`mdcv`/`clli`
 boxes, HEVC and AV1 SEI) fill it.
+
+#### Steps 1 to 5, done
+
+**1. The SDR white level is read.** `QueryDisplayConfig` and
+`DISPLAYCONFIG_GET_SDR_WHITE_LEVEL`, keyed on the monitor the window is on, matched to a
+display path by the GDI device name — the one thing a monitor handle and a display path
+have in common. The field is in units of 1/1000 of 80 nits and not in nits, which is the sort
+of thing that is a factor of twelve wrong and looks deliberate. The CCD API again rather than
+sharing `src/win/refresh_win.cpp`'s walk, because a module gets a host vtable and not the
+head's code (§3).
+
+**2. The output is the one the window is on.** Greatest intersection with the window rect,
+across every adapter and every output, falling back to the first when there is no window to
+intersect. Chosen by index and fetched once, because `Com` has no move and widening a
+deliberately small wrapper to hold a loop's shape would be the tail wagging the dog.
+
+**3, 4 and 5. PQ, HLG and BT.2390, in the shader.** `decode` dispatches on the transfer the
+plan already decided about: ST.2084 to absolute nits, ARIB STD-B67 through its inverse OETF
+*and* its OOTF at the display's peak, or the SDR curves as before. **SDR content is scaled by
+§9.6's boost and HDR content is not** — PQ already says how many nits it means, and scRGB's
+unit is 80 of them.
+
+Two things came with it that the plan had not listed and that are not optional:
+
+- **A gamut matrix.** HDR is graded on BT.2100, whose primaries are BT.2020's, and scRGB is
+  BT.709. Presenting one as the other is oversaturation of the kind that looks like a
+  decision. Identity unless the primaries differ, three dots either way.
+- **A tone mapper that is ours.** §9.7 wanted the OS's first; the OS's is a second rendering
+  path on a fixed-function video processor that a test cannot hold to anything, and §9.2 is a
+  whole section about it being measurably wrong. So `shader` is written and `driver` remains
+  the *default* until it exists, which is the part of §9.7's ordering that was about shipping
+  rather than about writing.
+
+And one number that had never been printed anywhere: the presenter now describes the display
+as *SDR, white 80 nits, peak 470 nits*, and `show` prints that beside the encoding, the
+applied mapper and the SDR scale. **A colour path whose numbers nobody can print is one nobody
+can check**, which is how a tone-mapping fault becomes a matter of opinion.
+
+#### And what the tests found, which was two things about the tests
+
+`tests/hdr_transfer_test.cpp` puts ramps through the real pixel shader, off-screen on WARP,
+and compares them with ST.2084, ARIB STD-B67 and BT.2390 computed independently. Both times
+it disagreed with the shader, **the shader was right**:
+
+- The test assumed HLG's reference 1000-nit display. An off-screen presenter has no window, so
+  §9.4's rule falls back to the first output — a real monitor, whose peak is 470 here —
+  and the OOTF is a function of that. The test asks now rather than assuming, which is also
+  the only way it can run on somebody else's machine.
+- The test asked for no tone mapping. `plan_for` will not give it: HDR content on an SDR
+  display *must* be mapped, because composition clips silently, so a request for `none`
+  becomes `driver`. So the test measures the whole path instead — transfer and roll-off,
+  both against their own formulas — which is a better test than the one that was refused.
+
+**A third thing, about ctest rather than about colour.** A `TEST_CASE` name containing `§`
+made ctest report a failure that had nothing to do with the test: `catch_discover_tests`
+registers each case by name and ctest re-invokes the binary with that name as a filter, and
+the non-ASCII byte does not survive the round trip, so the case matches nothing. Section
+numbers belong in the comment above a test, not in its title.
 
 #### How any of it is checked, which is the part that decides whether it is worth doing
 

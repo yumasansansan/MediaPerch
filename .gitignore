@@ -40,3 +40,9 @@ abi/probe_rust/target/
 __pycache__/
 *.pyc
 
+# `hm_cross_test` writes its bitstream, its reference YUV and HM's own log
+# beside the working directory it is run from, which is the repository root
+# when ctest is run there. They are outputs, not fixtures.
+hm_cross_*.log
+hm_cross_*.yuv
+hm_cross_*.265

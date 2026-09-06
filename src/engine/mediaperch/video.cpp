@@ -144,6 +144,15 @@ MpResult Presenter::set(const char* key, const char* value) noexcept
     return *this ? vtbl_->set(handle_, key, value) : MP_ERR_INVALID;
 }
 
+MpResult Presenter::describe(std::uint32_t index, char* out,
+                             std::uint32_t out_bytes) noexcept
+{
+    if (!*this || vtbl_->describe == nullptr) {
+        return MP_ERR_UNSUPPORTED;
+    }
+    return vtbl_->describe(handle_, index, out, out_bytes);
+}
+
 MpResult Presenter::get_device(MpGraphicsDevice& out) noexcept
 {
     if (!*this || vtbl_->get_device == nullptr) {

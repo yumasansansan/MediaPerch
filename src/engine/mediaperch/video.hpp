@@ -96,6 +96,13 @@ public:
     MpResult configure(const MpVideoInfo& info) noexcept;
     MpResult present(const MpVideoFrame& frame) noexcept;
     MpResult set(const char* key, const char* value) noexcept;
+    /// One `key	current	description` row, MP_END past the last.
+    ///
+    /// **What a presenter decided, read back.** §9's numbers are decided from
+    /// the display and the stream and then never seen; a colour pipeline whose
+    /// answers nobody can print is one nobody can check, which is how a
+    /// tone-mapping fault becomes a matter of opinion.
+    MpResult describe(std::uint32_t index, char* out, std::uint32_t out_bytes) noexcept;
     MpResult get_device(MpGraphicsDevice& out) noexcept;
     MpResult read_back(void* dst, std::size_t dst_bytes, std::uint32_t& width,
                        std::uint32_t& height, MpPixelLayout& layout) noexcept;

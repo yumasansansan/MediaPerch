@@ -1848,6 +1848,35 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
         }
         std::printf("threads    %u, asked for\n", options.decoder_threads);
     }
+    // **What the colour pipeline decided, where a person can see it.** §9's
+    // answers are worked out from the display and the stream and were then
+    // never shown; a colour path whose numbers nobody can print is one nobody
+    // can check, which is how a tone-mapping fault becomes a matter of opinion.
+    for (std::uint32_t row = 0;; ++row) {
+        char line[192];
+        if (presenter.describe(row, line, sizeof line) != MP_OK) {
+            break;
+        }
+        const char* first = std::strchr(line, '\t');
+        if (first == nullptr) {
+            continue;
+        }
+        const std::string key{line, static_cast<std::size_t>(first - line)};
+        if (key != "display" && key != "encoding" && key != "applied" &&
+            key != "sdr_scale") {
+            continue;
+        }
+        const char* second = std::strchr(first + 1, '\t');
+        const std::string value{first + 1, second != nullptr
+                                              ? static_cast<std::size_t>(second - first - 1)
+                                              : std::strlen(first + 1)};
+        // `display` is taken: the refresh line below already uses it, and two
+        // rows with one label is a report nobody can read. The presenter's row
+        // is about colour and says so here rather than being renamed -- the key
+        // is what a shell and a test ask for.
+        const char* label = key == "display" ? "colour" : key.c_str();
+        std::printf("%-10s %s\n", label, value.c_str());
+    }
     std::printf("picture    %ux%u", picture.width, picture.height);
     if (picture.fps_den != 0) {
         std::printf(" at %.3f fps", static_cast<double>(picture.fps_num) / picture.fps_den);
