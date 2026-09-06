@@ -88,14 +88,15 @@ struct MpVideoCodec {
     bool have_format = false;
     std::string trouble;
 
-    /// How many worker threads to start, and whether they have been.
-    ///
-    /// **Started at the first packet rather than at `open`**, which is what
-    /// makes `set("threads", ...)` mean anything: libde265 takes its pool size
-    /// once, in `de265_start_worker_threads`, and has no way to resize it
-    /// afterwards. Between `open` and the first `decode` there is nowhere for a
-    /// number to be applied unless the start waits, so it waits.
-    unsigned threads = 0;
+    /// What a host asked for, and whether it is too late to ask.
+    /// `modules/shared/decoder_threads` has the rules; what the number *means*
+    /// is libde265's and stays beside the call that uses it.
+    mp::ThreadChoice threads;
+    /// **The pool starts at the first packet rather than at `open`**, which is
+    /// what makes `set` mean anything here: libde265 takes its size once, in
+    /// `de265_start_worker_threads`, and cannot resize it afterwards. Between
+    /// `open` and the first `decode` there is nowhere to apply a number unless
+    /// the start waits, so it waits.
     bool workers_started = false;
 };
 
@@ -321,9 +322,6 @@ try {
     // smaller of the two is what it is asked for. A failure here is not fatal:
     // the decoder still works on the calling thread, which is what it did
     // before this line existed.
-    // The number is decided here and the pool is started at the first packet,
-    // so a host with something to say about it has somewhere to say it.
-    owned->threads = std::min<unsigned>(mp::decoder_threads(), 32u);
 
     // The parameter sets, before any sample.
     const MpResult sets = push_parameter_sets(owned.get());
@@ -368,15 +366,22 @@ MEDIAPERCH_ABI_GUARD_CATCH
 /// is what it did before there were any workers at all.
 void start_workers(MpVideoCodec* c) noexcept
 {
+    c->threads.fix();
     if (c->workers_started) {
         return;
     }
     c->workers_started = true;
-    if (c->threads <= 1) {
+    // What was asked for, or this machine's cores when nobody asked. libde265
+    // caps its own pool at 32 (MAX_THREADS in threads.h), so more than that is
+    // the same answer rather than a bigger one.
+    const unsigned want =
+        c->threads.chosen() != 0 ? c->threads.chosen() : mp::decoder_threads();
+    const unsigned threads = std::min<unsigned>(want, 32u);
+    if (threads <= 1) {
         return;
     }
     const de265_error started =
-        de265_start_worker_threads(c->ctx, static_cast<int>(c->threads));
+        de265_start_worker_threads(c->ctx, static_cast<int>(threads));
     if (started != DE265_OK) {
         log_line(MP_LOG_WARN, (std::string{"codec_de265: no worker threads: "} +
                                de265_get_error_text(started))
@@ -391,26 +396,10 @@ void start_workers(MpVideoCodec* c) noexcept
 /// will not be used would measure the old one and write down the new one.
 MpResult MP_CALL codec_set(MpVideoCodec* c, const char* key, const char* value) noexcept
 try {
-    if (c == nullptr || key == nullptr || value == nullptr) {
+    if (c == nullptr) {
         return MP_ERR_INVALID;
     }
-    if (std::strcmp(key, "threads") != 0) {
-        return MP_ERR_UNSUPPORTED;
-    }
-    if (c->workers_started) {
-        c->trouble = "threads cannot change once the workers have started";
-        return MP_ERR_BUSY;
-    }
-    char* end = nullptr;
-    const unsigned long asked = std::strtoul(value, &end, 10);
-    if (end == value || *end != '\0' || asked == 0) {
-        c->trouble = "threads is a whole number of at least one";
-        return MP_ERR_INVALID;
-    }
-    // libde265 caps its own pool at 32 (MAX_THREADS in threads.h), so more than
-    // that is not a refusal, it is the same answer.
-    c->threads = static_cast<unsigned>(std::min<unsigned long>(asked, 32ul));
-    return MP_OK;
+    return c->threads.take(key, value, c->trouble);
 }
 MEDIAPERCH_ABI_GUARD_CATCH
 

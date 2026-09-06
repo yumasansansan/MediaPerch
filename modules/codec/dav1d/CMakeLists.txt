@@ -115,7 +115,7 @@ add_dependencies(dav1d::dav1d dav1d_external)
 mediaperch_add_module(mp_codec_dav1d
     KIND codec
     SOURCES codec_dav1d.cpp
-    LINK dav1d::dav1d)
+    LINK dav1d::dav1d mediaperch_decoder_threads)
 
 # See the note above: one release build of dav1d, and a module pinned to the
 # runtime it was built against.

@@ -3560,8 +3560,27 @@ must not have.
 | 4 | 66 | 5 |
 | 16 | 67 | 4 |
 
-Only `codec_de265` implements it so far. The others answer `MP_ERR_UNSUPPORTED`, which is a
-sentence rather than a silence, and the ABI is there for them when they want it.
+**Every video module answers it now**, and what is shared is the half that is not the
+library's. `mp::ThreadChoice`, in `modules/shared/decoder_threads` beside the function that was
+already there, holds the key name, the parse, the ceiling and the *fixed once a packet has gone
+in* rule — five copies of that would have been five places for the `MP_ERR_BUSY` to go
+missing from.
+
+**What is not shared is the number's meaning**, because it is not the same number:
+
+| | zero means | taken by |
+|---|---|---|
+| `codec_dav1d` | one thread per logical core, genuinely | reopening dav1d — `n_threads` is read once in `dav1d_open`, and `reset` flushes rather than reopens |
+| `codec_aom`, `codec_avm`, `codec_vpx` | **one thread**, which is the mistake `decoder_threads.hpp` was written about | `codec_reset`, which already destroys and re-inits, and which a seek already costs |
+| `codec_de265` | — | starting the worker pool at the first packet instead of in `open` |
+
+So each module keeps one expression — *what was asked for, or this machine's cores when
+nobody asked* — next to the call that spends it, and shares everything else. Sharing the
+number as well would have meant a helper that knew dav1d's zero from libaom's, which is the
+kind of knowledge that belongs where the library is called and nowhere else.
+
+`codec_mft` is the one that does not implement it, and should not: its threads are the
+operating system's transform's, not this tree's.
 
 ##### The reading half, and the loop closing
 

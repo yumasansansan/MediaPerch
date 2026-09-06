@@ -55,6 +55,8 @@
 
 #include <mediaperch/module.h>
 
+#include "decoder_threads.hpp"
+
 #include <dav1d/dav1d.h>
 
 #include <cstdint>
@@ -116,6 +118,10 @@ struct MpVideoCodec {
 
     MpVideoInfo info{};
     bool have_format = false;
+    /// What a host asked for, and whether it is too late to ask.
+    /// `modules/shared/decoder_threads` has the rules; what the number *means*
+    /// is dav1d's, and dav1d's zero is the reason it is not shared.
+    mp::ThreadChoice threads;
     std::string trouble;
 };
 
@@ -277,6 +283,21 @@ MpResult MP_CALL codec_probe(MpCodec codec, MpGraphicsApi api, const std::uint8_
     return MP_OK;
 }
 
+/// Opens dav1d with whatever thread count is in force.
+///
+/// **Zero is left alone when nobody asked**, because for dav1d zero genuinely
+/// means one thread per logical core -- which is what a player wants and what
+/// makes it the answer for 4K. The other three decoders here read zero as one,
+/// which is why the meaning of the number is not shared and only the rules
+/// around it are.
+bool open_dav1d(MpVideoCodec* c) noexcept
+{
+    Dav1dSettings settings{};
+    dav1d_default_settings(&settings);
+    settings.n_threads = static_cast<int>(c->threads.chosen());
+    return dav1d_open(&c->ctx, &settings) == 0;
+}
+
 MpResult MP_CALL codec_open(MpCodec codec, const MpGraphicsDevice* device,
                             const std::uint8_t* config, std::uint32_t config_bytes,
                             MpVideoCodec** out) noexcept
@@ -294,12 +315,7 @@ try {
     }
     c->info.size = sizeof(MpVideoInfo);
 
-    Dav1dSettings settings{};
-    dav1d_default_settings(&settings);
-    // Zero means one thread per logical core, which is what a player wants and
-    // what makes dav1d fast enough to be the answer for 4K.
-    settings.n_threads = 0;
-    if (dav1d_open(&c->ctx, &settings) != 0) {
+    if (!open_dav1d(c.get())) {
         log_line(MP_LOG_ERROR, "codec_dav1d: dav1d would not open");
         return MP_ERR_UNSUPPORTED;
     }
@@ -363,6 +379,10 @@ MpResult MP_CALL codec_get_format(MpVideoCodec* c, MpVideoInfo* out) noexcept
 MpResult MP_CALL codec_decode(MpVideoCodec* c, const void* packet, std::size_t bytes,
                               std::uint64_t pts) noexcept
 try {
+    // A packet has gone in, so the thread count cannot move any more.
+    if (c != nullptr) {
+        c->threads.fix();
+    }
     if (c == nullptr || packet == nullptr || bytes == 0) {
         return MP_ERR_INVALID;
     }
@@ -474,6 +494,45 @@ try {
     return MP_ERR_NO_MEMORY;
 }
 
+/// `threads`, and nothing else yet.
+///
+/// **Taken by opening dav1d again**, because `n_threads` is a settings field
+/// read once in `dav1d_open` and `dav1d_flush` -- which is what `reset` uses --
+/// keeps the pool it already made. Refused once a packet has gone in, by
+/// `ThreadChoice`, for the reason its header gives.
+MpResult MP_CALL codec_set(MpVideoCodec* c, const char* key, const char* value) noexcept
+try {
+    if (c == nullptr) {
+        return MP_ERR_INVALID;
+    }
+    const MpResult took = c->threads.take(key, value, c->trouble);
+    if (took != MP_OK) {
+        return took;
+    }
+    release_frame(c);
+    if (c->pending.sz != 0) {
+        dav1d_data_unref(&c->pending);
+    }
+    if (c->ctx != nullptr) {
+        dav1d_close(&c->ctx);
+        c->ctx = nullptr;
+    }
+    if (!open_dav1d(c)) {
+        c->trouble = "dav1d would not reopen with that many threads";
+        return MP_ERR_INTERNAL;
+    }
+    // The sequence header goes back in front, exactly as `reset` puts it there.
+    if (!c->config.empty()) {
+        if (!take(c, c->config.data(), c->config.size(), 0)) {
+            return MP_ERR_NO_MEMORY;
+        }
+        push(c);
+    }
+    return MP_OK;
+} catch (...) {
+    return MP_ERR_NO_MEMORY;
+}
+
 constexpr MpVideoCodecVtbl k_vtbl = {
     /* size       */ sizeof(MpVideoCodecVtbl),
     /* reserved   */ 0,
@@ -485,6 +544,7 @@ constexpr MpVideoCodecVtbl k_vtbl = {
     /* next_frame */ &codec_next_frame,
     /* flush      */ &codec_flush,
     /* reset      */ &codec_reset,
+    /* set        */ &codec_set,
 };
 
 MpResult MP_CALL module_init(const MpHost* host) noexcept

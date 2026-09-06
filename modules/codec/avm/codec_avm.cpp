@@ -84,6 +84,10 @@ struct MpVideoCodec {
 
     MpVideoInfo info{};
     bool have_format = false;
+    /// What a host asked for, and whether it is too late to ask.
+    /// `modules/shared/decoder_threads` has the rules; what the number *means*
+    /// is this library's and stays beside the call that uses it.
+    mp::ThreadChoice threads;
     std::string trouble;
 };
 
@@ -202,8 +206,10 @@ try {
     // That is a shape ABI v4 can state and v3 could not, and it is the reason
     // `container_bits` is read from the image rather than assumed.
     avm_codec_dec_cfg_t cfg{};
-    // Not zero: avm reads that as one thread. See modules/shared/decoder_threads.
-    cfg.threads = mp::decoder_threads();
+    // What was asked for, or this machine's cores when nobody asked:
+    // avm is libaom's fork and reads zero the same way, so there is no zero to pass through.
+    cfg.threads = c->threads.chosen() != 0 ? c->threads.chosen()
+                                       : mp::decoder_threads();
     if (avm_codec_dec_init(&c->ctx, avm_codec_av2_dx(), &cfg, 0) != AVM_CODEC_OK) {
         log_line(MP_LOG_ERROR, "codec_avm: avm would not start");
         return MP_ERR_UNSUPPORTED;
@@ -246,6 +252,9 @@ try {
     if (c == nullptr || packet == nullptr || bytes == 0) {
         return MP_ERR_INVALID;
     }
+    // A packet has gone in, so the thread count cannot move any more. Said
+    // unconditionally because cheap and every time beats remembering once.
+    c->threads.fix();
     // avm takes a whole packet or fails, so there is no partial state to carry
     // and no MP_ERR_BUSY to report. The timestamp goes through `user_priv`,
     // which avm hands back on the image it produced.
@@ -323,12 +332,35 @@ try {
         c->started = false;
     }
     avm_codec_dec_cfg_t cfg{};
-    cfg.threads = mp::decoder_threads();
+    // What was asked for, or this machine's cores when nobody asked:
+    // avm is libaom's fork and reads zero the same way, so there is no zero to pass through.
+    cfg.threads = c->threads.chosen() != 0 ? c->threads.chosen()
+                                       : mp::decoder_threads();
     if (avm_codec_dec_init(&c->ctx, avm_codec_av2_dx(), &cfg, 0) != AVM_CODEC_OK) {
         return MP_ERR_INTERNAL;
     }
     c->started = true;
     return MP_OK;
+} catch (...) {
+    return MP_ERR_NO_MEMORY;
+}
+
+/// `threads`, and nothing else yet.
+///
+/// **Taken by starting the decoder again**, which is what `reset` already does
+/// and what a seek already costs: this library sizes its pool in
+/// `codec_dec_init` and cannot resize it afterwards. Refused once a packet has
+/// gone in, by `ThreadChoice`, for the reason its header gives.
+MpResult MP_CALL codec_set(MpVideoCodec* c, const char* key, const char* value) noexcept
+try {
+    if (c == nullptr) {
+        return MP_ERR_INVALID;
+    }
+    const MpResult took = c->threads.take(key, value, c->trouble);
+    if (took != MP_OK) {
+        return took;
+    }
+    return codec_reset(c);
 } catch (...) {
     return MP_ERR_NO_MEMORY;
 }
@@ -344,6 +376,7 @@ constexpr MpVideoCodecVtbl k_vtbl = {
     /* next_frame */ &codec_next_frame,
     /* flush      */ &codec_flush,
     /* reset      */ &codec_reset,
+    /* set        */ &codec_set,
 };
 
 MpResult MP_CALL module_init(const MpHost* host) noexcept
