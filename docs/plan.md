@@ -2367,7 +2367,7 @@ be checked by a test on a machine whose GPU does that differently. `shader` is a
 on top of step 3, it is thirty lines, and it is **testable off-screen against the formula**.
 The default stays `driver` either way.
 
-**6. HDR static metadata, which needs an ABI append. Not built.** `IDXGISwapChain4::SetHDRMetaData` and
+**6. HDR static metadata, which needs an ABI append.** `IDXGISwapChain4::SetHDRMetaData` and
 `VideoProcessorSetStreamHDRMetaData` both want the mastering display's primaries, its
 luminance range, MaxCLL and MaxFALL. **`MpVideoInfo` carries none of them** — it has
 primaries, transfer and matrix, which say how to *decode*, and nothing that says what the
@@ -2411,6 +2411,64 @@ And one number that had never been printed anywhere: the presenter now describes
 as *SDR, white 80 nits, peak 470 nits*, and `show` prints that beside the encoding, the
 applied mapper and the SDR scale. **A colour path whose numbers nobody can print is one nobody
 can check**, which is how a tone-mapping fault becomes a matter of opinion.
+
+#### Step 6: what the content was graded on
+
+`MpVideoInfo` says how to *decode* a stream and said nothing about what a colourist was
+looking at, so a display asked to tone-map was guessing at the one thing the content could
+have told it. Ten `uint32` appended — ST.2086's mastering display and CTA-861.3's light
+levels — in **the standards' own units rather than anything friendlier**, so that a demuxer
+copies what the file said and a presenter hands over what the API wants and no number is
+rounded twice: 0.00002 for chromaticities, 0.0001 cd/m² for luminance, whole cd/m² for the
+light levels.
+
+Two things are worth saying out loud in the header and are:
+
+- **Red, green, blue, in that order**, which is ST.2086's and DXGI's and is *not* the order an
+  HEVC SEI states them in. That one starts at green, so a demuxer reading one has to reorder.
+- **All zero means absent, not a display at nought nits.** `mp_video_has_mastering` is the
+  question, asked in one place, keyed on the white point — ST.2086 has no mastering display
+  without one and every real value is far from zero. A caller from before the append answers
+  *no*, because its `size` says the fields are not there to read.
+
+`demux_mkv` fills it, which is the half that makes the append worth having: Matroska states
+chromaticities as floats and luminance in cd/m², and the conversion happens there, where the
+container's spelling is known, rather than in a presenter guessing which of its callers used
+which. `video_d3d11` hands it to `IDXGISwapChain4::SetHDRMetaData` **only on a PQ chain and
+only when the stream stated one** — inventing a mastering display is how a display
+tone-maps for a picture that does not exist.
+
+**And a difference worth keeping in sight**: this tree's own mapper does not read it. BT.2390
+rolls off towards the *display's* peak, which it knows, rather than away from the *content's*,
+which it would have to be told. `driver` does read it, so the same file will look different
+under the two providers, and that is the format working rather than a fault.
+
+#### The white level, checked rather than asserted
+
+*"About 464 to 478 nits"* is what this panel does, and §9.7.2 reported 80. **The reading is
+right and the two numbers are different things.** A twenty-line probe against the CCD API says
+this monitor's path reports an SDR white level of raw 1000 — exactly 80 nits, the scRGB
+reference — while `IDXGIOutput6` gives its peak as 470. With HDR off Windows composites SDR
+to the reference and the panel's brightness is the panel's own business; the white level moves
+when HDR is on and the user drags the SDR slider, which is the case §9.6 exists for. So the
+scale of 1.0 is correct and the 470 is reported beside it.
+
+**The probe found something the code was throwing away.** The same call returns
+`advancedColorSupported 1, advancedColorEnabled 0, wideColorEnforced 1` — this display is
+in the wide-gamut, self-colour-managing state that §9.4 said *cannot be distinguished from a
+plain SDR display*, and concluded the difference only exists from Windows 11 24H2's
+`ADVANCED_COLOR_INFO_2`. That is true of `IDXGIOutput6` and not true of the CCD API: the
+original `ADVANCED_COLOR_INFO` answers it, and the walk for the white level was already
+standing in front of it. `Display::wide` is filled from it now, and `hdr` takes either source.
+
+#### A float that should have been an integer
+
+`transfer_kind` was a float because the flags around it are, and the flags around it are for a
+reason that does not apply to it. `has_chroma` multiplies the centred chroma so that 4:0:0
+comes out grey **without a branch**, and `sample_scale` scales samples: those are arithmetic.
+`transfer_kind` is a name — compared, never multiplied — so it is a `uint`, and the
+comparisons say `== 2` rather than `> 1.5`. The rest of the constants are quantities and stay
+floats.
 
 #### And what the tests found, which was two things about the tests
 

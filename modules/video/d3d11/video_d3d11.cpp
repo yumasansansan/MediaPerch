@@ -183,7 +183,12 @@ cbuffer Constants : register(b0)
 
     float sample_scale;   // mp_pixel_sample_scale: where the bits sit, not how many
     float transfer_gamma; // 2.4 for BT.1886, used only by transfer_kind 1
-    float transfer_kind;  // 0 sRGB, 1 a pure power, 2 PQ, 3 HLG
+    // **An integer, because it is a name and not a quantity.** The floats
+    // around it are multipliers -- `has_chroma` multiplies the centred chroma
+    // so that 4:0:0 comes out grey without a branch, and `sample_scale` scales
+    // samples -- and a float there is branch-free arithmetic rather than
+    // imitation. This one is compared, never multiplied, so it is a uint.
+    uint  transfer_kind;  // 0 sRGB, 1 a pure power, 2 PQ, 3 HLG
     float has_chroma;     // 0 for 4:0:0, where there is no chroma plane to read
 
     float hlg_peak;       // §9.9.1: the OOTF's system gamma is a function of it
@@ -229,7 +234,7 @@ float3 sdr_to_linear(float3 c)
     c = saturate(c);
     float3 piecewise = c <= 0.04045 ? c / 12.92 : pow(abs((c + 0.055) / 1.055), 2.4);
     float3 power = pow(abs(c), transfer_gamma);
-    return lerp(power, piecewise, transfer_kind < 0.5 ? 1.0 : 0.0);
+    return transfer_kind == 0 ? piecewise : power;
 }
 
 // ST.2084's constants, as the standard writes them: ratios of small integers,
@@ -299,10 +304,10 @@ float3 tone_map_bt2390(float3 nits, float peak)
 /// means.
 float3 decode(float3 c)
 {
-    if (transfer_kind > 2.5) {
+    if (transfer_kind == 3) {
         return hlg_to_nits(c, hlg_peak) / 80.0;
     }
-    if (transfer_kind > 1.5) {
+    if (transfer_kind == 2) {
         return pq_to_nits(c) / 80.0;
     }
     return sdr_to_linear(c) * sdr_scale;
@@ -391,7 +396,7 @@ struct Constants {
 
     float sample_scale = 1.0f;
     float transfer_gamma = 2.4f;
-    float transfer_kind = 0.0f;
+    std::uint32_t transfer_kind = 0;
     float has_chroma = 1.0f;
 
     float hlg_peak = 1000.0f;
@@ -511,28 +516,42 @@ bool output_for(IDXGIFactory2* factory, HWND window, Com<IDXGIOutput6>& six)
 /// where the user put the SDR slider. `src/win/refresh_win.cpp` walks the same
 /// API for the refresh rate; this walks it again rather than sharing, because a
 /// module gets a host vtable and not the head's code (§3).
-float sdr_white_of(HWND window)
+/// What one walk of the CCD API can say about the monitor a window is on.
+struct AdvancedColour {
+    float sdr_white_nits = 80.0f;
+    /// Advanced Color is on and the mode is SDR: a wide-gamut display doing its
+    /// own colour management. **§9.4 says `IDXGIOutput6` cannot tell this from a
+    /// plain SDR display**, and it cannot -- but the CCD API can, and the walk
+    /// for the white level is already standing in front of it.
+    bool wide = false;
+    /// HDR is on. DXGI's colour space says this too and this says it earlier,
+    /// from the same call as the rest.
+    bool hdr = false;
+};
+
+AdvancedColour advanced_colour_of(HWND window)
 {
+    AdvancedColour out;
     if (window == nullptr) {
-        return 80.0f;
+        return out;
     }
     HMONITOR monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
     MONITORINFOEXW info{};
     info.cbSize = sizeof(info);
     if (monitor == nullptr || GetMonitorInfoW(monitor, &info) == 0) {
-        return 80.0f;
+        return out;
     }
 
     UINT32 paths = 0;
     UINT32 modes = 0;
     if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &paths, &modes) != ERROR_SUCCESS) {
-        return 80.0f;
+        return out;
     }
     std::vector<DISPLAYCONFIG_PATH_INFO> path_list(paths);
     std::vector<DISPLAYCONFIG_MODE_INFO> mode_list(modes);
     if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &paths, path_list.data(), &modes,
                            mode_list.data(), nullptr) != ERROR_SUCCESS) {
-        return 80.0f;
+        return out;
     }
     path_list.resize(paths);
 
@@ -556,19 +575,42 @@ float sdr_white_of(HWND window)
         white.header.size = sizeof(white);
         white.header.adapterId = path.targetInfo.adapterId;
         white.header.id = path.targetInfo.id;
-        if (DisplayConfigGetDeviceInfo(&white.header) != ERROR_SUCCESS) {
-            return 80.0f;
-        }
         // **1000 is the unit, and it is not nits.** The field is the SDR white
         // level in units of 1/1000 of 80 nits, so 1000 means 80 -- the scRGB
-        // reference, a scale of exactly one. A monitor whose slider is at the
-        // top reports something like 6250, which is 500 nits.
-        if (white.SDRWhiteLevel == 0) {
-            return 80.0f;
+        // reference, a scale of exactly one.
+        //
+        // **And 1000 is what an SDR display reports**, whatever its panel can
+        // do. Measured here: a monitor whose peak `IDXGIOutput6` gives as 470
+        // nits reports an SDR white level of exactly 1000, because with HDR off
+        // Windows composites to the reference and the panel's brightness is the
+        // panel's business. The number moves when HDR is on and the user drags
+        // the SDR brightness slider, which is the case §9.6 exists for.
+        if (DisplayConfigGetDeviceInfo(&white.header) == ERROR_SUCCESS &&
+            white.SDRWhiteLevel != 0) {
+            out.sdr_white_nits = static_cast<float>(white.SDRWhiteLevel) * 80.0f / 1000.0f;
         }
-        return static_cast<float>(white.SDRWhiteLevel) * 80.0f / 1000.0f;
+
+        // **The one §9.4 said could not be told.** `IDXGIOutput6` reports
+        // `G22_NONE_P709` for a wide-gamut display doing its own colour
+        // management and for a plain one alike, and that note concluded the
+        // difference only exists from Windows 11 24H2's ADVANCED_COLOR_INFO_2.
+        // It does not: the original ADVANCED_COLOR_INFO answers it, and the
+        // walk for the white level is already standing in front of it.
+        // Measured on this machine -- supported 1, enabled 0, wideColorEnforced
+        // 1, which is exactly the state that was supposed to be invisible.
+        DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO advanced{};
+        advanced.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO;
+        advanced.header.size = sizeof(advanced);
+        advanced.header.adapterId = path.targetInfo.adapterId;
+        advanced.header.id = path.targetInfo.id;
+        if (DisplayConfigGetDeviceInfo(&advanced.header) == ERROR_SUCCESS) {
+            out.hdr = advanced.advancedColorEnabled != 0;
+            out.wide = advanced.advancedColorEnabled == 0 &&
+                       advanced.wideColorEnforced != 0;
+        }
+        return out;
     }
-    return 80.0f;
+    return out;
 }
 
 /// What §9.4 could work out, given a device and a window. Kept separate from
@@ -603,9 +645,16 @@ mp::video::Display probe_display(IDXGIFactory2* factory, HWND window)
     }
 
     // Asked of the monitor the window is on, which is why it comes last and
-    // why it takes the window rather than the output: DXGI has no idea where
-    // the user put the SDR slider.
-    display.sdr_white_nits = sdr_white_of(window);
+    // why it takes the window rather than the output: DXGI knows neither where
+    // the user put the SDR slider nor whether a wide-gamut display is managing
+    // its own colour.
+    const AdvancedColour advanced = advanced_colour_of(window);
+    display.sdr_white_nits = advanced.sdr_white_nits;
+    display.wide = advanced.wide;
+    // Either source will do for this one and they agree; DXGI's answers for a
+    // window that is not on any path, and the CCD's for a driver that reports a
+    // colour space it is not in.
+    display.hdr = display.hdr || advanced.hdr;
     return display;
 }
 
@@ -670,6 +719,13 @@ struct MpVideo {
     std::uint32_t height = 0;
 
     mp::video::Stream stream{};
+    /// **What the container said, kept whole.** `Stream` is the four numbers
+    /// the colour plan turns on; this is the rest, and it exists for the ten
+    /// that `SetHDRMetaData` wants. Its `size` is the caller's, not ours, so a
+    /// module built against the header before the mastering display was
+    /// appended answers `mp_video_has_mastering` with a no rather than with
+    /// whatever was on the stack.
+    MpVideoInfo graded{};
     /// `MP_VIDEO_FULL_RANGE` from the container. Studio range is the default
     /// and the safe one: treating 16..235 as 0..255 crushes the blacks and
     /// clips the whites, which reads as a contrast setting rather than a bug.
@@ -717,6 +773,61 @@ bool compile(const char* entry, const char* target, Com<ID3DBlob>& out, std::str
 /// `D3D11_CREATE_DEVICE_VIDEO_SUPPORT`, and multithread protection, because
 /// Media Foundation decodes on threads of its own. Both are free to the
 /// presenting half and neither can be added afterwards.
+/// **What the content was graded on, handed to the display.**
+///
+/// ST.2086's mastering display and CTA-861.3's light levels, in exactly the
+/// units `DXGI_HDR_METADATA_HDR10` takes -- which is why `MpVideoInfo` states
+/// them in those units rather than in anything friendlier: a demuxer copies
+/// what the file said, this hands over what the API wants, and no number is
+/// rounded twice on the way.
+///
+/// **Only when the stream carried it.** Sending a mastering display nobody
+/// stated would be inventing one, and a display told the content was graded at
+/// 4000 nits when it was graded at 1000 tone-maps for a picture that does not
+/// exist. `mp_video_has_mastering` is the question, asked in one place.
+///
+/// **And only on an HDR chain.** An SDR swap chain has nowhere to put it, and
+/// this tree's own tone mapper does not read it: BT.2390 rolls off towards the
+/// display's peak, which it knows, rather than away from the content's, which
+/// it would have to be told. That is a difference worth keeping in sight when
+/// `driver` arrives, because the driver's mapper *does* read this and will
+/// behave differently for the same file.
+void set_hdr_metadata(MpVideo* v) noexcept
+{
+    if (!v->swap_chain || !mp_video_has_mastering(&v->graded)) {
+        return;
+    }
+    if (v->plan.encoding != mp::video::Encoding::pq) {
+        return;
+    }
+    Com<IDXGISwapChain4> chain4;
+    if (FAILED(v->swap_chain->QueryInterface(__uuidof(IDXGISwapChain4),
+                                             reinterpret_cast<void**>(chain4.put())))) {
+        return;
+    }
+
+    const MpVideoInfo& in = v->graded;
+    DXGI_HDR_METADATA_HDR10 hdr{};
+    hdr.RedPrimary[0] = static_cast<UINT16>(in.mastering_primaries_x[0]);
+    hdr.RedPrimary[1] = static_cast<UINT16>(in.mastering_primaries_y[0]);
+    hdr.GreenPrimary[0] = static_cast<UINT16>(in.mastering_primaries_x[1]);
+    hdr.GreenPrimary[1] = static_cast<UINT16>(in.mastering_primaries_y[1]);
+    hdr.BluePrimary[0] = static_cast<UINT16>(in.mastering_primaries_x[2]);
+    hdr.BluePrimary[1] = static_cast<UINT16>(in.mastering_primaries_y[2]);
+    hdr.WhitePoint[0] = static_cast<UINT16>(in.mastering_white_x);
+    hdr.WhitePoint[1] = static_cast<UINT16>(in.mastering_white_y);
+    hdr.MaxMasteringLuminance = in.mastering_max_luminance;
+    hdr.MinMasteringLuminance = in.mastering_min_luminance;
+    hdr.MaxContentLightLevel = static_cast<UINT16>(in.max_content_light_level);
+    hdr.MaxFrameAverageLightLevel =
+        static_cast<UINT16>(in.max_frame_average_light_level);
+
+    // A failure is not fatal and not worth a log line every rebuild: a display
+    // that will not take metadata shows the picture without it, which is what
+    // every stream that states none gets anyway.
+    (void)chain4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10, sizeof(hdr), &hdr);
+}
+
 bool make_device(MpVideo* v, std::string& why)
 {
     UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
@@ -1021,6 +1132,7 @@ bool make_target(MpVideo* v, std::string& why)
                 chain3->SetColorSpace1(space);
             }
         }
+        set_hdr_metadata(v);
         if (FAILED(v->swap_chain->GetBuffer(0, __uuidof(ID3D11Texture2D),
                                             reinterpret_cast<void**>(v->target.put())))) {
             why = "no back buffer";
@@ -1349,6 +1461,13 @@ try {
         return MP_ERR_INVALID;
     }
 
+    // Kept whole, and kept at the caller's own `size`: what was not sent is
+    // not there, and a zeroed tail read as a mastering display would be a
+    // display told the content was graded at nothing.
+    v->graded = MpVideoInfo{};
+    std::memcpy(&v->graded, in, std::min<std::size_t>(in->size, sizeof(v->graded)));
+    v->graded.size = in->size;
+
     v->stream = mp::video::Stream{.primaries = in->primaries,
                                   .transfer = in->transfer,
                                   .matrix = in->matrix,
@@ -1422,14 +1541,14 @@ try {
     const std::uint32_t transfer = mp::video::assumed_transfer(v->stream);
     constants.transfer_gamma = 2.4f;
     if (v->plan.convert == mp::video::Convert::hlg_to_linear) {
-        constants.transfer_kind = 3.0f;
+        constants.transfer_kind = 3;
     } else if (transfer == mp::video::k_transfer_pq &&
                v->plan.convert != mp::video::Convert::none) {
-        constants.transfer_kind = 2.0f;
+        constants.transfer_kind = 2;
     } else if (transfer == mp::video::k_transfer_srgb) {
-        constants.transfer_kind = 0.0f;
+        constants.transfer_kind = 0;
     } else {
-        constants.transfer_kind = 1.0f;
+        constants.transfer_kind = 1;
     }
     constants.hlg_peak = v->plan.hlg_peak_nits;
 

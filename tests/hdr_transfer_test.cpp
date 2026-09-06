@@ -386,3 +386,34 @@ TEST_CASE("HLG is not PQ, which is the fault section 9.9.1 was written about",
     CHECK(as_pq == Catch::Approx(92.2).epsilon(0.01));
     CHECK(as_hlg.g == Catch::Approx(50.7).epsilon(0.01));
 }
+
+TEST_CASE("a mastering display is absent until something states one", "[video][hdr]")
+{
+    // **Zero is not a mastering display at nought nits, it is the absence of
+    // one**, and one question in one place is how that stays true: a presenter
+    // that invented its own test would eventually invent a different one.
+    MpVideoInfo info{};
+    info.size = sizeof(info);
+    CHECK(mp_video_has_mastering(&info) == 0);
+
+    // BT.2020's primaries and D65, in ST.2086's own units -- 0.00002, so 0.708
+    // is 35400. The numbers a real HDR10 file carries.
+    info.mastering_primaries_x[0] = 35400;  // red x, 0.708
+    info.mastering_primaries_y[0] = 14600;  // red y, 0.292
+    info.mastering_primaries_x[1] = 8500;   // green x, 0.170
+    info.mastering_primaries_y[1] = 39850;  // green y, 0.797
+    info.mastering_primaries_x[2] = 6550;   // blue x, 0.131
+    info.mastering_primaries_y[2] = 2300;   // blue y, 0.046
+    info.mastering_white_x = 15635;         // D65 x, 0.3127
+    info.mastering_white_y = 16450;         // D65 y, 0.3290
+    info.mastering_max_luminance = 10000000;  // 1000 nits, in 0.0001 cd/m^2
+    info.mastering_min_luminance = 1;         // 0.0001 nits
+    CHECK(mp_video_has_mastering(&info) != 0);
+
+    // **A caller from before the append says no**, whatever is behind its
+    // pointer: `size` is the caller's own and the fields are not there to read.
+    MpVideoInfo older = info;
+    older.size = 48;
+    CHECK(mp_video_has_mastering(&older) == 0);
+    CHECK(mp_video_has_mastering(nullptr) == 0);
+}

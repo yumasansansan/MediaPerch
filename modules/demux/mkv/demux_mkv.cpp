@@ -357,6 +357,18 @@ struct Track {
     std::uint32_t transfer = 2;
     std::uint32_t matrix = 2;
     bool full_range = false;
+    /// **What the content was graded on**, in ST.2086's units rather than
+    /// Matroska's: converted where the container's spelling is known, so that
+    /// nothing downstream has to ask which of its callers used which. Red,
+    /// green, blue -- the ABI's order and DXGI's.
+    std::uint32_t mastering_x[3] = {0, 0, 0};
+    std::uint32_t mastering_y[3] = {0, 0, 0};
+    std::uint32_t white_x = 0;
+    std::uint32_t white_y = 0;
+    std::uint32_t luminance_max = 0;
+    std::uint32_t luminance_min = 0;
+    std::uint32_t max_cll = 0;
+    std::uint32_t max_fall = 0;
 };
 
 } // namespace
@@ -548,6 +560,43 @@ void read_track_entry(MpDemux* d, KaxTrackEntry& entry)
             // 3 defined by the transfer function -- not the flag MP4 uses.
             if (auto* v = FindChild<KaxVideoColourRange>(*colour)) {
                 t.full_range = static_cast<std::uint64_t>(*v) == 2;
+            }
+
+            // **What the content was graded on**, which says nothing about how
+            // to decode it and everything about how to show it. CTA-861.3's
+            // light levels are whole cd/m^2 in both places and copy across.
+            if (auto* v = FindChild<KaxVideoColourMaxCLL>(*colour)) {
+                t.max_cll = static_cast<std::uint32_t>(static_cast<std::uint64_t>(*v));
+            }
+            if (auto* v = FindChild<KaxVideoColourMaxFALL>(*colour)) {
+                t.max_fall = static_cast<std::uint32_t>(static_cast<std::uint64_t>(*v));
+            }
+            if (auto* master = FindChild<KaxVideoColourMasterMeta>(*colour)) {
+                // **Matroska states chromaticities as floats and luminance in
+                // cd/m^2; the ABI states them in ST.2086's own units**, which
+                // is what `SetHDRMetaData` takes. One conversion, here, where
+                // the container's spelling is known -- rather than a presenter
+                // guessing which of its callers used which.
+                const auto chroma = [&](auto* e) {
+                    return e == nullptr ? 0u
+                                        : static_cast<std::uint32_t>(
+                                              static_cast<double>(*e) * 50000.0 + 0.5);
+                };
+                const auto nits = [&](auto* e) {
+                    return e == nullptr ? 0u
+                                        : static_cast<std::uint32_t>(
+                                              static_cast<double>(*e) * 10000.0 + 0.5);
+                };
+                t.mastering_x[0] = chroma(FindChild<KaxVideoRChromaX>(*master));
+                t.mastering_y[0] = chroma(FindChild<KaxVideoRChromaY>(*master));
+                t.mastering_x[1] = chroma(FindChild<KaxVideoGChromaX>(*master));
+                t.mastering_y[1] = chroma(FindChild<KaxVideoGChromaY>(*master));
+                t.mastering_x[2] = chroma(FindChild<KaxVideoBChromaX>(*master));
+                t.mastering_y[2] = chroma(FindChild<KaxVideoBChromaY>(*master));
+                t.white_x = chroma(FindChild<KaxVideoWhitePointChromaX>(*master));
+                t.white_y = chroma(FindChild<KaxVideoWhitePointChromaY>(*master));
+                t.luminance_max = nits(FindChild<KaxVideoLuminanceMax>(*master));
+                t.luminance_min = nits(FindChild<KaxVideoLuminanceMin>(*master));
             }
         }
     }
@@ -1217,6 +1266,16 @@ try {
     info.transfer = t.transfer;
     info.matrix = t.matrix;
     info.flags = t.full_range ? MP_VIDEO_FULL_RANGE : 0u;
+    for (int i = 0; i < 3; ++i) {
+        info.mastering_primaries_x[i] = t.mastering_x[i];
+        info.mastering_primaries_y[i] = t.mastering_y[i];
+    }
+    info.mastering_white_x = t.white_x;
+    info.mastering_white_y = t.white_y;
+    info.mastering_max_luminance = t.luminance_max;
+    info.mastering_min_luminance = t.luminance_min;
+    info.max_content_light_level = t.max_cll;
+    info.max_frame_average_light_level = t.max_fall;
 
     // **Nanoseconds**, because that is what libmatroska hands back from
     // `GlobalTimestamp` -- it has already applied the segment's TimestampScale,

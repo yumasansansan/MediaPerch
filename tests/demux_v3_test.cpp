@@ -903,8 +903,13 @@ TEST_CASE("a video packet says what its timestamp is counted in", "[abi][v3][vid
         };
         Guarded guarded{};
         guarded.canary = 0xFEEDFACEu;
-        // The size the header had before `timescale` was appended.
-        guarded.info.size = sizeof(MpVideoInfo) - sizeof(std::uint32_t);
+        // **The size the header had before `timescale` was appended**, said as
+        // where `timescale` starts rather than as `sizeof` minus a field.
+        // The subtraction was right while `timescale` was last and became a
+        // different question the moment anything was appended after it -- which
+        // is a test that breaks when the struct grows, rather than one that
+        // keeps asking what it says it asks.
+        guarded.info.size = offsetof(MpVideoInfo, timescale);
 
         // Stream 0 is the video track in this file, which the sections above
         // establish; asking the vtable directly means saying so here.

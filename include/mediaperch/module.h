@@ -544,7 +544,59 @@ typedef struct MpVideoInfo {
      * reciprocal of what FFmpeg calls a time base, whose numerator is 1 for
      * both of them. */
     uint32_t timescale;
+
+    /* **What the content was graded on**, SMPTE ST.2086 and CTA-861.3, and
+     * appended because nothing here could say it.
+     *
+     * `primaries`, `transfer` and `matrix` above say how to *decode* a stream.
+     * They do not say what a colourist was looking at, and a display asked to
+     * tone-map without knowing that is guessing at the one thing the content
+     * could have told it. Both APIs that want it -- DXGI's
+     * `IDXGISwapChain4::SetHDRMetaData` and D3D11's
+     * `VideoProcessorSetStreamHDRMetaData` -- take exactly these numbers.
+     *
+     * **All zero when the stream does not carry it**, which is most streams:
+     * static metadata is optional in every container that can hold it. Zero is
+     * not a mastering display at 0 nits, it is the absence of one, and
+     * `mp_video_has_mastering` is how that question is asked rather than each
+     * caller inventing its own test.
+     *
+     * The units are the standards' own rather than anything friendlier, so that
+     * a demuxer copies what the file said and a presenter hands over what the
+     * API wants, and nothing in between rounds a number twice:
+     *   - primaries and the white point in units of 0.00002, so 0.708 is 35400
+     *   - luminances in units of 0.0001 cd/m^2, so 1000 nits is 10000000
+     *   - the light levels in whole cd/m^2, which is how CTA-861.3 states them
+     *
+     * Red, green, blue -- **in that order**, which is ST.2086's and DXGI's and
+     * is *not* the order an HEVC SEI states them in (that one starts at green).
+     * A demuxer reading one has to reorder, and saying so here is cheaper than
+     * finding out. */
+    uint32_t mastering_primaries_x[3];
+    uint32_t mastering_primaries_y[3];
+    uint32_t mastering_white_x;
+    uint32_t mastering_white_y;
+    uint32_t mastering_max_luminance;
+    uint32_t mastering_min_luminance;
+    /* CTA-861.3: the brightest pixel anywhere, and the brightest frame average.
+     * Zero for "not stated", which is common even in files that carry the
+     * mastering display. */
+    uint32_t max_content_light_level;
+    uint32_t max_frame_average_light_level;
 } MpVideoInfo;
+
+/* Whether `info` carries a mastering display at all.
+ *
+ * One question in one place: a white point of zero is the tell, because
+ * ST.2086 has no mastering display without one and every real value is far
+ * from zero. */
+MP_INLINE int mp_video_has_mastering(const MpVideoInfo *info)
+{
+    if (info == NULL || info->size < sizeof(MpVideoInfo)) {
+        return 0;
+    }
+    return info->mastering_white_x != 0u && info->mastering_white_y != 0u;
+}
 
 enum {
     /* The samples use the full range of their container rather than the studio
@@ -1517,8 +1569,17 @@ MP_STATIC_ASSERT(sizeof(MpVideoFrame) == 112, "MpVideoFrame layout is ABI");
 MP_STATIC_ASSERT(offsetof(MpGraphicsDevice, size) == 0, "size must lead");
 MP_STATIC_ASSERT(offsetof(MpVideoCodecVtbl, size) == 0, "size must lead");
 MP_STATIC_ASSERT(offsetof(MpVideoVtbl, size) == 0, "size must lead");
-MP_STATIC_ASSERT(sizeof(MpVideoInfo) == 48, "MpVideoInfo layout is ABI");
+/* 48 until the mastering display was appended, and the assertion is here so
+ * that a change to what precedes it is a build failure rather than a picture
+ * that is wrong on somebody else's machine. Ten uint32 more: three primaries in
+ * x and y, a white point, two luminances and the two light levels. */
+MP_STATIC_ASSERT(offsetof(MpVideoInfo, mastering_primaries_x) == 48,
+                 "MpVideoInfo only ever grows at the end");
+MP_STATIC_ASSERT(sizeof(MpVideoInfo) == 96, "MpVideoInfo layout is ABI");
 MP_STATIC_ASSERT(offsetof(MpVideoInfo, flags) < offsetof(MpVideoInfo, timescale),
+                 "MpVideoInfo only ever grows at the end");
+MP_STATIC_ASSERT(offsetof(MpVideoInfo, timescale) <
+                     offsetof(MpVideoInfo, mastering_white_x),
                  "MpVideoInfo only ever grows at the end");
 
 /* v3 broke two members of MpDemuxVtbl in place and appended one after them.
