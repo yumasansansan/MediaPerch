@@ -2018,6 +2018,11 @@ on the hardware:
 comfortably past 16K DCI at 15360x8640. So 5K, 6K, 8K, 10K and 12K are all simply pictures as
 far as everything above the decoder is concerned; nothing here has a resolution in it.
 
+**8K is no longer only an argument.** §9.7.2 has it measured both ways — every pixel of a
+7680x4320 ten-bit PQ frame through the presenter, and the whole player against a generated
+fixture, where M6's acceptance holds with no flags. The claim above was true; it is now also
+checked.
+
 What runs out first is elsewhere, and the numbers are worth having:
 
 - **Memory per frame**, measured at eight-bit 4:2:0: 12 MB at 4K, 47 MB at 8K, **190 MB at
@@ -2411,6 +2416,55 @@ And one number that had never been printed anywhere: the presenter now describes
 as *SDR, white 80 nits, peak 470 nits*, and `show` prints that beside the encoding, the
 applied mapper and the SDR scale. **A colour path whose numbers nobody can print is one nobody
 can check**, which is how a tone-mapping fault becomes a matter of opinion.
+
+#### The depths HDR is actually coded in, and 8K
+
+**Eight-bit PQ is a format nobody ships.** The first HDR tests went in as BGRA8, which measures
+the curve at a depth the curve is never used at: HDR10 is ten bits, and twelve is where the
+arithmetic has to be right or the sky bands. So PQ and HLG are both measured at **ten and
+twelve bits** now, down the Y'CbCr path a decoder's frame takes, against the same formulas.
+
+**4:0:0, on purpose**, and finding out why was the interesting part. A "grey" 4:2:0 frame is
+not neutral: the code at the middle of a range is `1 << (bits-1)` and the range is
+`(1 << bits) - 1`, so the chroma sits one part in a thousand off centre and the green channel
+carries it — about one percent after the transfer, which is enough to fail a tolerance and
+say nothing about the transfer. That is true of real content and is a *matrix* question. A
+test about the transfer takes the chroma out and lets `has_chroma` be zero.
+
+##### The arithmetic is wider than the format a display gets, measured
+
+§9.10 says it and now something checks it. Two twelve-bit codes one step apart, rendered
+twice:
+
+- **`fp32` resolves them.** The pipeline carries twelve bits; if it did not, the arithmetic
+  would be what loses them rather than the format.
+- **`fp16` is asked**, not told. It must agree with single precision to within its own step,
+  2⁻¹¹ relative, and it must not reorder them. Half's relative step is 1/1024 at worst and a
+  twelve-bit output needs 1/1706 at white, so the gap is real and the test measures it instead
+  of asserting which side of it the machine lands on.
+
+##### 8K, which nothing here had ever been asked for
+
+**7680×4320 is 33 megapixels**, four times 4K and thirty-three times what every other pixel
+test uses. Nothing in the presenter is written against a size, which is exactly the kind of
+claim that is true until somebody tries.
+
+- **Through the presenter**: a ten-bit PQ frame at 8K, and **every pixel** checked rather than
+  the first — a presenter that got the size wrong draws a correct corner and a wrong edge,
+  and one pixel would agree with it. Under a second, at half precision, and it passes.
+- **Through the whole player**, on a generated fixture (`tests/data/make_8k_hevc.cmake`,
+  eleven megabytes, `ultrafast` because 33 megapixels a frame is where an encode stops being
+  minutes):
+
+| | frames | audio |
+|---|---|---|
+| 4K, at the default ring | 69-70 shown, 1-2 dropped | 0 underruns, 0 silent |
+| **8K, at the default ring** | **59-61 shown, 10-12 dropped** | **0 underruns, 0 silent** |
+
+**M6's acceptance condition holds at 8K, with no flags at all.** Four times the pixels costs
+ten more dropped frames of seventy-one and costs the audio nothing, which is §8 doing exactly
+what it says: the picture gives way, the sound does not. The ring's low-water mark is the same
+6.0 ms it is at 4K, which says the ring was never what 8K was going to strain.
 
 #### `driver` and `d2d`, and one decode rather than three
 

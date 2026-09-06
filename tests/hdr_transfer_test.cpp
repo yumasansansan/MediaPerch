@@ -21,6 +21,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -218,6 +219,49 @@ public:
         }
     }
 
+    /// One flat grey at `bits` a sample, as a single luma plane.
+    ///
+    /// **This is the shape HDR is actually coded in.** PQ at eight bits is a
+    /// format nobody ships: HDR10 is ten, and the twelve-bit case is where the
+    /// arithmetic has to be right or the sky bands.
+    ///
+    /// **4:0:0 on purpose.** A neutral chroma is not exactly a half: the code
+    /// at the middle of a range is `1 << (bits-1)` and the range is
+    /// `(1 << bits) - 1`, so a "grey" 4:2:0 frame is one part in a thousand off
+    /// neutral and the green channel carries the difference. That is true of
+    /// real content and is a matrix question rather than a transfer one, so a
+    /// test *about the transfer* takes the chroma out and lets the shader's
+    /// `has_chroma` be zero.
+    [[nodiscard]] MpResult present_grey(std::uint32_t code, std::uint32_t bits)
+    {
+        const std::uint32_t shift = 16u - bits;
+        std::vector<std::uint16_t> luma(static_cast<std::size_t>(width_) * height_,
+                                        static_cast<std::uint16_t>(code << shift));
+
+        MpVideoFrame frame{};
+        frame.size = sizeof(frame);
+        frame.layout.size = sizeof(frame.layout);
+        frame.layout.chroma = MP_CHROMA_MONO;
+        frame.layout.packing = MP_PACK_PLANAR;
+        frame.layout.bits = bits;
+        frame.layout.container_bits = 16;
+        // **Where the bits sit inside the container**, which is what P010 says
+        // and what `mp_pixel_sample_scale` turns into the shader's multiplier.
+        frame.layout.shift = shift;
+        frame.width = width_;
+        frame.height = height_;
+        frame.plane[0] = luma.data();
+        frame.stride[0] = static_cast<std::uint32_t>(width_) * 2u;
+        frame.pts = 0;
+        return vtbl_->present(handle_, &frame);
+    }
+
+    /// `fp32` measures the pipeline, `fp16` measures what a display gets.
+    [[nodiscard]] MpResult precision(const char* which)
+    {
+        return vtbl_->set(handle_, "precision", which);
+    }
+
     /// One flat colour, as BGRA8, through the whole path.
     [[nodiscard]] MpResult present(std::uint8_t b, std::uint8_t g, std::uint8_t r)
     {
@@ -239,6 +283,57 @@ public:
         frame.stride[0] = width_ * 4u;
         frame.pts = 0;
         return vtbl_->present(handle_, &frame);
+    }
+
+    /// Every pixel, so a half-precision read can say what it quantised to.
+    [[nodiscard]] std::vector<float> all()
+    {
+        std::uint32_t w = 0;
+        std::uint32_t h = 0;
+        MpPixelLayout layout{};
+        layout.size = sizeof(layout);
+        if (vtbl_->read_back(handle_, nullptr, 0, &w, &h, &layout) != MP_ERR_NO_MEMORY) {
+            return {};
+        }
+        const std::size_t count = static_cast<std::size_t>(w) * h * 4u;
+        if ((layout.flags & MP_PIXEL_FLOAT) == 0u) {
+            return {};
+        }
+        if (layout.container_bits == 32u) {
+            std::vector<float> out(count);
+            if (vtbl_->read_back(handle_, out.data(), out.size() * sizeof(float), &w, &h,
+                                 &layout) != MP_OK) {
+                return {};
+            }
+            return out;
+        }
+        std::vector<std::uint16_t> halves(count);
+        if (vtbl_->read_back(handle_, halves.data(), halves.size() * sizeof(std::uint16_t),
+                             &w, &h, &layout) != MP_OK) {
+            return {};
+        }
+        std::vector<float> out(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            const std::uint16_t v = halves[i];
+            const std::uint32_t sign = static_cast<std::uint32_t>(v & 0x8000u) << 16;
+            const std::uint32_t exponent = (v >> 10) & 0x1Fu;
+            const std::uint32_t mantissa = v & 0x3FFu;
+            std::uint32_t bits = sign;
+            if (exponent == 0 && mantissa == 0) {
+                // zero
+            } else if (exponent == 31) {
+                bits |= 0x7F800000u | (mantissa << 13);
+            } else if (exponent == 0) {
+                float sub = static_cast<float>(mantissa) / 1024.0f / 16384.0f;
+                out[i] = sign != 0 ? -sub : sub;
+                continue;
+            } else {
+                bits |= (exponent + 112u) << 23;
+                bits |= mantissa << 13;
+            }
+            std::memcpy(&out[i], &bits, sizeof(float));
+        }
+        return out;
     }
 
     /// The top-left pixel, in linear scRGB.
@@ -266,6 +361,17 @@ public:
             return {};
         }
         return Rgb{out[0], out[1], out[2]};
+    }
+
+    /// The top-left pixel whatever the target's width, which is what a
+    /// measurement of the *format* rather than of the arithmetic needs.
+    [[nodiscard]] Rgb pixel_any()
+    {
+        const std::vector<float> pixels = all();
+        if (pixels.size() < 4) {
+            return {};
+        }
+        return Rgb{pixels[0], pixels[1], pixels[2]};
     }
 
 private:
@@ -465,4 +571,166 @@ TEST_CASE("the providers that are not ours are held to properties, not values",
         const std::string applied = presenter.described("applied");
         CHECK((applied == provider || applied == "shader"));
     }
+}
+
+TEST_CASE("PQ and HLG at ten and twelve bits, which is how HDR is coded",
+          "[video][hdr]")
+{
+    // **Eight-bit PQ is a format nobody ships.** HDR10 is ten bits and the
+    // twelve-bit case is where the arithmetic has to be right or the sky bands,
+    // so the tests above -- which go in as BGRA8 -- measure the curve on a
+    // depth the curve is never used at. This one goes down the Y'CbCr path a
+    // decoder's frame takes, at both depths that matter.
+    mp::test::Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
+
+    struct Curve {
+        std::uint32_t code_point;
+        const char* name;
+    };
+    for (const Curve curve : {Curve{16, "PQ"}, Curve{18, "HLG"}}) {
+        for (const std::uint32_t bits : {10u, 12u}) {
+            Presenter presenter{*module.as<MpVideoVtbl>(), 8, 8};
+            REQUIRE(presenter.ok());
+            presenter.info().transfer = curve.code_point;
+            REQUIRE(presenter.tonemap("shader") == MP_OK);
+            REQUIRE(presenter.configure() == "");
+
+            const double peak = presenter.peak_nits();
+            const double target = presenter.white_nits();
+            REQUIRE(peak > 0.0);
+            REQUIRE(target > 0.0);
+
+            const std::uint32_t top = (1u << bits) - 1u;
+            for (const double fraction : {0.25, 0.5, 0.75, 1.0}) {
+                const auto code = static_cast<std::uint32_t>(fraction * top);
+                REQUIRE(presenter.present_grey(code, bits) == MP_OK);
+                const Rgb got = presenter.pixel();
+
+                // **Studio range**, which is what a Y'CbCr stream is unless it
+                // says otherwise and what the presenter assumes: the shader
+                // subtracts the offset and scales before the transfer, so the
+                // expected value has to do the same.
+                const double e = std::clamp(
+                    (static_cast<double>(code) / top - 16.0 / 255.0) * (255.0 / 219.0), 0.0,
+                    1.0);
+                Rgb light;
+                if (curve.code_point == 16) {
+                    const double nits = tone_map_bt2390(pq_to_nits(e), target);
+                    light = Rgb{nits, nits, nits};
+                } else {
+                    const Rgb raw = hlg_to_nits(Rgb{e, e, e}, peak);
+                    light = Rgb{tone_map_bt2390(raw.r, target),
+                                tone_map_bt2390(raw.g, target),
+                                tone_map_bt2390(raw.b, target)};
+                }
+                const Rgb want = bt2020_to_bt709(
+                    Rgb{light.r / 80.0, light.g / 80.0, light.b / 80.0});
+
+                INFO(curve.name << " at " << bits << " bits, code " << code);
+                close_enough(got.r, want.r);
+                close_enough(got.g, want.g);
+                close_enough(got.b, want.b);
+            }
+        }
+    }
+}
+
+TEST_CASE("the arithmetic is wider than the format a display gets", "[video][hdr]")
+{
+    // **§9.10, measured rather than asserted.** The shader works in single
+    // precision and a swap chain will not take it: DXGI offers 8-bit UNORM,
+    // 10-bit UNORM and RGBA16F and nothing above. Half's relative step is
+    // 1/1024 at worst, and a twelve-bit source needs 1/1706 at white -- so the
+    // *pipeline* can carry twelve bits and the *presentation format* cannot,
+    // and the difference between the two renders is exactly that gap.
+    mp::test::Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
+
+    const auto render = [&](const char* precision, std::uint32_t code) {
+        Presenter presenter{*module.as<MpVideoVtbl>(), 8, 8};
+        REQUIRE(presenter.ok());
+        REQUIRE(presenter.precision(precision) == MP_OK);
+        presenter.info().transfer = 16;  // PQ
+        REQUIRE(presenter.tonemap("shader") == MP_OK);
+        REQUIRE(presenter.configure() == "");
+        REQUIRE(presenter.present_grey(code, 12) == MP_OK);
+        return presenter.pixel_any().g;
+    };
+
+    // Two twelve-bit codes one step apart, high enough that half's exponent is
+    // coarse there. Single precision resolves them; half is asked whether it
+    // does.
+    constexpr std::uint32_t code = 3000;
+    const double wide_low = render("fp32", code);
+    const double wide_high = render("fp32", code + 1);
+    REQUIRE(wide_low > 0.0);
+    // **The pipeline resolves one step of twelve bits.** If it did not, the
+    // arithmetic would be the thing losing them rather than the format.
+    CHECK(wide_high > wide_low);
+
+    const double half_low = render("fp16", code);
+    const double half_high = render("fp16", code + 1);
+    REQUIRE(half_low > 0.0);
+    // Half may or may not resolve it -- that is the point of measuring rather
+    // than asserting -- but it must not disagree with single precision by more
+    // than its own step, which is 2^-11 relative.
+    const double step = std::abs(half_low - wide_low) / wide_low;
+    INFO("fp16 " << half_low << " against fp32 " << wide_low);
+    CHECK(step < 1.0 / 1024.0);
+    CHECK(half_high >= half_low);
+}
+
+TEST_CASE("8K, which nothing here had ever been asked for", "[video][hdr][slow]")
+{
+    // **7680x4320 is 33 megapixels**, four times 4K and thirty-three times what
+    // every other test in this file uses. Nothing in the presenter is written
+    // against a size, and that is exactly the kind of claim that is true until
+    // somebody tries: a texture that large is 530 MB at RGBA32F, which is where
+    // a machine says no if it is going to.
+    //
+    // Tagged slow, so a run that wants to be quick can leave it out; it is in
+    // the default set because a size nobody tries is a size that breaks in
+    // front of a user.
+    mp::test::Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
+
+    Presenter presenter{*module.as<MpVideoVtbl>(), 7680, 4320};
+    REQUIRE(presenter.ok());
+    // Half precision, because 530 MB of single is more than this test needs to
+    // prove and is the difference between a second and a stall.
+    REQUIRE(presenter.precision("fp16") == MP_OK);
+    presenter.info().transfer = 16;  // PQ, so the deep path is what is exercised
+    REQUIRE(presenter.tonemap("shader") == MP_OK);
+
+    const std::string trouble = presenter.configure();
+    if (!trouble.empty()) {
+        WARN("8K would not configure on this machine: " << trouble);
+        return;
+    }
+    const double target = presenter.white_nits();
+    REQUIRE(target > 0.0);
+
+    // Ten-bit, which is what an 8K HDR stream is.
+    constexpr std::uint32_t code = 700;
+    REQUIRE(presenter.present_grey(code, 10) == MP_OK);
+
+    const std::vector<float> pixels = presenter.all();
+    REQUIRE(pixels.size() == 7680ull * 4320ull * 4ull);
+
+    const double e = std::clamp((code / 1023.0 - 16.0 / 255.0) * (255.0 / 219.0), 0.0, 1.0);
+    const double nits = tone_map_bt2390(pq_to_nits(e), target);
+    const Rgb want = bt2020_to_bt709(Rgb{nits / 80.0, nits / 80.0, nits / 80.0});
+
+    // **Every pixel, not the first one.** A presenter that got the size wrong
+    // draws a correct corner and a wrong edge, and a test that looked at one
+    // pixel would agree with it. Half precision, so the tolerance is half's.
+    std::size_t wrong = 0;
+    for (std::size_t at = 0; at + 3 < pixels.size(); at += 4) {
+        if (std::abs(pixels[at + 1] - want.g) > std::abs(want.g) * 0.01 + 1e-4) {
+            ++wrong;
+        }
+    }
+    INFO("expected " << want.g << ", first was " << pixels[1]);
+    CHECK(wrong == 0);
 }
