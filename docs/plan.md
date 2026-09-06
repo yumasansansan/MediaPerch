@@ -2403,14 +2403,59 @@ Two things came with it that the plan had not listed and that are not optional:
   decision. Identity unless the primaries differ, three dots either way.
 - **A tone mapper that is ours.** §9.7 wanted the OS's first; the OS's is a second rendering
   path on a fixed-function video processor that a test cannot hold to anything, and §9.2 is a
-  whole section about it being measurably wrong. So `shader` is written and `driver` remains
-  the *default* until it exists, which is the part of §9.7's ordering that was about shipping
-  rather than about writing.
+  whole section about it being measurably wrong. So `shader` was written first and `driver`
+  stayed the default, which is the part of §9.7's ordering that was about shipping rather than
+  about writing. Both of the others are built now — see above.
 
 And one number that had never been printed anywhere: the presenter now describes the display
 as *SDR, white 80 nits, peak 470 nits*, and `show` prints that beside the encoding, the
 applied mapper and the SDR scale. **A colour path whose numbers nobody can print is one nobody
 can check**, which is how a tone-mapping fault becomes a matter of opinion.
+
+#### `driver` and `d2d`, and one decode rather than three
+
+The four names §9.3 keeps all have something behind them now, and the shape that made that
+cheap is worth stating: **the pixel shader decodes either way, and the provider is only the
+roll-off.**
+
+An earlier reading of this had `driver` replacing the shader entirely — the video processor
+doing Y'CbCr to RGB, the range, the matrix, the chroma siting and the mapping in one blt,
+which is a second copy of everything §9.9.2 and `yuv_matrix.hpp` already decide. Instead the
+shader stops one step short when the provider is not ours: it decodes to light and re-encodes
+as **HDR10, PQ on BT.2020, ten bits** into an intermediate, which is what a display would be
+sent, and the provider maps that into the real target. So there is one decode in this file,
+one place where the chroma matrix lives, and the difference between the three providers is
+exactly the roll-off, which is the thing being chosen between.
+
+| | is | reads the mastering display |
+|---|---|---|
+| `driver` | `VideoProcessorBlt`, told PQ/BT.2020 in and the display's space out | **yes**, `VideoProcessorSetStreamHDRMetaData` |
+| `d2d` | `CLSID_D2D1HdrToneMap`, told the content's peak and the display's | **yes**, as its input luminance |
+| `shader` | BT.2390's EETF in the same pass as the decode | **no** — it rolls off towards the display's peak, which it knows |
+
+That last column is a real difference and not an omission: the same file looks different under
+the three, because two of them are told what it was graded on and one of them asks the display
+instead. **A player that had only one of these could not tell a grading problem from a mapper
+problem.**
+
+**A provider that is not there falls back, once, out loud.** WARP has no driver video
+processor, so `driver` cannot run in a test on a machine with no GPU path for it; it says
+which and switches to ours, and **the frame is drawn again** rather than dropped or presented
+from an intermediate nobody read. Once, because a provider that is missing is missing every
+frame and a log line per frame is a log nobody reads.
+
+#### And how they are tested, which is not against a formula
+
+**Their arithmetic is theirs.** §9.2 is a whole section about the OS mapper being measurably
+wrong, so holding `d2d` or `driver` to BT.2390 would be asserting that Microsoft follows a
+recommendation it is known not to follow. What a test *can* say is that the path runs, that
+what comes back is finite and non-negative, that it is **monotone** — a roll-off that
+reordered two code values would not be a roll-off — and that `applied` afterwards is either
+the provider asked for or ours, never nothing.
+
+Measured: **`d2d` runs on WARP** and passes all of that, which is the only reason any of this
+is reachable by a test on a machine with no HDR panel. `driver` falls back there, which is
+itself the fallback path being exercised.
 
 #### Step 6: what the content was graded on
 

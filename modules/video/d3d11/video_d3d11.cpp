@@ -108,6 +108,8 @@
 #include <d3d11_1.h>
 #include <d3d11_4.h>
 #include <d3dcompiler.h>
+#include <d2d1_1.h>
+#include <d2d1effects_2.h>
 #include <dxgi1_6.h>
 
 namespace {
@@ -193,7 +195,11 @@ cbuffer Constants : register(b0)
 
     float hlg_peak;       // §9.9.1: the OOTF's system gamma is a function of it
     float tone_peak;      // the display's white in nits, or 0 for no tone mapping
-    float pad0;
+    // **Write HDR10 instead of scRGB.** A provider that is not ours does its
+    // mapping in its own pass and wants what a display would be sent: PQ on
+    // BT.2020 primaries. So the shader stops one step short -- it still
+    // decodes, and it neither maps nor moves the gamut.
+    uint  emit_pq;
     float pad1;
 
     // Source primaries to the buffer's, in linear light. Identity unless they
@@ -319,6 +325,12 @@ float3 decode(float3 c)
 float3 to_scrgb(float3 c)
 {
     float3 light = decode(c);
+    if (emit_pq != 0) {
+        // Straight back out as the display would be sent it: no roll-off,
+        // because somebody else is about to do that, and no gamut move,
+        // because HDR10 *is* BT.2020.
+        return nits_to_pq(light * 80.0);
+    }
     if (tone_peak > 0.0) {
         light = tone_map_bt2390(light * 80.0, tone_peak) / 80.0;
     }
@@ -401,7 +413,7 @@ struct Constants {
 
     float hlg_peak = 1000.0f;
     float tone_peak = 0.0f;
-    float pad0 = 0.0f;
+    std::uint32_t emit_pq = 0;
     float pad1 = 0.0f;
 
     float gamut0[4] = {1.0f, 0.0f, 0.0f, 0.0f};
@@ -675,6 +687,21 @@ struct MpVideo {
     /// CPU-readable, for `read_back`.
     Com<ID3D11Texture2D> staging;
 
+    /// **What a provider that is not ours reads.** HDR10 as a display would be
+    /// sent it -- PQ on BT.2020, ten bits -- written by the same pixel shader
+    /// that would otherwise have written scRGB. Null unless `driver` or `d2d`
+    /// is the provider in the path, because otherwise nothing reads it.
+    /// Direct2D over the same device, for the `d2d` provider and nothing
+    /// else. Made once when that provider is asked for, because opening a D2D
+    /// device for a player that will never tone-map is a dependency nobody
+    /// wanted.
+    Com<ID2D1Device> d2d_device;
+    Com<ID2D1DeviceContext> d2d_context;
+
+    Com<ID3D11Texture2D> graded_target;
+    Com<ID3D11RenderTargetView> graded_view;
+    Com<ID3D11ShaderResourceView> graded_source;
+
     Com<ID3D11VertexShader> vertex_shader;
     /// One per source kind rather than a branch in one shader: a constant that
     /// is the same for every pixel of every frame is not a thing to test at
@@ -735,6 +762,9 @@ struct MpVideo {
     mp::video::ToneMap preferred = mp::video::ToneMap::driver;
     bool composited = true;
     bool configured = false;
+    /// Said once. A provider that is not on this machine is not on it every
+    /// frame, and a log line per frame is a log nobody reads.
+    bool tone_map_complained = false;
     std::uint64_t frames = 0;
     std::uint64_t last_pts = 0;
 
@@ -773,6 +803,292 @@ bool compile(const char* entry, const char* target, Com<ID3DBlob>& out, std::str
 /// `D3D11_CREATE_DEVICE_VIDEO_SUPPORT`, and multithread protection, because
 /// Media Foundation decodes on threads of its own. Both are free to the
 /// presenting half and neither can be added afterwards.
+// --------------------------------------------------------------------------
+// The providers that are not ours
+// --------------------------------------------------------------------------
+//
+// Two helpers below are declared here and defined further down, beside the
+// swap chain they are otherwise about: what format the target is, and what
+// colour space it is in. Moving either up here would put the swap chain's
+// arithmetic in the middle of the tone mappers.
+DXGI_FORMAT target_format_of(const MpVideo* v) noexcept;
+DXGI_COLOR_SPACE_TYPE colour_space_of(const mp::video::Plan& plan) noexcept;
+//
+// §9.3 keeps four names and §9.2 explains why more than one of them has to
+// exist: the OS mapper is free, hardware accelerated, matches every other
+// Windows application, and maps the PQ EOTF to a 2.4 gamma rather than to the
+// curve Windows uses for SDR everywhere else. Both statements are true and a
+// player has to be able to pick.
+//
+// **All three take the same input.** The pixel shader decodes to light either
+// way; when the provider is not ours it stops one step short and writes HDR10
+// -- PQ on BT.2020, which is what a display would be sent -- into
+// `graded_target`, and the provider maps *that* into the real one. So there is
+// one decode in this file rather than three, and the difference between the
+// providers is exactly the roll-off, which is the thing being chosen between.
+
+/// Whether this provider does its work in a second pass rather than in the
+/// pixel shader.
+bool maps_elsewhere(const MpVideo* v) noexcept
+{
+    return v->plan.tone_mapping && (v->plan.tone_map == mp::video::ToneMap::driver ||
+                                    v->plan.tone_map == mp::video::ToneMap::d2d);
+}
+
+/// The HDR10 texture the second pass reads, made only when there is one.
+bool make_graded_target(MpVideo* v, std::string& why)
+{
+    v->graded_source.reset();
+    v->graded_view.reset();
+    v->graded_target.reset();
+    if (!maps_elsewhere(v)) {
+        return true;
+    }
+
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = v->width;
+    desc.Height = v->height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    // **Ten bits, not sixteen.** This is HDR10 as a display takes it, and the
+    // video processor's input views are for formats a display pipeline handles.
+    desc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(v->device->CreateTexture2D(&desc, nullptr, v->graded_target.put()))) {
+        why = "no HDR10 intermediate, so nothing could tone-map it";
+        return false;
+    }
+    if (FAILED(v->device->CreateRenderTargetView(v->graded_target.get(), nullptr,
+                                                 v->graded_view.put())) ||
+        FAILED(v->device->CreateShaderResourceView(v->graded_target.get(), nullptr,
+                                                   v->graded_source.put()))) {
+        why = "the HDR10 intermediate would take no views";
+        return false;
+    }
+    return true;
+}
+
+/// **`driver`: the GPU's fixed-function video processor.**
+///
+/// The cheapest of the four and the one the OS's own player path uses, which is
+/// the answer to *why does this look like Windows*. It is told what the stream
+/// is (`SetStreamColorSpace1`), what the display is (`SetOutputColorSpace1`)
+/// and what the content was graded on (`SetStreamHDRMetaData`, §9.7.2 step
+/// six), and the driver does the rest in fixed function.
+///
+/// **It can simply not be there.** A video processor is a driver feature and
+/// WARP's is not the same one; a device that will not make one says so and the
+/// caller falls back rather than presenting an unmapped picture.
+bool tone_map_by_driver(MpVideo* v, std::string& why)
+{
+    Com<ID3D11VideoDevice> video_device;
+    Com<ID3D11VideoContext> video_context;
+    if (FAILED(v->device->QueryInterface(__uuidof(ID3D11VideoDevice),
+                                         reinterpret_cast<void**>(video_device.put()))) ||
+        FAILED(v->context->QueryInterface(
+            __uuidof(ID3D11VideoContext), reinterpret_cast<void**>(video_context.put())))) {
+        why = "this device has no video processor";
+        return false;
+    }
+
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC content{};
+    content.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+    content.InputWidth = v->width;
+    content.InputHeight = v->height;
+    content.OutputWidth = v->width;
+    content.OutputHeight = v->height;
+    content.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+
+    Com<ID3D11VideoProcessorEnumerator> enumerator;
+    Com<ID3D11VideoProcessor> processor;
+    if (FAILED(video_device->CreateVideoProcessorEnumerator(&content, enumerator.put())) ||
+        FAILED(video_device->CreateVideoProcessor(enumerator.get(), 0, processor.put()))) {
+        why = "this device would not make a video processor";
+        return false;
+    }
+
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC in_desc{};
+    in_desc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+    Com<ID3D11VideoProcessorInputView> input;
+    if (FAILED(video_device->CreateVideoProcessorInputView(
+            v->graded_target.get(), enumerator.get(), &in_desc, input.put()))) {
+        why = "the video processor would not read an HDR10 texture";
+        return false;
+    }
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC out_desc{};
+    out_desc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+    Com<ID3D11VideoProcessorOutputView> output;
+    if (FAILED(video_device->CreateVideoProcessorOutputView(
+            v->target.get(), enumerator.get(), &out_desc, output.put()))) {
+        why = "the video processor would not write this target";
+        return false;
+    }
+
+    Com<ID3D11VideoContext1> video_context1;
+    if (SUCCEEDED(video_context->QueryInterface(
+            __uuidof(ID3D11VideoContext1), reinterpret_cast<void**>(video_context1.put())))) {
+        // **This is the whole request.** PQ on BT.2020 in, the display's own
+        // space out; everything the driver does follows from the pair.
+        video_context1->VideoProcessorSetStreamColorSpace1(
+            processor.get(), 0, DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
+        video_context1->VideoProcessorSetOutputColorSpace1(processor.get(),
+                                                           colour_space_of(v->plan));
+    } else {
+        why = "this device's video context is too old to be told a colour space";
+        return false;
+    }
+
+    Com<ID3D11VideoContext2> video_context2;
+    if (SUCCEEDED(video_context->QueryInterface(
+            __uuidof(ID3D11VideoContext2), reinterpret_cast<void**>(video_context2.put())))) {
+        if (mp_video_has_mastering(&v->graded)) {
+            // §9.7.2 step six: what the content was graded on. **Ours ignores
+            // it and this one does not** -- BT.2390 rolls off towards the
+            // display's peak, the driver rolls off away from the content's --
+            // which is why the same file looks different under the two.
+            DXGI_HDR_METADATA_HDR10 hdr{};
+            hdr.RedPrimary[0] = static_cast<UINT16>(v->graded.mastering_primaries_x[0]);
+            hdr.RedPrimary[1] = static_cast<UINT16>(v->graded.mastering_primaries_y[0]);
+            hdr.GreenPrimary[0] = static_cast<UINT16>(v->graded.mastering_primaries_x[1]);
+            hdr.GreenPrimary[1] = static_cast<UINT16>(v->graded.mastering_primaries_y[1]);
+            hdr.BluePrimary[0] = static_cast<UINT16>(v->graded.mastering_primaries_x[2]);
+            hdr.BluePrimary[1] = static_cast<UINT16>(v->graded.mastering_primaries_y[2]);
+            hdr.WhitePoint[0] = static_cast<UINT16>(v->graded.mastering_white_x);
+            hdr.WhitePoint[1] = static_cast<UINT16>(v->graded.mastering_white_y);
+            hdr.MaxMasteringLuminance = v->graded.mastering_max_luminance;
+            hdr.MinMasteringLuminance = v->graded.mastering_min_luminance;
+            hdr.MaxContentLightLevel =
+                static_cast<UINT16>(v->graded.max_content_light_level);
+            hdr.MaxFrameAverageLightLevel =
+                static_cast<UINT16>(v->graded.max_frame_average_light_level);
+            video_context2->VideoProcessorSetStreamHDRMetaData(
+                processor.get(), 0, DXGI_HDR_METADATA_TYPE_HDR10, sizeof(hdr), &hdr);
+        }
+        // What the display can show, which is the other half of the request.
+        DXGI_HDR_METADATA_HDR10 out_hdr{};
+        out_hdr.MaxMasteringLuminance =
+            static_cast<UINT>(v->display.peak_nits * 10000.0f);
+        out_hdr.MaxContentLightLevel = static_cast<UINT16>(v->display.peak_nits);
+        video_context2->VideoProcessorSetOutputHDRMetaData(
+            processor.get(), DXGI_HDR_METADATA_TYPE_HDR10, sizeof(out_hdr), &out_hdr);
+    }
+
+    D3D11_VIDEO_PROCESSOR_STREAM stream{};
+    stream.Enable = TRUE;
+    stream.pInputSurface = input.get();
+    if (FAILED(video_context->VideoProcessorBlt(processor.get(), output.get(), 0, 1,
+                                                &stream))) {
+        why = "the video processor would not run";
+        return false;
+    }
+    return true;
+}
+
+/// Direct2D on the device we already have, made the first time `d2d` is asked
+/// for. **The D3D11 device must be `BGRA_SUPPORT`** or D2D will not take it,
+/// which is a flag on the device rather than anything about the picture.
+bool make_d2d(MpVideo* v, std::string& why)
+{
+    if (v->d2d_context) {
+        return true;
+    }
+    Com<IDXGIDevice> dxgi;
+    if (FAILED(v->device->QueryInterface(__uuidof(IDXGIDevice),
+                                         reinterpret_cast<void**>(dxgi.put())))) {
+        why = "this device is not a DXGI device";
+        return false;
+    }
+    D2D1_CREATION_PROPERTIES props{};
+    props.threadingMode = D2D1_THREADING_MODE_SINGLE_THREADED;
+    props.debugLevel = D2D1_DEBUG_LEVEL_NONE;
+    props.options = D2D1_DEVICE_CONTEXT_OPTIONS_NONE;
+    if (FAILED(D2D1CreateDevice(dxgi.get(), props, v->d2d_device.put()))) {
+        why = "Direct2D would not open on this device";
+        return false;
+    }
+    if (FAILED(v->d2d_device->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
+                                                  v->d2d_context.put()))) {
+        why = "Direct2D would not make a context";
+        return false;
+    }
+    return true;
+}
+
+/// **`d2d`: the Direct2D HDR tone map effect**, which is the same mapper
+/// Windows ships for its own HDR video pipeline.
+///
+/// Between `driver` and `shader` in every way: it is somebody else's arithmetic
+/// like the first and it runs on the 3D pipeline like the second, so it works
+/// where there is no video processor -- WARP included, which is the only reason
+/// any of this is reachable by a test on a machine with no HDR panel.
+bool tone_map_by_d2d(MpVideo* v, std::string& why)
+{
+    if (!v->d2d_context) {
+        why = "Direct2D would not open on this device";
+        return false;
+    }
+
+    Com<IDXGISurface> in_surface;
+    Com<IDXGISurface> out_surface;
+    if (FAILED(v->graded_target->QueryInterface(
+            __uuidof(IDXGISurface), reinterpret_cast<void**>(in_surface.put()))) ||
+        FAILED(v->target->QueryInterface(__uuidof(IDXGISurface),
+                                         reinterpret_cast<void**>(out_surface.put())))) {
+        why = "these textures are not DXGI surfaces";
+        return false;
+    }
+
+    D2D1_BITMAP_PROPERTIES1 in_props{};
+    in_props.pixelFormat = {DXGI_FORMAT_R10G10B10A2_UNORM, D2D1_ALPHA_MODE_IGNORE};
+    in_props.bitmapOptions = D2D1_BITMAP_OPTIONS_NONE;
+    D2D1_BITMAP_PROPERTIES1 out_props{};
+    out_props.pixelFormat = {target_format_of(v), D2D1_ALPHA_MODE_IGNORE};
+    out_props.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
+
+    Com<ID2D1Bitmap1> in_bitmap;
+    Com<ID2D1Bitmap1> out_bitmap;
+    if (FAILED(v->d2d_context->CreateBitmapFromDxgiSurface(in_surface.get(), &in_props,
+                                                           in_bitmap.put())) ||
+        FAILED(v->d2d_context->CreateBitmapFromDxgiSurface(out_surface.get(), &out_props,
+                                                           out_bitmap.put()))) {
+        why = "Direct2D would not wrap these textures";
+        return false;
+    }
+
+    Com<ID2D1Effect> effect;
+    if (FAILED(v->d2d_context->CreateEffect(CLSID_D2D1HdrToneMap, effect.put()))) {
+        why = "this build of Windows has no HDR tone map effect";
+        return false;
+    }
+    effect->SetInput(0, in_bitmap.get());
+    // **The two luminances are the whole of the request**, exactly as they are
+    // for the driver: what the content can reach, and what the display can.
+    const float content = mp_video_has_mastering(&v->graded) &&
+                                  v->graded.mastering_max_luminance != 0u
+                              ? static_cast<float>(v->graded.mastering_max_luminance) /
+                                    10000.0f
+                              : 10000.0f;
+    (void)effect->SetValue(D2D1_HDRTONEMAP_PROP_INPUT_MAX_LUMINANCE, content);
+    (void)effect->SetValue(D2D1_HDRTONEMAP_PROP_OUTPUT_MAX_LUMINANCE,
+                           v->display.sdr_white_nits);
+    (void)effect->SetValue(D2D1_HDRTONEMAP_PROP_DISPLAY_MODE,
+                           v->display.hdr ? D2D1_HDRTONEMAP_DISPLAY_MODE_HDR
+                                          : D2D1_HDRTONEMAP_DISPLAY_MODE_SDR);
+
+    v->d2d_context->SetTarget(out_bitmap.get());
+    v->d2d_context->BeginDraw();
+    v->d2d_context->DrawImage(effect.get());
+    const HRESULT drawn = v->d2d_context->EndDraw();
+    v->d2d_context->SetTarget(nullptr);
+    if (FAILED(drawn)) {
+        why = "the HDR tone map effect would not draw";
+        return false;
+    }
+    return true;
+}
+
 /// **What the content was graded on, handed to the display.**
 ///
 /// ST.2086's mastering display and CTA-861.3's light levels, in exactly the
@@ -1490,6 +1806,16 @@ try {
     if (!make_target(v, v->trouble)) {
         return MP_ERR_UNSUPPORTED;
     }
+    // **Only when a provider that is not ours is in the path**, and Direct2D
+    // only when that provider is `d2d`: opening a D2D device for a player that
+    // will never tone-map is a dependency nobody asked for.
+    if (!make_graded_target(v, v->trouble)) {
+        return MP_ERR_UNSUPPORTED;
+    }
+    if (maps_elsewhere(v) && v->plan.tone_map == mp::video::ToneMap::d2d &&
+        !make_d2d(v, v->trouble)) {
+        return MP_ERR_UNSUPPORTED;
+    }
     v->configured = true;
     v->frames = 0;
     v->trouble.clear();
@@ -1561,6 +1887,10 @@ try {
         v->plan.tone_mapping && v->plan.tone_map == mp::video::ToneMap::shader
             ? v->display.sdr_white_nits
             : 0.0f;
+    // **Stop one step short for the other two.** They map in their own pass and
+    // want what a display would be sent, so the shader decodes and then
+    // re-encodes as PQ rather than converting to scRGB and moving the gamut.
+    constants.emit_pq = maps_elsewhere(v) && v->graded_view ? 1u : 0u;
 
     // **The gamut, when the buffer's primaries are not the stream's.** HDR is
     // graded on BT.2100, whose primaries are BT.2020's, and scRGB is BT.709: a
@@ -1625,7 +1955,12 @@ try {
                                   static_cast<float>(v->height),
                                   0.0f,
                                   1.0f};
-    ID3D11RenderTargetView* views[] = {v->target_view.get()};
+    // **Where the first pass lands.** With a provider that is not ours the
+    // shader writes HDR10 into the intermediate and the provider maps that into
+    // the real target; otherwise it writes the target directly.
+    const bool second_pass = maps_elsewhere(v) && v->graded_view;
+    ID3D11RenderTargetView* views[] = {second_pass ? v->graded_view.get()
+                                                   : v->target_view.get()};
     // Five slots, of which a frame uses one, two or three. Binding all five
     // each time keeps a stale view from a previous frame's shape out of the one
     // being drawn -- and an unused slot is a null the current shader does not
@@ -1647,6 +1982,51 @@ try {
     v->context->PSSetSamplers(0, 1, samplers);
     v->context->PSSetConstantBuffers(0, 1, buffers);
     v->context->Draw(3, 0);
+
+    if (second_pass) {
+        // **Unbound first.** The intermediate is about to be read by the video
+        // processor or by Direct2D, and a texture that is still a render target
+        // is a texture neither of them may sample.
+        ID3D11RenderTargetView* none[] = {nullptr};
+        v->context->OMSetRenderTargets(1, none, nullptr);
+
+        std::string trouble;
+        const bool rolled_off = v->plan.tone_map == mp::video::ToneMap::driver
+                                    ? tone_map_by_driver(v, trouble)
+                                    : tone_map_by_d2d(v, trouble);
+        if (!rolled_off) {
+            // **Said once, and then ours instead.** A provider that is not
+            // there is not a reason to present an unmapped picture -- §9.1 is
+            // that composition clips silently and everything above one is gone
+            // -- and it is not a reason to say so on every frame either.
+            if (!v->tone_map_complained) {
+                v->tone_map_complained = true;
+                v->trouble = mp::video::name_of(v->plan.tone_map) + std::string{": "} +
+                             trouble + "; using ours instead";
+                log_line(MP_LOG_WARN, ("video_d3d11: " + v->trouble).c_str());
+            }
+            v->plan.tone_map = mp::video::ToneMap::shader;
+
+            // **And this frame is drawn again**, into the real target and with
+            // the roll-off in the shader. The first pass wrote HDR10 into an
+            // intermediate nobody is now going to read; presenting the target
+            // as it stands would be presenting whatever was in it, and dropping
+            // the frame would be a gap at exactly the moment a fallback is
+            // supposed to be invisible. From here on `maps_elsewhere` is false
+            // and there is one pass again.
+            constants.emit_pq = 0;
+            constants.tone_peak = v->display.sdr_white_nits;
+            D3D11_MAPPED_SUBRESOURCE again{};
+            if (SUCCEEDED(v->context->Map(v->constants.get(), 0, D3D11_MAP_WRITE_DISCARD, 0,
+                                          &again))) {
+                std::memcpy(again.pData, &constants, sizeof(constants));
+                v->context->Unmap(v->constants.get(), 0);
+            }
+            ID3D11RenderTargetView* real[] = {v->target_view.get()};
+            v->context->OMSetRenderTargets(1, real, nullptr);
+            v->context->Draw(3, 0);
+        }
+    }
 
     if (v->swap_chain) {
         // Not vsynced: §8 makes the audio device the master clock and video

@@ -417,3 +417,52 @@ TEST_CASE("a mastering display is absent until something states one", "[video][h
     CHECK(mp_video_has_mastering(&older) == 0);
     CHECK(mp_video_has_mastering(nullptr) == 0);
 }
+
+TEST_CASE("the providers that are not ours are held to properties, not values",
+          "[video][hdr]")
+{
+    // **Their arithmetic is theirs.** Section 9.2 is a whole section about the
+    // OS mapper being measurably wrong, so comparing d2d or driver against a
+    // formula would be asserting that Microsoft agrees with a recommendation it
+    // is known not to follow. What a test can say is that the path runs, that
+    // what comes back is finite and in range, and that it does not invert the
+    // picture -- brighter in, no darker out.
+    mp::test::Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
+
+    for (const char* provider : {"d2d", "driver"}) {
+        Presenter presenter{*module.as<MpVideoVtbl>(), 8, 8};
+        REQUIRE(presenter.ok());
+        REQUIRE(presenter.tonemap(provider) == MP_OK);
+        const std::string trouble = presenter.configure();
+        INFO("provider " << provider);
+        if (!trouble.empty()) {
+            // A provider that will not open on this machine is a fact about the
+            // machine. WARP has no driver video processor; it does have
+            // Direct2D. Saying which is more useful than a skip.
+            WARN("provider " << provider << " would not configure: " << trouble);
+            continue;
+        }
+
+        double previous = -1.0;
+        for (const std::uint8_t code : {std::uint8_t{16}, std::uint8_t{64},
+                                        std::uint8_t{128}, std::uint8_t{255}}) {
+            REQUIRE(presenter.present(code, code, code) == MP_OK);
+            const Rgb got = presenter.pixel();
+            INFO("code " << static_cast<unsigned>(code) << " gave " << got.g);
+            CHECK(std::isfinite(got.r));
+            CHECK(std::isfinite(got.g));
+            CHECK(std::isfinite(got.b));
+            CHECK(got.g >= 0.0);
+            // **Monotone**, which is the one thing every tone mapper worth the
+            // name does and the one a broken pass fails: a roll-off that
+            // reordered two code values would not be a roll-off.
+            CHECK(got.g >= previous - 1e-4);
+            previous = got.g;
+        }
+        // And it fell back to something rather than presenting the unmapped
+        // picture, which section 9.1 says composition would clip silently.
+        const std::string applied = presenter.described("applied");
+        CHECK((applied == provider || applied == "shader"));
+    }
+}
