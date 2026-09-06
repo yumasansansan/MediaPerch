@@ -1745,6 +1745,7 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
     // priority -- which is not what the player does and is not what §14 says
     // the thread is for. M6's acceptance was measured through this command.
     mp::win::RenderThreadHooks audio_hooks;
+    mp::Format audio_wire{};
     std::unique_ptr<mp::IAudioClockSource> audio_clock;
     mp::Sink sink;
 
@@ -1778,6 +1779,10 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
             return 1;
         }
         std::printf("audio      %s\n", mp::describe(negotiated.accepted).c_str());
+        // Kept out here because the run's report turns bytes of ring into
+        // milliseconds of audio, and this is what says how many bytes a
+        // millisecond is.
+        audio_wire = negotiated.accepted;
         // The same flags `play` takes, because `show` is `play` with a picture
         // beside it and a setting that works in one and is ignored in the other
         // is worse than a setting that does not exist.
@@ -1893,6 +1898,28 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
                     static_cast<unsigned long long>(audio_stats.frames_rendered),
                     static_cast<unsigned long long>(audio_stats.underruns),
                     static_cast<unsigned long long>(audio_stats.silent_frames));
+
+        // **How close it came, which is the number an underrun is too late to
+        // be.** By the time an underrun is counted somebody has heard it; this
+        // is the same quantity while there is still margin to report. In
+        // milliseconds because that is the unit the risk is in -- a ring
+        // holding four milliseconds when the device asks every three is one
+        // scheduling hiccup from a click, whatever fraction of the ring that
+        // happens to be.
+        const std::uint32_t frame_bytes = mp::frame_bytes(audio_wire);
+        const double rate = audio_wire.sample_rate != 0
+                                ? static_cast<double>(audio_wire.sample_rate)
+                                : 1.0;
+        const auto ms = [&](std::size_t bytes) {
+            return frame_bytes == 0 ? 0.0
+                                    : 1000.0 * static_cast<double>(bytes / frame_bytes) / rate;
+        };
+        std::printf("ring       %.1f ms held at the closest, of %.1f ms (%.0f%%)\n",
+                    ms(audio_stats.low_water_bytes), ms(audio_stats.ring_bytes),
+                    audio_stats.ring_bytes == 0
+                        ? 0.0
+                        : 100.0 * static_cast<double>(audio_stats.low_water_bytes) /
+                              static_cast<double>(audio_stats.ring_bytes));
     }
 
     // **What the router held, which is the third thing in the room.** The

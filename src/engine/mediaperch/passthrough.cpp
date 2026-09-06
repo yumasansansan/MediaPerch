@@ -244,6 +244,13 @@ void PassthroughGraph::render_loop() noexcept
         // milliseconds of it, and the device never learns anything happened.
         const bool seeking = seeking_.load(std::memory_order_acquire);
         parked_.store(seeking, std::memory_order_release);
+        // **How close it came**, sampled before the read takes it away. Not
+        // while seeking: the ring is empty there because somebody emptied it.
+        // The file's last period is excluded below, where the same distinction
+        // is already made for the underrun count -- which cannot be done here,
+        // because whether this *is* the last period is not known until after
+        // the commit.
+        const std::size_t in_hand = ring_.readable();
         const std::size_t got = seeking ? 0 : ring_.read(buffer, want);
         if (got < want) {
             std::memset(static_cast<std::uint8_t*>(buffer) + got, 0, want - got);
@@ -274,6 +281,17 @@ void PassthroughGraph::render_loop() noexcept
                 underruns_.fetch_add(1, std::memory_order_relaxed);
             }
         }
+        if (!seeking && !finishing) {
+            // A minimum, kept without a lock: read, compare, try to replace,
+            // and give up the moment somebody else has already put something
+            // smaller there. One writer today, and this costs nothing to be
+            // right if that stops being true.
+            std::size_t seen = low_water_.load(std::memory_order_relaxed);
+            while (in_hand < seen &&
+                   !low_water_.compare_exchange_weak(seen, in_hand,
+                                                     std::memory_order_relaxed)) {
+            }
+        }
 
         if (finishing) {
             running_.store(false, std::memory_order_release); // rather than silence for ever
@@ -294,6 +312,11 @@ PassthroughGraph::Stats PassthroughGraph::stats() const noexcept
     out.tail_frames = tail_frames_.load(std::memory_order_relaxed);
     out.wait_timeouts = wait_timeouts_.load(std::memory_order_relaxed);
     out.frames_decoded = frames_decoded_.load(std::memory_order_relaxed);
+    const std::size_t low = low_water_.load(std::memory_order_relaxed);
+    // Nothing sampled yet reads as nothing in hand, which would be a lie about
+    // a run that never started rather than a measurement of one that did.
+    out.low_water_bytes = low == std::numeric_limits<std::size_t>::max() ? 0 : low;
+    out.ring_bytes = ring_.capacity();
     return out;
 }
 

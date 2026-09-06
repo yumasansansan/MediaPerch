@@ -209,6 +209,48 @@ TEST_CASE("every byte the source produced reaches the device unchanged", "[passt
     CHECK(graph.stats().underruns == 0);
 }
 
+TEST_CASE("the closest the ring came is reported, and the file's own end is not it",
+          "[passthrough]")
+{
+    // Small enough that every byte is in the ring before the device starts, so
+    // the sequence is not a race: the prefill takes the whole source, the
+    // device's own first buffer takes one period of it, and the render thread
+    // then finds three, two, one.
+    //
+    // **One, not zero, and the one is not counted.** The read that empties the
+    // ring is the read that ends the file, which is the same distinction the
+    // underrun count already makes -- a ring that is empty because there is no
+    // more file is not a ring that came close to starving. So the closest is
+    // the two periods it held on the second-to-last read.
+    constexpr std::uint32_t period = 64;
+    constexpr std::size_t periods_in_source = 4;
+    const auto format = cd_audio();
+    const std::size_t stride = mp::frame_bytes(format);
+    const auto bytes = pattern(stride * period * periods_in_source);
+
+    VectorSource source{format, bytes};
+    mp::test::FakeSinkRules rules;
+    rules.period_frames = period;
+    mp::test::FakeSink device{rules};
+    mp::Sink sink = device.handle();
+
+    mp::Format accepted{};
+    REQUIRE(sink.negotiate(format, accepted) == MP_OK);
+
+    mp::PassthroughGraph graph{source, sink, accepted, period, mp::Fidelity::exact};
+    REQUIRE(graph.start() == MP_OK);
+    REQUIRE(wait_until_stopped(graph));
+    graph.stop();
+
+    const auto stats = graph.stats();
+    CHECK(stats.underruns == 0);
+    CHECK(stats.low_water_bytes == 2 * period * stride);
+    // The size it is a fraction of, which is what makes the number mean
+    // anything, and which this source never came close to filling.
+    CHECK(stats.ring_bytes >= bytes.size());
+    CHECK(stats.low_water_bytes < stats.ring_bytes);
+}
+
 TEST_CASE("a repacked stream reaches the device as the move and nothing else",
           "[passthrough]")
 {

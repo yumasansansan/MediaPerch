@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <limits>
 #include <thread>
 #include <vector>
 
@@ -54,6 +55,25 @@ public:
         /// The device did not signal within the timeout. Usually means it went away.
         std::uint64_t wait_timeouts = 0;
         std::uint64_t frames_decoded = 0;
+        /// **The least the ring ever held when the device asked for a buffer.**
+        ///
+        /// An underrun is the measurement arriving too late: by the time it is
+        /// counted, somebody has heard it. This is the same quantity before it
+        /// becomes audible -- a run that never dropped below half the ring had
+        /// margin to spare, and one that touched a tenth was a period away from
+        /// a click and did not say so.
+        ///
+        /// Sampled where the render thread reads, and only where an underrun
+        /// would have been counted: never while seeking, where the ring is
+        /// empty because somebody emptied it, and never during the file's last
+        /// period, where it is empty because the file ended. The same two
+        /// exclusions the underrun counter makes, for the same reasons.
+        ///
+        /// `ring_bytes` beside it because the number means nothing alone: what
+        /// a caller wants is the fraction, or the milliseconds, and both need
+        /// the size it is a fraction of.
+        std::size_t low_water_bytes = 0;
+        std::size_t ring_bytes = 0;
     };
 
     /// `wire` is what the sink accepted, and `fidelity` is what `negotiate_best`
@@ -213,6 +233,9 @@ private:
     std::atomic<std::uint64_t> underruns_{0};
     std::atomic<std::uint64_t> silent_frames_{0};
     std::atomic<std::uint64_t> tail_frames_{0};
+    /// The least the ring held when the device asked. Starts at the largest a
+    /// size can be so the first sample wins, and only ever falls.
+    std::atomic<std::size_t> low_water_{std::numeric_limits<std::size_t>::max()};
     std::atomic<std::uint64_t> wait_timeouts_{0};
     std::atomic<std::uint64_t> frames_decoded_{0};
 };

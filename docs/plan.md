@@ -2940,6 +2940,11 @@ busy machine. At 32 periods, 96 ms, the audio never lost a buffer in four consec
 while the video went on dropping one to four frames of seventy-one. That is the acceptance
 condition exactly: the picture gives way, the sound does not.
 
+**Thirty-two was arrived at by doubling until the underruns stopped**, which is a way of
+finding a number that works and not a way of finding out how much of it is used. The
+low-water measurement below asked that question afterwards: sixteen periods carries the same
+margin as thirty-two, and everything above sixteen is memory the run never touches.
+
 **What this does not say.** The default is still 8, and the default still underran here. What
 it settles is that the arithmetic works and the shape is sound: §8's clock held, and nothing
 rate-matched the audio to help it, because there is no method that could.
@@ -3000,8 +3005,57 @@ Four families of answer, and they are not exclusive:
    four that needs no model of the machine at all.
 
 The last is the one this tree is shaped for: it already measures rather than assumes
-everywhere else that a number matters, and a low-water mark is exactly the kind of thing
-`show` could print beside the underruns before anything is made automatic. **Not built.**
+everywhere else that a number matters. So the measurement came first.
+
+#### The low-water mark, measured
+
+**An underrun is the measurement arriving too late.** By the time one is counted somebody has
+heard it. The same quantity while there is still margin to report is how much the ring held
+when the device asked, at its lowest over the run — and `PassthroughGraph::Stats` carries
+it now, sampled where the render thread reads, with the two exclusions the underrun counter
+already makes: never while seeking, where the ring is empty because somebody emptied it, and
+never on the file's last period, where it is empty because the file ended.
+
+In milliseconds, because that is the unit the risk is in. A ring holding four milliseconds
+when the device asks every three is one hiccup from a click, whatever fraction of the ring
+that happens to be — and the fractions below say the opposite of the milliseconds, which is
+the argument for the unit.
+
+The 4K file, two runs at each size:
+
+| `--ring-periods` | the ring | held at the closest | underruns |
+|---|---|---|---|
+| 8 | 42.7 ms | **0.0 ms** (0%) | 6, 23 |
+| 16 | 85.3 ms | **6.0 ms** (7%) | 0, 0 |
+| 32 | 170.7 ms | 6.0 ms (4%) | 0, 0 |
+| 64 | 341.3 ms | 6.0 ms (2%) | 0, 0 |
+| 128 | 682.7 ms | 6.0 ms (1%) | 0, 0 |
+
+**Six milliseconds from sixteen periods upward, and it does not move.** Not a plateau
+approached: a constant, to the tenth, over eight runs and an eightfold range of ring. Past
+sixteen periods the ring is not what limits how far ahead the decode thread can get, and
+every byte added beyond it is memory that is never used.
+
+That is the shape the closed loop needs, and it is visible from one number. A run reporting
+0.0 ms is in the regime where the ring is too small to bank what the worst stall costs; a run
+reporting a figure that stops rising when the ring grows is in the regime where something else
+is the limit and there is nothing left to buy. **The first says grow; the second says stop.**
+Neither reading needs to know anything about the machine.
+
+#### Which is the answer to "but machines differ"
+
+They do, and it is why the other three families are hard: a throughput constant measured on
+one machine is worth little on another, and a benchmark at install time is a snapshot that
+knows nothing about the program the user starts halfway through the film. **The low-water mark
+is not a constant to be ported. It is a reading taken on the machine that is playing, during
+the run that is playing, under whatever else that machine is doing.** The machine is not a
+parameter of the model; it is part of what is being measured, along with the file, the decoder
+and the load.
+
+What remains to decide is a policy, and the measurement is what a policy can now be written
+against: how thin is thin, how much to add, how long to wait before adding more, and whether
+to give the ring back when a film turns out to be cheap. **Those are choices about behaviour
+rather than guesses about hardware**, which is the difference this number makes.
 
 #### `claims` had never once mentioned a video decoder
 
@@ -3627,7 +3681,7 @@ HDR state.
 | parsers | libFuzzer on every one, with corpora in `fuzz/corpus`, as DragonPerch already does. **Eight targets, and they run in CI on every push** — dr_wav, libFLAC, libmpg123, Bento4 and the INI parser in C++ under ASan, and the ALAC and AAC decoders and the ADTS framer in Rust, coverage-guided on the stable toolchain. Thirty seconds each, which is a smoke test that the campaign still builds rather than a campaign, and somewhere for a regression corpus to live. §2 chose C++ for the parsers on the argument that fuzzing closes the gap; an unrun fuzzer would have made that argument worthless, and the three that are Rust now close it a second way |
 | properties | randomised invariants over the whole format space, in `tests/`, with a fixed-seed generator so a failure prints a seed that reproduces it. About 15,000 cases per run, no hardware, no Clang: every candidate list is bit-exact and free of duplicate wire formats, non-PCM encodings are never repacked, and `repack` round-trips for every container pair that fits and refuses every pair that does not. This is the cheap half of fuzzing, and it runs on both compilers |
 | devices | a manual matrix, because it cannot be automated, kept in [devices.md](devices.md): onboard codec, a USB DAC, HDMI to a receiver, Bluetooth. For each, the formats that negotiated, whether `AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED` appeared, and the minimum period that ran glitch-free for an hour |
-| glitch counting | the engine counts underruns, `AUDCLNT_E_DEVICE_INVALIDATED`, and late render callbacks, and shows them. A player that cannot tell you it glitched cannot be trusted when it says it did not |
+| glitch counting | the engine counts underruns, `AUDCLNT_E_DEVICE_INVALIDATED`, and late render callbacks, and shows them. A player that cannot tell you it glitched cannot be trusted when it says it did not. **And how close it came**, which is the half a count cannot give: `Stats::low_water_bytes` is the least the ring held when the device asked, so a run that never glitched still says whether it was comfortable or one period from a click. §9.8.2 has what it measured |
 
 ---
 

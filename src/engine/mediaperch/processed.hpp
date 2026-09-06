@@ -33,6 +33,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <limits>
 #include <thread>
 #include <vector>
 
@@ -207,6 +208,9 @@ private:
     std::atomic<std::uint64_t> underruns_{0};
     std::atomic<std::uint64_t> silent_frames_{0};
     std::atomic<std::uint64_t> tail_frames_{0};
+    /// The least the ring held when the device asked. Starts at the largest a
+    /// size can be so the first sample wins, and only ever falls.
+    std::atomic<std::size_t> low_water_{std::numeric_limits<std::size_t>::max()};
     std::atomic<std::uint64_t> wait_timeouts_{0};
     std::atomic<std::uint64_t> frames_decoded_{0};
 };

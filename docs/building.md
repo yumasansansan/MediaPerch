@@ -158,6 +158,15 @@ section below is about what happens when you forget.
 cmake --preset ninja-msvc && cmake --build --preset ninja-msvc-release && ctest --preset ninja-msvc-release
 ```
 
+**And AVX2, not baseline, when the answer matters.** Both are shipped, but the
+AVX2 build is the one Path B's inner loops were raised for and the one where
+libopus's run-time dispatch is compiled out, so it is the build a change is
+checked in:
+
+```bash
+cmake --preset ninja-msvc-avx2 && cmake --build build/ninja-msvc-avx2 --config Release && ctest --test-dir build/ninja-msvc-avx2 -C Release
+```
+
 **Release, not Debug, unless you are debugging.** The decoders do real arithmetic
 on real amounts of audio, and a Debug build is five to ten times slower at it:
 the whole test suite takes **177 seconds in Debug and 41 in Release**, and the
@@ -166,6 +175,7 @@ decode-quality check inside it goes from 174 to 39.
 | Preset | Toolchain | For |
 |---|---|---|
 | `ninja-msvc` | MSVC | day to day. `-debug`, `-release` and `-relwithdebinfo` build presets |
+| `ninja-msvc-avx2` | MSVC | the x86-64-v3 half of what ships, and **where a change is validated** — see below |
 | `measure` | MSVC | Release **with the measuring apparatus kept** — see below |
 | `core-only` | MSVC | what CI builds to keep `src/engine` and `src/player` portable, and the engine free of the player |
 | `asan` | Clang | the parsers under ASan and UBSan |
