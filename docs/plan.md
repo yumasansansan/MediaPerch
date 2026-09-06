@@ -2595,7 +2595,43 @@ Two things are worth saying out loud in the header and are:
 `demux_mkv` fills it, which is the half that makes the append worth having: Matroska states
 chromaticities as floats and luminance in cd/m², and the conversion happens there, where the
 container's spelling is known, rather than in a presenter guessing which of its callers used
-which. `video_d3d11` hands it to `IDXGISwapChain4::SetHDRMetaData` **only on a PQ chain and
+which.
+
+**And `demux_mp4` fills it, from somewhere the plan had not expected.** ISO/IEC 14496-12
+defines `mdcv` and `clli` boxes for exactly these numbers, so that is what was written first
+— and a real HDR10 file made by x265 and muxed by ffmpeg 9.0.1 has **neither**. It does not
+even have a `colr`. What it has is the HEVC prefix SEI, in band and repeated into `hvcC`'s
+arrays, which means it is reachable **without decoding**: `parse_hvcc` already keeps every NAL
+it finds, in order, and its comment already says a record carrying an SEI among them is *not
+this function's to object to*.
+
+So `mp::mft::hevc_hdr_metadata` reads payload types 137 and 144 out of those NALs, and
+`demux_mp4` prefers a box when there is one and falls back to the SEI when there is not. Two
+things about that reader are worth having written down:
+
+- **Both SEI length fields are 0xFF-extended.** A payload type of 137 is one byte and a type
+  of 300 is two `0xFF` bytes and a 46. Reading either as a plain byte works on every file
+  until it does not.
+- **The SEI states its primaries starting at green**, and both `MpVideoInfo` and DXGI want red
+  first. The reorder is in the one place that knows the SEI's convention. Getting it wrong is
+  a mastering display that is a plausible triangle in the wrong place, which reads as a
+  grading choice rather than as a fault.
+
+All twelve numbers are checked against what x265 was given, on a committed thirty-kilobyte
+fixture — the primaries, the white point, both luminances and both light levels.
+
+##### And the defect that file found
+
+**The colour tags on that same file are unspecified.** They were given to x265, they are in
+the bitstream's VUI, ffmpeg wrote no `colr` for them, and unlike the mastering display they
+are not repeated into an SEI. So the container says nothing, `assumed_transfer` falls back to
+BT.709, and **a PQ stream would be decoded with an SDR curve** — which is precisely the
+fault §9.1 is about, on a file somebody could actually have.
+
+Reading them means walking an HEVC SPS to its VUI, which `parse_hvcc` deliberately does not
+do: the record states the chroma format and the bit depths, so a `probe` never needed a
+bitstream, and this is the first case that does. The test asserts the *current* behaviour
+rather than leaving it out, so that fixing it fails there and has to be looked at. `video_d3d11` hands it to `IDXGISwapChain4::SetHDRMetaData` **only on a PQ chain and
 only when the stream stated one** — inventing a mastering display is how a display
 tone-maps for a picture that does not exist.
 

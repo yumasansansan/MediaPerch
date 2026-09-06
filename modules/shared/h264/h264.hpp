@@ -116,6 +116,47 @@ struct HevcConfig {
     bool valid = false;
 };
 
+/// **What the content was graded on, as HEVC states it.**
+///
+/// SMPTE ST 2086's mastering display and CTA-861.3's light levels, which HEVC
+/// carries as prefix SEI messages -- payload types 137 and 144 -- rather than
+/// in the parameter sets. ISO/IEC 14496-12 also defines `mdcv` and `clli` boxes
+/// for the same numbers, and **files in the wild carry the SEI**: x265 writes
+/// it in band and ffmpeg's MP4 muxer, measured on version 9.0.1, writes neither
+/// box. A demuxer that read only the boxes would report nothing for most real
+/// HDR10 files.
+///
+/// Reachable without decoding, because `hvcC` may carry SEI in its arrays and
+/// an encoder asked for repeated headers puts it there. `parse_hvcc` already
+/// keeps every NAL it finds, in order, and declines to object to an SEI among
+/// them; this is what reads one.
+///
+/// **The order is corrected here.** The SEI states its primaries starting at
+/// green, and both `MpVideoInfo` and DXGI want red first. One reorder, in the
+/// one place that knows the SEI's convention.
+struct HdrMetadata {
+    /// Red, green, blue. In units of 0.00002, which is the SEI's own and the
+    /// ABI's.
+    std::uint32_t primaries_x[3] = {0, 0, 0};
+    std::uint32_t primaries_y[3] = {0, 0, 0};
+    std::uint32_t white_x = 0;
+    std::uint32_t white_y = 0;
+    /// In units of 0.0001 cd/m^2, again the SEI's own.
+    std::uint32_t max_luminance = 0;
+    std::uint32_t min_luminance = 0;
+    /// Whole cd/m^2.
+    std::uint32_t max_content_light_level = 0;
+    std::uint32_t max_frame_average_light_level = 0;
+    bool has_mastering = false;
+    bool has_light_levels = false;
+};
+
+/// Reads both SEI messages out of whatever NALs a config is carrying.
+///
+/// Everything absent when there are none, which is the common case: static
+/// metadata is optional and most streams state none.
+[[nodiscard]] HdrMetadata hevc_hdr_metadata(const AvcConfig& config);
+
 /// Parses an `hvcC` box body.
 ///
 /// Returns `valid == false` for anything it cannot read, which is the answer

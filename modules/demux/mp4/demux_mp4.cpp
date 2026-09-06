@@ -32,6 +32,7 @@
 
 #include <mediaperch/module.h>
 
+#include "h264.hpp"
 #include "module_log.hpp"
 
 #include <Ap4.h>
@@ -349,6 +350,85 @@ bool av1c_config(const AP4_SampleDescription& desc, std::vector<std::uint8_t>& o
     const AP4_UI08* at = bytes->GetData() + k_header;
     out.assign(at, bytes->GetData() + bytes->GetDataSize());
     return true;
+}
+
+/// The payload of a box Bento4 has no class for, header stripped.
+///
+/// The same route `av1c_config` takes and for the same reason: `mdcv` and
+/// `clli` are not boxes Bento4 parses, so what comes back is an unknown atom
+/// and the only way to its bytes is to ask it to write itself. Neither is a
+/// full box, so the payload starts eight bytes in.
+bool raw_box(const AP4_SampleDescription& desc, AP4_Atom::Type type,
+             std::vector<std::uint8_t>& out)
+{
+    auto& details = const_cast<AP4_AtomParent&>(desc.GetDetails());
+    AP4_Atom* box = details.GetChild(type);
+    if (box == nullptr) {
+        return false;
+    }
+    auto* bytes = new (std::nothrow) AP4_MemoryByteStream();
+    if (bytes == nullptr) {
+        return false;
+    }
+    const std::unique_ptr<AP4_ByteStream, Releaser> owner(bytes);
+    if (AP4_FAILED(box->Write(*bytes))) {
+        return false;
+    }
+    constexpr AP4_Size k_header = 8;
+    if (bytes->GetDataSize() <= k_header) {
+        return false;
+    }
+    const AP4_UI08* at = bytes->GetData() + k_header;
+    out.assign(at, bytes->GetData() + bytes->GetDataSize());
+    return true;
+}
+
+std::uint32_t be16(const std::uint8_t* at) noexcept
+{
+    return (static_cast<std::uint32_t>(at[0]) << 8) | at[1];
+}
+
+std::uint32_t be32(const std::uint8_t* at) noexcept
+{
+    return (static_cast<std::uint32_t>(at[0]) << 24) |
+           (static_cast<std::uint32_t>(at[1]) << 16) |
+           (static_cast<std::uint32_t>(at[2]) << 8) | at[3];
+}
+
+/// **`mdcv` and `clli`: what the content was graded on.**
+///
+/// ISO/IEC 14496-12 carries SMPTE ST 2086 in `mdcv` and CTA-861.3's light
+/// levels in `clli`, both as children of the visual sample entry beside `colr`.
+/// Their units are the standards' own, which are the ABI's: 0.00002 for
+/// chromaticities, 0.0001 cd/m² for luminance, whole cd/m² for the light
+/// levels. So this copies and does not convert -- unlike `demux_mkv`, which has
+/// to, because Matroska states the same numbers as floats.
+///
+/// **`mdcv` is green, blue, red.** The box follows the HEVC SEI's order and not
+/// ST.2086's own, which the ABI uses and DXGI wants; getting it wrong swaps the
+/// primaries and produces a mastering display that is a plausible triangle in
+/// the wrong place. `MpVideoInfo`'s comment says so and this is the code that
+/// has to know it.
+void read_mastering(const AP4_SampleDescription& desc, MpVideoInfo& info)
+{
+    std::vector<std::uint8_t> box;
+    if (raw_box(desc, AP4_ATOM_TYPE('m', 'd', 'c', 'v'), box) && box.size() >= 24) {
+        // Green, blue, red in the box; red, green, blue in the ABI.
+        static constexpr int k_order[3] = {2, 0, 1}; // ABI index -> box index
+        for (int abi = 0; abi < 3; ++abi) {
+            const std::uint8_t* at = box.data() + static_cast<std::size_t>(k_order[abi]) * 4;
+            info.mastering_primaries_x[abi] = be16(at);
+            info.mastering_primaries_y[abi] = be16(at + 2);
+        }
+        info.mastering_white_x = be16(box.data() + 12);
+        info.mastering_white_y = be16(box.data() + 14);
+        info.mastering_max_luminance = be32(box.data() + 16);
+        info.mastering_min_luminance = be32(box.data() + 20);
+    }
+    if (raw_box(desc, AP4_ATOM_TYPE('c', 'l', 'l', 'i'), box) && box.size() >= 4) {
+        info.max_content_light_level = be16(box.data());
+        info.max_frame_average_light_level = be16(box.data() + 2);
+    }
 }
 
 /// What `stsd` said, mapped onto an MpCodec and the blob the ABI defines for it.
@@ -966,6 +1046,33 @@ try {
     info.matrix = 2;
     if (desc != nullptr) {
         const AP4_AtomParent& details = desc->GetDetails();
+        read_mastering(*desc, info);
+        // **And the SEI, which is where files actually put it.** ISO/IEC
+        // 14496-12 defines `mdcv` and `clli`; measured on ffmpeg 9.0.1, its MP4
+        // muxer writes neither, and x265 writes the SEI in band. `hvcC` carries
+        // prefix SEI in its arrays when an encoder was asked for repeated
+        // headers, so this costs no decoding. The boxes win when both are
+        // there, because a box is the container's own statement.
+        std::vector<std::uint8_t> blob;
+        if (!mp_video_has_mastering(&info) &&
+            codec_for(desc, blob) == MP_CODEC_HEVC && !blob.empty()) {
+            const mp::mft::HdrMetadata hdr =
+                mp::mft::hevc_hdr_metadata(mp::mft::parse_hvcc(blob.data(), blob.size()).annex);
+            if (hdr.has_mastering) {
+                for (int i = 0; i < 3; ++i) {
+                    info.mastering_primaries_x[i] = hdr.primaries_x[i];
+                    info.mastering_primaries_y[i] = hdr.primaries_y[i];
+                }
+                info.mastering_white_x = hdr.white_x;
+                info.mastering_white_y = hdr.white_y;
+                info.mastering_max_luminance = hdr.max_luminance;
+                info.mastering_min_luminance = hdr.min_luminance;
+            }
+            if (hdr.has_light_levels) {
+                info.max_content_light_level = hdr.max_content_light_level;
+                info.max_frame_average_light_level = hdr.max_frame_average_light_level;
+            }
+        }
         if (auto* colr = AP4_DYNAMIC_CAST(AP4_ColrAtom,
                                           details.GetChild(AP4_ATOM_TYPE_COLR))) {
             // `nclx` and `nclc` carry the code points; `rICC`/`prof` carry an

@@ -60,6 +60,16 @@ const char* bt2020_path()
     return MEDIAPERCH_TEST_AV_BT2020;
 }
 
+/// **A real HDR10 file**, ten-bit HEVC with a mastering display and content
+/// light levels, made by x265 with the numbers this test knows. Committed
+/// rather than generated: thirty kilobytes is the size of every other fixture
+/// here, and the point of it is what the *container* says rather than how
+/// expensive it is to decode.
+const char* hdr10_path()
+{
+    return MEDIAPERCH_TEST_HDR10;
+}
+
 const char* mkv_path()
 {
     return MEDIAPERCH_TEST_AV_MKV;
@@ -921,4 +931,86 @@ TEST_CASE("a video packet says what its timestamp is counted in", "[abi][v3][vid
 
         module.as<MpDemuxVtbl>()->close(handle);
     }
+}
+
+TEST_CASE("the mastering display reaches the host, from where HEVC puts it",
+          "[demux][hdr]")
+{
+    // **ISO/IEC 14496-12 defines `mdcv` and `clli`, and this file has neither.**
+    // Measured on ffmpeg 9.0.1: its MP4 muxer writes no such boxes even for a
+    // stream tagged BT.2020 and PQ with x265 given a master-display. What it
+    // does write is the HEVC prefix SEI, in band and repeated into `hvcC`'s
+    // arrays -- so a demuxer that read only the boxes would report nothing for
+    // most real HDR10 files, which is why demux_mp4 reads both and prefers the
+    // box when there is one.
+    Module module{mp4_module(), MP_KIND_DEMUX};
+    REQUIRE(module.as<MpDemuxVtbl>() != nullptr);
+
+    mp::Demux demux;
+    REQUIRE(demux.open(*module.as<MpDemuxVtbl>(), hdr10_path()) == MP_OK);
+
+    std::uint32_t video = demux.stream_count();
+    for (std::uint32_t i = 0; i < demux.stream_count(); ++i) {
+        MpStreamInfo info{};
+        if (demux.stream_info(i, info) && info.kind == MP_STREAM_VIDEO) {
+            video = i;
+            break;
+        }
+    }
+    REQUIRE(video < demux.stream_count());
+
+    MpVideoInfo picture{};
+    picture.size = sizeof(picture);
+    REQUIRE(demux.video_info(video, picture));
+    REQUIRE(mp_video_has_mastering(&picture) != 0);
+
+    // The numbers x265 was given, in ST.2086's units, and **reordered**: the
+    // SEI states its primaries starting at green and both this ABI and DXGI
+    // want red first. Getting that wrong is a plausible triangle in the wrong
+    // place, which is the kind of fault that looks like a grading choice.
+    CHECK(picture.mastering_primaries_x[0] == 35400u);  // red
+    CHECK(picture.mastering_primaries_y[0] == 14600u);
+    CHECK(picture.mastering_primaries_x[1] == 8500u);   // green
+    CHECK(picture.mastering_primaries_y[1] == 39850u);
+    CHECK(picture.mastering_primaries_x[2] == 6550u);   // blue
+    CHECK(picture.mastering_primaries_y[2] == 2300u);
+    CHECK(picture.mastering_white_x == 15635u);         // D65
+    CHECK(picture.mastering_white_y == 16450u);
+    CHECK(picture.mastering_max_luminance == 10000000u);  // 1000 nits
+    CHECK(picture.mastering_min_luminance == 1u);         // 0.0001 nits
+    CHECK(picture.max_content_light_level == 1000u);
+    CHECK(picture.max_frame_average_light_level == 400u);
+
+    // **And the colour tags are unspecified, which is a defect this file
+    // found.** They were given to x265 and they are in the bitstream's VUI;
+    // ffmpeg's MP4 muxer wrote no `colr` box for them either, and unlike the
+    // mastering display they are not repeated into an SEI. So the container
+    // says nothing, `assumed_transfer` falls back to BT.709, and a PQ stream
+    // would be decoded with an SDR curve -- which is exactly the fault §9.1 is
+    // about, on a real file.
+    //
+    // Reading them means walking an HEVC SPS to its VUI, which `parse_hvcc`
+    // deliberately does not do: the record states the chroma format and the bit
+    // depths, so a `probe` never needed a bitstream. This is the case that
+    // needs one. Asserted as it stands rather than left out, so that fixing it
+    // fails here and has to be looked at.
+    CHECK(picture.primaries == 2u);  // unspecified -- see above
+    CHECK(picture.transfer == 2u);
+}
+
+TEST_CASE("a file that states no mastering display says so", "[demux][hdr]")
+{
+    // **Zero is the absence and not a display at nought nits**, and the SDR
+    // fixtures are what proves the reader does not invent one.
+    Module module{mp4_module(), MP_KIND_DEMUX};
+    REQUIRE(module.as<MpDemuxVtbl>() != nullptr);
+
+    mp::Demux demux;
+    REQUIRE(demux.open(*module.as<MpDemuxVtbl>(), av_path()) == MP_OK);
+
+    MpVideoInfo picture{};
+    picture.size = sizeof(picture);
+    REQUIRE(demux.video_info(0, picture));
+    CHECK(mp_video_has_mastering(&picture) == 0);
+    CHECK(picture.max_content_light_level == 0u);
 }

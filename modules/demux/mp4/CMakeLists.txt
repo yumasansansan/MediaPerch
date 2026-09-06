@@ -38,7 +38,11 @@ add_subdirectory("${CMAKE_SOURCE_DIR}/external/Bento4"
 mediaperch_add_module(mp_demux_mp4
     KIND demux
     SOURCES demux_mp4.cpp
-    LINK ap4)
+    # mediaperch_h264 for the HEVC prefix SEI: the mastering display and the
+    # content light levels live there in every real HDR10 file, and `hvcC`
+    # carries the SEI when an encoder was asked for repeated headers -- so this
+    # costs no decoding and no second parser.
+    LINK ap4 mediaperch_h264)
 
 # Not ours, and not held to our warning set.
 if(TARGET ap4)

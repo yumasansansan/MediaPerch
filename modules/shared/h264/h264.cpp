@@ -447,6 +447,111 @@ HevcConfig parse_hvcc(const std::uint8_t* data, std::size_t bytes)
     return config;
 }
 
+namespace {
+
+/// A NAL with its emulation prevention bytes removed.
+///
+/// The bit reader above does this as it goes; an SEI payload is read a whole
+/// byte at a time and in fixed-width fields, so it is cheaper to unescape once
+/// than to carry the state through every read.
+std::vector<std::uint8_t> unescaped(const std::uint8_t* nal, std::size_t bytes)
+{
+    std::vector<std::uint8_t> out;
+    out.reserve(bytes);
+    std::size_t zeros = 0;
+    for (std::size_t at = 0; at < bytes; ++at) {
+        const std::uint8_t byte = nal[at];
+        if (zeros >= 2 && byte == 0x03) {
+            zeros = 0;
+            continue; // the escape itself, which is not data
+        }
+        zeros = byte == 0 ? zeros + 1 : 0;
+        out.push_back(byte);
+    }
+    return out;
+}
+
+std::uint32_t be16_at(const std::vector<std::uint8_t>& b, std::size_t at) noexcept
+{
+    return (static_cast<std::uint32_t>(b[at]) << 8) | b[at + 1];
+}
+
+std::uint32_t be32_at(const std::vector<std::uint8_t>& b, std::size_t at) noexcept
+{
+    return (static_cast<std::uint32_t>(b[at]) << 24) |
+           (static_cast<std::uint32_t>(b[at + 1]) << 16) |
+           (static_cast<std::uint32_t>(b[at + 2]) << 8) | b[at + 3];
+}
+
+} // namespace
+
+HdrMetadata hevc_hdr_metadata(const AvcConfig& config)
+{
+    HdrMetadata out;
+    for (const std::vector<std::uint8_t>& nal : config.parameter_sets) {
+        if (nal.size() < 3) {
+            continue;
+        }
+        // HEVC's NAL header is two bytes and the type is six bits of the first.
+        // 39 is a prefix SEI; 40 is a suffix one and carries nothing wanted here.
+        if (((nal[0] >> 1) & 0x3fu) != 39u) {
+            continue;
+        }
+        const std::vector<std::uint8_t> body = unescaped(nal.data() + 2, nal.size() - 2);
+
+        std::size_t at = 0;
+        while (at + 1 < body.size()) {
+            // **Both fields are 0xFF-extended**, which is the one thing about
+            // SEI framing that catches people: a payload type of 137 is one
+            // byte and a type of 300 is two 0xFF bytes and a 46.
+            std::uint32_t type = 0;
+            while (at < body.size() && body[at] == 0xff) {
+                type += 255;
+                ++at;
+            }
+            if (at >= body.size()) {
+                break;
+            }
+            type += body[at++];
+
+            std::uint32_t size = 0;
+            while (at < body.size() && body[at] == 0xff) {
+                size += 255;
+                ++at;
+            }
+            if (at >= body.size()) {
+                break;
+            }
+            size += body[at++];
+            if (at + size > body.size()) {
+                break; // a payload that runs past its NAL is a NAL to leave alone
+            }
+
+            if (type == 137u && size >= 24u) {
+                // display_primaries are stated green, blue, red; the ABI wants
+                // red, green, blue.
+                static constexpr int k_from[3] = {2, 0, 1}; // ABI index -> SEI index
+                for (int abi = 0; abi < 3; ++abi) {
+                    const std::size_t base = at + static_cast<std::size_t>(k_from[abi]) * 4;
+                    out.primaries_x[abi] = be16_at(body, base);
+                    out.primaries_y[abi] = be16_at(body, base + 2);
+                }
+                out.white_x = be16_at(body, at + 12);
+                out.white_y = be16_at(body, at + 14);
+                out.max_luminance = be32_at(body, at + 16);
+                out.min_luminance = be32_at(body, at + 20);
+                out.has_mastering = out.white_x != 0 && out.white_y != 0;
+            } else if (type == 144u && size >= 4u) {
+                out.max_content_light_level = be16_at(body, at);
+                out.max_frame_average_light_level = be16_at(body, at + 2);
+                out.has_light_levels = true;
+            }
+            at += size;
+        }
+    }
+    return out;
+}
+
 bool parameter_sets_annex_b(const AvcConfig& config, std::vector<std::uint8_t>& out)
 {
     if (!config.valid) {
