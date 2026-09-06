@@ -1699,8 +1699,10 @@ next one, because a frame due less than half a refresh after this presentation i
 this one than to the one after it. `DisplayLoop` measures the refresh from the gaps between
 its own turns and sets the lead; measured rather than asked, because a mode that calls itself
 60 Hz is 59.94 and that is a frame every seventeen minutes -- the same rounding §9.9 refuses
-for a container's frame rate. Taken as the shortest gap seen: a gap can only be lengthened by
-a turn that was late, so the shortest is the one that was not.
+for a container's frame rate. Taken as elapsed time over refreshes counted — it was the
+shortest gap seen, and the section below on the estimator says what was wrong with that and
+what it cost. The refresh column in the table is the shortest-gap figure, left as it was
+measured at the time.
 
 | file | before | after | refresh measured |
 |---|---|---|---|
@@ -1857,11 +1859,9 @@ table further up and measures 27 to 33 ms late now, and 61 ms at 47.952 — that
 decoder falling behind on this machine rather than anything about the pacing, and a loop
 waking 47 times a second instead of 60 gives it longer to fall behind between chances.
 
-And **the measured refresh is biased low**: 20.62 to 20.67 ms against 20.854 nominal, 16.35 to 16.49 against 16.666, about a fifth
-of a millisecond both times. `learn_refresh` takes the shortest gap on the argument that a gap
-can only be *lengthened* by a turn that was late — true of outliers, but the minimum of
-a symmetrically jittery sample is biased low by roughly the jitter, and a fifth of a
-millisecond is that. The lead is built from it.
+And **the measured refresh was biased low**: 20.62 to 20.67 ms against 20.854 nominal, 16.35
+to 16.49 against 16.667, about a fifth of a millisecond both times. That is fixed, and the
+next section is the fix.
 
 #### Choosing the mode, which is the part that is not Windows
 
@@ -1948,15 +1948,47 @@ is exactly what the new API makes easy. §8 already refuses it: measured rather 
 *because a mode that calls itself 60 Hz is 59.94*. The nominal is a label and the panel's
 crystal is the fact, and they differ by tens of parts per million.
 
-But the measurement is worse than that, and this is the part that changes the priority: **the
-estimator's bias is 1.3e-2 and the deviation it exists to catch is a crystal's, tens of parts
+But the measurement was worse than that, and it is what changed the priority: **the
+estimator's bias was 1.3e-2 and the deviation it exists to catch is a crystal's, tens of parts
 per million** — hundreds of times smaller. That second figure is a consumer oscillator's
-specification rather than a measurement of this panel, which would take a long run to make;
-it does not have to be exact to carry the point. As it stands, taking the shortest gap is
-*less* accurate than believing the nominal rate would be. The argument for the minimum is sound about outliers, a
-gap can only be lengthened by a turn that was late, and wrong about symmetric jitter, whose
-minimum is low by roughly its spread. Elapsed time over turns taken, with the long gaps
-discarded, is the shape of the answer. Not done here.
+specification rather than a measurement of this panel, which would take a long run to make; it
+does not have to be exact to carry the point. Taking the shortest gap was *less* accurate than
+believing the nominal rate would have been.
+
+#### The estimator, replaced and measured
+
+The argument for the minimum is sound about outliers — a gap can only be *lengthened* by a
+turn that was late — and wrong about jitter, whose minimum sits low by roughly its spread
+and stays there however long the run is. **An average over a span has no such bias.** A turn
+happens at `k * T + e_k`; over a span the noise enters only at the two ends and is divided by
+the refreshes between them, so the error shrinks as the run goes on instead of settling.
+
+What the shortest gap is still for is the *scale*. A gap is worth one refresh or two or three,
+and something has to say which; the estimate rounds `gap / scale` to an integer, which needs
+the scale to be within a quarter and has it within a percent. A gap that is not near a whole
+multiple is not counted, and one that arrives much shorter than anything before it means the
+scale itself was wrong — which happens when the *first* gap of a run is a starved one —
+so the span is thrown away and started again.
+
+Measured on this panel, three runs at each of two modes:
+
+| mode | nominal | the shortest gap | elapsed over refreshes |
+|---|---|---|---|
+| 60.000 Hz | 16.6667 ms | 16.35 .. 16.49 | **16.661 .. 16.664** |
+| 47.952 Hz | 20.8542 ms | 20.62 .. 20.67 | **20.849 .. 20.854** |
+
+The error goes from 0.18-0.32 ms to 0.003-0.006 ms, a factor of about fifty, on a one-second
+file that gives it sixty refreshes to average over. The run-to-run scatter goes from 0.14 ms
+to 0.003 ms, which matters as much: an estimate that moves between runs moves the lead with
+it. `show` prints the span beside the figure, because the error is one timestamp's jitter
+divided by that number and it is what says how much of the third decimal to believe.
+
+The tests put the noise in on purpose, since a display cannot be asked to jitter: a frame
+clock on an exact grid, observed through a symmetric zero-mean cycle. The bound they check is
+derived from the swing and the span rather than chosen — what the arithmetic allows, not
+what happened to pass — and one of them asserts the thing the change is for, that the
+shortest gap would have been a hundred times further out.
+
 
 #### How large a picture, measured
 

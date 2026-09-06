@@ -126,11 +126,29 @@ public:
         ///
         /// **Measured rather than asked**, because a mode that says 60 Hz is
         /// 59.94 and the difference is a frame every seventeen minutes -- the
-        /// same rounding §9.9 refuses for a container's frame rate. Taken as
-        /// the shortest gap seen rather than the average: a gap can only be
-        /// lengthened by a turn that was late, so the shortest is the one that
-        /// was not.
+        /// same rounding §9.9 refuses for a container's frame rate.
+        ///
+        /// **Elapsed time over refreshes counted, and this used to be the
+        /// shortest gap.** The argument for the shortest was that a gap can
+        /// only be *lengthened* by a turn that was late, which is true of
+        /// outliers and false of jitter: the minimum of a symmetrically noisy
+        /// sample sits low by roughly the noise, and it stays there however
+        /// long the run is. Measured against the modes this tree built, the
+        /// shortest gap came back 0.2 ms under a 16.67 ms refresh and 0.2 ms
+        /// under a 20.85 ms one -- one part in eighty, when the deviation the
+        /// measurement exists to catch is a crystal's tens of parts in a
+        /// million. It was less accurate than believing the mode's own label.
+        ///
+        /// An average over a span has no such bias. Timestamp noise enters only
+        /// at the two ends of the span and is divided by the refreshes between
+        /// them, so the error shrinks as the run goes on rather than settling.
+        /// What the shortest gap is still for is the *scale*: a gap is worth
+        /// one refresh or two or three, and something has to say which.
         double refresh_seconds = 0.0;
+        /// How many refresh intervals `refresh_seconds` is averaged over. The
+        /// estimate's error is about one timestamp's jitter divided by this, so
+        /// it is the number that says how much to believe it.
+        double refresh_span = 0.0;
     };
     [[nodiscard]] Stats stats() const noexcept { return stats_; }
     [[nodiscard]] const AvClock& clock() const noexcept { return clock_; }
@@ -142,6 +160,9 @@ private:
     /// Learns the display's refresh from the gaps between turns, and tells the
     /// pacer how far ahead to decide.
     void learn_refresh(std::uint64_t ticks);
+    /// The interval to pace by now: the span average once there is one, and the
+    /// shortest gap until then.
+    [[nodiscard]] double interval_now() const noexcept;
 
     VideoGraph* graph_;
     IAudioClockSource* audio_;
@@ -151,6 +172,13 @@ private:
     bool configured_ = false;
     std::uint64_t last_tick_ = 0;
     bool have_last_tick_ = false;
+    /// The shortest gap seen, which is the scale rather than the answer: it
+    /// decides whether a gap was one refresh or three.
+    double shortest_gap_ = 0.0;
+    /// Seconds of run, and refreshes in them, over the gaps that were a whole
+    /// number of refreshes long.
+    double span_seconds_ = 0.0;
+    double span_refreshes_ = 0.0;
     Stats stats_{};
 };
 

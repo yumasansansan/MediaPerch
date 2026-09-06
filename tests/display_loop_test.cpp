@@ -13,8 +13,10 @@
 #include "mediaperch/packet.hpp"
 #include "module_loader.hpp"
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -50,6 +52,61 @@ private:
     std::uint64_t left_;
     std::uint64_t step_;
     std::uint64_t ticks_ = 0;
+};
+
+/// A display that refreshes at a fixed rate and is *observed* through noise.
+///
+/// **This is the clock the old estimator got wrong**, and it is the only kind
+/// there is: the display's own interval is a crystal and does not wobble, but
+/// the instant a thread notices a vertical blank does. So the tick returned is
+/// the true grid plus a bounded, symmetric, zero-mean offset -- and the mean of
+/// the gaps is exactly the interval while the minimum of them is not.
+///
+/// The noise is a small deterministic cycle rather than a generator, so the run
+/// is the same every time and a failure is a failure rather than a seed.
+class JitteryFrames final : public mp::IFrameClock {
+public:
+    /// `miss` makes every nth turn skip a refresh, which is what a turn that
+    /// took too long looks like from here.
+    JitteryFrames(std::uint64_t turns, std::uint64_t step, std::uint64_t swing,
+                  std::uint64_t miss = 0) noexcept
+        : left_(turns), step_(step), swing_(swing), miss_(miss)
+    {
+    }
+
+    bool wait() override
+    {
+        if (left_ == 0) {
+            return false;
+        }
+        --left_;
+        ++index_;
+        std::uint64_t refreshes = 1;
+        if (miss_ != 0 && index_ % miss_ == 0) {
+            refreshes = 3; // two vertical blanks went by unnoticed
+        }
+        grid_ += refreshes * step_;
+        // A four-phase cycle summing to zero: +swing, 0, -swing, 0.
+        static constexpr int k_phase[] = {1, 0, -1, 0};
+        const int phase = k_phase[index_ % 4];
+        offset_ = static_cast<std::int64_t>(swing_) * phase;
+        return true;
+    }
+    [[nodiscard]] std::uint64_t now() const override
+    {
+        return static_cast<std::uint64_t>(static_cast<std::int64_t>(grid_) + offset_);
+    }
+    [[nodiscard]] std::uint64_t rate() const override { return k_tick_rate; }
+    [[nodiscard]] double nominal_interval() const override { return 0.0; }
+
+private:
+    std::uint64_t left_;
+    std::uint64_t step_;
+    std::uint64_t swing_;
+    std::uint64_t miss_;
+    std::uint64_t index_ = 0;
+    std::uint64_t grid_ = 1'000'000;
+    std::int64_t offset_ = 0;
 };
 
 /// An audio device whose position the test writes.
@@ -236,6 +293,103 @@ TEST_CASE("without a clock nothing is drawn, and it is not an error",
     // feed: nothing was decided against a guess.
     CHECK_FALSE(graph.finished());
 }
+
+
+TEST_CASE("the refresh is the average over a span, not the shortest gap",
+          "[display]")
+{
+    // **The bias this replaces was measured on real hardware**: the shortest
+    // gap came back 0.2 ms under a 16.67 ms refresh, one part in eighty, when
+    // what the measurement exists to catch is a crystal's tens of parts in a
+    // million. Here the noise is put in on purpose so the answer is known.
+    Standing standing;
+    Dial dial;
+
+    // 60 Hz exactly, observed through +/- 0.4 ms of noise -- twice the swing
+    // the real loop showed, so the old rule would be twice as wrong.
+    const std::uint64_t step = k_tick_rate / 60;
+    const std::uint64_t swing = k_tick_rate / 2500; // 0.4 ms
+    JitteryFrames frames{200, step, swing};
+    mp::DisplayLoop loop{standing.graph, dial, frames};
+    loop.run();
+
+    const double truth = static_cast<double>(step) / k_tick_rate;
+    const double noise = static_cast<double>(swing) / k_tick_rate;
+    const mp::DisplayLoop::Stats stats = loop.stats();
+    REQUIRE(stats.refresh_span > 190.0);
+
+    // **The bound is derived rather than chosen.** After the span average, the
+    // only noise left is the two endpoints', and it is divided by the elapsed
+    // time between them -- so this is what the arithmetic allows and not a
+    // number that happened to pass.
+    const double allowed = 2.0 * noise / (stats.refresh_span * truth);
+    const double got = std::abs(stats.refresh_seconds - truth) / truth;
+    INFO("measured " << stats.refresh_seconds << " against " << truth << " over "
+                     << stats.refresh_span << " refreshes: " << got << " out, allowed "
+                     << allowed);
+    CHECK(got <= allowed);
+
+    // And what the shortest gap would have said. The phases run +s, 0, -s, 0,
+    // so the shortest gap is a whole swing under the truth -- and stays there
+    // however long the run is, which is the difference that matters.
+    const double old_way = std::abs((truth - noise) - truth) / truth;
+    INFO("the shortest gap would be " << old_way << " out");
+    CHECK(old_way > 100.0 * got);
+}
+
+TEST_CASE("a turn that missed a vertical blank is counted, not discarded",
+          "[display]")
+{
+    // A gap of three refreshes is three refreshes of evidence. Throwing it away
+    // would be throwing away the run either side of it as well, because what
+    // the average needs is elapsed time and the count that goes with it.
+    Standing standing;
+    Dial dial;
+
+    const std::uint64_t step = k_tick_rate / 50; // 50 Hz, an exact tick count
+    JitteryFrames frames{120, step, k_tick_rate / 5000, 7};
+    mp::DisplayLoop loop{standing.graph, dial, frames};
+    loop.run();
+
+    const mp::DisplayLoop::Stats stats = loop.stats();
+    INFO("measured " << stats.refresh_seconds << " over " << stats.refresh_span);
+    CHECK(stats.refresh_seconds ==
+          Catch::Approx(static_cast<double>(step) / k_tick_rate).epsilon(3e-4));
+    // More refreshes than turns, which is the whole point: the missed blanks
+    // are in the count.
+    CHECK(stats.refresh_span > static_cast<double>(stats.turns));
+}
+
+TEST_CASE("a run that starts on a starved turn still finds the refresh",
+          "[display]")
+{
+    // **The failure the scale guard exists for.** If the first gap is three
+    // refreshes, nothing yet says a refresh is shorter, so it is taken for one
+    // and every later gap reads as a third of one. Without the guard the
+    // estimate would sit at three times the truth for the whole run.
+    Standing standing;
+    Dial dial;
+
+    const std::uint64_t step = k_tick_rate / 60;
+    // `miss` of 1 makes the *first* turn a three-refresh one, and every one
+    // after it, so this also checks that a display seen only at a third of its
+    // rate is measured as what it was seen at rather than as nonsense.
+    JitteryFrames start_bad{60, step, k_tick_rate / 5000, 1};
+    mp::DisplayLoop first{standing.graph, dial, start_bad};
+    first.run();
+    CHECK(first.stats().refresh_seconds == Catch::Approx(3.0 / 60.0).epsilon(1e-3));
+
+    // And the case that matters: one starved turn at the start, then a normal
+    // run. The guard throws away the span built against the wrong scale.
+    Standing again;
+    Dial dial2;
+    JitteryFrames recovers{200, step, k_tick_rate / 5000, 200};
+    mp::DisplayLoop second{again.graph, dial2, recovers};
+    second.run();
+    INFO("measured " << second.stats().refresh_seconds);
+    CHECK(second.stats().refresh_seconds == Catch::Approx(1.0 / 60.0).epsilon(1e-3));
+}
+
 
 TEST_CASE("the frame clock stopping stops the loop", "[display]")
 {

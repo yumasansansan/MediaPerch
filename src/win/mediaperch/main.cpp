@@ -1861,10 +1861,14 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
                 static_cast<unsigned long long>(stats.decoded));
     std::printf("first      %.1f ms out -- the clock ran while it was being decoded\n",
                 stats.first_late_seconds * -1000.0);
-    std::printf("spread     %.1f ms late .. %.1f ms early after that, against a %.2f ms "
-                "refresh measured\n",
-                stats.worst_late_seconds * -1000.0, stats.worst_early_seconds * 1000.0,
-                turns.refresh_seconds * 1000.0);
+    std::printf("spread     %.1f ms late .. %.1f ms early after that\n",
+                stats.worst_late_seconds * -1000.0, stats.worst_early_seconds * 1000.0);
+    // Three decimals, because the thing worth seeing is in the third: the
+    // estimator this replaced read a sixteen-and-two-thirds millisecond refresh
+    // as sixteen and a half. The span is how many refreshes it averaged over,
+    // which is what says how much of that third decimal to believe.
+    std::printf("refresh    %.3f ms measured, over %.0f refreshes\n",
+                turns.refresh_seconds * 1000.0, turns.refresh_span);
     std::printf("turns      %llu, %llu of them with no clock to read\n",
                 static_cast<unsigned long long>(turns.turns),
                 static_cast<unsigned long long>(turns.without_clock));
