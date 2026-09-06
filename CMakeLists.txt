@@ -166,6 +166,7 @@ if(MEDIAPERCH_BUILD_PLATFORM)
     add_subdirectory(modules/codec/opus)
     add_subdirectory(modules/codec/vorbis)
 
+    add_subdirectory(modules/shared/abi_guard)
     add_subdirectory(modules/dsp/gain)
     add_subdirectory(modules/dsp/resample)
     add_subdirectory(modules/shared/module_log)

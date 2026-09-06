@@ -17,6 +17,7 @@
 #include "biquad.hpp"
 
 #include <convolve.hpp>
+#include <abi_guard.hpp>
 #include <mediaperch/module.h>
 #include <transform.hpp>
 
@@ -86,8 +87,11 @@ double target_db(const MpDsp& d, double hz)
 std::vector<double> design_fir(const MpDsp& d, double rate, std::uint32_t taps,
                                bool minimum)
 {
-    const std::size_t points =
-        mp::transform::next_power_of_two(std::max<std::size_t>(taps * 8, 4096));
+    // `taps * 8` in the field's own width wraps past 2^29, which used to be
+    // what the 2^20 ceiling on `taps` was really protecting. Widening first is
+    // the fix; capping the input was the symptom's.
+    const std::size_t points = mp::transform::next_power_of_two(
+        std::max<std::size_t>(static_cast<std::size_t>(taps) * 8, 4096));
     std::vector<std::complex<double>> spectrum(points, {0.0, 0.0});
     for (std::size_t k = 0; k <= points / 2; ++k) {
         const double hz = static_cast<double>(k) * rate / static_cast<double>(points);
@@ -159,13 +163,14 @@ double target_peak_db(const MpDsp& d)
 }
 
 MpResult MP_CALL dsp_open(MpDsp** out) noexcept
-{
+try {
     if (out == nullptr) {
         return MP_ERR_INVALID;
     }
     *out = new (std::nothrow) MpDsp();
     return *out != nullptr ? MP_OK : MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 void MP_CALL dsp_close(MpDsp* d) noexcept
 {
@@ -174,7 +179,7 @@ void MP_CALL dsp_close(MpDsp* d) noexcept
 
 MpResult MP_CALL dsp_configure(MpDsp* d, const MpFormat* in, std::uint32_t max_frames,
                                MpFormat* out, std::uint32_t* out_max) noexcept
-{
+try {
     if (d == nullptr || in == nullptr || out == nullptr || out_max == nullptr) {
         return MP_ERR_INVALID;
     }
@@ -221,11 +226,12 @@ MpResult MP_CALL dsp_configure(MpDsp* d, const MpFormat* in, std::uint32_t max_f
     *out_max = d->convolver.max_output(max_frames);
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_process(MpDsp* d, const double* const* in, std::uint32_t in_frames,
                              double* const* out, std::uint32_t out_capacity,
                              std::uint32_t* out_frames) noexcept
-{
+try {
     if (d == nullptr || out == nullptr || out_frames == nullptr) {
         return MP_ERR_INVALID;
     }
@@ -265,10 +271,11 @@ MpResult MP_CALL dsp_process(MpDsp* d, const double* const* in, std::uint32_t in
     *out_frames = made;
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_flush(MpDsp* d, double* const* out, std::uint32_t out_capacity,
                            std::uint32_t* out_frames) noexcept
-{
+try {
     (void)out;
     (void)out_capacity;
     if (d == nullptr || out_frames == nullptr) {
@@ -289,9 +296,10 @@ MpResult MP_CALL dsp_flush(MpDsp* d, double* const* out, std::uint32_t out_capac
     *out_frames = 0;
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
-{
+try {
     if (d == nullptr || key == nullptr || value == nullptr) {
         return MP_ERR_INVALID;
     }
@@ -327,13 +335,12 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
     if (std::strcmp(key, "taps") == 0) {
         char* end = nullptr;
         const unsigned long taps = std::strtoul(value, &end, 10);
-        // **The ceiling stays and the floor goes.** `design_fir` works in
-        // `taps * 8` points, which is unsigned 32-bit arithmetic and wraps past
-        // 2^29 -- so the ceiling is not a taste, it is the only thing between a
-        // large number and a transform of the wrong size. The 16 underneath it
-        // was a taste: one tap is a gain, which is a legal thing to ask an
-        // equaliser for, and the convolver refuses an empty impulse by itself.
-        if (end == value || taps > (1u << 20)) {
+        // Both ends gone. The floor of 16 was a taste -- one tap is a gain,
+        // which is a legal thing to ask an equaliser for. The ceiling of 2^20
+        // was two things at once: `taps * 8` wrapping, which is fixed in
+        // `design_fir` where the arithmetic is, and a transform the machine
+        // cannot hold, which the entry point's guard now reports.
+        if (end == value || taps > 0xFFFFFFFFul) {
             return MP_ERR_INVALID;
         }
         d->taps = static_cast<std::uint32_t>(taps);
@@ -342,11 +349,10 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
     if (std::strcmp(key, "partition") == 0) {
         char* end = nullptr;
         const unsigned long partition = std::strtoul(value, &end, 10);
-        // A block of the overlap-save convolver, allocated per channel. Memory,
-        // which the DSP ABI cannot report because it is `noexcept` -- so this
-        // ceiling is the DoS exception rather than a judgement about the value.
-        // Zero still means "size it from the host's block".
-        if (end == value || partition > (1u << 20)) {
+        // A block of the overlap-save convolver, allocated per channel. The
+        // ABI can report a failed allocation now, so the ceiling that stood in
+        // for that is gone. Zero still means "size it from the host's block".
+        if (end == value || partition > 0xFFFFFFFFul) {
             return MP_ERR_INVALID;
         }
         d->partition = static_cast<std::uint32_t>(partition);
@@ -409,12 +415,12 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
                 }
             }
         }
-        // All four of these are facts rather than tastes. A curve from zero
-        // hertz has no logarithm to step along; a top below its bottom is not a
-        // range; one point divides by `points - 1`; and the report is built as
-        // a string of about fifteen bytes a point inside a `noexcept` function,
-        // so the ceiling is the same DoS exception `partition` carries.
-        if (low <= 0.0 || high <= low || points < 2 || points > 4096) {
+        // Three facts and no taste. A curve from zero hertz has no logarithm
+        // to step along; a top below its bottom is not a range; and one point
+        // divides by `points - 1`. The ceiling of 4096 was the string the
+        // report is built in -- about fifteen bytes a point -- and that is an
+        // allocation the entry point reports now rather than dies of.
+        if (low <= 0.0 || high <= low || points < 2) {
             return MP_ERR_INVALID;
         }
         d->curve_low_hz = low;
@@ -424,10 +430,11 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
     }
     return MP_ERR_UNSUPPORTED;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
                               std::uint32_t out_bytes) noexcept
-{
+try {
     if (d == nullptr || out == nullptr || out_bytes < 64) {
         return MP_ERR_INVALID;
     }
@@ -534,9 +541,10 @@ MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
         return MP_END;
     }
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_reset(MpDsp* d) noexcept
-{
+try {
     if (d == nullptr) {
         return MP_ERR_INVALID;
     }
@@ -545,9 +553,10 @@ MpResult MP_CALL dsp_reset(MpDsp* d) noexcept
     d->peak = 0.0;
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_get_latency(MpDsp* d, std::uint32_t* out_frames) noexcept
-{
+try {
     if (d == nullptr || out_frames == nullptr) {
         return MP_ERR_INVALID;
     }
@@ -557,6 +566,7 @@ MpResult MP_CALL dsp_get_latency(MpDsp* d, std::uint32_t* out_frames) noexcept
     *out_frames = d->mode == Mode::linear ? d->taps / 2 : 0u;
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 const MpDspVtbl g_vtbl = {
     /* size      */ sizeof(MpDspVtbl),
@@ -573,10 +583,11 @@ const MpDspVtbl g_vtbl = {
 };
 
 MpResult MP_CALL module_init(const MpHost* host) noexcept
-{
+try {
     (void)host; // nothing here logs, so nothing here keeps the host
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 void MP_CALL module_shutdown() noexcept
 {

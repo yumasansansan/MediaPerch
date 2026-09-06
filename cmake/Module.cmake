@@ -29,7 +29,12 @@ function(mediaperch_add_module name)
     endif()
 
     add_library(${name} MODULE ${M_SOURCES})
-    target_link_libraries(${name} PRIVATE MediaPerch::abi mediaperch_flags ${M_LINK})
+    # **Every module gets the guard**, rather than each one asking for it. A
+    # vtable entry that lets an exception out calls std::terminate, and that is
+    # as true of a module nobody has written yet as of these -- so the header
+    # goes where the ABI goes, not where somebody remembered to link it.
+    target_link_libraries(${name}
+        PRIVATE MediaPerch::abi mediaperch_flags mediaperch_abi_guard ${M_LINK})
 
     set(out "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/modules/${M_KIND}")
     set_target_properties(${name} PROPERTIES

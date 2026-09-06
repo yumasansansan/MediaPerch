@@ -8,6 +8,7 @@
 // before it does it.
 
 #include "mediaperch/platform.hpp"
+#include "mediaperch/refresh_win.hpp"
 
 #include "mediaperch/display.hpp"
 #include "mediaperch/display_win.hpp"
@@ -106,6 +107,15 @@ struct Options {
     std::uint32_t queue_limit_mib = 32;
     std::uint32_t queue_packets = 4;
     std::uint32_t queue_hard_mib = 256;
+    /// `show`: change the display's refresh rate to suit the file, and put
+    /// it back afterwards. Off by default because it changes somebody's
+    /// desktop, and a player that does that without being asked is a player
+    /// that gets uninstalled.
+    bool match_refresh = false;
+    /// Which of two equally correct modes `--match-refresh` takes. 23.976 and
+    /// 47.952 are both exact for a 23.976 fps film and the film cannot tell
+    /// them apart, so this is a preference about everything else on screen.
+    mp::Prefer refresh_prefer = mp::Prefer::fastest;
     /// `show`: the fallback frame clock's period, when there is no vertical
     /// blank to wait on. Two milliseconds is eight wakeups per refresh at
     /// 60 Hz, which is enough to land on every one of them and wasteful on a
@@ -391,6 +401,26 @@ Options
   --tick-period US  `show`: the fallback frame clock's period, used when there
                     is no vertical blank to wait on. Default 2000, which is
                     eight wakeups per refresh at 60 Hz
+  --match-refresh   `show`: switch the display to a refresh rate that is a whole
+                    multiple of the file's frame rate, and switch back at the
+                    end. This is the one thing that makes the pacing error
+                    smaller rather than better measured: 23.976 fps on a 60 Hz
+                    display is five halves, so alternate frames land half a
+                    refresh apart however good the clock is. **It changes your
+                    desktop**, which is why it is a flag. It prints what it
+                    chose, and what it chose from
+  --refresh-prefer WHICH
+                    which of two equally correct modes to take, and implies
+                    --match-refresh. 23.976 and 47.952 are both exact for a
+                    23.976 fps film -- one refresh a frame and two -- and the
+                    film cannot tell them apart:
+                      fastest   the highest exact multiple. THE DEFAULT: the
+                                cursor and any overlay move at that rate too,
+                                and a panel is likeliest to be happy with it
+                      slowest   the lowest. Less power, and what a television
+                                does with a 24 Hz mode -- but 24 Hz on a monitor
+                                is where panels flicker, and this tree's would
+                                not show one at all until its timing was rebuilt
   --no-recover      treat a device that disappears mid-run as the end of the
                     run. Without this, `play` waits for an endpoint to answer
                     again, rebuilds, and resumes from the frame the device had
@@ -483,6 +513,14 @@ bool parse(int argc, char** argv, Options& out)
             value(out.queue_hard_mib);
         } else if (arg == "--tick-period") {
             value(out.tick_period_us);
+        } else if (arg == "--match-refresh") {
+            out.match_refresh = true;
+        } else if (arg == "--refresh-prefer") {
+            if (i + 1 >= argc || !mp::prefer_from_name(argv[++i], out.refresh_prefer)) {
+                std::fprintf(stderr, "--refresh-prefer is fastest or slowest\n");
+                return false;
+            }
+            out.match_refresh = true;
         } else if (arg == "--no-recover") {
             out.recover = false;
         } else if (arg == "--recover-timeout") {
@@ -1614,6 +1652,50 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
         std::printf(" at %.3f fps", static_cast<double>(picture.fps_num) / picture.fps_den);
     }
     std::printf("\n");
+
+    // ---- the display's mode, before anything that keeps time
+    //
+    // **A mode switch takes over a second**, which is long enough to matter and
+    // was found the way these things are: with it after the audio half, the
+    // wall clock had already started, the switch and the display's resync
+    // happened on its time, and a one-second file arrived with every frame
+    // already past -- 24 decoded, 24 dropped, one turn. So it goes here, ahead
+    // of every clock and ahead of the vblank clock that is opened on whatever
+    // is in force.
+    mp::win::RefreshSwitch refresh;
+    if (options.match_refresh) {
+        const mp::Rational fps{picture.fps_num, picture.fps_den};
+        std::string mode_why;
+        const std::vector<mp::DisplayMode> modes =
+            mp::win::display_modes(window.handle(), mode_why);
+        const std::optional<mp::DisplayMode> now =
+            mp::win::current_mode(window.handle(), mode_why);
+        if (!fps.valid()) {
+            std::printf("refresh    the container states no frame rate, so there is "
+                        "nothing to match\n");
+        } else if (modes.empty() || !now.has_value()) {
+            std::printf("refresh    %s\n", mode_why.c_str());
+        } else {
+            const std::vector<mp::Match> ranked =
+                mp::rank_modes(modes, fps, now->width, now->height, options.refresh_prefer);
+            if (ranked.empty()) {
+                std::printf("refresh    this display has no mode at %ux%u\n", now->width,
+                            now->height);
+            } else if (ranked.front().mode.refresh == now->refresh) {
+                std::printf("refresh    already the best of %zu: %s\n", ranked.size(),
+                            mp::describe(ranked.front()).c_str());
+            } else if (refresh.apply(window.handle(), ranked.front().mode.refresh,
+                                     mode_why)) {
+                std::printf("refresh    %s\n", mp::describe(ranked.front()).c_str());
+                std::printf("           was %.3f Hz, chosen from %zu at this size, "
+                            "and put back at the end\n",
+                            now->refresh.hz(), ranked.size());
+            } else {
+                std::printf("refresh    %s -- staying at %.3f Hz\n", mode_why.c_str(),
+                            now->refresh.hz());
+            }
+        }
+    }
 
     mp::IPacketFeed* video_feed = router.feed(video_stream);
     if (video_feed == nullptr) {

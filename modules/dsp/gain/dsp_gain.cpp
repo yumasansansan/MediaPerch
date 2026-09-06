@@ -15,6 +15,7 @@
 // another module: it is this stage with its `gain_db` set from a tag, plus the
 // peak the tag also carries so the gain can be limited rather than clipped.
 
+#include <abi_guard.hpp>
 #include <mediaperch/module.h>
 
 #include <cmath>
@@ -35,13 +36,14 @@ struct MpDsp {
 namespace {
 
 MpResult MP_CALL dsp_open(MpDsp** out) noexcept
-{
+try {
     if (out == nullptr) {
         return MP_ERR_INVALID;
     }
     *out = new (std::nothrow) MpDsp();
     return *out != nullptr ? MP_OK : MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 void MP_CALL dsp_close(MpDsp* d) noexcept
 {
@@ -50,7 +52,7 @@ void MP_CALL dsp_close(MpDsp* d) noexcept
 
 MpResult MP_CALL dsp_configure(MpDsp* d, const MpFormat* in, std::uint32_t max_frames,
                                MpFormat* out, std::uint32_t* out_max) noexcept
-{
+try {
     if (d == nullptr || in == nullptr || out == nullptr || out_max == nullptr) {
         return MP_ERR_INVALID;
     }
@@ -68,11 +70,12 @@ MpResult MP_CALL dsp_configure(MpDsp* d, const MpFormat* in, std::uint32_t max_f
     *out_max = max_frames;
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_process(MpDsp* d, const double* const* in, std::uint32_t in_frames,
                              double* const* out, std::uint32_t out_capacity,
                              std::uint32_t* out_frames) noexcept
-{
+try {
     if (d == nullptr || out == nullptr || out_frames == nullptr) {
         return MP_ERR_INVALID;
     }
@@ -99,10 +102,11 @@ MpResult MP_CALL dsp_process(MpDsp* d, const double* const* in, std::uint32_t in
     *out_frames = in_frames;
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_flush(MpDsp* d, double* const* out, std::uint32_t out_capacity,
                            std::uint32_t* out_frames) noexcept
-{
+try {
     (void)d;
     (void)out;
     (void)out_capacity;
@@ -112,9 +116,10 @@ MpResult MP_CALL dsp_flush(MpDsp* d, double* const* out, std::uint32_t out_capac
     *out_frames = 0; // no history, nothing held back
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
-{
+try {
     if (d == nullptr || key == nullptr || value == nullptr) {
         return MP_ERR_INVALID;
     }
@@ -155,10 +160,11 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
     }
     return MP_ERR_UNSUPPORTED;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
                               std::uint32_t out_bytes) noexcept
-{
+try {
     if (d == nullptr || out == nullptr || out_bytes < 64) {
         return MP_ERR_INVALID;
     }
@@ -178,15 +184,17 @@ MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
         return MP_END;
     }
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_reset(MpDsp* d) noexcept
-{
+try {
     if (d == nullptr) {
         return MP_ERR_INVALID;
     }
     (void)d;
     return MP_OK; // a gain has no memory of where the stream was
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 const MpDspVtbl g_vtbl = {
     /* size      */ sizeof(MpDspVtbl),
@@ -203,10 +211,11 @@ const MpDspVtbl g_vtbl = {
 };
 
 MpResult MP_CALL module_init(const MpHost* host) noexcept
-{
+try {
     (void)host; // nothing here logs, so nothing here keeps the host
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 void MP_CALL module_shutdown() noexcept
 {

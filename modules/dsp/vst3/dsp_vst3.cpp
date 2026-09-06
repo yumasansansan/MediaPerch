@@ -21,6 +21,7 @@
 
 #include "vst3_host.hpp"
 
+#include <abi_guard.hpp>
 #include <mediaperch/module.h>
 
 #include <cstdio>
@@ -134,13 +135,14 @@ bool bring_up(MpDsp* d)
 }
 
 MpResult MP_CALL dsp_open(MpDsp** out) noexcept
-{
+try {
     if (out == nullptr) {
         return MP_ERR_INVALID;
     }
     *out = new (std::nothrow) MpDsp();
     return *out != nullptr ? MP_OK : MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 void MP_CALL dsp_close(MpDsp* d) noexcept
 {
@@ -149,7 +151,7 @@ void MP_CALL dsp_close(MpDsp* d) noexcept
 
 MpResult MP_CALL dsp_configure(MpDsp* d, const MpFormat* in, std::uint32_t max_frames,
                                MpFormat* out, std::uint32_t* out_max) noexcept
-{
+try {
     if (d == nullptr || in == nullptr || out == nullptr || out_max == nullptr) {
         return MP_ERR_INVALID;
     }
@@ -180,11 +182,12 @@ MpResult MP_CALL dsp_configure(MpDsp* d, const MpFormat* in, std::uint32_t max_f
     }
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_process(MpDsp* d, const double* const* in, std::uint32_t in_frames,
                              double* const* out, std::uint32_t out_capacity,
                              std::uint32_t* out_frames) noexcept
-{
+try {
     if (d == nullptr || out == nullptr || out_frames == nullptr) {
         return MP_ERR_INVALID;
     }
@@ -208,10 +211,11 @@ MpResult MP_CALL dsp_process(MpDsp* d, const double* const* in, std::uint32_t in
     *out_frames = in_frames;
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_flush(MpDsp* d, double* const* out, std::uint32_t out_capacity,
                            std::uint32_t* out_frames) noexcept
-{
+try {
     if (d == nullptr || out_frames == nullptr) {
         return MP_ERR_INVALID;
     }
@@ -236,27 +240,30 @@ MpResult MP_CALL dsp_flush(MpDsp* d, double* const* out, std::uint32_t out_capac
     *out_frames = n;
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_reset(MpDsp* d) noexcept
-{
+try {
     if (d == nullptr) {
         return MP_ERR_INVALID;
     }
     d->tail_left = 0;
     return d->host.reset() ? MP_OK : MP_ERR_INTERNAL;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_get_latency(MpDsp* d, std::uint32_t* out_frames) noexcept
-{
+try {
     if (d == nullptr || out_frames == nullptr) {
         return MP_ERR_INVALID;
     }
     *out_frames = d->host.latency_frames();
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
-{
+try {
     if (d == nullptr || key == nullptr || value == nullptr) {
         return MP_ERR_INVALID;
     }
@@ -299,10 +306,11 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
     }
     return MP_ERR_UNSUPPORTED;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
                               std::uint32_t out_bytes) noexcept
-{
+try {
     if (d == nullptr || out == nullptr || out_bytes < 64) {
         return MP_ERR_INVALID;
     }
@@ -386,6 +394,7 @@ MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
                   shown.c_str());
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 const MpDspVtbl g_vtbl = {
     /* size        */ sizeof(MpDspVtbl),
@@ -402,10 +411,11 @@ const MpDspVtbl g_vtbl = {
 };
 
 MpResult MP_CALL module_init(const MpHost* host) noexcept
-{
+try {
     (void)host; // nothing here logs, so nothing here keeps the host
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 void MP_CALL module_shutdown() noexcept
 {

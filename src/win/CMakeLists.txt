@@ -16,6 +16,10 @@ add_library(mediaperch_win STATIC
     mediaperch/ipc_server.hpp
     mediaperch/platform.cpp
     mediaperch/platform.hpp
+    # Enumerating a display's modes and putting one in force: DXGI for the
+    # list, the display-configuration API for the switch. See the header.
+    mediaperch/refresh_win.cpp
+    mediaperch/refresh_win.hpp
     mediaperch/tray.cpp
     mediaperch/tray.hpp
     mediaperch/verify.cpp

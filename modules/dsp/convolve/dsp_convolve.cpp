@@ -22,6 +22,7 @@
 #include "impulse.hpp"
 
 #include <convolve.hpp>
+#include <abi_guard.hpp>
 #include <mediaperch/module.h>
 
 #include <cmath>
@@ -70,13 +71,14 @@ struct MpDsp {
 namespace {
 
 MpResult MP_CALL dsp_open(MpDsp** out) noexcept
-{
+try {
     if (out == nullptr) {
         return MP_ERR_INVALID;
     }
     *out = new (std::nothrow) MpDsp();
     return *out != nullptr ? MP_OK : MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 void MP_CALL dsp_close(MpDsp* d) noexcept
 {
@@ -85,7 +87,7 @@ void MP_CALL dsp_close(MpDsp* d) noexcept
 
 MpResult MP_CALL dsp_configure(MpDsp* d, const MpFormat* in, std::uint32_t max_frames,
                                MpFormat* out, std::uint32_t* out_max) noexcept
-{
+try {
     if (d == nullptr || in == nullptr || out == nullptr || out_max == nullptr) {
         return MP_ERR_INVALID;
     }
@@ -162,11 +164,12 @@ MpResult MP_CALL dsp_configure(MpDsp* d, const MpFormat* in, std::uint32_t max_f
     *out_max = d->convolver.max_output(max_frames);
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_process(MpDsp* d, const double* const* in, std::uint32_t in_frames,
                              double* const* out, std::uint32_t out_capacity,
                              std::uint32_t* out_frames) noexcept
-{
+try {
     if (d == nullptr || out == nullptr || out_frames == nullptr) {
         return MP_ERR_INVALID;
     }
@@ -189,10 +192,11 @@ MpResult MP_CALL dsp_process(MpDsp* d, const double* const* in, std::uint32_t in
     *out_frames = made;
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_flush(MpDsp* d, double* const* out, std::uint32_t out_capacity,
                            std::uint32_t* out_frames) noexcept
-{
+try {
     if (d == nullptr || out == nullptr || out_frames == nullptr) {
         return MP_ERR_INVALID;
     }
@@ -203,9 +207,10 @@ MpResult MP_CALL dsp_flush(MpDsp* d, double* const* out, std::uint32_t out_capac
     *out_frames = made;
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
-{
+try {
     if (d == nullptr || key == nullptr || value == nullptr) {
         return MP_ERR_INVALID;
     }
@@ -247,10 +252,9 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
     if (std::strcmp(key, "partition") == 0) {
         char* end = nullptr;
         const unsigned long partition = std::strtoul(value, &end, 10);
-        // Memory, per channel, inside a `noexcept` ABI that has no way to
-        // report a failed allocation. Kept for that reason and not because
-        // 2^20 is thought to be enough for anyone.
-        if (end == value || partition > (1u << 20)) {
+        // Memory, per channel, and the ABI can report a failed allocation
+        // now -- so the number is the caller's rather than this file's.
+        if (end == value || partition > 0xFFFFFFFFul) {
             return MP_ERR_INVALID;
         }
         d->partition = static_cast<std::uint32_t>(partition);
@@ -259,9 +263,10 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
     if (std::strcmp(key, "max_taps") == 0) {
         char* end = nullptr;
         const unsigned long taps = std::strtoul(value, &end, 10);
-        // Likewise: 2^24 coefficients is 128 MB of doubles before the
-        // transforms ask for theirs.
-        if (end == value || taps > (1u << 24)) {
+        // Likewise. 2^24 coefficients was 128 MB of doubles before the
+        // transforms asked for theirs, which is a real cost and still not this
+        // file's to refuse on somebody's behalf.
+        if (end == value || taps > 0xFFFFFFFFul) {
             return MP_ERR_INVALID;
         }
         d->max_taps = static_cast<std::uint32_t>(taps);
@@ -273,10 +278,11 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
     }
     return MP_ERR_UNSUPPORTED;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
                               std::uint32_t out_bytes) noexcept
-{
+try {
     if (d == nullptr || out == nullptr || out_bytes < 64) {
         return MP_ERR_INVALID;
     }
@@ -351,9 +357,10 @@ MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
         return MP_END;
     }
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_reset(MpDsp* d) noexcept
-{
+try {
     if (d == nullptr) {
         return MP_ERR_INVALID;
     }
@@ -361,9 +368,10 @@ MpResult MP_CALL dsp_reset(MpDsp* d) noexcept
     d->peak = 0.0;
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_get_latency(MpDsp* d, std::uint32_t* out_frames) noexcept
-{
+try {
     if (d == nullptr || out_frames == nullptr) {
         return MP_ERR_INVALID;
     }
@@ -382,6 +390,7 @@ MpResult MP_CALL dsp_get_latency(MpDsp* d, std::uint32_t* out_frames) noexcept
     *out_frames = 0;
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 const MpDspVtbl g_vtbl = {
     /* size      */ sizeof(MpDspVtbl),
@@ -398,10 +407,11 @@ const MpDspVtbl g_vtbl = {
 };
 
 MpResult MP_CALL module_init(const MpHost* host) noexcept
-{
+try {
     (void)host; // nothing here logs, so nothing here keeps the host
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 void MP_CALL module_shutdown() noexcept
 {

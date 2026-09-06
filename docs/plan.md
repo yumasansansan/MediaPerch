@@ -1743,6 +1743,163 @@ Three things would make it smaller, and only one of them is a timing change:
 So zero is not reachable at a fixed refresh rate, half a refresh is the floor, and the loop is
 at the floor.
 
+#### And then the display grew a mode that divides, so it was measured
+
+The first of those three was tried. This machine's panel offers 29.997, 59.934 and 60.003 Hz
+and nothing else; Custom Resolution Utility can write an EDID override, and nine modes were
+built for it — 23.976, 24, 29.97, 30, 47.952, 48, 50, 59.94 and 60, each exact rather
+than rounded. Two facts came out of building them that are worth keeping:
+
+- **EDID stores a pixel clock in whole units of 10 kHz**, so a refresh is only reachable
+  exactly when `target * htotal * vtotal` lands on that grid. Asking for 48 Hz at the panel's
+  native 1111-line vertical total wants 110.92224 MHz, which does not, and 48.003 Hz is what
+  comes back. The lever is the vertical total, not the clock field: 1125 lines at 112.32 MHz
+  is 48.000000, and 1155 at 115.20 MHz is 47.952047952, which is 24000/1001 to the digit.
+- **This panel's floor is a line rate, not a vertical refresh.** 23.976 and 24 Hz built the
+  obvious way — the same vertical timing as the 47.952 and 48 Hz modes with the clock
+  halved — gave 27,692 and 27,000 Hz horizontal, and the panel showed nothing. Built by
+  raising the vertical total instead, at 35,077 and 36,000 Hz, both work. Its slowest working
+  mode is 33,750 Hz and its fastest failing one 27,692, so the floor is between them. The
+  failing and working pairs differed in exactly one field, which is what made that a
+  measurement rather than a guess.
+
+`dmDisplayFrequency` **truncates**: the nine modes come back from `EnumDisplaySettings` as
+50, 48, 47, 29, 24, 23, 60, 59 and 30, so on *this* panel 47 is 47.952 and 48 is 48.000 and
+`ChangeDisplaySettingsEx` can tell them apart. That is how the 47 Hz column below was
+measured, and **it is not a rule, it is this machine.** Truncation only separates the pair
+because these nine modes were built exact. A panel offering 60.000 and 59.997, or 59.94 and
+59.939, hands both of them to `EnumDisplaySettings` as one number and there is nothing in a
+`DEVMODE` to say which is wanted. A whole number of hertz cannot name a refresh rate.
+
+**The API that can is the Connecting and Configuring Displays one.**
+`DISPLAYCONFIG_PATH_TARGET_INFO::refreshRate` is a `DISPLAYCONFIG_RATIONAL`, and
+`SetDisplayConfig` takes back what `QueryDisplayConfig` gives. Measured on this machine, each
+row a separate apply and read-back:
+
+| asked for | came back as | pixel clock in force |
+|---|---|---|
+| 48000/1001 | 11520000/240240 = 47.952048 | 115.20 MHz |
+| 48/1 | 11232000/234000 = 48.000000 | 112.32 MHz |
+| 24000/1001 | 7296000/304304 = 23.976024 | 72.96 MHz |
+| 24/1 | 7488000/312000 = 24.000000 | 74.88 MHz |
+
+Those pixel clocks are the EDID timings above, to the hertz, so the request reached the right
+mode and the answer says which one. Three things fall out of that and none of them is
+available through a `DEVMODE`:
+
+- **Exact in, exact out.** No pair of modes is ambiguous, whatever the panel offers.
+- **`SDC_VALIDATE` asks without changing anything**, so "which of these modes would actually
+  apply" is answerable before a player disturbs somebody's desktop.
+- **The read-back is authoritative.** What is in force is a fact to be read rather than the
+  request to be assumed, which is the same discipline `learn_refresh` follows for the interval.
+
+So the shape is: **enumerate with DXGI**, whose `GetDisplayModeList` is rationals too and which
+lists modes that are not active; **validate and set with `SetDisplayConfig`**; **verify with
+`QueryDisplayConfig`**. `DEVMODE` never appears, and neither does exclusive fullscreen, which
+is what `IDXGISwapChain::ResizeTarget` would have wanted.
+
+One trap, because it cost the first attempt: clear `modeInfoIdx`, the 32-bit union member, and
+not `targetModeInfoIdx`, the 16-bit bitfield beside it. Setting the bitfield leaves
+`desktopModeInfoIdx` pointing at a mode that is no longer consistent, and every request comes
+back `ERROR_INVALID_PARAMETER` with nothing to say which field was wrong.
+
+`spread` is two numbers because the error is signed: how far the worst frame was late, and how
+far the worst was early. **Two-sided means the error alternates, which is judder; one-sided
+means it is a constant offset, which is latency.** That distinction is the whole result.
+
+**The 60 Hz column is the CRU 60.000 and not the panel's old 60.003**, because the override was
+already in place when this was measured: `QueryDisplayConfig` said 14040000/234000 at a pixel
+clock of 140.40 MHz throughout, which is the exact-60 mode from the table above. That is worth
+being precise about, because the three modes this panel now offers a 23.976 fps film are three
+different arguments and not one:
+
+| mode | refreshes per frame | what that is |
+|---|---|---|
+| 60.000 Hz | 2.502503 | near five halves. Alternating, **and** the cadence breaks every 16.7 s |
+| 59.940 Hz | 2.500000 exactly | five halves. Alternating forever, and it never breaks |
+| 47.952 Hz | 2.000000 exactly | two. No alternation at all |
+
+**Exactness is not the point; the ratio is.** 59.940 is exact and still puts every other frame
+half a refresh out, because half a refresh is what a 3:2 cadence *is*. What exactness buys
+there is only the absence of the 16.7-second break. Going from 60.000 to 59.940 removes a
+hitch; going to 47.952 removes the judder.
+
+Measured, three files at each of the three, one run apiece, as `late / early` in ms:
+
+| file | 60.000 Hz | 59.940 Hz | 47.952 Hz |
+|---|---|---|---|
+| `av.mp4` | 3.5 / 6.0 | 7.4 / 1.4 | **0.0 / 5.2** |
+| `av1.mp4` | 5.0 / 4.8 | 0.6 / 8.2 | **7.2 / 0.0** |
+| `vp9.webm` | 8.0 / 8.1 | 8.3 / 8.2 | 13.4 / 8.0 |
+
+and three more runs at 47.952 against two at 60.000, from the first sitting:
+
+| file | 60.000 Hz | 47.952 Hz |
+|---|---|---|
+| `av.mp4` | 8.6 / 8.0, 3.1 / 6.4 | 10.5 / 10.3, **0.0 / 2.2**, **0.0 / 3.5** |
+| `av1.mp4` | 5.4 / 4.2, 7.7 / 1.9 | 19.9 / 2.0, 13.0 / 8.4, **0.5 / 0.1** |
+| `vp9.webm` | 8.1 / 1.9, 3.8 / 6.4 | 0.3 / 1.0, **7.7 / 0.0**, **5.3 / 0.0** |
+
+Every one of the nine runs at a 2.5 ratio is two-sided, and it could not be otherwise: at five
+halves, alternate frames land half a refresh apart by construction. Seven of the twelve runs
+at 47.952 are one-sided with the other side at zero — the frames land on the same phase
+every time, and the number left is where the *first* one landed. **An exact ratio locks the
+cadence and does not choose the phase.** The runs that are still two-sided are ones where
+something slipped: this fixture is 128x96 and twenty-four frames long, so a single scheduling
+hiccup is the whole measurement, and the shape rather than any single row is the result.
+
+A constant offset of a few milliseconds is not what §9.9's sixty-millisecond skew is about and
+nobody can see it. The alternation is what a person sees, and at a ratio of exactly two there
+is none.
+
+**Two things this exposed, neither of them fixed here.** `av2.webm` measured 2.2 ms late in the
+table further up and measures 27 to 33 ms late now, and 61 ms at 47.952 — that is the AV2
+decoder falling behind on this machine rather than anything about the pacing, and a loop
+waking 47 times a second instead of 60 gives it longer to fall behind between chances.
+
+And **the measured refresh is biased low**: 20.62 to 20.67 ms against 20.854 nominal, 16.35 to 16.49 against 16.666, about a fifth
+of a millisecond both times. `learn_refresh` takes the shortest gap on the argument that a gap
+can only be *lengthened* by a turn that was late — true of outliers, but the minimum of
+a symmetrically jittery sample is biased low by roughly the jitter, and a fifth of a
+millisecond is that. The lead is built from it.
+
+#### Choosing the mode, which is the part that is not Windows
+
+**Done: `mediaperch-probe show --match-refresh`.** `src/engine/mediaperch/refresh.hpp` decides
+*which* mode, touches no display, and is the whole of what another platform would keep;
+`src/win/mediaperch/refresh_win.hpp` is the Windows half that enumerates and switches.
+
+The decision is three questions and they are not one score:
+
+- **The cadence.** A whole number of refreshes per frame shows every frame for the same
+  length of time. A half is 3:2 pulldown, which is judder by construction.
+- **Whether it holds.** An exact ratio repeats forever; a near-exact one slips a refresh
+  every so often, and that slip is a hitch.
+- **Whether frames survive.** A refresh under the frame rate cannot show them all.
+
+**The arithmetic is exact, and that is the point.** 24000/1001 into 48000/1001 is two, and in
+`double` it is not: the ratio is doubled and reduced to a fraction, so "even", "pulldown" and
+"exact" are one remainder rather than three tolerances. `rank_modes` is checked against this
+panel's nine modes written down as a table, which is what lets a machine with one display
+check every answer.
+
+One thing the ranking cannot decide, so it does not: **23.976 and 47.952 are both exactly
+right for a 23.976 fps film**, one refresh a frame and two, and nothing about the film
+separates them. `--refresh-prefer` does, and defaults to `fastest` for a measured reason —
+this panel would not show a 23.976 Hz mode at all until its timing was rebuilt, and even now
+that mode sits just above a line rate it refuses. Picking the slowest exact multiple by
+default would put a player on the least reliable mode a display has.
+
+**Two things the integration found.** A mode switch takes over a second, and with the switch
+after the audio half the wall clock had already started: the switch and the display's resync
+happened on its time, and a one-second file arrived with every frame already past — 24
+decoded, 24 dropped, one turn. It goes ahead of every clock now. And `vp9.webm` reports its
+match as *not* exact, at one slip per thirty days: Matroska states a frame duration in
+nanoseconds, and 41708333 ns is 24000/1001 to eight digits and not to the ninth. MP4 states a
+rational and can be exact; Matroska cannot. The ranking picks the same mode either way and
+says which of the two it had, which is the honest answer rather than a snap to what it
+probably meant.
+
 #### How large a picture, measured
 
 The presenter was asked to configure and to take one frame at each of ten sizes, on WARP and
@@ -1863,10 +2020,29 @@ in unsigned 32-bit arithmetic), `dsp_eq`'s and `dsp_convolve`'s `partition` at 2
 `channels <= 64` is not memory at all but the bus's own width, and `points >= 2` is a
 division by `points - 1`.
 
-The way to retire the five would be to stop the ABI being the place an allocation failure has
-nowhere to go — a guard at each module's entry points, turning `bad_alloc` into
-`MP_ERR_*` the way `Player::play_track` now turns it into a failed run. That is a change to
-six modules and it is not this one.
+**And then the five went too, because the ABI stopped being the place a failure has nowhere
+to go.** Sixty entry points across the seven C++ DSP modules carry a function-try-block now:
+`std::bad_alloc` becomes MP_ERR_NO_MEMORY, anything else MP_ERR_INTERNAL. It is not a new
+idea in this tree: eighteen of the twenty-nine module files already did exactly that, in the
+codecs, the demuxers, the sinks and the video module, and the DSP ones were the whole of what
+was missing. `modules/shared/abi_guard` is the catch half as a macro, so the diff is two
+lines a function and no statement moved, and `mediaperch_add_module` links it into *every*
+module rather than each one asking for it — a vtable that lets an exception out calls
+`std::terminate`, and that is as true of a module nobody has written yet as of these seven.
+
+So `max_taps`, `dsp_eq`'s `taps` and `partition`, `dsp_convolve`'s `partition` and `taps`, and
+`dsp_eq`'s curve `points` are all the caller's numbers now. One of them was two things at
+once and only one of the two was memory: `taps * 8` in `design_fir` wraps past 2^29 in the
+field's own width, so that was widened to `std::size_t` where the arithmetic is rather than
+capped at the input where the symptom was. What stays is `dsp_mix`'s `channels <= 64`, which
+is the bus's own width, and `points >= 2`, which is a division by `points - 1`.
+
+**What the guard does not buy is worth writing beside what it does.** It converts a failure
+that is *reported*. A vendored library that calls `abort`, or Rust's own allocation failure
+which reaches `handle_alloc_error` and aborts rather than unwinding, is past any fence either
+language can build — and that last is why "rewrite it in Rust" would not have removed
+these five. `catch_unwind` catches panics; C++ is the easier language on this one axis,
+because `new` throws and a throw can be turned into a number.
 
 **Settings**, with the two ways of reaching each one. The probe's flags are the tool's; the
 `[player]` keys are the settings file's, and what one of those *means* is decided in exactly

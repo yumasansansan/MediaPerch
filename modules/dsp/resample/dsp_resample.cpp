@@ -17,6 +17,7 @@
 
 #include "resample.hpp"
 
+#include <abi_guard.hpp>
 #include <mediaperch/module.h>
 
 #include <cmath>
@@ -41,13 +42,14 @@ struct MpDsp {
 namespace {
 
 MpResult MP_CALL dsp_open(MpDsp** out) noexcept
-{
+try {
     if (out == nullptr) {
         return MP_ERR_INVALID;
     }
     *out = new (std::nothrow) MpDsp();
     return *out != nullptr ? MP_OK : MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 void MP_CALL dsp_close(MpDsp* d) noexcept
 {
@@ -56,7 +58,7 @@ void MP_CALL dsp_close(MpDsp* d) noexcept
 
 MpResult MP_CALL dsp_configure(MpDsp* d, const MpFormat* in, std::uint32_t max_frames,
                                MpFormat* out, std::uint32_t* out_max) noexcept
-{
+try {
     if (d == nullptr || in == nullptr || out == nullptr || out_max == nullptr) {
         return MP_ERR_INVALID;
     }
@@ -85,11 +87,12 @@ MpResult MP_CALL dsp_configure(MpDsp* d, const MpFormat* in, std::uint32_t max_f
     *out_max = d->engine.max_output(max_frames);
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_process(MpDsp* d, const double* const* in, std::uint32_t in_frames,
                              double* const* out, std::uint32_t out_capacity,
                              std::uint32_t* out_frames) noexcept
-{
+try {
     if (d == nullptr || out == nullptr || out_frames == nullptr) {
         return MP_ERR_INVALID;
     }
@@ -101,10 +104,11 @@ MpResult MP_CALL dsp_process(MpDsp* d, const double* const* in, std::uint32_t in
     *out_frames = produced;
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_flush(MpDsp* d, double* const* out, std::uint32_t out_capacity,
                            std::uint32_t* out_frames) noexcept
-{
+try {
     if (d == nullptr || out == nullptr || out_frames == nullptr) {
         return MP_ERR_INVALID;
     }
@@ -116,9 +120,10 @@ MpResult MP_CALL dsp_flush(MpDsp* d, double* const* out, std::uint32_t out_capac
     *out_frames = produced;
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
-{
+try {
     if (d == nullptr || key == nullptr || value == nullptr) {
         return MP_ERR_INVALID;
     }
@@ -218,14 +223,13 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
     if (std::strcmp(key, "max_taps") == 0) {
         char* end = nullptr;
         const unsigned long taps = std::strtoul(value, &end, 10);
-        // **This is the memory bound, and it stays.** Every other length here
-        // is checked against it before anything is allocated, and the DSP ABI
-        // is `noexcept`, so a prototype the machine cannot hold is not a
-        // refusal but a terminated process. 2^26 coefficients is half a
-        // gigabyte of doubles before the transforms want their own. The 64
-        // floor was a judgement and is gone: a small ceiling just refuses more
-        // ratios, which is a thing somebody may want to do on purpose.
-        if (end == value || taps > (1u << 26)) {
+        // This was the memory bound, and it was 2^26 because a prototype the
+        // machine cannot hold used to be a terminated process rather than a
+        // refusal. The entry points catch now, so a length nothing can allocate
+        // comes back as MP_ERR_NO_MEMORY and the number is the caller's again.
+        // It is still the gate every other length is checked against: what it
+        // bounds is the *design*, and that is its job rather than a limit.
+        if (end == value || taps > 0xFFFFFFFFul) {
             return MP_ERR_INVALID;
         }
         d->design.max_taps = static_cast<std::uint32_t>(taps);
@@ -313,10 +317,11 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
     }
     return MP_ERR_UNSUPPORTED;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
                               std::uint32_t out_bytes) noexcept
-{
+try {
     if (d == nullptr || out == nullptr || out_bytes < 64) {
         return MP_ERR_INVALID;
     }
@@ -468,9 +473,10 @@ MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
         return MP_END;
     }
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_reset(MpDsp* d) noexcept
-{
+try {
     if (d == nullptr) {
         return MP_ERR_INVALID;
     }
@@ -482,9 +488,10 @@ MpResult MP_CALL dsp_reset(MpDsp* d) noexcept
                               d->format.channels, d->max_frames, d->design, d->why);
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_get_latency(MpDsp* d, std::uint32_t* out_frames) noexcept
-{
+try {
     if (d == nullptr || out_frames == nullptr) {
         return MP_ERR_INVALID;
     }
@@ -495,6 +502,7 @@ MpResult MP_CALL dsp_get_latency(MpDsp* d, std::uint32_t* out_frames) noexcept
     *out_frames = frames > 0.0 ? static_cast<std::uint32_t>(frames + 0.5) : 0u;
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 const MpDspVtbl g_vtbl = {
     /* size      */ sizeof(MpDspVtbl),
@@ -511,10 +519,11 @@ const MpDspVtbl g_vtbl = {
 };
 
 MpResult MP_CALL module_init(const MpHost* host) noexcept
-{
+try {
     (void)host; // nothing here logs, so nothing here keeps the host
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 void MP_CALL module_shutdown() noexcept
 {
