@@ -818,7 +818,13 @@ TEST_CASE("the engine renders into a surface and still has no window",
     const std::string where = presenter.described("surface");
     INFO("surface row: " << where);
     CHECK(where.rfind("composition 0x", 0) == 0);
-    CHECK(where != "composition 0x0");
+    CHECK(where.find("composition 0x0,") == std::string::npos);
+    // **And a frame clock that needs no window.** `show` paces on WaitForVBlank
+    // against the output its window is on; an engine has neither, and a
+    // waitable chain hands back an event the compositor sets -- the same
+    // question, answered by the thing that will actually show the frame.
+    CHECK(where.find("waitable 0x") != std::string::npos);
+    CHECK(where.find("waitable 0x0") == std::string::npos);
 
     // And it presents. Not read back: a flip-model chain's back buffer is the
     // shell's to composite and this process is deliberately not looking at it.

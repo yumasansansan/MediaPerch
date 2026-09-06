@@ -1513,6 +1513,12 @@ bool make_target(MpVideo* v, std::string& why)
         // video and wrong the moment anything is behind it, and the shell
         // cannot change its mind afterwards.
         desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+        // **The frame clock, for an engine that has no window to wait on.**
+        // `show` paces on `WaitForVBlank` against the output its window is on;
+        // an engine has neither. A waitable chain hands back an event the
+        // compositor sets, which is the same question -- *when may I draw the
+        // next one* -- answered by the thing that will actually show it.
+        desc.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
 
         Com<IDXGIFactoryMedia> media;
         if (FAILED(v->factory->QueryInterface(__uuidof(IDXGIFactoryMedia),
@@ -2352,10 +2358,20 @@ try {
         // boundary, and a shell duplicates it by value out of an IPC message;
         // printing it is how a settings surface carries one.
         if (v->composition != nullptr) {
+            HANDLE waitable = nullptr;
+            Com<IDXGISwapChain2> chain2;
+            if (v->swap_chain &&
+                SUCCEEDED(v->swap_chain->QueryInterface(
+                    __uuidof(IDXGISwapChain2), reinterpret_cast<void**>(chain2.put())))) {
+                waitable = chain2->GetFrameLatencyWaitableObject();
+            }
             std::snprintf(out, out_bytes,
-                          "surface\tcomposition 0x%llx\twhere it draws (read only)",
+                          "surface\tcomposition 0x%llx, waitable 0x%llx"
+                          "\twhere it draws and what paces it (read only)",
                           static_cast<unsigned long long>(
-                              reinterpret_cast<std::uintptr_t>(v->composition)));
+                              reinterpret_cast<std::uintptr_t>(v->composition)),
+                          static_cast<unsigned long long>(
+                              reinterpret_cast<std::uintptr_t>(waitable)));
         } else {
             std::snprintf(out, out_bytes, "surface\t%s\twhere it draws (read only)",
                           v->window != nullptr ? "a window" : "off-screen");

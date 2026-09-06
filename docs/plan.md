@@ -3039,6 +3039,57 @@ set. `IDCompositionVisual3::SetTransform` hides its base's overloads rather than
 them, which is C4263 and C4264, and it is suppressed around that one include and popped
 immediately so that ours stay errors.
 
+#### How it talks to a shell, which is less than it looks
+
+**Nothing crosses per frame.** That is the property the whole shape is for, and it is worth
+stating before the messages, because the messages are what is left over once it holds.
+
+| | crosses | when |
+|---|---|---|
+| the composition surface handle | engine — shell | once, when a graph is built |
+| the display: which monitor, HDR or not, its white and its peak | shell — engine | when the window moves or the mode changes |
+| the size to render at | shell — engine | when the window resizes, if at all — see below |
+| transport, playlist, settings, log | both | §10, already there |
+
+**The engine paces itself, and needs no window to do it.** `show` waits on `WaitForVBlank`
+against the output its window is on; an engine has neither a window nor an output. A
+composition swap chain asked for `DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT` hands
+back an event the compositor sets — measured: `composition 0x1e0, waitable 0x2a4`, and the
+presenter reports both. That is `WaitForVBlank`'s question, *when may I draw the next one*,
+answered by the thing that will actually show the frame, and it makes `IFrameClock` a third
+implementation beside the vblank and the tick rather than an IPC round trip in the render
+loop. **A shell that stops answering does not stop the video.**
+
+**The display is the one thing the engine cannot work out for itself.** `probe_display` takes
+a window and, given none, falls back to the first output — which is how a test measuring
+HLG's OOTF ended up reading this machine's panel rather than BT.2100's reference. For a
+windowless engine that fallback is not a fallback, it is a guess about which monitor the
+picture is on, and every §9 decision turns on it: the tone mapper, the SDR boost, the HLG
+system gamma, the encoding. So the shell says, and it says it again whenever its window
+crosses a monitor or the user toggles HDR. **This is a message that has to exist**, and it is
+the only one in this list that is not already implied by §10.
+
+**Who scales is a decision, not a detail.** The engine can render at the video's native size
+and let the shell's visual carry a transform, which costs no resize and no message at all;
+or the shell can ask for a size and the engine renders there, which puts the scaling in our
+own shader beside the chroma reconstruction rather than in the compositor's bilinear.
+The first is simpler and the second is better for the thing this program is about. **Not
+decided.** What is decided is that it is one message either way.
+
+#### What `Player` grows, and what it does not
+
+The assembly `show` does — a router reading one file for two consumers, a video decoder, a
+presenter, a display loop and a frame clock — moves into `src/player`, where it is portable
+and where the calibration driver can already reach it. `IEngineHost` gains two doors beside
+the four it has: **open a presenter** and **open a video decoder**. That is §15-legitimate
+from the day it is written, because the head implements it and the tests fake it, which is
+exactly `IEngineHost`'s own justification.
+
+What does *not* move is anything that knows what an `HWND` is. The presenter takes a
+composition surface and reports a handle; the decoder takes the presenter's device (§9.8.1);
+the display loop waits on whatever `IFrameClock` it was handed. **The engine still has no
+window and no toolkit**, which is the sentence the whole section exists to keep true.
+
 **What else comes with the video path, and is easy to forget.** Two things are waiting on this
 section rather than on any decision of their own, and neither is visible from here unless it is
 written down:
