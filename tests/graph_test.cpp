@@ -251,6 +251,50 @@ TEST_CASE("the closest the ring came is reported, and the file's own end is not 
     CHECK(stats.low_water_bytes < stats.ring_bytes);
 }
 
+TEST_CASE("the prefill stops at its floor, and the floor is a setting",
+          "[passthrough]")
+{
+    // **The device's own first buffer is the observable.** `start()` fills the
+    // ring, then reads one period out of it to prime the device; whether that
+    // read finds anything is exactly whether the prefill ran, and a read that
+    // finds nothing is counted as silence. So a floor of zero has to produce a
+    // period of silence at the start and a floor that covers the whole source
+    // has to produce none -- with nothing in between to race against, because
+    // the source here fits in the ring several times over.
+    constexpr std::uint32_t period = 64;
+    const auto format = cd_audio();
+    const std::size_t stride = mp::frame_bytes(format);
+    const auto bytes = pattern(stride * period * 4);
+
+    const auto silence_after = [&](std::uint32_t prefill_periods) {
+        VectorSource source{format, bytes};
+        mp::test::FakeSinkRules rules;
+        rules.period_frames = period;
+        mp::test::FakeSink device{rules};
+        mp::Sink sink = device.handle();
+
+        mp::Format accepted{};
+        REQUIRE(sink.negotiate(format, accepted) == MP_OK);
+
+        mp::PassthroughConfig config;
+        config.prefill_periods = prefill_periods;
+        mp::PassthroughGraph graph{source,        sink,    accepted, period,
+                                   mp::Fidelity::exact, nullptr, config};
+        REQUIRE(graph.start() == MP_OK);
+        REQUIRE(wait_until_stopped(graph));
+        graph.stop();
+        CHECK(graph.error() == MP_OK);
+        return graph.stats().silent_frames;
+    };
+
+    // Nothing asked for, nothing filled: the device is primed with silence.
+    CHECK(silence_after(0) >= period);
+    // A floor past the end of the source fills what there is, which is all of
+    // it -- so it behaves as the whole-ring prefill did before there was a
+    // floor at all.
+    CHECK(silence_after(64) == 0);
+}
+
 TEST_CASE("a repacked stream reaches the device as the move and nothing else",
           "[passthrough]")
 {

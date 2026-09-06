@@ -29,6 +29,8 @@ ProcessedGraph::ProcessedGraph(ISource& source, Sink& sink, const Format& wire,
       config_(config), period_frames_(period_frames), wire_frame_bytes_(frame_bytes(wire)),
       source_frame_bytes_(frame_bytes(source.format())),
       pump_bytes_(proc_.output_bytes()),
+      prefill_bytes_(static_cast<std::size_t>(period_frames) * frame_bytes(wire) *
+                     config.prefill_periods),
       ring_(ring_bytes(period_frames, frame_bytes(wire), config.ring_periods, pump_bytes_))
 {
     source_chunk_.resize(proc_.input_bytes());
@@ -79,6 +81,16 @@ bool ProcessedGraph::pump_once()
     return true;
 }
 
+void ProcessedGraph::fill_to_floor()
+{
+    while (ring_.readable() < prefill_bytes_ && ring_.writable() >= pump_bytes_) {
+        if (!pump_once()) {
+            drained_.store(true, std::memory_order_release);
+            return;
+        }
+    }
+}
+
 MpResult ProcessedGraph::start()
 {
     if (running_.load(std::memory_order_acquire)) {
@@ -102,12 +114,9 @@ MpResult ProcessedGraph::start()
     drained_.store(false, std::memory_order_release);
     error_.store(MP_OK, std::memory_order_relaxed);
 
-    while (ring_.writable() >= pump_bytes_) {
-        if (!pump_once()) {
-            drained_.store(true, std::memory_order_release);
-            break;
-        }
-    }
+    // Fill the ring before anything starts running, so the first device period
+    // is never served from an empty ring -- to a floor, not to the brim.
+    fill_to_floor();
 
     void* buffer = nullptr;
     std::uint32_t frames = 0;
@@ -430,12 +439,10 @@ void ProcessedGraph::perform_seek(std::uint64_t frame)
         rendered_base_.store(frames_rendered_.load(std::memory_order_relaxed),
                              std::memory_order_relaxed);
     }
-    while (ring_.writable() >= pump_bytes_) {
-        if (!pump_once()) {
-            drained_.store(true, std::memory_order_release);
-            break;
-        }
-    }
+    // The same floor as a start, and for a sharper reason: the render thread is
+    // parked and writing silence until this returns, so filling the whole ring
+    // here would make a seek's silence as long as the ring is large.
+    fill_to_floor();
     seek_request_.store(k_no_seek, std::memory_order_release);
     seeking_.store(false, std::memory_order_release);
 }

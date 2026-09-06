@@ -22,9 +22,47 @@ namespace mp {
 /// initializers while the enclosing class is still incomplete. MSVC accepts it;
 /// clang does not, and clang is right.
 struct PassthroughConfig {
-    /// Ring capacity, in device periods. Eight periods at a 3 ms period is about
-    /// 24 ms of slack for a decode thread that is not real-time.
-    std::uint32_t ring_periods = 8;
+    /// Ring capacity, in device periods. **Generous on purpose, and generous
+    /// against 4K.**
+    ///
+    /// Nothing here can know, before a file is opened, how long the worst
+    /// decode stall in it will be -- so the default covers a stall it has not
+    /// seen rather than the one it happens to be handed. 4K HEVC beside audio
+    /// underran at 8 periods and did not at 16, and the ring's low-water mark
+    /// stops moving above 16: the ring is what covers the stall, and above the
+    /// stall it does nothing at all.
+    ///
+    /// **Which is a claim about 4K and not a claim about everything.** 683 ms
+    /// is a small ring beside 16K60 and f64 PCM, and a default cannot be told
+    /// that by anything except a measurement -- `buffering.hpp` is where one is
+    /// allowed to say so, in either direction.
+    ///
+    /// Being wrong in one direction is a click. In the other it is memory and a
+    /// slower start, and both are cheap: 131,072 bytes at a 3 ms period, and
+    /// `start()` prefills the ring before the device begins, which costs about
+    /// a tenth to a fifth of a millisecond per millisecond of ring. A device
+    /// with a 10 ms period pays the most and pays about half a second.
+    ///
+    /// The number is periods rather than milliseconds, which is the unit the
+    /// risk is actually in -- §9.8.2 has why that is a defect and what it would
+    /// take to fix.
+    std::uint32_t ring_periods = 128;
+    /// How much of the ring is filled before the device is started, and before
+    /// a seek resumes. In device periods, and **not** the whole ring.
+    ///
+    /// The ring is deliberately larger than a start needs. Filling all of it
+    /// first would make how long a start takes -- and how long a seek is
+    /// silent, which is worse, because a seek happens again and again -- a
+    /// function of how large the ring is, which is the opposite of what a
+    /// generous ring is for. The decode thread fills the rest while the audio
+    /// is already playing, which is what it does for every other second of the
+    /// run.
+    ///
+    /// 32 because 16 periods was the least ring that did not underrun over the
+    /// 4K measurement in §9.8.2, and the moment the device starts should not be
+    /// the thinnest the run ever is. It costs about 14 ms here against the
+    /// 100 ms that filling all 128 costs.
+    std::uint32_t prefill_periods = 32;
     std::uint32_t wait_timeout_ms = 2000;
 };
 
@@ -194,6 +232,13 @@ private:
     std::uint32_t wire_frame_bytes_;
     std::uint32_t source_frame_bytes_;
     std::uint32_t chunk_frames_;
+    /// `PassthroughConfig::prefill_periods` in bytes.
+    std::size_t prefill_bytes_;
+
+    /// Fills the ring to `prefill_bytes_`, or until the source runs out, or
+    /// until the ring cannot take another chunk. **The one place a start and a
+    /// seek agree**, which is why it is a function rather than two loops.
+    void fill_to_floor();
 
     /// Takes the ring from the render thread, moves the source, and refills.
     void perform_seek(std::uint64_t frame);

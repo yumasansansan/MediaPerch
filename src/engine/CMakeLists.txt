@@ -21,6 +21,8 @@
 add_library(mediaperch_engine STATIC
     mediaperch/avsync.cpp
     mediaperch/avsync.hpp
+    mediaperch/buffering.cpp
+    mediaperch/buffering.hpp
     mediaperch/compare.cpp
     mediaperch/compare.hpp
     mediaperch/convert.cpp

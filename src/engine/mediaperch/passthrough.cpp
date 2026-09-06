@@ -26,6 +26,8 @@ PassthroughGraph::PassthroughGraph(ISource& source, Sink& sink, const Format& wi
       fidelity_(fidelity), hooks_(hooks), config_(config), period_frames_(period_frames),
       wire_frame_bytes_(frame_bytes(wire)), source_frame_bytes_(frame_bytes(source.format())),
       chunk_frames_(period_frames),
+      prefill_bytes_(static_cast<std::size_t>(period_frames) * frame_bytes(wire) *
+                     config.prefill_periods),
       ring_(round_up_ring(period_frames, frame_bytes(wire), config.ring_periods))
 {
     source_chunk_.resize(static_cast<std::size_t>(chunk_frames_) * source_frame_bytes_);
@@ -73,6 +75,17 @@ bool PassthroughGraph::pump_once()
     return true;
 }
 
+void PassthroughGraph::fill_to_floor()
+{
+    const std::size_t chunk = static_cast<std::size_t>(chunk_frames_) * wire_frame_bytes_;
+    while (ring_.readable() < prefill_bytes_ && ring_.writable() >= chunk) {
+        if (!pump_once()) {
+            drained_.store(true, std::memory_order_release);
+            return;
+        }
+    }
+}
+
 MpResult PassthroughGraph::start()
 {
     if (running_.load(std::memory_order_acquire)) {
@@ -91,13 +104,8 @@ MpResult PassthroughGraph::start()
     error_.store(MP_OK, std::memory_order_relaxed);
 
     // Fill the ring before anything starts running, so the first device period
-    // is never served from an empty ring.
-    while (ring_.writable() >= static_cast<std::size_t>(chunk_frames_) * wire_frame_bytes_) {
-        if (!pump_once()) {
-            drained_.store(true, std::memory_order_release);
-            break;
-        }
-    }
+    // is never served from an empty ring -- to a floor, not to the brim.
+    fill_to_floor();
 
     // And prefill the device's own first buffer, which is what the Microsoft
     // sample does and what keeps the very first period from being silence.
@@ -426,12 +434,10 @@ void PassthroughGraph::perform_seek(std::uint64_t frame)
         rendered_base_.store(frames_rendered_.load(std::memory_order_relaxed),
                              std::memory_order_relaxed);
     }
-    while (ring_.writable() >= static_cast<std::size_t>(chunk_frames_) * wire_frame_bytes_) {
-        if (!pump_once()) {
-            drained_.store(true, std::memory_order_release);
-            break;
-        }
-    }
+    // The same floor as a start, and for a sharper reason: the render thread is
+    // parked and writing silence until this returns, so filling the whole ring
+    // here would make a seek's silence as long as the ring is large.
+    fill_to_floor();
     seek_request_.store(k_no_seek, std::memory_order_release);
     seeking_.store(false, std::memory_order_release);
 }

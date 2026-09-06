@@ -171,6 +171,13 @@ private:
     /// which for anything that upsamples is more. Both loops keep this much
     /// room free, so a write never has to be split or dropped.
     std::uint32_t pump_bytes_;
+    /// `PassthroughConfig::prefill_periods` in bytes.
+    std::size_t prefill_bytes_;
+
+    /// Fills the ring to `prefill_bytes_`, or until the source runs out, or
+    /// until the ring cannot take another pump. **The one place a start and a
+    /// seek agree**, which is why it is a function rather than two loops.
+    void fill_to_floor();
 
     /// Takes the ring from the render thread, moves the source, and refills.
     void perform_seek(std::uint64_t frame);

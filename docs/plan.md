@@ -2168,7 +2168,8 @@ disagree.
 | `PacketRouterLimits::queued_packets_floor` | 4 | `--queue-packets` | — |
 | `PacketRouterLimits::hard_bytes_per_stream` | 256 MiB | `--queue-hard` | — |
 | `TickClock`'s period | 2000 us | `--tick-period` | — |
-| `PassthroughConfig::ring_periods` | 8 | `--ring-periods` | `ring_periods` |
+| `PassthroughConfig::ring_periods` | 128 | `--ring-periods` | `ring_periods` |
+| `PassthroughConfig::prefill_periods` | 32 | `--prefill-periods` | `prefill_periods` |
 | `PassthroughConfig::wait_timeout_ms` | 2000 | `--wait-timeout` | `wait_timeout` |
 | `ConvertConfig::{gain,dither,shaping,seed}` | unity, TPDF, none, fixed | `--gain`, `--dither`, `--shape`, `--dither-seed` | `gain`, `dither`, `shaping`, `dither_seed` |
 
@@ -2934,8 +2935,8 @@ claimed, sitting in a module that had only ever been asked to decode 128x96. It 
 `mp::decoder_threads()` now, which is what the rest of this tree does.
 
 **The second was a number that was right for audio and wrong for this.** Eight ring periods is
-24 ms of slack at a 3 ms period, which the comment on `--ring-periods` already calls "a busy
-machine may want more" — and a 4K software decoder with a worker on every core *is* the
+24 ms of slack at a 3 ms period, and the comment on `--ring-periods` said at the time that "a
+busy machine may want more" — a 4K software decoder with a worker on every core *is* the
 busy machine. At 32 periods, 96 ms, the audio never lost a buffer in four consecutive runs
 while the video went on dropping one to four frames of seventy-one. That is the acceptance
 condition exactly: the picture gives way, the sound does not.
@@ -2945,9 +2946,11 @@ finding a number that works and not a way of finding out how much of it is used.
 low-water measurement below asked that question afterwards: sixteen periods carries the same
 margin as thirty-two, and everything above sixteen is memory the run never touches.
 
-**What this does not say.** The default is still 8, and the default still underran here. What
-it settles is that the arithmetic works and the shape is sound: §8's clock held, and nothing
-rate-matched the audio to help it, because there is no method that could.
+**What this did not say, at the time.** The default was 8, and the default underran here;
+what the measurement settled was that the arithmetic works and the shape is sound — §8's
+clock held, and nothing rate-matched the audio to help it, because there is no method that
+could. **The default is 128 now**, for reasons the sections below measured and the last of
+them decides.
 
 #### Why the ring, and three answers that turned out to be wrong
 
@@ -3042,6 +3045,52 @@ reporting a figure that stops rising when the ring grows is in the regime where 
 is the limit and there is nothing left to buy. **The first says grow; the second says stop.**
 Neither reading needs to know anything about the machine.
 
+#### The knob has five positions, and the floor is two periods
+
+Three more readings, taken when the question turned to what an algorithm could output.
+
+**`--ring-periods` does not name a size.** `ByteRing` rounds its capacity up to a power of
+two, so the flag names a request that lands on the next power of two above it:
+
+| requested | the ring | held at the closest | underruns |
+|---|---|---|---|
+| 8 | 42.7 ms | 0.0 ms | 6 |
+| 9 | 42.7 ms | 0.0 ms | 6 |
+| 12 | 42.7 ms | 0.0 ms | 6 |
+| 15 | 85.3 ms | 6.0 ms | 0 |
+| 16 | 85.3 ms | 6.0 ms | 0 |
+
+**8, 9 and 12 are the same ring and produce the same run** — 6 underruns and 864 silent
+frames, to the frame, all three times. Between 8 periods and 128 there are five distinct
+rings, not a hundred and twenty. An algorithm that grows the ring by a quarter grows it by
+nothing at all; the only move the ring offers is a doubling.
+
+**The capacities also pin the device period, which nothing prints.** 8 and 12 periods land on
+8192 bytes and 15 lands on 16384, which is true only for a period between 137 and 170 frames
+— and 144 frames, 3.0 ms at 48 kHz, agrees with all eight capacity readings above.
+So the floor of 6.0 ms is **exactly two device periods**: at its worst the ring held the
+period being read and one spare, which is where a healthy single-producer handover settles.
+That is why the number stops moving. Above the burst the ring has to cover, the capacity is
+idle, and the run does not care that it is there.
+
+**And the near miss does not precede the failure within one ring size.** At 42.7 ms the
+reading is 0.0 ms *and* the underruns are already counted: the ring empties and the read comes
+up short in the same moment. The low-water mark separates a ring that is too small from one
+that is not; it is not an early warning inside the one that is.
+
+Nor can the ring be grown while it is running. `ByteRing`'s buffer is fixed at construction
+and the render thread indexes it against a mask derived from its size, with no lock and no
+second chance — so *grow it during playback* is a graph rebuild, which is a gap, which is
+the one thing [design.md](design.md)'s *Keeping it flowing* says must not happen. **A closed
+loop here can only act on the next graph, not on this one.**
+
+Which leaves the sizing question smaller than it looked and differently shaped. What has to be
+decided before the first frame is not a number but **which of about five rings**, and the cost
+of guessing high is bytes: 128 periods on this device is 131,072 of them. The cost of guessing
+low is audible. That asymmetry, not a throughput model, is the argument this measurement
+actually supports — and the default is still 8, because changing it is a policy decision
+and this section is a measurement.
+
 #### Which is the answer to "but machines differ"
 
 They do, and it is why the other three families are hard: a throughput constant measured on
@@ -3056,6 +3105,308 @@ What remains to decide is a policy, and the measurement is what a policy can now
 against: how thin is thin, how much to add, how long to wait before adding more, and whether
 to give the ring back when a film turns out to be cheap. **Those are choices about behaviour
 rather than guesses about hardware**, which is the difference this number makes.
+
+#### Calibrating, and the three things that decide its shape
+
+**The direction taken is the closed loop, calibrated rather than modelled**: measure on this
+machine, write the answer down, and let the answer depend on the stream — because 8K60 HEVC
+HDR10 beside 32-bit float PCM is not the same machine's worth of work as 4K24, and one number
+for both is one number that is wrong twice.
+
+Three things about this tree decide what that can look like, and all three are already
+measured or already written down.
+
+**1. The setting is in the wrong unit.** `ring_periods` counts periods *of this device*, and a
+period is 3.0 ms here and can be several times that elsewhere; the same number is a different
+amount of time on every machine, which is the one property a stored measurement must not have.
+What gets measured is milliseconds. So milliseconds is what a profile stores, converted to
+periods — and then to the power of two the ring will actually be — when the graph is built.
+`--ring-periods` stays exactly as it is: a user who names a number gets that number.
+
+**2. The answer is ordinal, not accurate.** Five rings between 8 periods and 128. A model that
+lands within a factor of two of the truth lands on the right one, which is a far cheaper thing
+to fit than the per-machine throughput constant families (1) and (2) wanted.
+
+**3. Nothing here can make its own test material.** `tests/data/make_4k_hevc.cmake` drives
+ffmpeg, and ffmpeg is deliberately not a build dependency and not shipped
+([building.md](building.md)). So a first-launch calibration would have to *ship* its content,
+and 8K60 for three seconds is tens of megabytes of exactly the thing this tree refused to
+commit at 4K.
+
+That suggested letting the first play of a class *be* the calibration — the low-water mark
+is reported already, so the profile could record what the class needed and the next file of
+that class would start there. **It is wrong, and the reason is worth keeping.** A class key of
+codec, geometry and frame rate says nothing about how hard the content is: two 4K23.976 HEVC
+streams, one a talking head and one a hand-held forest, differ by more than the margin being
+measured. Calibrate on whichever happened to be played first and a quiet file writes down a
+number that a loud one then fails at — silently, because the profile now says it measured
+that class. **A calibration nobody asked for, taken on material nobody chose, is a guess with
+a measurement's authority.**
+
+So: **a default set deliberately high, and measurement only when a user asks for it, over
+files the user picks.** The two halves are the same argument from opposite ends. The default
+does not know what it will be handed, so it is generous. The calibration knows exactly what it
+was handed, because somebody chose it.
+
+##### How high a default costs what
+
+The asymmetry says generous is cheap — 128 periods is 131,072 bytes here — but memory is
+not the only price, and the other one had not been measured. **`start()` prefills the entire
+ring before the device is started**, in both graphs, so a ring is also a delay before the
+first sample. The whole run, on the 4K file, two runs at each size:
+
+| `--ring-periods` | the ring | wall clock |
+|---|---|---|
+| 8 | 42.7 ms | 3763, 3483 ms |
+| 32 | 170.7 ms | 3449, 3473 ms |
+| 128 | 682.7 ms | 3508, 3529 ms |
+| 512 | 2730.7 ms | 3975, 3791 ms |
+
+Against a file that is 3.0 seconds long. Between 32 and 128 the difference is inside the
+noise; at 512 the ring is 2.7 seconds and the run pays about 370 ms for it — **roughly a
+tenth to a fifth of a millisecond of start-up per millisecond of ring**, which is the audio
+being decoded before anything can be heard.
+
+So generous has a ceiling, and it is not a memory ceiling: it is however long a person will
+wait before the sound starts. Somewhere around a third of a second of ring costs about 60 ms
+of that and covers this file eight times over. **And the number that expresses it has to be
+milliseconds**, for the reason above: 128 periods is 683 ms on a device with a 3 ms period and
+2.7 seconds on one with 10 ms, which is the difference between a good default and a bad one.
+
+##### The other place a big ring is paid for
+
+Start-up is paid once. **A seek pays it again, every time**, and that had not been looked at:
+`perform_seek` parks the render thread, resets the ring, and refills *the whole of it* before
+clearing the seeking flag — and a parked render thread is writing silence into the device.
+At the rate above that is something like 70 to 120 ms of silence per seek here, and about half
+a second on a device with a 10 ms period.
+
+Neither loop has to fill the ring to the brim. `start()`'s own comment says what its prefill
+is for — *so the first device period is never served from an empty ring* — and a few
+periods satisfy that; the decode thread fills the rest while the audio is already playing,
+which is what it does for every other second of the run.
+
+**So both loops fill to a floor now**, and it is the same floor and the same code: one
+`fill_to_floor` in each graph, called from `start()` and from `perform_seek`, stopping at
+`prefill_periods` device periods instead of at the brim. **How large the ring is and how long
+a start or a seek takes are no longer the same number.** The ring can be as generous as the
+worst stall deserves without a seek paying for it every time.
+
+The floor is 32 periods, which is 96 ms here against a ring of 683: **16 was the least ring
+that did not underrun over the 4K measurement, and the moment the device starts should not be
+the thinnest the run ever is.** Above the floor the ring keeps filling while the audio plays
+— the prefill rate above says the decode thread runs five to ten times real time, so the
+ring reaches its full 683 ms about a tenth of a second into playback. That tenth of a second
+is the one thing this trade costs: a stall in it lands on a ring that has not finished
+growing. A start now waits about 14 ms instead of 100, and a seek is silent for that long
+rather than for as long as the ring is large.
+
+**Measured after the change**, the same file and two runs each, against 3975 and 3791 ms for
+512 periods before it:
+
+| `--ring-periods` | the ring | wall clock |
+|---|---|---|
+| 128 | 682.7 ms | 3734, 3562 ms |
+| 512 | 2730.7 ms | 3431, 3484 ms |
+| 2048 | 10922.7 ms | 3584, 3510 ms |
+
+The last row is a ring of nearly eleven seconds against a file of three, and it costs nothing
+to start. **Start-up is flat in the ring size across a sixteenfold range**, which is the
+property the floor was for, and the low-water mark reads 6.0 ms at every one of them.
+
+It is a setting, because it is a bet about a machine and this program does not make those for
+people: `--prefill-periods`, `prefill_periods`. **Zero is a real answer** — start the device
+on whatever the first acquire can be given and let the decode thread catch up — and so is a
+number past the end of the ring, which means *all of it*, which is what this program did
+before the floor existed.
+
+##### What the measurement mode is
+
+A command the user runs, over files the user names, which plays each one and writes down what
+each class needed. Three things it has to get right:
+
+- **The worst, not the mean.** A calibration that averages a hard file with an easy one
+  produces a number that fails on the hard one, which is the same failure as calibrating on
+  whatever played first, arrived at more slowly.
+- **Say what it measured, and on what.** The profile records the files as well as the numbers,
+  so a person reading it later can see what the answer rests on and disagree with it. Every
+  other measurement in this tree is kept with its inputs; this one is a setting, so it matters
+  more rather than less.
+- **Supply a default, never overwrite a choice.** An explicit `ring_periods`, from the flag or
+  from the settings file, beats the profile always.
+
+**The class key** is what the container states before anything is opened: codec, width ×
+height, chroma and bit depth, frame rate as a ratio. The stall a ring covers is the cost of
+the most expensive single frame, so samples per frame is the axis and the frame rate says how
+often that cost recurs. Two measured points and a straight line in log2 place a third class,
+because the answer is a power of two and does not deserve better.
+
+**Where it is written is a separate question with a clear answer.** §11's settings file is the
+user's: `[player]` keys are arguments to `Player::set` and a person edits them by hand. A
+calibration result is not a setting, it is machine-local measured state, and a program that
+rewrites the user's file is a program that fights the user's editor. It belongs beside that
+file rather than in it, as a supplier of defaults that any explicit setting beats.
+
+**What is not known** is whether decoding alone predicts it. A decode-only calibration would
+be silent and faster than real time, and `VideoDecoder` already runs without a device — the
+codec tests do nothing else. But the reading above says the stall the ring covers is partly
+the coupling rather than the decode: one file has one position, so the audio thread spends its
+turns pulling video packets, and a decoder measured on its own never does that. Whether a
+decode-only number orders the classes correctly is a measurement nobody has taken.
+
+**The default is 128 periods** — 683 ms on this device, 131,072 bytes, and about 60 ms
+of the start-up it costs. On a device with a 10 ms period it is 2.7 seconds and about half a
+second of start-up, which is the worst this default can do to anybody and is worth what it
+buys. `--ring-periods` and the `ring_periods` key move it, and a number a user names is the
+number they get.
+
+##### Where it goes, which is four places and not one
+
+Put like that it sounds like a mode, and a mode wants a home. It is four things, and they
+belong in three different rings of §3:
+
+| | where | why there |
+|---|---|---|
+| the measurement | engine, **done** | `Stats::low_water_bytes` |
+| the policy: numbers — a ring | **engine, and not negotiable** | the ring is chosen where the graph is built |
+| the profile's text | `src/player`, beside `settings.cpp` | §11 already made this split |
+| the driver: play a list, record | `src/player` | one of it, above the engine, below every head |
+
+**The policy is in the engine because that is where the answer is needed**, not because the
+engine is a nice place to keep things. A policy in a shell leaves `mediaperchd` with no shell
+attached — §10's tray-only install — with no policy at all, and leaves anything that embeds
+`src/engine` for something other than playing music, a colour grader or an editor, with none
+either. It is pure arithmetic, so it is tested without a device, the way `refresh.hpp` and
+`framerate.hpp` are.
+
+**The profile's text is `src/player`'s because §11 settled that shape already**: the head
+opens the file and the portable half decides what the text means. `settings.cpp` takes a
+string and never touches a filesystem, `profile.cpp` does the same, and the Linux head gets
+both for nothing.
+
+**The driver is not a new mode, it is a list of files and a graph per file.** Not
+`mp::Queue`: gapless hides the track boundary from the graph on purpose, so a queue would
+give one `Stats` for the whole list instead of one per file, which is the opposite of the
+question. With those four in place a shell's whole share is *choose the files, say go, show
+the result* — one verb, and §10's surface does not widen to hold it.
+
+And no interfaces yet, per §15: there is one policy and one profile format. `IProfileStore`
+waits for a second store to exist.
+
+##### What is built, and the one rule it enforces
+
+`src/engine/mediaperch/buffering.{hpp,cpp}` and `src/player/mediaperch/profile.{hpp,cpp}`,
+with thirteen tests and no device between them.
+
+- `StreamShape` is the class key: codec, geometry, frame rate as a ratio. **Not bit depth or
+  chroma** — ABI v4 put those on the frame, so a container does not state them and neither
+  can anything asking this question before it opens a decoder.
+- `answer_for` picks **the cheapest class measured that is still at least as expensive** as
+  the one being asked about. An answer measured on harder material is safe for easier
+  material and merely wasteful; there is no interpolation and no extrapolation, because the
+  class above the largest one measured is exactly where a model would be guessing.
+- `ring_for` returns periods, **above the default as readily as below it**. It shipped for one
+  revision clamped to `min(measured, default)`, on the argument that a profile should only be
+  able to talk the ring down. That was wrong twice over and the correction is worth keeping.
+  It throws away the one case a default cannot answer — a class that needs *more* — and
+  leaves that class glitching while the answer sits written down in a file. And *"the default
+  is generous"* is a claim about the material it was measured against: 683 ms is a small ring
+  beside 16K60 and f64 PCM, and no adjective in a comment changes that. **§11 already ruled on
+  the shape of this**, when `ring_periods` lost its `2..4096` range: a size the machine cannot
+  meet comes back as a run that failed, caught where the graph is built, rather than as a
+  number refused in advance by somebody who was not there.
+
+  What survives is which direction is dangerous, and it is doing different work now: too much
+  ring is bytes and a slower start, both bounded; too little is a click. That is why an
+  *unmeasured* class gets the generous default and why an answer measured on heavier material
+  may stand in for lighter material. It is not a reason to overrule a measurement.
+- `Dimension` is what a user picks: `ring`, `threads`. **Chosen rather than assumed**, because
+  a calibration cannot run faster than real time — and adding a dimension multiplies how long
+  it takes by how many values it tries.
+- The profile is milliseconds, never periods — a period is 3 ms on one device and four times
+  that on another, so periods do not survive being written down. Its codec is a number with
+  the name in a comment above it, because a second table of codec names would be a second
+  place to forget the next codec in and `result.cpp` already says so about the first.
+
+##### The driver, and the door the platform comes through
+
+`src/player/mediaperch/calibrate.{hpp,cpp}`, with eleven tests and a fake machine.
+
+**Where in a file to measure, and for how long, is asked rather than assumed.** `Windows` is a
+count and a length, and `window_starts` spreads them so the first begins where the file does
+and the last ends where it ends — the beginning, the middle and the run-out, which is where a
+decoder's work is least like its average. A file too short to hold the plan gets one window
+and no arithmetic pretending otherwise: measuring the same ten seconds three times reports
+three runs and one fact.
+
+The sizes are powers of two, because there is nothing in between — 8, 9 and 12 periods
+were measured as the same ring, to the frame.
+
+**Which way it walks was a bug, found by asking what happens when the first size underruns.**
+The first version built every size from one to the ceiling and sorted them descending, so
+whatever it was told to start at, it began at the ceiling: nine real-time runs before reaching
+a plausible answer, on every file, every time. It did handle a machine needing more than the
+default — by accident, because it started above everything.
+
+What it does now is start **where it was told** and let the first run choose the direction. If
+the start holds, smaller sizes are worth trying and it walks down while they keep holding. If
+the start underruns, nothing smaller will, and the question is how much more is needed, so it
+walks up until one holds. The answer is the same either way and it is reached in the fewest
+real-time runs, which is the only currency a calibration spends.
+
+That is `Sweep::adaptive`, and it is a choice among four, because the fastest route to an
+answer is not always the answer somebody wants:
+
+| | walks | for |
+|---|---|---|
+| `adaptive` | from the start, whichever way the first run points | the fewest runs |
+| `shrink` | only smaller; a start that underruns has no answer and says so | *how little can I get away with* |
+| `grow` | only larger; never answers below the start | a machine already known to be short |
+| `every` | the whole range, no early stop | not assuming a size holding means every larger size holds, which is true of the mechanism and not always of a busy machine |
+
+The start, the floor and the ceiling are all in `CalibrationPlan` beside them. **Stopping
+points, not judgements about the value**: a user who names a ring outside them gets it, and
+these are only how far an automatic sweep goes before admitting it found nothing.
+
+**Every window has to hold**, not their average; one window is enough to disqualify a size,
+and the sweep stops that size there rather than finishing a set it has already failed at real
+speed. What is written down is the smallest size that held, **doubled** — 16 periods was the
+least ring that held over the 4K measurement and the acceptance ran at 32, so a default does
+not sit on the edge of the cliff.
+
+Threads are measured at the ring the sweep settled on, not at the one it started from, and
+**underruns decide before dropped frames even there**: §8 makes the audio the clock and the
+picture what gives way, so a thread count that keeps more frames by starving the ring has done
+the one thing it may not. Ties go to the smaller count.
+
+**Making one run is not in there, and the reason is structural.** What the measurement needs
+is the whole A/V graph: a router reading one file for two consumers (§4), a video decoder
+saturating the machine, and an audio graph against a real device with a real deadline. That
+assembly exists in exactly one place today — `show`, 438 lines of window, Direct3D,
+presenter and refresh switching — so one run arrives through `ICalibrationHost`, the way
+`Player` gets a file and an endpoint opened through `IEngineHost`. §15 wants a second
+implementation before an interface: there are two, the head's and the tests', which is exactly
+the justification `IEngineHost` has and `player_test.cpp` says so out loud.
+
+##### What the command still needs, which is two things and not one
+
+**Not built**, and what stands between:
+
+1. **A run has to stop after a window.** `show` plays until the file ends or the window
+   closes. A duration is one condition on that loop.
+2. **A run has to start somewhere other than the beginning.** The audio graphs seek and the
+   router has a position, but `show` never asks either to move: it opens a file and plays it
+   from the top. Seeking the A/V pair together — audio graph, router, video graph, and the
+   clock they share — is the piece that does not exist, and it is the piece a windowed
+   calibration is made of.
+
+The second is worth having anyway. A player that cannot seek a file with a picture in it is
+missing something rather larger than a calibration.
+
+Nor is the head's other half built: opening the profile file, and asking `ring_for` where the
+graph is built. That last one has a wrinkle worth naming before it bites — `ring_periods`
+carries no mark saying whether a user set it, so *the default* and *a user who typed 128* look
+identical to anything deciding whether a profile may speak.
 
 #### `claims` had never once mentioned a video decoder
 
@@ -3714,7 +4065,7 @@ HDR state.
 | M6.10 | The display loop, and a window with a picture in it | **done.** DisplayLoop in the engine and two clocks in the head: IFrameClock answers when a frame may be drawn and what time it is, in one object because they are one clock -- the tick a frame is drawn at is the tick the audio position is extrapolated to. VBlankClock waits on the output the window is actually on rather than the adapter's first, TickClock is the fallback, and the loop runs on its own thread because WaitForVBlank blocks a whole refresh and a message queue nobody drains for sixteen milliseconds is an unresponsive window. It re-reads the graph's clock_spec every turn and reconfigures when a seek moved the anchor, and a device that stops answering keeps its last reading rather than blanking the picture. `mediaperch-probe show` is the whole of it wired up -- one demuxer, the router feeding both halves, the audio graph that owns the clock, a window, and the loop -- which is §9.7.1's one-process-one-window case and is deliberately not in the engine. Measured on this machine with all four decoders: 24 shown and none dropped through codec_mft, dav1d and libvpx, 16 through avm, sixty turns for a one-second file on a 60 Hz display, and every worst-late figure inside one refresh, which is the floor. --no-audio pages in a wall clock for a file with no audio track and says so, because §8's clock is the audio device and there was none -- this machine's endpoint refused every format while that was measured |
 | M6.9 | One demuxer, and the position two consumers share | **done.** PacketRouter reads one demuxer once and hands each selected stream an IPacketFeed, which fills the hole VideoGraph was written around without changing a line of it. The ABI header already said what is wrong with the alternative: two file positions that a seek has to move separately and land on the same moment. So seek here is one call that moves the file and empties every queue, because a seek that left them would hand a consumer packets from before it. The queues are the only buffering and most packets miss them -- a consumer asking for its own stream has the demuxer read straight into its own buffer, serving a queued packet is a vector swap, and the vectors are recycled so a 4K keyframe costs no allocation. A per-stream cap answers MP_ERR_BUSY rather than growing, because dropping would be silent corruption and blocking would be a deadlock between two threads; VideoGraph reads that as its repeated, which is what it already does when nothing is due. Checked by equivalence: what each stream gets through the router is what it would have got from a demuxer of its own, packet for packet and byte for byte, with one file position. Two assertions that first test made were wrong and both were the fixture -- av.mp4's whole audio track is four kilobytes in forty-four packets, so a four-kilobyte cap fills only after the file ends, and a seek to half a second lands on frame zero because that fixture's only sync sample is its first |
 | M6.8 | The video graph: decode, pace, present | **done.** VideoDecoder and Presenter behind their vtables -- mp::Sink for pictures -- and VideoGraph, which holds one frame, asks §8's pacer and presents. One frame and no queue, because a decoded frame is valid until the next call on the codec that produced it and a queue would have to copy what §9.8.1 went to some trouble not to copy; the lookahead is inside the decoder, which reorders B-frames and since M6.6 uses every core. No thread of its own either: the audio graphs own one because the device's event paces them, and video's pace is the display's, which belongs to the head. A drop does not cost a refresh -- one pump lets go of every frame whose time has passed, because letting one go per refresh would never catch the clock. After the first frame the decoder is asked what it actually produced and the presenter reconfigured where the bitstream disagrees with the container, except for the timescale and the frame rate, which a decoder never re-times. Packets arrive through IPacketFeed rather than from a demuxer, which is a hole with a name: §4 says one file has one position, so audio and video must share one demuxer, and the router that would do that is what comes next. Checked on demux_mp4 + codec_dav1d + video_d3d11 with a clock somebody chose: 24 shown and none dropped at the right speed with nothing more than a millisecond late, twelve dropped and twelve shown half a second behind with the picture still right at the end, and five hundred polls of a stopped clock holding it |
-| M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse. **Measured, and met at `--ring-periods 32`**: 3840x2160 HEVC with an audio track, four consecutive runs, 0 underruns and 0 silent frames while 1 to 4 frames of 71 were dropped. At the default 8 periods it underran; the section above has what that says and does not say. Getting there took worker threads in `codec_de265` (one thread was a comment rather than a decision) and the ring. DirectComposition is still §9.7.1's shell case and unbuilt; hardware decode is `codec_mft` where the machine has a transform |
+| M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse. **Measured, and met at the default**: 3840x2160 HEVC with an audio track, 0 underruns and 0 silent frames while 1 to 4 frames of 71 were dropped. It was first met at `--ring-periods 32` against a default of 8 that underran; the default is 128 now, and the sections above are the measurements that moved it and what they do and do not say. Getting there took worker threads in `codec_de265` (one thread was a comment rather than a decision) and the ring. DirectComposition is still §9.7.1's shell case and unbuilt; hardware decode is `codec_mft` where the machine has a transform |
 | M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled |
 | M8 | WinUI 3 shell | killing it mid-track changes nothing audible |
 | M9 | Linux head | ALSA or PipeWire in an exclusive-equivalent mode, proving the core was actually portable |

@@ -97,8 +97,13 @@ struct Options {
     std::uint32_t dither_seed = 0x1f2e3d4cu;
     /// The ring, in device periods, and how long the render thread waits for a
     /// device that has stopped signalling. Both were constants until somebody
-    /// with a busier machine needed the first one bigger.
-    std::uint32_t ring_periods = 8;
+    /// with a busier machine needed the first one bigger. The ring's default is
+    /// deliberately generous, and `PassthroughConfig` says what against.
+    std::uint32_t ring_periods = 128;
+    /// How much of that ring is filled before the device starts and before a
+    /// seek resumes. Not the whole of it, or the ring's size would decide how
+    /// long a start takes and how long a seek is silent.
+    std::uint32_t prefill_periods = 32;
     std::uint32_t wait_timeout_ms = 2000;
     /// `show`: what one stream may hold while the other consumer is not
     /// asking. Mebibytes for the two caps, because that is the size a person
@@ -383,9 +388,16 @@ Options
   --dither-seed N   the dither generator's seed. Fixed rather than drawn from a
                     clock, so two decodes of one file produce the same bytes;
                     change it to hear the same setting a second time
-  --ring-periods N  ring capacity in device periods, default 8. At a 3 ms period
-                    that is 24 ms of slack for a decode thread that is not
-                    real-time, and a busy machine may want more
+  --ring-periods N  ring capacity in device periods, default 128. At a 3 ms
+                    period that is 683 ms of slack for a decode thread that is
+                    not real-time, which is generous because nothing can know
+                    the worst stall in a file before opening it. Lower it for a
+                    faster start; the ring is prefilled before the first sample
+  --prefill-periods N
+                    how much of the ring is filled before the device starts and
+                    before a seek resumes, default 32. Not the whole ring: the
+                    decode thread fills the rest while the audio plays, so this
+                    is what a start costs rather than what the ring costs
   --wait-timeout MS how long the render thread waits for a device that has
                     stopped signalling before calling it gone. Default 2000
   --queue-limit MiB `show`: how much of one stream may wait while the other
@@ -504,6 +516,8 @@ bool parse(int argc, char** argv, Options& out)
             }
         } else if (arg == "--ring-periods") {
             value(out.ring_periods);
+        } else if (arg == "--prefill-periods") {
+            value(out.prefill_periods);
         } else if (arg == "--wait-timeout") {
             value(out.wait_timeout_ms);
         } else if (arg == "--queue-limit") {
@@ -1232,6 +1246,7 @@ mp::PassthroughConfig buffering(const Options& options)
 {
     mp::PassthroughConfig config;
     config.ring_periods = std::max(2u, options.ring_periods);
+    config.prefill_periods = options.prefill_periods;
     config.wait_timeout_ms = options.wait_timeout_ms;
     return config;
 }
@@ -1793,6 +1808,7 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
         conversion.seed = options.dither_seed;
         mp::PassthroughConfig ring;
         ring.ring_periods = options.ring_periods;
+        ring.prefill_periods = options.prefill_periods;
         ring.wait_timeout_ms = options.wait_timeout_ms;
         if (mp::use_processed(options.path, negotiated.fidelity, options.gain != 1.0)) {
             processed = std::make_unique<mp::ProcessedGraph>(

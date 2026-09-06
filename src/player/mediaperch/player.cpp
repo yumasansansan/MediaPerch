@@ -395,7 +395,11 @@ std::vector<ipc::Setting> Player::settings() const
     row("dither_seed", std::to_string(config_.conversion.seed),
         "so two runs of one file produce the same bytes");
     row("ring_periods", std::to_string(config_.buffering.ring_periods),
-        "ring capacity in device periods. A busy machine may want more");
+        "ring capacity in device periods. Generous by default, because the "
+        "worst stall in a file is not knowable before opening it");
+    row("prefill_periods", std::to_string(config_.buffering.prefill_periods),
+        "how much of the ring is filled before the device starts and before a "
+        "seek resumes. Not the whole ring");
     row("wait_timeout", std::to_string(config_.buffering.wait_timeout_ms),
         "how long the render thread waits for a device before calling it gone");
     row("recover", config_.recover ? "1" : "0",
@@ -473,6 +477,19 @@ bool Player::set(const std::string& key, const std::string& value, std::string& 
                 return false;
             }
             config_.buffering.ring_periods = static_cast<std::uint32_t>(number);
+            rebuild = true;
+        } else if (key == "prefill_periods") {
+            // Zero is a real answer and not a broken one: start the device on
+            // whatever the first acquire can be given and let the decode thread
+            // catch up, which is a bet on the machine that is the user's to
+            // make. Larger than the ring is also real -- the fill stops when
+            // the ring is full, so it means "all of it", which is what this
+            // program did until it was measured.
+            if (!as_unsigned(value, 4294967295.0, number)) {
+                why = "prefill_periods is a whole number of device periods";
+                return false;
+            }
+            config_.buffering.prefill_periods = static_cast<std::uint32_t>(number);
             rebuild = true;
         } else if (key == "wait_timeout") {
             // Zero is a real answer: do not wait at all for a device that

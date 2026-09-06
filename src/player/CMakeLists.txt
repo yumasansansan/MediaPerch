@@ -35,6 +35,10 @@ add_library(mediaperch_player STATIC
     mediaperch/protocol.hpp
     mediaperch/queue.cpp
     mediaperch/queue.hpp
+    mediaperch/calibrate.cpp
+    mediaperch/calibrate.hpp
+    mediaperch/profile.cpp
+    mediaperch/profile.hpp
     mediaperch/settings.cpp
     mediaperch/settings.hpp
 )
