@@ -23,6 +23,8 @@
 // tree is compiled for. Anything that does not is a module the player will not
 // load, and a silent absence is the one thing §7 says this tree does not do.
 
+#include "mediaperch/result.hpp"
+
 #include <mediaperch/module.h>
 
 #include <catch2/catch_test_macros.hpp>
@@ -149,4 +151,53 @@ TEST_CASE("every module built here loads at this tree's ABI version", "[abi][mod
         INFO("DLLs in the module directory that are not modules:" << listed(unusable));
         REQUIRE(unusable.empty());
     }
+}
+
+TEST_CASE("every codec the ABI declares has a name", "[abi]")
+{
+    // **Six of them did not, for two ABI versions.** `codec_name` was written
+    // when this tree decoded audio, and the video codecs arrived in v3 without
+    // it -- so `claims` printed `codec 0x00000041` for an HEVC stream and
+    // `0x00000042` for an AV1 one, which is the id in hex and tells a reader
+    // nothing. Nothing failed, because a fallback that formats the number is
+    // indistinguishable from a name until somebody reads the output.
+    //
+    // The list here is the ABI's, so the next codec added to the header fails
+    // this until it is named. That is the whole point: the fallback exists for
+    // an id from a *newer* module than this build, and it should never be
+    // reached for one this build compiled against.
+    struct Known {
+        MpCodec codec;
+        const char* what;
+    };
+    const Known every[] = {
+        {MP_CODEC_PCM, "PCM"},         {MP_CODEC_DSD, "DSD"},
+        {MP_CODEC_FLAC, "FLAC"},       {MP_CODEC_ALAC, "ALAC"},
+        {MP_CODEC_WAVPACK, "WavPack"}, {MP_CODEC_APE, "Monkey's Audio"},
+        {MP_CODEC_TTA, "TTA"},         {MP_CODEC_MP1, "MPEG-1 layer I"},
+        {MP_CODEC_MP2, "MPEG-1 layer II"}, {MP_CODEC_MP3, "MP3"},
+        {MP_CODEC_AAC_LC, "AAC-LC"},   {MP_CODEC_HE_AAC, "HE-AAC"},
+        {MP_CODEC_VORBIS, "Vorbis"},   {MP_CODEC_OPUS, "Opus"},
+        {MP_CODEC_SPEEX, "Speex"},     {MP_CODEC_WMA, "WMA"},
+        {MP_CODEC_AC3, "AC-3"},        {MP_CODEC_EAC3, "E-AC-3"},
+        {MP_CODEC_DTS, "DTS"},
+        {MP_CODEC_H264, "H.264"},      {MP_CODEC_HEVC, "HEVC"},
+        {MP_CODEC_AV1, "AV1"},         {MP_CODEC_VP8, "VP8"},
+        {MP_CODEC_VP9, "VP9"},         {MP_CODEC_AV2, "AV2"},
+        {MP_CODEC_INTERNAL, "internal"}, {MP_CODEC_UNKNOWN, "unknown"},
+    };
+
+    for (const Known& one : every) {
+        const std::string got = mp::codec_name(one.codec);
+        INFO("codec " << static_cast<unsigned>(one.codec) << " came back as " << got);
+        // Not the hex fallback, which is what an unnamed id produces.
+        CHECK(got.find("0x") == std::string::npos);
+        CHECK(got == one.what);
+    }
+
+    // And an id this build has never heard of still says something rather than
+    // nothing, because a module newer than the host is allowed to exist.
+    const std::string future = mp::codec_name(static_cast<MpCodec>(4242u));
+    INFO(future);
+    CHECK_FALSE(future.empty());
 }

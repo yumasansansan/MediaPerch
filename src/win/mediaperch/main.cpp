@@ -3212,9 +3212,34 @@ int main(int argc, char** argv)
                 }
                 std::vector<std::uint8_t> config;
                 (void)demux.stream_config(i, config);
-                const char* takes = "nothing here decodes it";
+                // **A video stream is asked about too, and was not.** This
+                // only ever called `codec_for`, which walks MP_KIND_CODEC --
+                // the audio decoders. So every video stream in every file came
+                // back "nothing here decodes it", including the ones four
+                // modules in this tree decode. `av1.mp4` said it while `show`
+                // played the same file.
+                std::string takes = "nothing here decodes it";
                 if ((info.flags & MP_STREAM_SELF_DECODES) != 0u) {
                     takes = "this module, itself";
+                } else if (info.kind == MP_STREAM_VIDEO) {
+                    // **Every one that claims it, in order, rather than the
+                    // best.** A decoder can claim a codec and then fail to
+                    // open it -- `codec_mft` does exactly that for HEVC on a
+                    // machine with the Store extension installed -- so the
+                    // list is the diagnostic and the maximum is not.
+                    //
+                    // Asked for system memory, because `claims` opens no
+                    // presenter and has no device to offer. A module that
+                    // scores differently with one says so in `show`.
+                    const auto found = registry.video_codecs_for(
+                        info.codec, MP_GRAPHICS_NONE,
+                        config.empty() ? nullptr : config.data(),
+                        static_cast<std::uint32_t>(config.size()));
+                    for (const auto& one : found) {
+                        takes = takes == "nothing here decodes it"
+                                    ? std::string{one.desc->id}
+                                    : takes + ", " + one.desc->id;
+                    }
                 } else if (const MpCodecVtbl* chosen = registry.codec_for(
                                info.codec, config.empty() ? nullptr : config.data(),
                                static_cast<std::uint32_t>(config.size()))) {
@@ -3229,7 +3254,7 @@ int main(int argc, char** argv)
                 }
                 std::printf("  stream %u  %-8s %-8s -> %s\n", i,
                             mp::stream_kind_name(info.kind), mp::codec_name(info.codec),
-                            takes);
+                            takes.c_str());
             }
         }
 

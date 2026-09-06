@@ -46,6 +46,16 @@ const char* codec_name(MpCodec codec) noexcept
     case MP_CODEC_AC3: return "AC-3";
     case MP_CODEC_EAC3: return "E-AC-3";
     case MP_CODEC_DTS: return "DTS";
+    // **The video half, which this printed as a hex number until now.** Not a
+    // separate function: a stream's codec is one field, `claims` prints one
+    // column, and two name tables would be two places to forget the next codec
+    // in.
+    case MP_CODEC_H264: return "H.264";
+    case MP_CODEC_HEVC: return "HEVC";
+    case MP_CODEC_AV1: return "AV1";
+    case MP_CODEC_VP8: return "VP8";
+    case MP_CODEC_VP9: return "VP9";
+    case MP_CODEC_AV2: return "AV2";
     // Not "unknown": the module has told us it decodes this itself, which is a
     // statement, and printing it as an absence would misread the flag.
     case MP_CODEC_INTERNAL: return "internal";

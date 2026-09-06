@@ -2892,6 +2892,32 @@ already knew.** The fix in both cases was to stop.
 so a different fixture asks the same question; and it checks that the timestamps increase,
 which is the assertion that would have caught the first row on its own.
 
+#### `claims` had never once mentioned a video decoder
+
+**It asked the wrong registry.** `claims` called `codec_for`, which walks `MP_KIND_CODEC` —
+the audio decoders — so every video stream in every file came back *nothing here decodes
+it*. `av1.mp4` said it while `show` played the same file with dav1d. Four modules in this tree
+decode video and the command that exists to say who claims a file had never named one of them.
+
+It asks `video_codecs_for` now, and prints the whole list rather than the best, because the
+list is the diagnostic:
+
+```
+stream 0  video    HEVC     -> codec_mft, codec_de265
+```
+
+That single line is what would have explained the afternoon `codec_de265` spent unreachable:
+`codec_mft` claims HEVC on this machine and fails to open it, and the decoder that can do the
+job is behind it. A command that prints the maximum would have said `codec_mft` and stopped.
+
+**And it had never named a video codec either.** `codec_name` was written when this tree
+decoded audio; the video ids arrived in ABI v3 without it, so the column read `0x00000041` for
+HEVC and `0x00000042` for AV1. Nothing failed, because a fallback that formats the number is
+indistinguishable from a name until somebody reads the output. `module_abi_test.cpp` now walks
+every codec the header declares and fails on any that comes back as hex — which is the
+same shape as the test beside it, and for the same reason: an absence that nothing announces is
+the one thing §7 says this tree does not do.
+
 #### And against the reference, sample for sample
 
 **HEVC's decoding process is defined bit-exactly**, so libde265 and HM must agree on every
