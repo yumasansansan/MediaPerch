@@ -773,13 +773,33 @@ struct MpVideo {
 
 namespace {
 
+/// **The flags every shader here is compiled with**, named so that the
+/// assertion below can be about them rather than about a comment.
+constexpr UINT k_compile_flags =
+    D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_WARNINGS_ARE_ERRORS;
+
+// **Single precision, and the compiler is not asked to reconsider.**
+//
+// On the targets here the flag is inert: FXC honours
+// `D3DCOMPILE_PARTIAL_PRECISION` for shader model 2 and 3 and ignores it from 4
+// onward, and these compile as `vs_5_0` and `ps_5_0`. It is asserted against
+// anyway, because a flag that is inert today is a flag that is not inert after
+// a move to DXC, and because an assertion is cheaper to trust than a reader
+// working out which shader model they are looking at.
+//
+// What would actually reduce precision is a *type* -- `min16float`, or `half`
+// before it -- and `cmake/ShaderPrecision.cmake` is what bans those. Between
+// them and the twelve-bit measurement in `hdr_transfer_test.cpp` there are
+// three locks on one door, which is one more than a comment.
+static_assert((k_compile_flags & D3DCOMPILE_PARTIAL_PRECISION) == 0,
+              "the colour shader is computed at single precision; see plan.md §9.10");
+
 bool compile(const char* entry, const char* target, Com<ID3DBlob>& out, std::string& why)
 {
     Com<ID3DBlob> errors;
     const HRESULT hr = ::D3DCompile(k_shader, sizeof(k_shader) - 1, "colour.hlsl", nullptr,
-                                    nullptr, entry, target,
-                                    D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_WARNINGS_ARE_ERRORS,
-                                    0, out.put(), errors.put());
+                                    nullptr, entry, target, k_compile_flags, 0, out.put(),
+                                    errors.put());
     if (SUCCEEDED(hr)) {
         return true;
     }

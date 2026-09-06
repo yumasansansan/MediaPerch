@@ -286,6 +286,14 @@ add_test(NAME core_purity
             -D "MEDIAPERCH_CORE_DIR=${CMAKE_SOURCE_DIR}/src/engine;${CMAKE_SOURCE_DIR}/src/player"
             -P "${CMAKE_SOURCE_DIR}/cmake/CorePurity.cmake")
 
+# And the same shape of rule about the one place that legitimately touches half
+# precision. RGBA16F is what a flip-model swap chain takes; everything before
+# that write is 32-bit, and this is what keeps it so. See plan.md §9.10.
+add_test(NAME shader_precision
+    COMMAND "${CMAKE_COMMAND}"
+            -D "MEDIAPERCH_SHADER_DIR=${CMAKE_SOURCE_DIR}/modules/video/d3d11"
+            -P "${CMAKE_SOURCE_DIR}/cmake/ShaderPrecision.cmake")
+
 # Also not a unit test: a second compiler front end over the portable sources.
 # Both Clang presets in this tree turn the modules off, so most of the code has
 # only ever been read by MSVC -- and that hid a constant that was quietly -1, a

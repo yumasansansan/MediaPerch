@@ -2454,6 +2454,32 @@ The one place half is unavoidable is the last write on Windows: a flip-model swa
 8-bit UNORM, 10-bit UNORM or RGBA16F and nothing above. That is the platform's limit, it
 belongs to the platform, and the measurement below is of exactly that step.
 
+##### Can the flag be forbidden? Yes, and the interesting part is what it would forbid
+
+**On these targets `D3DCOMPILE_PARTIAL_PRECISION` does nothing.** FXC honours it for shader
+model 2 and 3 and ignores it from 4 onward; the shaders here compile as `vs_5_0` and `ps_5_0`.
+So the precision claim was never resting on the flag's absence, and banning it is guarding a
+door that is not the one somebody would walk through.
+
+**What would actually reduce precision is a type**: `min16float`, the shader model 6.2
+spelling of *at least sixteen bits, and sixteen will do*, or `half` before it. Neither means
+anything to FXC at SM5 — and both mean something the day this module moves to DXC or to
+D3D12, which is a move nobody will remember to check. So both are banned now.
+
+Three locks, each on what it can actually hold:
+
+| | guards | how |
+|---|---|---|
+| `static_assert` in the module | the **flag** | against `k_compile_flags`, the named constant the flags are passed as, so it checks the value rather than the spelling |
+| `cmake/ShaderPrecision.cmake` | the **types** | a grep the compiler cannot do, run as a test beside `core_purity` |
+| `hdr_transfer_test.cpp` | the **result** | one step of a twelve-bit code, which half cannot resolve at that magnitude |
+
+**And the grep's first run failed on the assertion that bans the flag**, which is why the flag
+is not in its list: a name-grep for `D3DCOMPILE_PARTIAL_PRECISION` can only ever find the line
+forbidding it. The same run failed on the comment explaining why `min16float` is not used, so
+comment lines are exempt — a check that cannot tell an explanation from a use is a check
+that makes the explanation impossible to write, which is how a rule ends up undocumented.
+
 ##### The arithmetic is wider than the format a display gets, measured
 
 §9.10 says it and now something checks it. Two twelve-bit codes one step apart, rendered

@@ -652,9 +652,9 @@ subset of C and C++, because the whole point of that file is to be readable by a
 we do not control. See §14 of [the plan](plan.md) for exactly which C23 features MSVC 19.51
 has and which it does not.
 
-## The three checks that are not unit tests
+## The checks that are not unit tests
 
-All three run as part of `ctest`, so they cannot be skipped by not remembering them.
+All of them run as part of `ctest`, so they cannot be skipped by not remembering them.
 
 - **`core_purity`** greps `src/engine` and `src/player` for OS headers and platform
   conditionals and fails the test run if either appears. `mediaperch_engine` is built alone
@@ -662,6 +662,14 @@ All three run as part of `ctest`, so they cannot be skipped by not remembering t
   second rule for free: the engine target does not have `src/player` on its include path, so
   an engine file reaching for the transport or the playlist is a `C1083`, not a review
   comment.
+- **`shader_precision`** greps `modules/video/d3d11` for `min16float`, `float16_t` and the
+  vector spellings of `half`. RGBA16F is what a flip-model swap chain takes and is the last
+  write a picture gets on Windows; everything before it is 32-bit on purpose, and this is one
+  of three locks on that. The second is a `static_assert` in the module against the named
+  constant the compile flags are passed as, so `D3DCOMPILE_PARTIAL_PRECISION` cannot be added
+  without failing the build -- and the third is a measurement, in `hdr_transfer_test.cpp`,
+  that resolves one step of a twelve-bit code. Each guards what only it can: the compiler the
+  flag, the grep the types, the test the result.
 - **`tests/abi_header_c.c`** is compiled as C rather than C++. The ABI header exists to be
   read by another language; a header that has only ever been through a C++ compiler has not
   been tested for that job. The `MP_STATIC_ASSERT` block in the header fires there under C's
