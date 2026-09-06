@@ -2033,10 +2033,19 @@ What runs out first is elsewhere, and the numbers are worth having:
 
 
 **`--no-audio`, and what it admits.** §8's clock is the audio device, and a file with no audio
-track has none; neither does a run on a machine whose endpoint refuses every format, which is
-not hypothetical -- this one did while the above was measured. `WallClock` counts the
-performance counter and reports it as though a device were playing, the program says which of
-the two clocks it is using, and the header says plainly that it is not §8's. What it costs is
+track has none. `WallClock` counts the performance counter and reports it as though a device
+were playing, the program says which of the two clocks it is using, and the header says plainly
+that it is not §8's.
+
+**An earlier version of this paragraph said something else and was wrong.** It claimed the
+runs above used `--no-audio` because this machine's endpoint "refuses every format", which is
+not what happened: `show` defaults to `--path bitexact`, every file used here has a lossy
+audio track, and **a lossy decoder's output is F32** — which no device accepts in exclusive
+mode. So the refusal was Path A doing exactly what §5 built it to do, and reading it as a
+broken endpoint was reading a working one backwards. A lossy file needs `--path processed` or
+`--path auto`, and with one it plays: 44100 Hz S24_IN_32 on this machine's speakers. The
+mistake is worth keeping because it is the one Path A is designed to provoke and the one its
+message has to prevent. What it costs is
 what §8 was avoiding: the counter and the display are not the same crystal either. What it
 does not cost is anything a person can hear, because there is nothing to hear.
 
@@ -2892,6 +2901,52 @@ already knew.** The fix in both cases was to stop.
 so a different fixture asks the same question; and it checks that the timestamps increase,
 which is the assertion that would have caught the first row on its own.
 
+#### M6's acceptance, measured
+
+> **4K HEVC plays with frames dropped against audio, never the reverse.**
+
+Two statements, and `show` was measuring one of them. The video side has always said what it
+dropped; the audio side said nothing at all, so "never the reverse" was an assertion about the
+shape of the code rather than a number. An **underrun** is the device having been handed less
+than a period — the audible symptom of a run the picture won — and it is now printed
+beside the frame counts.
+
+The fixture is 3840x2160 at 23.976 for three seconds **with an audio track**, because a claim
+about two clocks cannot be measured on a file that has one. It is generated rather than
+committed: six megabytes against fourteen kilobytes for every other fixture here, used by one
+measurement, and `tests/data/make_4k_hevc.cmake` is what makes it repeatable.
+
+**It failed, and then it failed less, and then it passed.**
+
+| | frames | audio |
+|---|---|---|
+| as first measured | 37 shown, **34 dropped** | **173 underruns**, half a second of silence |
+| worker threads | 69 shown, 2 dropped | 1 to 26 underruns, run to run |
+| and `--ring-periods 32` | 67-70 shown, 1-4 dropped | **0 underruns, 0 silent**, four runs |
+
+**The first failure was a comment.** `codec_de265` said one thread was deliberate because
+libde265's workers "decode frames ahead of the one asked for" and that this made a seek
+expensive. libde265's own header says the opposite: the workers parallelise WPP and tile
+decoding *inside one picture* and do not relax the rule that one thread owns the context. And
+the paragraph was attached to two `set_parameter` calls that set defaults, so nothing was
+configuring any threading at all. A rationale nobody checked, for code that did not do what it
+claimed, sitting in a module that had only ever been asked to decode 128x96. It calls
+`mp::decoder_threads()` now, which is what the rest of this tree does.
+
+**The second was a number that was right for audio and wrong for this.** Eight ring periods is
+24 ms of slack at a 3 ms period, which the comment on `--ring-periods` already calls "a busy
+machine may want more" — and a 4K software decoder with a worker on every core *is* the
+busy machine. At 32 periods, 96 ms, the audio never lost a buffer in four consecutive runs
+while the video went on dropping one to four frames of seventy-one. That is the acceptance
+condition exactly: the picture gives way, the sound does not.
+
+**What this does not say.** The default is still 8, and the default still underran here. A
+player that meets M6 out of the box has to either raise the ring when it sees a stream this
+expensive, or leave fewer cores to the decoder than there are — and which of those is right
+is a question this measurement asks rather than answers. What it settles is that the
+arithmetic works and the shape is sound: §8's clock held, and nothing rate-matched the audio
+to help it, because there is no method that could.
+
 #### `claims` had never once mentioned a video decoder
 
 **It asked the wrong registry.** `claims` called `codec_for`, which walks `MP_KIND_CODEC` —
@@ -3549,7 +3604,7 @@ HDR state.
 | M6.10 | The display loop, and a window with a picture in it | **done.** DisplayLoop in the engine and two clocks in the head: IFrameClock answers when a frame may be drawn and what time it is, in one object because they are one clock -- the tick a frame is drawn at is the tick the audio position is extrapolated to. VBlankClock waits on the output the window is actually on rather than the adapter's first, TickClock is the fallback, and the loop runs on its own thread because WaitForVBlank blocks a whole refresh and a message queue nobody drains for sixteen milliseconds is an unresponsive window. It re-reads the graph's clock_spec every turn and reconfigures when a seek moved the anchor, and a device that stops answering keeps its last reading rather than blanking the picture. `mediaperch-probe show` is the whole of it wired up -- one demuxer, the router feeding both halves, the audio graph that owns the clock, a window, and the loop -- which is §9.7.1's one-process-one-window case and is deliberately not in the engine. Measured on this machine with all four decoders: 24 shown and none dropped through codec_mft, dav1d and libvpx, 16 through avm, sixty turns for a one-second file on a 60 Hz display, and every worst-late figure inside one refresh, which is the floor. --no-audio pages in a wall clock for a file with no audio track and says so, because §8's clock is the audio device and there was none -- this machine's endpoint refused every format while that was measured |
 | M6.9 | One demuxer, and the position two consumers share | **done.** PacketRouter reads one demuxer once and hands each selected stream an IPacketFeed, which fills the hole VideoGraph was written around without changing a line of it. The ABI header already said what is wrong with the alternative: two file positions that a seek has to move separately and land on the same moment. So seek here is one call that moves the file and empties every queue, because a seek that left them would hand a consumer packets from before it. The queues are the only buffering and most packets miss them -- a consumer asking for its own stream has the demuxer read straight into its own buffer, serving a queued packet is a vector swap, and the vectors are recycled so a 4K keyframe costs no allocation. A per-stream cap answers MP_ERR_BUSY rather than growing, because dropping would be silent corruption and blocking would be a deadlock between two threads; VideoGraph reads that as its repeated, which is what it already does when nothing is due. Checked by equivalence: what each stream gets through the router is what it would have got from a demuxer of its own, packet for packet and byte for byte, with one file position. Two assertions that first test made were wrong and both were the fixture -- av.mp4's whole audio track is four kilobytes in forty-four packets, so a four-kilobyte cap fills only after the file ends, and a seek to half a second lands on frame zero because that fixture's only sync sample is its first |
 | M6.8 | The video graph: decode, pace, present | **done.** VideoDecoder and Presenter behind their vtables -- mp::Sink for pictures -- and VideoGraph, which holds one frame, asks §8's pacer and presents. One frame and no queue, because a decoded frame is valid until the next call on the codec that produced it and a queue would have to copy what §9.8.1 went to some trouble not to copy; the lookahead is inside the decoder, which reorders B-frames and since M6.6 uses every core. No thread of its own either: the audio graphs own one because the device's event paces them, and video's pace is the display's, which belongs to the head. A drop does not cost a refresh -- one pump lets go of every frame whose time has passed, because letting one go per refresh would never catch the clock. After the first frame the decoder is asked what it actually produced and the presenter reconfigured where the bitstream disagrees with the container, except for the timescale and the frame rate, which a decoder never re-times. Packets arrive through IPacketFeed rather than from a demuxer, which is a hole with a name: §4 says one file has one position, so audio and video must share one demuxer, and the router that would do that is what comes next. Checked on demux_mp4 + codec_dav1d + video_d3d11 with a clock somebody chose: 24 shown and none dropped at the right speed with nothing more than a millisecond late, twelve dropped and twelve shown half a second behind with the picture still right at the end, and five hundred polls of a stopped clock holding it |
-| M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse. **Started**: MP_KIND_VIDEO has a vtable, `video_d3d11` renders BGRA8 into a flip-model scRGB target or an off-screen one, and `read_back` makes the result a hash rather than a screenshot somebody looks at. §9's colour decisions are a separate testable header. NV12, P010 and the tone mappers wait for the decoder that produces frames for them |
+| M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse. **Measured, and met at `--ring-periods 32`**: 3840x2160 HEVC with an audio track, four consecutive runs, 0 underruns and 0 silent frames while 1 to 4 frames of 71 were dropped. At the default 8 periods it underran; the section above has what that says and does not say. Getting there took worker threads in `codec_de265` (one thread was a comment rather than a decision) and the ring. DirectComposition is still §9.7.1's shell case and unbuilt; hardware decode is `codec_mft` where the machine has a transform |
 | M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled |
 | M8 | WinUI 3 shell | killing it mid-track changes nothing audible |
 | M9 | Linux head | ALSA or PipeWire in an exclusive-equivalent mode, proving the core was actually portable |

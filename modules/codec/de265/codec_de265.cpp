@@ -26,6 +26,7 @@
 // valid until the next call, which is what `MpVideoCodecVtbl` promises and
 // what makes a 4K frame free rather than a copy.
 
+#include "decoder_threads.hpp"
 #include "h264.hpp"
 
 #include <abi_guard.hpp>
@@ -33,6 +34,7 @@
 
 #include <libde265/de265.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -289,15 +291,36 @@ try {
     if (owned->ctx == nullptr) {
         return MP_ERR_NO_MEMORY;
     }
-    // **One thread, and it is not a performance decision to revisit lightly.**
-    // §4 says a module may not assume the host's threading, and libde265's
-    // worker threads decode frames ahead of the one asked for -- which is
-    // exactly what a player wants and exactly what makes `reset` at a seek
-    // expensive. One thread keeps `decode` and `next_frame` the same call
-    // sequence they are on paper. See modules/shared/decoder_threads for the
-    // shape this takes when it is made a setting.
-    de265_set_parameter_bool(owned->ctx, DE265_DECODER_PARAM_DISABLE_DEBLOCKING, 0);
-    de265_set_parameter_bool(owned->ctx, DE265_DECODER_PARAM_DISABLE_SAO, 0);
+    // **Worker threads, and the comment that used to be here was wrong twice
+    // over.** It said one thread was deliberate because libde265's workers
+    // "decode frames ahead of the one asked for", which is not what they do --
+    // the header says they parallelise WPP and tile decoding *inside* one
+    // picture and do not relax the rule that one thread owns the context. And
+    // it was attached to two `set_parameter` calls that set defaults, so
+    // nothing was configuring any threading at all. A rationale nobody checked,
+    // for code that did not do what it claimed.
+    //
+    // 4K found it: three seconds of 3840x2160 decoded on one core, the video
+    // fell far enough behind that 34 of 71 frames were dropped, and the audio
+    // device underran 173 times -- which is M6's acceptance condition failing
+    // on the half that says the picture never wins.
+    //
+    // `mp::decoder_threads()` is this tree's answer everywhere else, and
+    // libde265 caps its own pool at 32 (MAX_THREADS in threads.h), so the
+    // smaller of the two is what it is asked for. A failure here is not fatal:
+    // the decoder still works on the calling thread, which is what it did
+    // before this line existed.
+    const int threads =
+        static_cast<int>(std::min<unsigned>(mp::decoder_threads(), 32u));
+    if (threads > 1) {
+        const de265_error started = de265_start_worker_threads(owned->ctx, threads);
+        if (started != DE265_OK) {
+            log_line(MP_LOG_WARN,
+                     (std::string{"codec_de265: no worker threads: "} +
+                      de265_get_error_text(started))
+                         .c_str());
+        }
+    }
 
     // The parameter sets, before any sample.
     const MpResult sets = push_parameter_sets(owned.get());

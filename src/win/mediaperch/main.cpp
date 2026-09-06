@@ -1872,6 +1872,22 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
 
     const mp::VideoGraph::Stats stats = video_graph.stats();
     const mp::DisplayLoop::Stats turns = loop.stats();
+
+    // **The other half of §8's claim, which this did not report.** "Frames are
+    // dropped against audio, never the reverse" is two statements, and until
+    // now `show` measured only the first: the video side says what it dropped
+    // and the audio side said nothing at all. An underrun is the device having
+    // been given less than a period -- the audible symptom of a run where the
+    // picture won -- and it is the number that makes "never the reverse" a
+    // measurement rather than an assertion about the code's shape.
+    if (exact || processed) {
+        const auto audio_stats = exact ? exact->stats() : processed->stats();
+        std::printf("\naudio      %llu frames rendered, %llu underruns, %llu silent\n",
+                    static_cast<unsigned long long>(audio_stats.frames_rendered),
+                    static_cast<unsigned long long>(audio_stats.underruns),
+                    static_cast<unsigned long long>(audio_stats.silent_frames));
+    }
+
     std::printf("\nframes     %llu shown, %llu dropped, %llu decoded\n",
                 static_cast<unsigned long long>(stats.shown),
                 static_cast<unsigned long long>(stats.dropped),

@@ -90,7 +90,7 @@ mediaperch_add_module(mp_codec_de265
     SOURCES codec_de265.cpp
     # `hvcC` to Annex B, which is `avcC` to Annex B with a different record in
     # front of it -- see modules/shared/h264, where the emitter never knew which.
-    LINK de265::de265 mediaperch_h264)
+    LINK de265::de265 mediaperch_h264 mediaperch_decoder_threads)
 
 set_target_properties(mp_codec_de265 PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
