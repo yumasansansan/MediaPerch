@@ -2318,6 +2318,78 @@ scRGB) and get it correct. Only then add `shader`, and only as an option — a h
 tone mapper that ships before the platform one has been made to work is how a project ends
 up maintaining a colour pipeline it never meant to own.
 
+#### 9.7.2 M7, staged, and what is already standing
+
+**More of M7 exists than the milestone table suggests**, because the decisions were made
+while the pieces around them were being built. Written down here so that the next person to
+open this does not rediscover it:
+
+| | state |
+|---|---|
+| the decision — `plan_for`, `Stream`, `Display`, `ToneMap`, `Encoding`, `Convert`, `Plan` | **built**, in `modules/video/d3d11/colour_plan.hpp`, pure and with eight tests |
+| the display is HDR, and its peak | **built**, `IDXGIOutput6::GetDesc1` |
+| flip-model scRGB fp16 chain, `SetColorSpace1` | **built** |
+| the packed HDR10 buffer when nothing is composited | **built**, `Encoding::pq` picks `R10G10B10A2` |
+| `sdr_scale` reaching the shader | **built**, and always 1.0 — see step 1 |
+| a `tonemap` setting a person can name | **built**, and no provider behind any of the names |
+| sRGB and BT.1886 in the shader | **built** |
+| PQ, HLG, any tone mapper, the SDR white level, the right output | **not built** |
+
+So M7 is not a pipeline to design. It is **six steps against a design that is already
+written**, and they are in this order because each one is visible on its own:
+
+**1. Read the SDR white level, and the boost stops being a no-op.** §9.6 calls this the one
+that will look wrong first, `Plan::sdr_scale` is computed and plumbed all the way to the pixel
+shader, and the number is always 1.0 because `QueryDisplayConfig` +
+`DISPLAYCONFIG_SDR_WHITE_LEVEL` is never called — the code says so, with a `(void)window`.
+Smallest step in M7 and the one that fixes the most common HDR bug in players.
+
+**2. The output the window is actually on.** Today it is adapter 0, output 0. §9.4 says the
+greatest intersection with the window, and `IDXGIFactory1::IsCurrent` each frame, and *do not*
+call `GetContainingOutput`. Until this is done everything else in M7 is correct about the
+wrong monitor, and *switching monitors mid-playback is handled* is half of M7's own acceptance
+condition.
+
+**3. PQ in the shader.** `Convert::to_linear` covers sRGB and BT.1886 today and ST.2084 not at
+all, so an HDR10 stream is currently decoded with an SDR curve. This is the step that first
+puts an HDR picture on the screen, and on an HDR display it needs no tone mapper: the plan
+already answers `ToneMap::none` there.
+
+**4. HLG in the shader.** `Convert::hlg_to_linear`, with the OOTF's system gamma taken from
+`Plan::hlg_peak_nits`, which the plan already carries for exactly this and which §9.9.1
+explains at length.
+
+**5. A tone mapper, for an HDR stream on an SDR display.** §9.7 says the OS's first and ours
+second, and that ordering is about what ships as the default rather than about what is written
+first — but it is worth naming the tension: `driver` is a second rendering path
+(`ID3D11VideoContext`'s fixed-function video processor, not our pixel shader), and it cannot
+be checked by a test on a machine whose GPU does that differently. `shader` is a BT.2390 EETF
+on top of step 3, it is thirty lines, and it is **testable off-screen against the formula**.
+The default stays `driver` either way.
+
+**6. HDR static metadata, which needs an ABI append.** `IDXGISwapChain4::SetHDRMetaData` and
+`VideoProcessorSetStreamHDRMetaData` both want the mastering display's primaries, its
+luminance range, MaxCLL and MaxFALL. **`MpVideoInfo` carries none of them** — it has
+primaries, transfer and matrix, which say how to *decode*, and nothing that says what the
+content was graded on. So this step begins with a size-prefixed append, the way
+`MpVideoCodecVtbl::set` did, and the demuxers and decoders that can fill it (`mdcv`/`clli`
+boxes, HEVC and AV1 SEI) fill it.
+
+#### How any of it is checked, which is the part that decides whether it is worth doing
+
+A colour pipeline that is judged by looking at it is a colour pipeline nobody can change. This
+tree's habit is a reference and a number, and HDR gives one readily: **the transfer functions
+and the EETF are formulas**, so a known code value has a known linear answer, and the presenter
+already has `read_back` and renders off-screen with a null window.
+
+So each of steps 3, 4 and 5 arrives with a test that puts a ramp through the real shader and
+compares it against the curve computed independently in the test — ST.2084 and its inverse,
+ARIB STD-B67 with its OOTF at a stated peak, BT.2390's EETF at stated black and white points.
+**None of those needs an HDR display**, which means they run in CI and on any machine, which
+means they are a test rather than a ritual. Steps 1, 2 and 6 are not formulas and are checked
+the way the device matrix is: by hand, on real hardware, written into
+[devices.md](devices.md).
+
 **And before any of it, a way to tell.** §9.2 is the record of what happens without one:
 Windows maps PQ to a 2.4 gamma where the sRGB curve belongs, Intel published a support note
 saying so, and it has survived years of that because the result looks fine. A colour pipeline
@@ -4321,7 +4393,7 @@ HDR state.
 | M6.9 | One demuxer, and the position two consumers share | **done.** PacketRouter reads one demuxer once and hands each selected stream an IPacketFeed, which fills the hole VideoGraph was written around without changing a line of it. The ABI header already said what is wrong with the alternative: two file positions that a seek has to move separately and land on the same moment. So seek here is one call that moves the file and empties every queue, because a seek that left them would hand a consumer packets from before it. The queues are the only buffering and most packets miss them -- a consumer asking for its own stream has the demuxer read straight into its own buffer, serving a queued packet is a vector swap, and the vectors are recycled so a 4K keyframe costs no allocation. A per-stream cap answers MP_ERR_BUSY rather than growing, because dropping would be silent corruption and blocking would be a deadlock between two threads; VideoGraph reads that as its repeated, which is what it already does when nothing is due. Checked by equivalence: what each stream gets through the router is what it would have got from a demuxer of its own, packet for packet and byte for byte, with one file position. Two assertions that first test made were wrong and both were the fixture -- av.mp4's whole audio track is four kilobytes in forty-four packets, so a four-kilobyte cap fills only after the file ends, and a seek to half a second lands on frame zero because that fixture's only sync sample is its first |
 | M6.8 | The video graph: decode, pace, present | **done.** VideoDecoder and Presenter behind their vtables -- mp::Sink for pictures -- and VideoGraph, which holds one frame, asks §8's pacer and presents. One frame and no queue, because a decoded frame is valid until the next call on the codec that produced it and a queue would have to copy what §9.8.1 went to some trouble not to copy; the lookahead is inside the decoder, which reorders B-frames and since M6.6 uses every core. No thread of its own either: the audio graphs own one because the device's event paces them, and video's pace is the display's, which belongs to the head. A drop does not cost a refresh -- one pump lets go of every frame whose time has passed, because letting one go per refresh would never catch the clock. After the first frame the decoder is asked what it actually produced and the presenter reconfigured where the bitstream disagrees with the container, except for the timescale and the frame rate, which a decoder never re-times. Packets arrive through IPacketFeed rather than from a demuxer, which is a hole with a name: §4 says one file has one position, so audio and video must share one demuxer, and the router that would do that is what comes next. Checked on demux_mp4 + codec_dav1d + video_d3d11 with a clock somebody chose: 24 shown and none dropped at the right speed with nothing more than a millisecond late, twelve dropped and twelve shown half a second behind with the picture still right at the end, and five hundred polls of a stopped clock holding it |
 | M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse. **Measured, and met at the default**: 3840x2160 HEVC with an audio track, 0 underruns and 0 silent frames while 1 to 4 frames of 71 were dropped. It was first met at `--ring-periods 32` against a default of 8 that underran; the default is 128 now, and the sections above are the measurements that moved it and what they do and do not say. Getting there took worker threads in `codec_de265` (one thread was a comment rather than a decision) and the ring. DirectComposition is still §9.7.1's shell case and unbuilt; hardware decode is `codec_mft` where the machine has a transform |
-| M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled |
+| M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled. **The decision is already built** and most of the presentation with it -- §9.7.2 has what stands, the six steps that remain, and how each is checked without an HDR display |
 | M8 | WinUI 3 shell | killing it mid-track changes nothing audible |
 | M9 | Linux head | ALSA or PipeWire in an exclusive-equivalent mode, proving the core was actually portable |
 
