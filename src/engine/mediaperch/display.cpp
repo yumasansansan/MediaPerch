@@ -159,6 +159,14 @@ bool DisplayLoop::once(DisplayStep& out)
     const std::uint64_t tick = frames_->now();
     learn_refresh(tick);
 
+    // Asked before anything is decided about, and answered by not deciding.
+    const bool holding = holding_.load(std::memory_order_acquire);
+    parked_.store(holding, std::memory_order_release);
+    if (holding) {
+        out.step = VideoGraph::Step::repeated;
+        return true;
+    }
+
     refresh_spec();
     ClockReading reading{};
     if (audio_->read(reading)) {

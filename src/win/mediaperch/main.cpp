@@ -11,6 +11,8 @@
 #include "mediaperch/framerate.hpp"
 #include "mediaperch/refresh_win.hpp"
 
+#include "mediaperch/calibrate.hpp"
+#include "mediaperch/profile.hpp"
 #include "mediaperch/display.hpp"
 #include "mediaperch/display_win.hpp"
 #include "mediaperch/video.hpp"
@@ -42,6 +44,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -99,11 +102,40 @@ struct Options {
     /// device that has stopped signalling. Both were constants until somebody
     /// with a busier machine needed the first one bigger. The ring's default is
     /// deliberately generous, and `PassthroughConfig` says what against.
-    std::uint32_t ring_periods = 128;
     /// How much of that ring is filled before the device starts and before a
     /// seek resumes. Not the whole of it, or the ring's size would decide how
     /// long a start takes and how long a seek is silent.
     std::uint32_t prefill_periods = 32;
+    /// **Zero means nobody said.**
+    ///
+    /// `ring_periods` used to default to the same number the engine defaults
+    /// to, which made *the default* and *a user who typed it* indistinguishable
+    /// to anything deciding whether a measured profile may speak. A profile
+    /// exists to fill in where nobody chose; it must never overrule somebody
+    /// who did, and it cannot tell the difference unless the difference is
+    /// written down. So it is: unset is zero, and the engine's own default is
+    /// what unset resolves to when there is no profile either.
+    std::uint32_t ring_periods = 0;
+    /// How long to play before stopping, or zero for all of it. A window,
+    /// which is what a measurement is made of and what a person wanting to
+    /// hear one part of a file asks for.
+    double play_seconds = 0.0;
+    /// `calibrate`: what to move, what order to walk it in, and how much of
+    /// each file to spend on it. Every one of them costs real time, which is
+    /// why every one of them is asked rather than assumed.
+    /// Threads for the video decoder, or 0 for whatever the module decides.
+    /// A module built before `MpVideoCodecVtbl::set` existed cannot be told,
+    /// and says so rather than being told nothing.
+    std::uint32_t decoder_threads = 0;
+    std::string measure = "ring";
+    std::string sweep = "adaptive";
+    std::uint32_t windows = 3;
+    double window_seconds = 10.0;
+    std::uint32_t lowest_ring = 1;
+    std::uint32_t highest_ring = 8192;
+    /// Where the profile is written. Empty prints it instead, which is what a
+    /// person wants the first time and never wants again.
+    std::string profile_path;
     std::uint32_t wait_timeout_ms = 2000;
     /// `show`: what one stream may hold while the other consumer is not
     /// asking. Mebibytes for the two caps, because that is the size a person
@@ -257,6 +289,10 @@ void usage()
   show        open a file in a window and play it: one demuxer feeding both
               halves, the audio device holding the clock, and the picture going
               up against it. TAKES THE ENDPOINT unless --no-audio.
+  calibrate   measure what this machine needs to play these files, and write it
+              down. Plays each file, in windows, at one ring size after another.
+              TAKES THE ENDPOINT, at real speed, for as long as the windows add
+              up to -- a calibration cannot run faster than the material.
   loudness    measure a file to ITU-R BS.1770 and print its ReplayGain figure.
               Touches no device.
   modules     list what loaded, and what each one claims to be
@@ -393,6 +429,33 @@ Options
                     not real-time, which is generous because nothing can know
                     the worst stall in a file before opening it. Lower it for a
                     faster start; the ring is prefilled before the first sample
+  --seek FRAME      start somewhere other than the beginning. In audio frames,
+                    and for `show` it moves the picture with the sound: one
+                    file has one position and both consumers are held still
+                    while it moves
+  --for SECONDS     stop after this long instead of at the end of the file.
+                    Counted from after `--seek`, so the two together are a
+                    window: this part of this file, for this long
+  --decoder-threads N
+                    how many threads the video decoder may use. Default is the
+                    module's own answer, which is the core count. Refused by a
+                    decoder that has already started its workers, and
+                    unsupported by one built before the ABI could say it
+  --measure LIST    `calibrate`: what to move. `ring`, `threads`, or both
+                    separated by a comma. Default `ring`
+  --sweep WHICH     `calibrate`: `adaptive` starts at --ring-periods and lets
+                    the first run pick the direction; `shrink` only goes
+                    smaller; `grow` only larger; `every` tries the whole range
+                    and does not stop early. Default `adaptive`
+  --windows N       `calibrate`: how many places in each file to measure.
+                    Default 3 -- the beginning, the middle and the run-out
+  --window-seconds S
+                    `calibrate`: how long each one plays. Default 10
+  --lowest-ring N, --highest-ring N
+                    `calibrate`: how far the sweep walks before saying it found
+                    no answer. Stopping points, not opinions about the value
+  --profile PATH    `calibrate`: where to write what it measured. Without one
+                    it prints the profile instead of writing it
   --prefill-periods N
                     how much of the ring is filled before the device starts and
                     before a seek resumes, default 32. Not the whole ring: the
@@ -473,7 +536,7 @@ bool parse(int argc, char** argv, Options& out)
             usage();
             std::exit(0);
         } else if (arg == "devices" || arg == "negotiate" || arg == "play" ||
-                   arg == "show" ||
+                   arg == "show" || arg == "calibrate" ||
                    arg == "verify" || arg == "decode" || arg == "modules" ||
                    arg == "compare" || arg == "loudness" || arg == "claims") {
             out.command = arg;
@@ -518,6 +581,42 @@ bool parse(int argc, char** argv, Options& out)
             value(out.ring_periods);
         } else if (arg == "--prefill-periods") {
             value(out.prefill_periods);
+        } else if (arg == "--decoder-threads") {
+            value(out.decoder_threads);
+        } else if (arg == "--measure") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "--measure needs a list, e.g. ring or ring,threads\n");
+                return false;
+            }
+            out.measure = argv[++i];
+        } else if (arg == "--sweep") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "--sweep needs adaptive, shrink, grow or every\n");
+                return false;
+            }
+            out.sweep = argv[++i];
+        } else if (arg == "--windows") {
+            value(out.windows);
+        } else if (arg == "--window-seconds") {
+            if (i + 1 < argc) {
+                out.window_seconds = std::strtod(argv[++i], nullptr);
+            }
+        } else if (arg == "--lowest-ring") {
+            value(out.lowest_ring);
+        } else if (arg == "--highest-ring") {
+            value(out.highest_ring);
+        } else if (arg == "--profile") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "--profile needs a path\n");
+                return false;
+            }
+            out.profile_path = argv[++i];
+        } else if (arg == "--for") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "--for needs a number of seconds\n");
+                return false;
+            }
+            out.play_seconds = std::strtod(argv[++i], nullptr);
         } else if (arg == "--wait-timeout") {
             value(out.wait_timeout_ms);
         } else if (arg == "--queue-limit") {
@@ -1245,7 +1344,9 @@ std::unique_ptr<mp::ISource> open_file(mp::win::EngineHost& host, const std::str
 mp::PassthroughConfig buffering(const Options& options)
 {
     mp::PassthroughConfig config;
-    config.ring_periods = std::max(2u, options.ring_periods);
+    if (options.ring_periods != 0) {
+        config.ring_periods = std::max(2u, options.ring_periods);
+    }
     config.prefill_periods = options.prefill_periods;
     config.wait_timeout_ms = options.wait_timeout_ms;
     return config;
@@ -1537,8 +1638,63 @@ bool switch_path(Options& current, const RunOutcome& run, mp::Queue& queue)
 /// The shape is the whole of what has been built: one demuxer, a router
 /// feeding both halves, the audio graph that owns the master clock, and a
 /// display loop that reads that clock and pumps the video graph against it.
+/// Reads a profile file, or says why it could not.
+///
+/// §11's split, applied to the second file: the head opens it and
+/// `mp::parse_profile` decides what the text means. **A profile that will not
+/// read is not fatal.** It supplies defaults, and a run without them is the run
+/// this program made before there were any.
+bool read_profile(const std::string& path, mp::Profile& out, std::string& why)
+{
+    std::FILE* file = nullptr;
+    if (fopen_s(&file, path.c_str(), "rb") != 0 || file == nullptr) {
+        why = path + " could not be opened";
+        return false;
+    }
+    std::string text;
+    char chunk[4096];
+    for (;;) {
+        const std::size_t got = std::fread(chunk, 1, sizeof chunk, file);
+        text.append(chunk, got);
+        if (got != sizeof chunk) {
+            break;
+        }
+    }
+    const bool bad = std::ferror(file) != 0;
+    std::fclose(file);
+    if (bad) {
+        why = path + " could not be read to the end";
+        return false;
+    }
+    const mp::ProfileText read = mp::parse_profile(text, path);
+    for (const std::string& complaint : read.complaints) {
+        std::fprintf(stderr, "%s\n", complaint.c_str());
+    }
+    out = read.profile;
+    return true;
+}
+
+/// What one `show` run measured, for a caller that is a program.
+///
+/// The report `show` prints is for a person; this is the same run read by
+/// something that is going to make a decision from it. Nothing is computed
+/// here that the report does not already print -- **two answers to one
+/// question would be two things to keep in step**, so both come off the same
+/// `Stats`.
+struct ShowResult {
+    bool ok = false;
+    std::uint64_t underruns = 0;
+    std::uint64_t frames_shown = 0;
+    std::uint64_t frames_dropped = 0;
+    std::size_t low_water_bytes = 0;
+    std::size_t ring_bytes = 0;
+    std::uint32_t period_frames = 0;
+    std::uint32_t sample_rate = 0;
+    std::uint32_t frame_bytes = 0;
+};
+
 int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
-         const Options& options)
+         const Options& options, ShowResult* measured = nullptr)
 {
     if (options.files.empty()) {
         std::fprintf(stderr, "show needs a file: --file <path>\n");
@@ -1680,6 +1836,18 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
         return 1;
     }
     std::printf("decoder    %s\n", decoder_desc->id);
+    if (options.decoder_threads != 0) {
+        // **Between `open` and the first packet**, which is where a decoder
+        // that starts a worker pool can still be told how big to make it.
+        const std::string count = std::to_string(options.decoder_threads);
+        const MpResult told = decoder.set("threads", count.c_str());
+        if (told != MP_OK) {
+            std::fprintf(stderr, "%s would not take %u threads: %s\n", decoder_desc->id,
+                         options.decoder_threads, mp::result_name(told));
+            return 1;
+        }
+        std::printf("threads    %u, asked for\n", options.decoder_threads);
+    }
     std::printf("picture    %ux%u", picture.width, picture.height);
     if (picture.fps_den != 0) {
         std::printf(" at %.3f fps", static_cast<double>(picture.fps_num) / picture.fps_den);
@@ -1760,7 +1928,21 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
     // priority -- which is not what the player does and is not what §14 says
     // the thread is for. M6's acceptance was measured through this command.
     mp::win::RenderThreadHooks audio_hooks;
+    // Read once, before any graph is built, because §11's rule is that the
+    // head opens files and the portable half decides what they mean.
+    mp::Profile profile;
+    if (!options.profile_path.empty() && options.command != "calibrate") {
+        std::string unreadable;
+        if (!read_profile(options.profile_path, profile, unreadable)) {
+            std::fprintf(stderr, "%s -- carrying on with the defaults\n",
+                         unreadable.c_str());
+        }
+    }
+
     mp::Format audio_wire{};
+    /// Beside it, and hoisted for the same reason: what a ring period is a
+    /// multiple of is the device's, and the report is written out here.
+    std::uint32_t audio_period = 0;
     std::unique_ptr<mp::IAudioClockSource> audio_clock;
     mp::Sink sink;
 
@@ -1798,6 +1980,7 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
         // milliseconds of audio, and this is what says how many bytes a
         // millisecond is.
         audio_wire = negotiated.accepted;
+        audio_period = period;
         // The same flags `play` takes, because `show` is `play` with a picture
         // beside it and a setting that works in one and is ignored in the other
         // is worse than a setting that does not exist.
@@ -1807,8 +1990,27 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
         conversion.shaping = options.shaping;
         conversion.seed = options.dither_seed;
         mp::PassthroughConfig ring;
-        ring.ring_periods = options.ring_periods;
         ring.prefill_periods = options.prefill_periods;
+        // **Three answers, in the order that respects who said what.** A number
+        // somebody typed wins outright. Failing that, a profile measured on
+        // this machine for this class of stream. Failing that, the engine's own
+        // generous default, which is what the two above are measured against.
+        if (options.ring_periods != 0) {
+            ring.ring_periods = options.ring_periods;
+        } else if (!profile.measured.empty()) {
+            const mp::StreamShape shape{video_info.codec, picture.width, picture.height,
+                                        picture.fps_num, picture.fps_den};
+            const std::uint32_t asked =
+                mp::ring_for(shape, profile, audio_period, negotiated.accepted.sample_rate,
+                             ring.ring_periods);
+            if (asked != ring.ring_periods) {
+                std::printf("profile    %u periods rather than %u, measured here\n", asked,
+                            ring.ring_periods);
+            } else {
+                std::printf("profile    nothing measured for this class of stream\n");
+            }
+            ring.ring_periods = asked;
+        }
         ring.wait_timeout_ms = options.wait_timeout_ms;
         if (mp::use_processed(options.path, negotiated.fidelity, options.gain != 1.0)) {
             processed = std::make_unique<mp::ProcessedGraph>(
@@ -1882,7 +2084,32 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
         done.store(true, std::memory_order_release);
     }};
 
-    while (!done.load(std::memory_order_acquire) && window.pump_messages()) {
+    // **A file with a picture in it, seeked.** §4 gives the file one position
+    // and the router owns it, so this is one move that three things have to
+    // agree about, which is what `seek_together` is. Asked *after* the loop is
+    // turning, because a loop that has not started has no turn in which to
+    // answer the hold, and the wait would be the deadline every time.
+    if (options.seek != 0) {
+        const bool moved =
+            exact ? mp::seek_together(*exact, video_graph, loop, options.seek)
+                  : processed
+                        ? mp::seek_together(*processed, video_graph, loop, options.seek)
+                        : false;
+        std::printf("seek       %s frame %llu\n", moved ? "moved to" : "would not move to",
+                    static_cast<unsigned long long>(options.seek));
+        std::fflush(stdout);
+    }
+
+    // **Counted from here**, after the seek, so `--seek` and `--for` together
+    // are a window rather than a window plus however long the seek took.
+    const auto stop_at =
+        options.play_seconds > 0.0
+            ? std::chrono::steady_clock::now() +
+                  std::chrono::microseconds{
+                      static_cast<std::int64_t>(options.play_seconds * 1'000'000.0)}
+            : std::chrono::steady_clock::time_point::max();
+    while (!done.load(std::memory_order_acquire) && window.pump_messages() &&
+           std::chrono::steady_clock::now() < stop_at) {
         std::this_thread::sleep_for(std::chrono::milliseconds{4});
     }
     if (vblank != nullptr) {
@@ -1910,6 +2137,17 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
     // measurement rather than an assertion about the code's shape.
     if (exact || processed) {
         const auto audio_stats = exact ? exact->stats() : processed->stats();
+        if (measured != nullptr) {
+            measured->ok = true;
+            measured->underruns = audio_stats.underruns;
+            measured->frames_shown = stats.shown;
+            measured->frames_dropped = stats.dropped;
+            measured->low_water_bytes = audio_stats.low_water_bytes;
+            measured->ring_bytes = audio_stats.ring_bytes;
+            measured->period_frames = audio_period;
+            measured->sample_rate = audio_wire.sample_rate;
+            measured->frame_bytes = mp::frame_bytes(audio_wire);
+        }
         std::printf("\naudio      %llu frames rendered, %llu underruns, %llu silent\n",
                     static_cast<unsigned long long>(audio_stats.frames_rendered),
                     static_cast<unsigned long long>(audio_stats.underruns),
@@ -3187,6 +3425,253 @@ int no_diagnostics(const char* command)
 
 #endif // MEDIAPERCH_DIAGNOSTICS
 
+/// **The platform half of a calibration**: `ICalibrationHost`, made of `show`.
+///
+/// The sweep -- which sizes, which direction, when to stop, what a pile of runs
+/// adds up to -- is in `src/player` and knows nothing about Windows. What is
+/// here is the one thing it cannot do without a machine: play a window of a
+/// file against a real device with a real deadline, and say what happened.
+///
+/// It is `show` because `show` is where the A/V graph is assembled: a router
+/// reading one file for two consumers, a video decoder, an audio graph, a
+/// window and a display loop. A second assembly for measuring would be a second
+/// thing to keep in step with the one that plays.
+class ShowHost final : public mp::ICalibrationHost {
+public:
+    ShowHost(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
+             const Options& options)
+        : sink_(&sink_vtbl), registry_(&registry), options_(&options)
+    {
+    }
+
+    bool inspect(const std::string& file, mp::StreamShape& shape, double& duration,
+                 std::string& why) override
+    {
+        mp::Demux demux;
+        bool opened = false;
+        for (const auto& choice : registry_->demuxers_for(file, options_->decoder_id)) {
+            if (demux.open(*choice.vtbl, file.c_str()) == MP_OK) {
+                opened = true;
+                break;
+            }
+            demux.close();
+        }
+        if (!opened) {
+            why = "nothing here reads it";
+            return false;
+        }
+
+        MpStreamInfo audio{};
+        MpStreamInfo video{};
+        bool have_audio = false;
+        bool have_video = false;
+        std::uint32_t video_stream = 0;
+        for (std::uint32_t i = 0; i < demux.stream_count(); ++i) {
+            MpStreamInfo info{};
+            if (!demux.stream_info(i, info)) {
+                continue;
+            }
+            if (info.kind == MP_STREAM_AUDIO && !have_audio) {
+                audio = info;
+                have_audio = true;
+            }
+            if (info.kind == MP_STREAM_VIDEO && !have_video) {
+                video = info;
+                video_stream = i;
+                have_video = true;
+            }
+        }
+        if (!have_video) {
+            why = "there is no video in it, so there is nothing here to be expensive";
+            return false;
+        }
+        if (!have_audio) {
+            // A file with one clock cannot say whether the picture gave way to
+            // the sound, which is the whole of what is being measured.
+            why = "there is no audio in it, so there is no second clock to measure against";
+            return false;
+        }
+
+        MpVideoInfo picture{};
+        picture.size = sizeof(picture);
+        if (!demux.video_info(video_stream, picture) || picture.width == 0) {
+            why = "the container would not describe its video stream";
+            return false;
+        }
+        shape = mp::StreamShape{video.codec, picture.width, picture.height, picture.fps_num,
+                                picture.fps_den};
+
+        // **`total_frames` and the stream's own rate**, which is what
+        // `--seek` counts in and is what the sample table states. `duration_ms`
+        // is optional and `demux_mp4` does not fill it, so asking for it was
+        // asking the container for a number it had already given in a better
+        // unit.
+        if (audio.total_frames == 0 || audio.format.sample_rate == 0) {
+            why = "the container does not say how long it is, so a window cannot be placed";
+            return false;
+        }
+        rate_[file] = static_cast<double>(audio.format.sample_rate);
+        duration = static_cast<double>(audio.total_frames) / rate_[file];
+        return true;
+    }
+
+    bool play(const mp::CalibrationRun& run, mp::RunResult& result, std::string& why) override
+    {
+        const auto found = rate_.find(run.file);
+        if (found == rate_.end()) {
+            why = "it was played before it was looked at";
+            return false;
+        }
+        Options one = *options_;
+        one.command = "show";
+        one.files = {run.file};
+        one.seek = static_cast<std::uint64_t>(run.at_seconds * found->second);
+        one.play_seconds = run.seconds;
+        one.ring_periods = run.ring_periods;
+        one.decoder_threads = run.decoder_threads;
+
+        ShowResult got;
+        if (show(*sink_, *registry_, one, &got) != 0 || !got.ok) {
+            why = "the run would not start";
+            return false;
+        }
+        result.ok = true;
+        result.underruns = got.underruns;
+        result.frames_dropped = got.frames_dropped;
+        result.low_water_bytes = got.low_water_bytes;
+        result.ring_bytes = got.ring_bytes;
+        result.period_frames = got.period_frames;
+        result.sample_rate = got.sample_rate;
+        result.frame_bytes = got.frame_bytes;
+        return true;
+    }
+
+    void say(const std::string& line) override
+    {
+        std::printf("           %s\n", line.c_str());
+        std::fflush(stdout);
+    }
+
+private:
+    const MpSinkVtbl* sink_;
+    const mp::win::ModuleRegistry* registry_;
+    const Options* options_;
+    /// Audio frames per second, per file, so a window's place in seconds
+    /// becomes the frame `--seek` takes.
+    std::map<std::string, double> rate_;
+};
+
+/// Reads `--measure`.
+bool wanted_dimensions(const std::string& list, mp::Dimension& out, std::string& why)
+{
+    out = mp::Dimension::none;
+    std::size_t at = 0;
+    while (at <= list.size()) {
+        const std::size_t next = std::min(list.find(',', at), list.size());
+        const std::string name = list.substr(at, next - at);
+        if (!name.empty()) {
+            mp::Dimension one = mp::Dimension::none;
+            if (!mp::dimension_from_name(name, one)) {
+                why = "`" + name + "` is not something this measures; there are `ring` and "
+                                   "`threads`";
+                return false;
+            }
+            out = out | one;
+        }
+        at = next + 1;
+    }
+    if (out == mp::Dimension::none) {
+        why = "--measure named nothing";
+        return false;
+    }
+    return true;
+}
+
+int calibrate(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
+              const Options& options)
+{
+    if (options.files.empty()) {
+        std::fprintf(stderr, "calibrate needs files to measure: --file <path>, repeated\n");
+        return 1;
+    }
+
+    mp::CalibrationPlan plan;
+    std::string why;
+    if (!wanted_dimensions(options.measure, plan.dimensions, why)) {
+        std::fprintf(stderr, "%s\n", why.c_str());
+        return 1;
+    }
+    if (!mp::sweep_from_name(options.sweep, plan.sweep)) {
+        std::fprintf(stderr, "`%s` is not a sweep; there are adaptive, shrink, grow, every\n",
+                     options.sweep.c_str());
+        return 1;
+    }
+    plan.windows = mp::Windows{options.windows, options.window_seconds};
+    // Where the sweep begins, and unset begins where the program would have.
+    plan.start_ring = options.ring_periods != 0 ? options.ring_periods
+                                                : mp::PassthroughConfig{}.ring_periods;
+    plan.lowest_ring = options.lowest_ring;
+    plan.highest_ring = options.highest_ring;
+
+    // **What it is about to cost, before it costs it.** A calibration cannot
+    // run faster than real time, so this is minutes of somebody's afternoon and
+    // sound out of their speakers, and a program that starts spending those
+    // without saying how many is a program that gets stopped half way.
+    const auto order = mp::ring_order(plan);
+    std::printf("measuring  %s, sweep %s, %u window%s of %.1f s\n",
+                options.measure.c_str(), options.sweep.c_str(), options.windows,
+                options.windows == 1 ? "" : "s", options.window_seconds);
+    std::printf("ring       from %u periods, between %u and %u\n", plan.start_ring,
+                plan.lowest_ring, plan.highest_ring);
+    if (plan.sweep != mp::Sweep::adaptive) {
+        std::printf("that is    up to %zu size%s a file, so up to %.0f s of playing\n",
+                    order.size(), order.size() == 1 ? "" : "s",
+                    static_cast<double>(order.size() * options.windows * options.files.size()) *
+                        options.window_seconds);
+    }
+    std::printf("\n");
+    std::fflush(stdout);
+
+    ShowHost host{sink_vtbl, registry, options};
+    const mp::CalibrationReport report = mp::calibrate(host, options.files, plan);
+
+    std::printf("\nmeasured   %u run%s over %zu file%s\n", report.runs,
+                report.runs == 1 ? "" : "s", report.profile.measured.size(),
+                report.profile.measured.size() == 1 ? "" : "s");
+    for (const std::string& skipped : report.skipped) {
+        std::printf("skipped    %s\n", skipped.c_str());
+    }
+    if (report.profile.measured.empty()) {
+        std::fprintf(stderr, "nothing was measured, so nothing is written\n");
+        return 1;
+    }
+
+    const std::string text = mp::write_profile(report.profile);
+    if (options.profile_path.empty()) {
+        // **Printed, not written, when nowhere was named.** A calibration that
+        // silently put a file somewhere is a calibration whose result nobody
+        // can find, and this is the run where somebody is finding out what it
+        // does.
+        std::printf("\n%s", text.c_str());
+        std::printf("\n-- pass --profile <path> to write this instead of printing it\n");
+        return 0;
+    }
+    std::FILE* out = nullptr;
+    if (fopen_s(&out, options.profile_path.c_str(), "wb") != 0 || out == nullptr) {
+        std::fprintf(stderr, "%s could not be written\n", options.profile_path.c_str());
+        return 1;
+    }
+    const bool wrote = std::fwrite(text.data(), 1, text.size(), out) == text.size();
+    std::fclose(out);
+    if (!wrote) {
+        std::fprintf(stderr, "%s was not written in full\n", options.profile_path.c_str());
+        return 1;
+    }
+    std::printf("wrote      %s\n", options.profile_path.c_str());
+    return 0;
+}
+
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -3344,6 +3829,9 @@ int main(int argc, char** argv)
     }
     if (options.command == "negotiate") {
         return negotiate(sink, options);
+    }
+    if (options.command == "calibrate") {
+        return calibrate(sink, registry, options);
     }
     if (options.command == "show") {
         return show(sink, registry, options);

@@ -18,7 +18,10 @@
 #include "mediaperch/avsync.hpp"
 #include "mediaperch/video.hpp"
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <thread>
 
 namespace mp {
 
@@ -112,6 +115,29 @@ public:
     /// of turns, which for a file is roughly its length times the refresh rate.
     std::uint64_t run();
 
+    // --- holding still while somebody moves the file -------------------------
+    //
+    // **The same shape the audio graph's render thread already has**, for the
+    // same reason: a seek moves the one position two consumers share (§4), and
+    // a turn taken while that happens is a turn deciding about a frame from a
+    // place nobody is at any more. The loop keeps turning -- the display still
+    // has to be waited on and a window still has to stay responsive -- and only
+    // stops deciding.
+
+    /// Stop deciding. The picture already up stays up, which is the duplicate
+    /// §8 describes and costs nothing to perform.
+    void hold() noexcept { holding_.store(true, std::memory_order_release); }
+    /// Decide again.
+    void release() noexcept { holding_.store(false, std::memory_order_release); }
+    /// Whether a turn has been taken under the hold. **The answer a mover
+    /// waits for**: `hold` is a request and this is the acknowledgement, and
+    /// resetting a decoder underneath a thread that is inside `pump` is how a
+    /// seek becomes a crash rather than a seek.
+    [[nodiscard]] bool parked() const noexcept
+    {
+        return parked_.load(std::memory_order_acquire);
+    }
+
     struct Stats {
         std::uint64_t turns = 0;
         /// Turns where the device had no clock to read. **Not an error and not
@@ -167,6 +193,9 @@ private:
     /// shortest gap until then.
     [[nodiscard]] double interval_now() const noexcept;
 
+    std::atomic<bool> holding_{false};
+    std::atomic<bool> parked_{false};
+
     VideoGraph* graph_;
     IAudioClockSource* audio_;
     IFrameClock* frames_;
@@ -184,5 +213,59 @@ private:
     std::uint64_t span_refreshes_ = 0;
     Stats stats_{};
 };
+
+
+/// **A file with a picture in it, seeked.**
+///
+/// §4 gives a file one position and the router owns it, so there is no such
+/// thing as seeking the audio and seeking the video: there is one move, and
+/// three things have to agree about it. This is that move, and the order is the
+/// whole of it.
+///
+/// 1. **Hold the display loop**, and wait until it says it has stopped
+///    deciding. Resetting a decoder underneath a thread inside `pump` is how a
+///    seek becomes a crash.
+/// 2. **Seek the audio graph.** It parks its own render thread, resets its
+///    ring, and asks its source -- which is a router feed, so this is what
+///    moves the file. `PacketRouter::seek` clears *every* queue, the video's
+///    included, because the packets waiting for the other consumer came from
+///    where the file used to be. The call returns once the audio has actually
+///    moved, so there is nothing to poll.
+/// 3. **Tell the video graph it was rewound**, now that its queue is empty and
+///    the position is elsewhere.
+/// 4. **Release the loop.** It re-reads the audio graph's anchor on its next
+///    turn -- `origin_device_frame` and `origin_source_frame` moved during step
+///    2 -- and `AvClock` re-anchors without the device ever stopping.
+///
+/// A template because the two audio graphs are two types with no common base,
+/// and `Player` already answers that question this way. §15's rule is that an
+/// interface waits for the second implementation; a base class invented for one
+/// method here would be the interface arriving early.
+///
+/// False when the source will not seek. `deadline` is how long to wait for the
+/// loop to park before moving anyway -- a loop that is not running has no turn
+/// to take, and refusing to seek because nobody is drawing would be refusing
+/// the seek for the wrong reason.
+template <typename AudioGraph>
+bool seek_together(AudioGraph& audio, VideoGraph& video, DisplayLoop& loop,
+                   std::uint64_t frame,
+                   std::chrono::milliseconds deadline = std::chrono::milliseconds{500})
+{
+    loop.hold();
+    const auto give_up_at = std::chrono::steady_clock::now() + deadline;
+    while (!loop.parked() && std::chrono::steady_clock::now() < give_up_at) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+
+    const bool moved = audio.seek(frame);
+    // **Even when it did not move.** A source that refused the seek may still
+    // have been asked, and a decoder holding frames from a position that was
+    // half-moved is worse than one holding none. The cost of being wrong here
+    // is one repeated picture.
+    video.rewound();
+
+    loop.release();
+    return moved;
+}
 
 } // namespace mp

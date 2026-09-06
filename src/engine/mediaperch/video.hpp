@@ -62,6 +62,14 @@ public:
     MpResult flush() noexcept;
     MpResult reset() noexcept;
 
+    /// One `key=value` for the decoder, or MP_ERR_UNSUPPORTED from a module
+    /// built before there was anything to say.
+    ///
+    /// **`threads` is the one this was added for**, and the only one anything
+    /// here sends. Asked between `open` and the first `decode`, because that is
+    /// where a decoder starts its workers.
+    MpResult set(const char* key, const char* value) noexcept;
+
 private:
     const MpVideoCodecVtbl* vtbl_ = nullptr;
     MpVideoCodec* handle_ = nullptr;
@@ -136,6 +144,23 @@ public:
         /// Something failed; `error()` says what.
         failed,
     };
+
+    /// **The position moved under it.** Something seeked, so the frame this
+    /// was holding, the frames the decoder is part way through, and the end of
+    /// the stream it may have reached all belong to a place nobody is at.
+    ///
+    /// Not a seek: this graph does not have a position to move. §4 gives the
+    /// file one position and the router owns it, so a video seek is somebody
+    /// else moving that position and then telling this what happened. The
+    /// packets already queued for this consumer went with it -- `PacketRouter`
+    /// clears every queue, not just the one that asked -- and what is left is
+    /// the decoder's own state, which is here.
+    ///
+    /// **The counters are not reset.** `shown`, `dropped` and `decoded` are the
+    /// run's, and a run with a seek in it is still one run; a report that
+    /// forgot the frames before the seek would be a report of the last seek
+    /// rather than of the playback.
+    void rewound() noexcept;
 
     /// One decision, against the audio being heard at `audible_seconds`.
     ///

@@ -133,6 +133,11 @@ mediaperch-probe negotiate   # offer every candidate format to a real device
 mediaperch-probe play        # files, gaplessly, or a test tone. Takes the endpoint.
                              # --interactive to pause, seek, skip and switch paths;
                              # a device that is unplugged is rebuilt onto, not given up on
+mediaperch-probe show        # a file in a window: one demuxer feeding both halves,
+                             # the audio device holding the clock, the picture
+                             # against it. --seek and --for make it a window
+mediaperch-probe calibrate   # measure what this machine needs to play these files
+                             # and write it down. Plays them, at real speed
 mediaperch-probe compare     # a decode against the audio that was encoded
 mediaperch-probe loudness    # BS.1770 over a whole file, and the ReplayGain
 mediaperch-probe verify      # a file, hashed at the device boundary

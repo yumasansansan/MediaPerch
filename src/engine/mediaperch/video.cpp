@@ -2,7 +2,22 @@
 
 #include "mediaperch/video.hpp"
 
+#include <cstddef>
+
 namespace mp {
+namespace {
+
+/// Whether a module's vtable is long enough to have the field at `offset`.
+///
+/// The same check `packet.cpp` makes, for the same reason: a size-prefixed
+/// vtable grows at the end, and a host that read past what a module declared
+/// would be reading whatever came after it in that module's data segment.
+bool has(const MpVideoCodecVtbl& v, std::size_t offset) noexcept
+{
+    return v.size >= offset + sizeof(void*);
+}
+
+} // namespace
 
 // --------------------------------------------------------------------------
 // VideoDecoder
@@ -67,6 +82,17 @@ MpResult VideoDecoder::get_format(MpVideoInfo& out) noexcept
 MpResult VideoDecoder::flush() noexcept
 {
     return *this ? vtbl_->flush(handle_) : MP_ERR_INVALID;
+}
+
+MpResult VideoDecoder::set(const char* key, const char* value) noexcept
+{
+    // `size` first, then the pointer: a module built against the header before
+    // this field existed has neither, and reading past what it declared is the
+    // one thing a size-prefixed vtable exists to stop.
+    if (!*this || !has(*vtbl_, offsetof(MpVideoCodecVtbl, set)) || vtbl_->set == nullptr) {
+        return MP_ERR_UNSUPPORTED;
+    }
+    return vtbl_->set(handle_, key, value);
 }
 
 MpResult VideoDecoder::reset() noexcept
@@ -247,6 +273,22 @@ void VideoGraph::reconcile()
     if (changed && presenter_->configure(want) == MP_OK) {
         info_ = want;
     }
+}
+
+void VideoGraph::rewound() noexcept
+{
+    // The decoder first: it may be holding frames it has not parted with, and
+    // they are frames from before the move.
+    if (decoder_ != nullptr) {
+        (void)decoder_->reset();
+    }
+    have_frame_ = false;
+    frame_ = MpVideoFrame{};
+    drained_ = false;
+    finished_ = false;
+    // **Not `reconciled_`.** What the bitstream said its pixels were is a fact
+    // about the stream, not about the position in it, and asking the presenter
+    // to reconfigure at every seek would be a rebuild nobody needed.
 }
 
 VideoGraph::Step VideoGraph::pump(double audible_seconds)

@@ -2172,9 +2172,10 @@ disagree.
 | `PassthroughConfig::prefill_periods` | 32 | `--prefill-periods` | `prefill_periods` |
 | `PassthroughConfig::wait_timeout_ms` | 2000 | `--wait-timeout` | `wait_timeout` |
 | `ConvertConfig::{gain,dither,shaping,seed}` | unity, TPDF, none, fixed | `--gain`, `--dither`, `--shape`, `--dither-seed` | `gain`, `dither`, `shaping`, `dither_seed` |
+| a video decoder's thread count | the module's, which is the core count | `--decoder-threads` | — |
 
-The four with no player key are the four the player cannot reach yet: it has no video path,
-so it opens one source per file and never builds a router or a frame clock. They become
+The five with no player key are the five the player cannot reach yet: it has no video path,
+so it opens one source per file and never builds a router, a frame clock or a video decoder. They become
 `Player::set` keys on the day it does, and not before — a setting that is listed, accepted
 and then does nothing is worse than one that does not exist.
 
@@ -3388,25 +3389,212 @@ presenter and refresh switching — so one run arrives through `ICalibrationHost
 implementation before an interface: there are two, the head's and the tests', which is exactly
 the justification `IEngineHost` has and `player_test.cpp` says so out loud.
 
-##### What the command still needs, which is two things and not one
+##### A file with a picture in it, seeked
 
-**Not built**, and what stands between:
+The second of the two things the command needed, and the one worth having anyway: a player
+that cannot seek a file with a picture in it is missing something rather larger than a
+calibration.
 
-1. **A run has to stop after a window.** `show` plays until the file ends or the window
-   closes. A duration is one condition on that loop.
-2. **A run has to start somewhere other than the beginning.** The audio graphs seek and the
-   router has a position, but `show` never asks either to move: it opens a file and plays it
-   from the top. Seeking the A/V pair together — audio graph, router, video graph, and the
-   clock they share — is the piece that does not exist, and it is the piece a windowed
-   calibration is made of.
+**There is no such thing as seeking the audio and seeking the video.** §4 gives a file one
+position and the router owns it, so there is one move that three things have to agree about,
+and the order is the whole of it — `mp::seek_together`:
 
-The second is worth having anyway. A player that cannot seek a file with a picture in it is
-missing something rather larger than a calibration.
+1. **Hold the display loop**, and wait until it says it has stopped deciding. The loop keeps
+   turning: the display still has to be waited on and a window still has to stay responsive.
+   What stops is deciding, and the picture already up stays up, which is §8's duplicate and
+   costs nothing to perform. **Resetting a decoder underneath a thread inside `pump` is how a
+   seek becomes a crash rather than a seek**, so `hold` is a request and `parked` is the
+   acknowledgement — the same shape the audio graph's render thread has had since gapless.
+2. **Seek the audio graph**, which parks its own render thread, resets its ring and asks its
+   source. The source is a router feed, so this is what moves the file, and
+   `PacketRouter::seek` clears *every* queue rather than the one that asked: the packets
+   waiting for the other consumer came from where the file used to be. It returns once the
+   audio has actually moved, so there is nothing to poll.
+3. **Tell the video graph it was rewound** — reset the decoder, drop the frame it was
+   holding, forget the end of the stream it may have reached. Not a seek: this graph has no
+   position of its own to move. Its counters are *not* reset, because `shown`, `dropped` and
+   `decoded` are the run's and a run with a seek in it is still one run.
+4. **Release the loop.** Its next turn re-reads the anchor the audio graph moved in step 2 and
+   `AvClock` re-anchors, without the device ever having stopped. That path was already built:
+   `ClockSpec`'s `origin_device_frame` and `origin_source_frame` are documented as *a seek
+   moves it and does not stop the device*, and `DisplayLoop::Stats::reanchored` was already
+   counting it. What was missing was somebody to move them.
 
-Nor is the head's other half built: opening the profile file, and asking `ring_for` where the
-graph is built. That last one has a wrinkle worth naming before it bites — `ring_periods`
-carries no mark saying whether a user set it, so *the default* and *a user who typed 128* look
-identical to anything deciding whether a profile may speak.
+A template, because the two audio graphs are two types with no common base and `Player`
+already answers that question the same way. §15's rule is that an interface waits for the
+second implementation; a base class invented for one method would be the interface arriving
+early.
+
+**Measured, on the 4K fixture, seeking to 72000 audio frames — a second and a half into
+three seconds:**
+
+```
+seek       moved to frame 72000
+audio      79344 frames rendered, 0 underruns, 0 silent
+ring       6.0 ms held at the closest, of 682.7 ms (1%)
+frames     21 shown, 50 dropped, 71 decoded
+```
+
+The audio landed and stayed clean: 79,344 frames is the 1.65 seconds that were left, with
+nothing missed. **But 71 frames were decoded for 21 shown, and 71 is the whole file.**
+
+#### A seek that placed one track and left the other at the top of the file
+
+The first guess was that the machine was busy: the suite had been running. It had not been,
+and three runs on a quiet machine came back 19, 20 and 20 shown against 52, 51 and 51 dropped,
+with 71 decoded every time. **Reproducible to the frame is not load.**
+
+`demux_mp4`'s seek placed the track it was named and no other, and its comment said the rest
+*come from wherever `SetSampleIndex` left the file, which is what an interleaved container can
+do*. That is not what happens. `restart` **rewinds the reader to the top of the file** — it
+has to, because `AP4_LinearReader` looks for fragments from wherever the stream happens to be
+— so a track nobody placed does not carry on near where it was. It starts at sample zero.
+Seeking the audio to the middle of a three-second file therefore sent the video back to the
+beginning, and every frame before the audio's new position was decoded and dropped.
+
+So every *selected* track is placed now, each at its own nearest point, with the target
+restated in that track's own timescale and the same two corrections the named track already
+got: back by the composition reach, because the table indexes decode time while `frame` is a
+presentation time, then back to the nearest sync sample.
+
+| | decoded | dropped | shown |
+|---|---|---|---|
+| before | 71 | 51 | 20 |
+| after | **47** | **17** | **30** |
+
+**47 is the arithmetic, not an improvement in general.** The fixture is 71 frames with a
+keyframe every 24; the audio target is a second and a half in, near frame 36; the nearest sync
+sample at or before it is frame 24; and 71 - 24 = 47. The 17 that are still dropped are frames
+24 to 40, between the keyframe and the target — **the discard the demuxer's own comment
+says is the host's**, which is what seeking video costs and is not a defect. Identical across
+three runs.
+
+#### And a run that stops after a window
+
+`--for SECONDS`, counted from after `--seek`, so the two together are a window: this part of
+this file, for this long. Three one-second windows out of the same three-second file:
+
+| | held at the closest | frames | wall clock |
+|---|---|---|---|
+| `--seek 0` | 42.0 ms | 21 shown, 4 dropped | 1893 ms |
+| `--seek 48000` | 21.0 ms | 14 shown, 33 dropped | 1639 ms |
+| `--seek 96000` | 4.0 ms | 12 shown, 35 dropped | 1590 ms |
+
+**The windows do not measure the same thing, which is the point of having more than one.** The
+run-out window came within 4.0 ms of the ring emptying where the opening one kept 42; a
+calibration that had measured only the beginning would have written down a number ten times
+too comfortable. That is the case `Windows` exists for and the reason the sweep takes the
+worst window rather than their average.
+
+`show --seek FRAME` asks after the loop is turning, because a loop that has not started has no
+turn in which to answer the hold.
+
+**What is still not built is the rest of the tree consulting it.** `show` reads a profile;
+`play` and `Player` do not, because a player has no video shape to ask about until it has a
+video path (§9.7.1), and a shell has no way to run a calibration until §10's surface carries
+one. Both are the same shape of work and neither is a new decision.
+
+##### `mediaperch-probe calibrate`, and what it measured
+
+The head's half: `ShowHost`, an `ICalibrationHost` **made of `show`**. `inspect` opens the
+container and reads the class of stream and how long it is; `play` fills an `Options`, calls
+`show` with a `--seek` and a `--for`, and reads the `Stats` back through an out-parameter.
+Nothing computes anything the report does not already print — two answers to one question
+would be two things to keep in step — and there is no second A/V assembly, which is the
+point of doing it this way.
+
+The plan comes off the command line, all of it, because all of it costs real time:
+`--measure`, `--sweep`, `--windows`, `--window-seconds`, `--ring-periods` as the start,
+`--lowest-ring` and `--highest-ring` as where to give up, `--profile` for where to write. With
+no `--profile` it prints the profile instead of writing it, which is what a person wants the
+first time and never again. And it says what it is about to cost before it spends it:
+
+```
+measuring  ring, sweep grow, 1 window of 1.0 s
+ring       from 8 periods, between 1 and 8192
+that is    up to 11 sizes a file, so up to 11 s of playing
+```
+
+**Measured, on the 4K fixture, two one-second windows, adaptive from 128:**
+
+| tried | held at the closest, worst window | |
+|---|---|---|
+| 128 | 21.0 ms of 682.7 | held |
+| 64 | 21.0 ms of 341.3 | held |
+| 32 | 3.7 ms of 170.7 | held |
+| 16 | 0.0 ms of 85.3 | **underran** |
+
+Seven runs, and it stopped at the first size that failed. The answer written down is 32
+periods doubled: `ring_ms = 341.333`. `grow` from 8 finds the same edge from below in two
+runs — 8 underran, 16 held, `ring_ms = 170.667`.
+
+**Two one-second windows are harder than the whole file**, and the numbers say so: the earlier
+sweep over whole-file runs found 16 periods enough, and windowed runs put the floor at 32. A
+window begins with a seek, and a seek begins with a decoder catching up through a GOP it will
+not show — which is exactly the transient a calibration should be measuring rather than
+averaging away.
+
+##### ABI: a video decoder can be told something
+
+`--measure threads` had nothing to act on. `mp::decoder_threads()` reads the core count inside
+each module and had no override, and `MpVideoCodecVtbl` had no `set` to add one to —
+`MpDspVtbl` and the presenter both have one; the video codecs did not. **So the vtable grew
+one, at the end, which is the only place a vtable may grow**: a host checks `size` and reads no
+further than it says, so a module built against the older header keeps working and simply
+cannot be told anything. `VideoDecoder::set` makes that check before the pointer, the way
+`Demux` already does for `read_frames`.
+
+**The awkward part is when.** Most decoders take their thread count once, when they start their
+workers, and `codec_de265` did that inside `open` — where nothing had had a chance to say a
+number yet. So the pool starts at the **first packet** instead, and `set("threads", n)` between
+`open` and the first `decode` is honoured; asked afterwards it answers `MP_ERR_BUSY` rather
+than accepting a number it will not use. A host told *yes* to a number that will not be used
+would measure the old one and write down the new one, which is the one failure a calibration
+must not have.
+
+`--decoder-threads N` is where a person reaches it, and it matters more than the ring does:
+
+| threads | shown | dropped |
+|---|---|---|
+| 1 | 11 | 60 |
+| 4 | 66 | 5 |
+| 16 | 67 | 4 |
+
+Only `codec_de265` implements it so far. The others answer `MP_ERR_UNSUPPORTED`, which is a
+sentence rather than a silence, and the ABI is there for them when they want it.
+
+##### The reading half, and the loop closing
+
+Writing a profile was done and reading one back was tested; **nobody consulted one**. Now
+`show` does, before it builds a graph, and §11's split is what says where each half goes: the
+head opens the file, `mp::parse_profile` decides what the text means, `mp::ring_for` decides
+what to do about it. A profile that will not read is not fatal — it supplies defaults, and a
+run without them is the run this program made before there were any.
+
+**And the wrinkle got fixed rather than noted.** `ring_periods` defaulted to the same number
+the engine defaults to, so *the default* and *a user who typed 128* were indistinguishable to
+anything deciding whether a measured profile may speak. The probe's own field is **zero for
+"nobody said"** now, and three answers resolve in the order that respects who said what: a
+number somebody typed, then a profile measured on this machine for this class of stream, then
+the engine's generous default.
+
+Measured, all three, on the same file:
+
+```
+== no profile
+ring       6.0 ms held at the closest, of 682.7 ms (1%)
+== with the profile the calibration wrote
+profile    57 periods rather than 128, measured here
+ring       6.0 ms held at the closest, of 341.3 ms (2%)
+== and an explicit number beats it
+ring       6.0 ms held at the closest, of 1365.3 ms (0%)
+```
+
+**Half the ring, the same margin, and nobody guessed.** The 6.0 ms floor is unchanged at 341
+ms because 341 ms is still well past the stall it has to cover — which is the thing the
+low-water mark said in the first place and the thing the whole loop exists to act on. And the
+run with `--ring-periods 256` shows no `profile` line at all, because there was nothing for a
+profile to add.
 
 #### `claims` had never once mentioned a video decoder
 
@@ -4455,6 +4643,17 @@ real time.
   was still incomplete; MSVC compiled it without a word. Clang is right, and the fix was to
   move the type to namespace scope. One instance is not a policy, but it is the first thing
   the `clang` CI job found, on the first tree it was pointed at.
+- **A seek that places one track puts every other track back at the top of the file.**
+  Bento4's `AP4_LinearReader` has to be constructed at a known position — it looks for
+  fragments from wherever the stream happens to be — so `demux_mp4`'s seek rewinds to zero
+  and then calls `SetSampleIndex` for the track it was named. Its own comment said the others
+  *come from wherever the file position lands*, which sounds like "near the target" and means
+  "sample zero". Seeking the audio of a three-second 4K file to its middle therefore decoded
+  every video frame in the file, dropped the 51 whose time had passed, and showed 20 —
+  reproducible to the frame, which is how it was told apart from a busy machine. Every
+  *selected* track is placed now, each at its own nearest sync sample with the target restated
+  in its own timescale. **A container with more than one stream has more than one cursor, and
+  a seek that moves one of them has not moved the file.**
 - **`/CETCOMPAT` and `/guard:ehcont` are whole-image flags and must not be target-scoped.**
   The linker requires that *every* object carrying C++ EH metadata was compiled with
   `/guard:ehcont`, third-party code built in-tree included — and Catch2 never sees an

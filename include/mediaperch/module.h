@@ -1077,6 +1077,24 @@ typedef struct MpVideoCodecVtbl {
 
     /* MP_IO. Forget everything, for a seek. */
     MpResult(MP_CALL *reset)(MpVideoCodec *c);
+
+    /* MP_ANY. `key=value`, as MpDspVtbl and MpVideoVtbl mean it. Appended,
+     * which is the only place a vtable may grow: a host checks `size` and
+     * reads no further than it says, so a module built against the older
+     * header keeps working and simply cannot be told anything.
+     *
+     * **`threads` is why this exists.** How many threads a decoder may use is
+     * a machine's answer, not a stream's, and until now it was decided inside
+     * each module by `mp::decoder_threads()` reading the core count -- which
+     * cannot be measured against, because nothing could ask for a different
+     * one. A calibration that sweeps thread counts needs a way to say which,
+     * and this is it.
+     *
+     * **Asked between `open` and the first `decode`.** Most decoders here take
+     * their thread count when they start their workers, which is at or before
+     * the first packet; a module that cannot change it later says so with
+     * MP_ERR_BUSY rather than accepting a number it will not use. */
+    MpResult(MP_CALL *set)(MpVideoCodec *c, const char *key, const char *value);
 } MpVideoCodecVtbl;
 
 typedef struct MpVideoVtbl {
@@ -1454,6 +1472,9 @@ MP_STATIC_ASSERT(offsetof(MpDspVtbl, describe) < offsetof(MpDspVtbl, reset),
                  "MpDspVtbl only ever grows at the end");
 MP_STATIC_ASSERT(offsetof(MpDspVtbl, reset) < offsetof(MpDspVtbl, get_latency),
                  "MpDspVtbl only ever grows at the end");
+
+MP_STATIC_ASSERT(offsetof(MpVideoCodecVtbl, reset) < offsetof(MpVideoCodecVtbl, set),
+                 "MpVideoCodecVtbl only ever grows at the end");
 
 MP_STATIC_ASSERT(sizeof(MpFormat) == 32, "MpFormat layout is ABI");
 MP_STATIC_ASSERT(offsetof(MpFormat, sample_rate) == 0, "MpFormat layout is ABI");

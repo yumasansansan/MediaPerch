@@ -36,6 +36,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <new>
@@ -86,6 +87,16 @@ struct MpVideoCodec {
     MpVideoInfo info{};
     bool have_format = false;
     std::string trouble;
+
+    /// How many worker threads to start, and whether they have been.
+    ///
+    /// **Started at the first packet rather than at `open`**, which is what
+    /// makes `set("threads", ...)` mean anything: libde265 takes its pool size
+    /// once, in `de265_start_worker_threads`, and has no way to resize it
+    /// afterwards. Between `open` and the first `decode` there is nowhere for a
+    /// number to be applied unless the start waits, so it waits.
+    unsigned threads = 0;
+    bool workers_started = false;
 };
 
 namespace {
@@ -310,17 +321,9 @@ try {
     // smaller of the two is what it is asked for. A failure here is not fatal:
     // the decoder still works on the calling thread, which is what it did
     // before this line existed.
-    const int threads =
-        static_cast<int>(std::min<unsigned>(mp::decoder_threads(), 32u));
-    if (threads > 1) {
-        const de265_error started = de265_start_worker_threads(owned->ctx, threads);
-        if (started != DE265_OK) {
-            log_line(MP_LOG_WARN,
-                     (std::string{"codec_de265: no worker threads: "} +
-                      de265_get_error_text(started))
-                         .c_str());
-        }
-    }
+    // The number is decided here and the pool is started at the first packet,
+    // so a host with something to say about it has somewhere to say it.
+    owned->threads = std::min<unsigned>(mp::decoder_threads(), 32u);
 
     // The parameter sets, before any sample.
     const MpResult sets = push_parameter_sets(owned.get());
@@ -359,12 +362,65 @@ try {
 }
 MEDIAPERCH_ABI_GUARD_CATCH
 
+/// Starts the pool the first time a packet arrives, and never again.
+///
+/// A failure is not fatal: the decoder still works on the calling thread, which
+/// is what it did before there were any workers at all.
+void start_workers(MpVideoCodec* c) noexcept
+{
+    if (c->workers_started) {
+        return;
+    }
+    c->workers_started = true;
+    if (c->threads <= 1) {
+        return;
+    }
+    const de265_error started =
+        de265_start_worker_threads(c->ctx, static_cast<int>(c->threads));
+    if (started != DE265_OK) {
+        log_line(MP_LOG_WARN, (std::string{"codec_de265: no worker threads: "} +
+                               de265_get_error_text(started))
+                                  .c_str());
+    }
+}
+
+/// `threads`, and nothing else yet.
+///
+/// **Refused once the pool exists**, with MP_ERR_BUSY, rather than accepted and
+/// ignored: libde265 sizes its pool once and a host told "yes" to a number that
+/// will not be used would measure the old one and write down the new one.
+MpResult MP_CALL codec_set(MpVideoCodec* c, const char* key, const char* value) noexcept
+try {
+    if (c == nullptr || key == nullptr || value == nullptr) {
+        return MP_ERR_INVALID;
+    }
+    if (std::strcmp(key, "threads") != 0) {
+        return MP_ERR_UNSUPPORTED;
+    }
+    if (c->workers_started) {
+        c->trouble = "threads cannot change once the workers have started";
+        return MP_ERR_BUSY;
+    }
+    char* end = nullptr;
+    const unsigned long asked = std::strtoul(value, &end, 10);
+    if (end == value || *end != '\0' || asked == 0) {
+        c->trouble = "threads is a whole number of at least one";
+        return MP_ERR_INVALID;
+    }
+    // libde265 caps its own pool at 32 (MAX_THREADS in threads.h), so more than
+    // that is not a refusal, it is the same answer.
+    c->threads = static_cast<unsigned>(std::min<unsigned long>(asked, 32ul));
+    return MP_OK;
+}
+MEDIAPERCH_ABI_GUARD_CATCH
+
 MpResult MP_CALL codec_decode(MpVideoCodec* c, const void* packet, std::size_t bytes,
                               std::uint64_t pts) noexcept
 try {
     if (c == nullptr) {
         return MP_ERR_INVALID;
     }
+    start_workers(c);
     if (packet == nullptr || bytes == 0) {
         return MP_OK;
     }
@@ -492,6 +548,7 @@ constexpr MpVideoCodecVtbl k_vtbl = {
     /* next_frame */ &codec_next_frame,
     /* flush      */ &codec_flush,
     /* reset      */ &codec_reset,
+    /* set        */ &codec_set,
 };
 
 MpResult MP_CALL module_init(const MpHost* host) noexcept

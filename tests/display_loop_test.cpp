@@ -16,8 +16,11 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <thread>
 #include <vector>
 
 using mp::test::Module;
@@ -263,6 +266,56 @@ struct Standing {
     }
 };
 
+/// An audio graph, as far as a seek is concerned: something with a `seek`.
+///
+/// That is the whole of what `seek_together` asks of one, which is why it is a
+/// template rather than a base class nobody else would implement.
+/// A display that takes a millisecond a turn and never runs out.
+///
+/// `CountedFrames` does not sleep, so a loop driven by it finishes as fast as
+/// the CPU can go and is gone before another thread can interact with it. A
+/// test about *what happens while the loop is running* needs a loop that is
+/// still running.
+class SlowFrames final : public mp::IFrameClock {
+public:
+    bool wait() override
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        ticks_ += k_tick_rate / 1000;
+        return true;
+    }
+    [[nodiscard]] std::uint64_t now() const override { return ticks_; }
+    [[nodiscard]] std::uint64_t rate() const override { return k_tick_rate; }
+
+private:
+    std::uint64_t ticks_ = 0;
+};
+
+class FakeAudioGraph {
+public:
+    explicit FakeAudioGraph(bool movable = true) : movable_(movable) {}
+
+    /// The loop to ask, at the moment the file is asked to move. **Read here
+    /// rather than watched from outside**: whether the loop had parked *by
+    /// then* is the ordering under test, and a thread polling for it races the
+    /// thing it is trying to observe.
+    void watches(const mp::DisplayLoop& loop) noexcept { loop_ = &loop; }
+
+    bool seek(std::uint64_t frame)
+    {
+        asked.push_back(frame);
+        parked_when_asked = loop_ != nullptr && loop_->parked();
+        return movable_;
+    }
+
+    std::vector<std::uint64_t> asked;
+    bool parked_when_asked = false;
+
+private:
+    bool movable_;
+    const mp::DisplayLoop* loop_ = nullptr;
+};
+
 } // namespace
 
 TEST_CASE("without a clock nothing is drawn, and it is not an error",
@@ -495,4 +548,155 @@ TEST_CASE("a device that goes quiet stops the picture rather than the loop",
     }
     CHECK(loop.stats().without_clock == 0);
     CHECK(dial.reads() == 6);
+}
+
+
+TEST_CASE("a held loop keeps turning and stops deciding", "[display][avsync]")
+{
+    Standing standing;
+    Dial dial;
+    CountedFrames frames{8, k_tick_rate};
+    mp::DisplayLoop loop{standing.graph, dial, frames};
+    dial.set(48000, k_tick_rate);
+
+    mp::DisplayStep step;
+    REQUIRE(loop.once(step));
+    const std::uint64_t reads_before = dial.reads();
+    const std::uint64_t shown_before = standing.graph.stats().shown;
+
+    loop.hold();
+    REQUIRE(loop.once(step));
+    // **It turned.** The display still has to be waited on and a window still
+    // has to stay responsive; what stops is deciding, not the loop.
+    CHECK(loop.stats().turns == 2);
+    CHECK(loop.parked());
+    // And it decided nothing: no clock was read and no frame was shown. The
+    // picture already up stays up, which is §8's duplicate and costs nothing.
+    CHECK(step.step == mp::VideoGraph::Step::repeated);
+    CHECK_FALSE(step.had_clock);
+    CHECK(dial.reads() == reads_before);
+    CHECK(standing.graph.stats().shown == shown_before);
+
+    loop.release();
+    REQUIRE(loop.once(step));
+    CHECK_FALSE(loop.parked());
+    CHECK(step.had_clock);
+}
+
+TEST_CASE("a rewound graph forgets the frame it was holding", "[display][avsync]")
+{
+    Standing standing;
+    Dial dial;
+    CountedFrames frames{8, k_tick_rate};
+    mp::DisplayLoop loop{standing.graph, dial, frames};
+
+    dial.set(48000, k_tick_rate);
+    mp::DisplayStep step;
+    REQUIRE(loop.once(step));
+    const auto before = standing.graph.stats();
+    REQUIRE(before.decoded > 0);
+
+    standing.graph.rewound();
+
+    // **The counters are the run's, not the last seek's.** A report that forgot
+    // the frames before a seek would describe the seek rather than the
+    // playback.
+    const auto after = standing.graph.stats();
+    CHECK(after.decoded == before.decoded);
+    CHECK(after.shown == before.shown);
+    CHECK(after.dropped == before.dropped);
+    // And it carries on, which is the part that says the decoder was left
+    // usable rather than merely emptied.
+    CHECK_FALSE(standing.graph.finished());
+    REQUIRE(loop.once(step));
+    CHECK(standing.graph.error() == MP_OK);
+}
+
+TEST_CASE("seeking moves the loop, the file and the decoder in that order",
+          "[display][avsync]")
+{
+    Standing standing;
+    Dial dial;
+    CountedFrames frames{8, k_tick_rate};
+    mp::DisplayLoop loop{standing.graph, dial, frames};
+    dial.set(48000, k_tick_rate);
+
+    mp::DisplayStep step;
+    REQUIRE(loop.once(step));
+
+    FakeAudioGraph audio;
+    // The loop is not running on a thread here, so it cannot park itself: the
+    // deadline is what stops this from waiting for a turn nobody will take.
+    // What is checked is that the file was asked to move exactly once, and
+    // that the graph was told about it.
+    CHECK(mp::seek_together(audio, standing.graph, loop, 48000 * 42,
+                            std::chrono::milliseconds{1}));
+    REQUIRE(audio.asked.size() == 1);
+    CHECK(audio.asked[0] == 48000 * 42);
+    // And the hold was let go, so the next turn decides again.
+    CHECK_FALSE(loop.parked());
+    REQUIRE(loop.once(step));
+    CHECK(step.had_clock);
+}
+
+TEST_CASE("a seek waits for the loop to stop deciding before the file moves",
+          "[display][avsync]")
+{
+    Standing standing;
+    Dial dial;
+    // A clock that takes a millisecond a turn, so the loop is still running
+    // when the seek arrives. A loop that had already finished would make the
+    // assertion below pass without testing anything.
+    SlowFrames frames;
+    mp::DisplayLoop loop{standing.graph, dial, frames};
+    dial.set(48000, k_tick_rate);
+
+    std::atomic<bool> stop{false};
+    std::thread turning{[&] {
+        mp::DisplayStep step;
+        while (!stop.load(std::memory_order_acquire) && loop.once(step)) {
+        }
+    }};
+
+    FakeAudioGraph audio;
+    audio.watches(loop);
+    // A tiny sleep so the loop is definitely inside its turns rather than not
+    // started, which would make the assertion below vacuous.
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    const std::uint64_t turning_at = loop.stats().turns;
+    REQUIRE(turning_at > 0);
+
+    CHECK(mp::seek_together(audio, standing.graph, loop, 4242));
+    stop.store(true, std::memory_order_release);
+    turning.join();
+
+    REQUIRE(audio.asked.size() == 1);
+    // The loop really was turning when the seek arrived, so the wait below is
+    // a wait for something rather than a wait for a thread that had stopped.
+    CHECK(loop.stats().turns > turning_at);
+    // **The ordering this whole call exists for.** Resetting a decoder
+    // underneath a thread inside `pump` is how a seek becomes a crash.
+    CHECK(audio.parked_when_asked);
+}
+
+TEST_CASE("a source that will not seek says so, and the picture is still sound",
+          "[display][avsync]")
+{
+    Standing standing;
+    Dial dial;
+    CountedFrames frames{8, k_tick_rate};
+    mp::DisplayLoop loop{standing.graph, dial, frames};
+    dial.set(48000, k_tick_rate);
+    mp::DisplayStep step;
+    REQUIRE(loop.once(step));
+
+    FakeAudioGraph audio{false};
+    CHECK_FALSE(mp::seek_together(audio, standing.graph, loop, 99,
+                                  std::chrono::milliseconds{1}));
+    // Told anyway: a source that refused may still have been asked, and a
+    // decoder holding frames from a half-moved position is worse than one
+    // holding none. The cost of being wrong here is one repeated picture.
+    CHECK_FALSE(loop.parked());
+    REQUIRE(loop.once(step));
+    CHECK(standing.graph.error() == MP_OK);
 }

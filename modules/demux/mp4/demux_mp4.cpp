@@ -570,10 +570,26 @@ struct MpDemux {
 
 namespace {
 
-/// Points the reader at the start, and then at `index` within `in_track` when
-/// one is named -- a seek names the stream it is seeking, and the others follow
-/// from wherever the file position lands.
-bool restart(MpDemux* d, AP4_Track* in_track, AP4_Ordinal index)
+/// Where one track is put back to. Every selected track gets one, because
+/// `restart` rewinds the reader to the top of the file and a track nobody
+/// placed then starts from the file's first sample.
+struct Placement {
+    AP4_Track* track = nullptr;
+    AP4_Ordinal index = 0;
+};
+
+/// Points the reader at the start, and then puts each named track where it was
+/// asked to be.
+///
+/// **Every selected track, not only the one the seek named.** The reader is
+/// rewound here -- it has to be, because it looks for fragments from wherever
+/// the stream happens to be -- so a track left unplaced does not carry on from
+/// near where it was: it starts at the beginning of the file. Measured on the
+/// 4K fixture, seeking the audio to 1.5 s of 3: the video decoded all 71 frames
+/// of the file and showed 20, because the other 51 belonged to a time already
+/// past. One file has one position (§4), and putting one track on it and not
+/// the other is not a position.
+bool restart(MpDemux* d, const Placement* at_each, std::size_t count)
 {
     d->reader.reset();
     d->at_end = false;
@@ -610,12 +626,64 @@ bool restart(MpDemux* d, AP4_Track* in_track, AP4_Ordinal index)
             return false;
         }
     }
-    if (in_track != nullptr && index != 0 &&
-        AP4_FAILED(reader->SetSampleIndex(in_track->GetId(), index))) {
-        return false;
+    for (std::size_t i = 0; i < count; ++i) {
+        const Placement& place = at_each[i];
+        if (place.track == nullptr || place.index == 0) {
+            continue; // already where it starts
+        }
+        if (AP4_FAILED(reader->SetSampleIndex(place.track->GetId(), place.index))) {
+            return false;
+        }
     }
     d->reader = std::move(reader);
     return true;
+}
+
+/// `frame` counted in `to` ticks instead of `from` ticks.
+///
+/// Exact while the product fits, which for any real timescale and any real file
+/// it does; past that it divides first and loses the remainder rather than
+/// wrapping, because a seek a long way into a very long file landing a tick
+/// early is a discard and landing anywhere at all is not.
+std::uint64_t restated(std::uint64_t frame, std::uint32_t from, std::uint32_t to) noexcept
+{
+    if (from == 0 || to == 0) {
+        return 0;
+    }
+    if (from == to) {
+        return frame;
+    }
+    if (frame != 0 && frame > (~std::uint64_t{0}) / to) {
+        return frame / from * to;
+    }
+    return frame * to / from;
+}
+
+/// The sample of `stream` to start from for `frame`, counted in `rate` ticks.
+///
+/// The same two corrections the named track gets, because they are facts about
+/// a track rather than about which track was asked for: back by the reordering,
+/// because the table indexes decode time and `frame` is a presentation time,
+/// and then back to the nearest sync sample, because most video samples cannot
+/// be decoded from.
+AP4_Ordinal sample_for(Stream& stream, std::uint64_t frame, std::uint32_t rate)
+{
+    AP4_Track* track = stream.track;
+    if (track == nullptr) {
+        return 0;
+    }
+    AP4_SampleTable* table = track->GetSampleTable();
+    if (table == nullptr) {
+        return 0;
+    }
+    const std::uint64_t here = restated(frame, rate, track->GetMediaTimeScale());
+    const std::uint64_t reach = composition_reach(stream);
+    const std::uint64_t target = here > reach ? here - reach : 0;
+    AP4_Ordinal index = 0;
+    if (AP4_FAILED(table->GetSampleIndexForTimeStamp(target, index))) {
+        return 0;
+    }
+    return table->GetNearestSyncSampleIndex(index, true);
 }
 
 /// The stream index a Bento4 track id belongs to, or `npos`.
@@ -750,7 +818,7 @@ try {
     if (d->selected.empty() && !d->streams.empty()) {
         d->selected = {0}; // a file with no audio at all still opens
     }
-    if (!restart(d.get(), nullptr, 0)) {
+    if (!restart(d.get(), nullptr, 0u)) {
         return MP_ERR_UNSUPPORTED;
     }
 
@@ -943,7 +1011,7 @@ try {
         chosen.push_back(indices[i]);
     }
     d->selected = std::move(chosen);
-    return restart(d, nullptr, 0) ? MP_OK : MP_ERR_UNSUPPORTED;
+    return restart(d, nullptr, 0u) ? MP_OK : MP_ERR_UNSUPPORTED;
 } catch (...) {
     return MP_ERR_NO_MEMORY;
 }
@@ -1040,38 +1108,37 @@ try {
     // codec can be started from. `stts` says which one that is exactly, and
     // never past it -- what precedes the target inside that sample is the
     // host's to discard, and `MP_PACKET_TIMED` is what lets it.
-    // **Back by the reordering, then look up.** `frame` is a presentation time
-    // and the table indexes decode time; without this the seek lands after a
-    // frame it was asked for, which for video is the direction that cannot be
-    // recovered. Zero for every audio track, so the measured path is untouched.
-    const std::uint64_t reach = composition_reach(d->streams[stream]);
-    const std::uint64_t decode_target = frame > reach ? frame - reach : 0;
-
-    AP4_SampleTable* table = track->GetSampleTable();
-    AP4_Ordinal index = 0;
-    if (table != nullptr &&
-        AP4_SUCCEEDED(table->GetSampleIndexForTimeStamp(decode_target, index))) {
-        // **Back to the nearest sync sample, which for audio is this one.**
-        // Every sample of every audio codec here is one, so this changes
-        // nothing on the path that is measured -- and it is the whole of
-        // seeking a video track, where most samples cannot be decoded from and
-        // the table indexes decode time while `frame` is a presentation time.
-        // Landing early costs the host a discard it already does; landing late
-        // is audio, or a picture, that cannot be recovered.
-        index = table->GetNearestSyncSampleIndex(index, true);
-
-        // Only the named track is placed. The others come from wherever
-        // `SetSampleIndex` left the file, which is what an interleaved
-        // container can do -- each arrives from its own nearest point and the
-        // host discards what precedes its own target.
-        return restart(d, track, index) ? MP_OK : MP_ERR_IO;
+    //
+    // **Every selected track is placed, each at its own nearest point**, with
+    // the target restated in that track's own timescale. Placing only the named
+    // one left the others at the top of the file, which is not "wherever the
+    // file position lands": `restart` rewinds the reader, so an unplaced track
+    // starts from sample zero. The host then discards what precedes its own
+    // target, which for a video track seeked by the audio clock was most of the
+    // file.
+    if (track->GetSampleTable() != nullptr) {
+        const std::uint32_t rate = track->GetMediaTimeScale();
+        std::vector<Placement> places;
+        places.reserve(d->selected.size() + 1);
+        bool named_is_selected = false;
+        for (const std::size_t at : d->selected) {
+            named_is_selected = named_is_selected || at == stream;
+            places.push_back(Placement{d->streams[at].track,
+                                       sample_for(d->streams[at], frame, rate)});
+        }
+        // A host seeking by the audio clock names a stream it may not be
+        // reading. It is still the one whose rate `frame` is in, and a track
+        // the reader has not enabled cannot be placed on it -- so the named
+        // track appears above only when it is one of the selected.
+        (void)named_is_selected;
+        return restart(d, places.data(), places.size()) ? MP_OK : MP_ERR_IO;
     }
 
     // A fragmented file has no sample table to ask, so the reader is asked
     // instead. It takes milliseconds, so the target is rounded *down* to one:
     // landing early costs the host a discard, landing late loses audio.
     const std::uint32_t rate = track->GetMediaTimeScale();
-    if (rate == 0 || !restart(d, nullptr, 0)) {
+    if (rate == 0 || !restart(d, nullptr, 0u)) {
         return MP_ERR_UNSUPPORTED;
     }
     const auto ms = static_cast<std::uint32_t>(frame * 1000ull / rate);
