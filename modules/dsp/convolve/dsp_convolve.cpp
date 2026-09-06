@@ -247,6 +247,9 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
     if (std::strcmp(key, "partition") == 0) {
         char* end = nullptr;
         const unsigned long partition = std::strtoul(value, &end, 10);
+        // Memory, per channel, inside a `noexcept` ABI that has no way to
+        // report a failed allocation. Kept for that reason and not because
+        // 2^20 is thought to be enough for anyone.
         if (end == value || partition > (1u << 20)) {
             return MP_ERR_INVALID;
         }
@@ -256,6 +259,8 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
     if (std::strcmp(key, "max_taps") == 0) {
         char* end = nullptr;
         const unsigned long taps = std::strtoul(value, &end, 10);
+        // Likewise: 2^24 coefficients is 128 MB of doubles before the
+        // transforms ask for theirs.
         if (end == value || taps > (1u << 24)) {
             return MP_ERR_INVALID;
         }

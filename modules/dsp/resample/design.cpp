@@ -784,7 +784,18 @@ bool design_prototype(const Design& design, std::uint32_t up, std::uint32_t down
         // than needing a different one.
         const double order =
             (design.attenuation_db - 8.0) / (2.285 * 2.0 * k_pi * transition) + 1.0;
-        chosen = static_cast<std::uint64_t>(std::ceil(order / static_cast<double>(up)));
+        const double estimate = std::ceil(order / static_cast<double>(up));
+        // **The cast is only defined for a value the type can hold**, and every
+        // input to the estimate is the caller's: an attenuation of 1e18, or a
+        // bandwidth a hair under one, sends it past 2^64. It used to be the
+        // 40..200 dB and 0.5..0.999 windows on those settings that kept this
+        // in range, and settings are not where that job belongs. Saturating is
+        // right rather than merely safe -- anything this large fails the
+        // max_taps gate below, which refuses it in words about the filter.
+        constexpr double k_countable = 9.0e18;
+        chosen = !(estimate >= 0.0)      ? 0
+                 : estimate > k_countable ? static_cast<std::uint64_t>(k_countable)
+                                          : static_cast<std::uint64_t>(estimate);
     }
     chosen = std::max<std::uint64_t>(chosen, 8);
     chosen += chosen & 1u; // even, so the prototype's centre lands on a sample
@@ -799,7 +810,14 @@ bool design_prototype(const Design& design, std::uint32_t up, std::uint32_t down
     double expected_stop_db = 0.0; // what Parks-McClellan said it would be
 
     for (int attempt = 0;; ++attempt) {
-        const std::uint64_t length = chosen * up + 1;
+        // Saturating, for the same reason: `taps` is now whatever was asked for
+        // and `up` is whatever the two rates reduce to, and the product of two
+        // numbers this program did not choose has to be allowed to be too big
+        // to count rather than allowed to wrap.
+        const std::uint64_t length =
+            chosen > (std::numeric_limits<std::uint64_t>::max() - 1) / up
+                ? std::numeric_limits<std::uint64_t>::max()
+                : chosen * up + 1;
         if (length > design.max_taps) {
             why = "the ratio reduces to " + std::to_string(up) + "/" +
                   std::to_string(down) + ", which needs " + std::to_string(length) +

@@ -174,6 +174,9 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
     if (std::strcmp(key, "channels") == 0) {
         char* end = nullptr;
         const unsigned long channels = std::strtoul(value, &end, 10);
+        // The ABI's own channel ceiling, which every stage here shares and
+        // the bus is sized by. Not a judgement: a sixty-fifth channel has
+        // nowhere to go.
         if (end == value || channels == 0 || channels > 64) {
             return MP_ERR_INVALID;
         }

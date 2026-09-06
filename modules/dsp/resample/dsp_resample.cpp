@@ -125,9 +125,12 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
     if (std::strcmp(key, "rate") == 0) {
         char* end = nullptr;
         const unsigned long rate = std::strtoul(value, &end, 10);
-        // The window is the ABI's own: 1 Hz is not audio and 3 MHz is past what
-        // any container can say. The device decides the rest.
-        if (end == value || rate < 4000 || rate > 3'000'000) {
+        // Any rate the ABI's own field can hold. The 4000..3,000,000 window
+        // that used to be here was a judgement about what somebody would want,
+        // and it was also redundant: a ratio that reduces badly costs
+        // coefficients, and `max_taps` is what refuses those, by name and with
+        // the arithmetic in the message. Zero keeps the input rate.
+        if (end == value || rate > 0xFFFFFFFFul) {
             return MP_ERR_INVALID;
         }
         d->rate = static_cast<std::uint32_t>(rate);
@@ -143,7 +146,11 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
     if (std::strcmp(key, "attenuation") == 0) {
         char* end = nullptr;
         const double db = std::strtod(value, &end);
-        if (end == value || !std::isfinite(db) || db < 40.0 || db > 200.0) {
+        // Positive and finite, which is what makes it an attenuation. Not
+        // 40..200: a shallow stopband is a poor filter and a legal one, the
+        // designer measures what it actually built either way, and the
+        // estimate the number feeds is total now.
+        if (end == value || !std::isfinite(db) || db <= 0.0) {
             return MP_ERR_INVALID;
         }
         d->design.attenuation_db = db;
@@ -153,7 +160,12 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
     if (std::strcmp(key, "bandwidth") == 0) {
         char* end = nullptr;
         const double fraction = std::strtod(value, &end);
-        if (end == value || !std::isfinite(fraction) || fraction < 0.5 || fraction > 0.999) {
+        // The same domain `design_prototype` states -- between zero and one,
+        // exclusive -- and not the narrower 0.5..0.999 taste that was here. At
+        // one the transition band is nothing and the order is infinite; below
+        // zero there is no passband. Everything in between is a filter.
+        if (end == value || !std::isfinite(fraction) || fraction <= 0.0 ||
+            fraction >= 1.0) {
             return MP_ERR_INVALID;
         }
         d->design.bandwidth = fraction;
@@ -184,7 +196,7 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
         // Zero means "whatever the stopband gets", which is the only thing the
         // window method can say. Anything else is a real second specification
         // and only Parks-McClellan can spend it.
-        if (end == value || !std::isfinite(db) || db < 0.0 || db > 6.0) {
+        if (end == value || !std::isfinite(db) || db < 0.0) {
             return MP_ERR_INVALID;
         }
         d->design.passband_ripple_db = db;
@@ -194,7 +206,10 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
     if (std::strcmp(key, "taps") == 0) {
         char* end = nullptr;
         const unsigned long taps = std::strtoul(value, &end, 10);
-        if (end == value || taps > 1u << 20) {
+        // Whatever fits the field. What it costs is checked where the cost is
+        // known: `chosen * up + 1` against `max_taps`, in saturating
+        // arithmetic. Zero still means "let the design choose".
+        if (end == value || taps > 0xFFFFFFFFul) {
             return MP_ERR_INVALID;
         }
         d->design.taps = static_cast<std::uint32_t>(taps);
@@ -203,38 +218,62 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
     if (std::strcmp(key, "max_taps") == 0) {
         char* end = nullptr;
         const unsigned long taps = std::strtoul(value, &end, 10);
-        if (end == value || taps < 64 || taps > (1u << 26)) {
+        // **This is the memory bound, and it stays.** Every other length here
+        // is checked against it before anything is allocated, and the DSP ABI
+        // is `noexcept`, so a prototype the machine cannot hold is not a
+        // refusal but a terminated process. 2^26 coefficients is half a
+        // gigabyte of doubles before the transforms want their own. The 64
+        // floor was a judgement and is gone: a small ceiling just refuses more
+        // ratios, which is a thing somebody may want to do on purpose.
+        if (end == value || taps > (1u << 26)) {
             return MP_ERR_INVALID;
         }
         d->design.max_taps = static_cast<std::uint32_t>(taps);
         return MP_OK;
     }
-    const auto counted = [&](unsigned long low, unsigned long high,
-                             std::uint32_t& target) {
+    // A whole number the field can hold, and no opinion beyond that.
+    //
+    // The four settings below used to carry 65..2^20, 1..10000, 1..1000 and
+    // 4096..2^24, and none of the eight numbers was guarding anything:
+    //
+    //  * `remez_max_taps` only decides when Parks-McClellan *refuses*, and the
+    //    header already says raising it cannot let a bad filter reach the
+    //    audio, only make the refusal take longer. What it would allocate is
+    //    gated by `max_taps`.
+    //  * `refine_rounds` and `refine_patience` are loop counts. Zero means no
+    //    refining, which is what `design=window` is, and a large one spends
+    //    the caller's own time.
+    //  * `measure_points` is clamped at both ends inside `measure` --
+    //    `max(points, 4096)` and then `min` against eight per tap -- so it can
+    //    only ever *reduce* the resolution. Both of its bounds were dead.
+    const auto counted = [&](std::uint32_t& target) {
         char* end = nullptr;
         const unsigned long parsed = std::strtoul(value, &end, 10);
-        if (end == value || parsed < low || parsed > high) {
+        if (end == value || parsed > 0xFFFFFFFFul) {
             return false;
         }
         target = static_cast<std::uint32_t>(parsed);
         return true;
     };
     if (std::strcmp(key, "remez_max_taps") == 0) {
-        return counted(65, 1u << 20, d->design.remez_max_taps) ? MP_OK : MP_ERR_INVALID;
+        return counted(d->design.remez_max_taps) ? MP_OK : MP_ERR_INVALID;
     }
     if (std::strcmp(key, "refine_rounds") == 0) {
-        return counted(1, 10000, d->design.refine_rounds) ? MP_OK : MP_ERR_INVALID;
+        return counted(d->design.refine_rounds) ? MP_OK : MP_ERR_INVALID;
     }
     if (std::strcmp(key, "refine_patience") == 0) {
-        return counted(1, 1000, d->design.refine_patience) ? MP_OK : MP_ERR_INVALID;
+        return counted(d->design.refine_patience) ? MP_OK : MP_ERR_INVALID;
     }
     if (std::strcmp(key, "measure_points") == 0) {
-        return counted(4096, 1u << 24, d->design.measure_points) ? MP_OK : MP_ERR_INVALID;
+        return counted(d->design.measure_points) ? MP_OK : MP_ERR_INVALID;
     }
     if (std::strcmp(key, "cepstrum") == 0) {
         char* end = nullptr;
         const unsigned long factor = std::strtoul(value, &end, 10);
-        if (end == value || factor < 2 || factor > 256) {
+        // 2..256 was dead too: `to_minimum_phase` takes `max(oversample, 2)`
+        // and then caps the transform at 2^22 points, so a value outside that
+        // window is already the nearest value inside it.
+        if (end == value || factor > 0xFFFFFFFFul) {
             return MP_ERR_INVALID;
         }
         d->design.cepstrum = static_cast<std::uint32_t>(factor);
@@ -243,7 +282,13 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
     if (std::strcmp(key, "phase_floor") == 0) {
         char* end = nullptr;
         const double db = std::strtod(value, &end);
-        if (end == value || !std::isfinite(db) || db > 0.0 || db < -400.0) {
+        // Zero and above already mean "derive it from the attenuation", so the
+        // old `db > 0.0` refusal turned a synonym into an error. What is left
+        // is the one thing that actually breaks: the floor is a *linear*
+        // multiplier of the peak, and once it underflows to zero the logarithm
+        // it guards has a zero to take, which is not a number.
+        if (end == value || !std::isfinite(db) ||
+            (db < 0.0 && std::pow(10.0, db / 20.0) <= 0.0)) {
             return MP_ERR_INVALID;
         }
         d->design.phase_floor_db = db;

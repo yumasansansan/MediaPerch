@@ -122,9 +122,17 @@ std::vector<double> design_fir(const MpDsp& d, double rate, std::uint32_t taps,
     const double denominator = i0(beta);
     for (std::size_t n = 0; n < taps; ++n) {
         const std::size_t from = (n + points - centre) % points;
-        const double ratio = (static_cast<double>(n) - half) / half;
-        const double window =
-            i0(beta * std::sqrt(std::max(0.0, 1.0 - ratio * ratio))) / denominator;
+        // **A window of one point has nothing to taper.** `half` is zero there
+        // and the ratio would be 0/0, which reaches `i0` as a NaN and comes
+        // back as `i0(0) / i0(beta)` -- sixty decibels of attenuation on a
+        // filter that was asked to be a gain. Unreachable while `taps` had a
+        // floor of 16 under it, and reachable the moment that floor came off,
+        // which is the shape of most of what a range hides.
+        double window = 1.0;
+        if (half > 0.0) {
+            const double ratio = (static_cast<double>(n) - half) / half;
+            window = i0(beta * std::sqrt(std::max(0.0, 1.0 - ratio * ratio))) / denominator;
+        }
         h[n] = spectrum[from].real() * window;
     }
     if (minimum) {
@@ -319,7 +327,13 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
     if (std::strcmp(key, "taps") == 0) {
         char* end = nullptr;
         const unsigned long taps = std::strtoul(value, &end, 10);
-        if (end == value || taps < 16 || taps > (1u << 20)) {
+        // **The ceiling stays and the floor goes.** `design_fir` works in
+        // `taps * 8` points, which is unsigned 32-bit arithmetic and wraps past
+        // 2^29 -- so the ceiling is not a taste, it is the only thing between a
+        // large number and a transform of the wrong size. The 16 underneath it
+        // was a taste: one tap is a gain, which is a legal thing to ask an
+        // equaliser for, and the convolver refuses an empty impulse by itself.
+        if (end == value || taps > (1u << 20)) {
             return MP_ERR_INVALID;
         }
         d->taps = static_cast<std::uint32_t>(taps);
@@ -328,6 +342,10 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
     if (std::strcmp(key, "partition") == 0) {
         char* end = nullptr;
         const unsigned long partition = std::strtoul(value, &end, 10);
+        // A block of the overlap-save convolver, allocated per channel. Memory,
+        // which the DSP ABI cannot report because it is `noexcept` -- so this
+        // ceiling is the DoS exception rather than a judgement about the value.
+        // Zero still means "size it from the host's block".
         if (end == value || partition > (1u << 20)) {
             return MP_ERR_INVALID;
         }
@@ -391,6 +409,11 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
                 }
             }
         }
+        // All four of these are facts rather than tastes. A curve from zero
+        // hertz has no logarithm to step along; a top below its bottom is not a
+        // range; one point divides by `points - 1`; and the report is built as
+        // a string of about fifteen bytes a point inside a `noexcept` function,
+        // so the ceiling is the same DoS exception `partition` carries.
         if (low <= 0.0 || high <= low || points < 2 || points > 4096) {
             return MP_ERR_INVALID;
         }

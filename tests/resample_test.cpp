@@ -648,6 +648,56 @@ TEST_CASE("a design that cannot be trusted is refused, not returned",
     CHECK(why.find("design=window") != std::string::npos);
 }
 
+TEST_CASE("a specification too large to count is refused, not wrapped",
+          "[resample][design]")
+{
+    // **The settings no longer hold a range, so the design has to be total.**
+    // Kaiser's order estimate is a division by the transition band, and both
+    // its inputs are now whatever was asked for: the 40..200 dB and 0.5..0.999
+    // windows on `attenuation` and `bandwidth` were the only reason the cast to
+    // an unsigned integer was in range. Each of these used to be unreachable
+    // and each of them is now a number somebody may type.
+    std::vector<double> h;
+    mp::resample::Response achieved;
+    std::uint32_t taps = 0;
+    std::string why;
+
+    const auto refused = [&](mp::resample::Design design, std::uint32_t up,
+                             std::uint32_t down) {
+        h.clear();
+        why.clear();
+        // Refused rather than returned, and by name rather than by crashing:
+        // the estimate saturates and `max_taps` is what speaks.
+        const bool built = mp::resample::design_prototype(design, up, down, h, taps,
+                                                          achieved, why);
+        INFO(why);
+        CHECK_FALSE(built);
+        CHECK_FALSE(why.empty());
+    };
+
+    mp::resample::Design huge_attenuation = quality("good");
+    huge_attenuation.attenuation_db = 1.0e18;
+    refused(huge_attenuation, 2, 1);
+
+    mp::resample::Design razor = quality("good");
+    razor.bandwidth = 1.0 - 1.0e-15; // a transition band of almost nothing
+    refused(razor, 2, 1);
+
+    // And the length itself, which is `taps * up + 1` in numbers this program
+    // did not choose. 4294967295 * 147 overflows sixty-four bits if it wraps.
+    mp::resample::Design every_tap = quality("good");
+    every_tap.taps = 0xFFFFFFFFu;
+    refused(every_tap, 147, 160);
+
+    // A shallow stopband is a poor filter and a legal one, which is the point
+    // of taking the floor off: it builds, and it measures what it built.
+    mp::resample::Design shallow = quality("good");
+    shallow.attenuation_db = 12.0;
+    h.clear();
+    REQUIRE(mp::resample::design_prototype(shallow, 2, 1, h, taps, achieved, why));
+    CHECK(achieved.stopband_db < 0.0);
+}
+
 TEST_CASE("more taps is the other axis, and it works", "[resample][design]")
 {
     // `taps=` with the attenuation fixed: the transition band narrows and the

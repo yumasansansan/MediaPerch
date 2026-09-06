@@ -1814,11 +1814,59 @@ double cannot hold, which is arithmetic rather than judgement — an infinite ga
 sample into a NaN and stops being a gain. A negative linear gain is now taken: it inverts the
 phase, and the decibel figure reports the magnitude because a logarithm has no sign.
 
-About a dozen ranges remain, in `dsp_resample`, `dsp_eq`, `dsp_convolve` and `dsp_mix`, and
-they are left because telling one kind from the other needs the algorithm read rather than
-the constant looked at. `channels > 64` is an array; `taps > 1 << 24` is memory; but
-`stopband 40..200 dB`, `passband 0.5..0.999` and `cepstrum 2..256` look like the ones
-already removed, and each wants its designer read before the number moves.
+The ones left pending have now been read rather than guessed at, and they split three ways.
+**Thirteen were judgements or were dead**, and are gone:
+
+| setting | was | why it went |
+|---|---|---|
+| `rate` | 4000..3,000,000 | a bad ratio costs coefficients, and `max_taps` already refuses those by name |
+| `attenuation` | 40..200 dB | a shallow stopband is a poor filter and a legal one; the design is measured either way |
+| `bandwidth` | 0.5..0.999 | `design_prototype` states the real domain, 0 to 1 exclusive; this was a narrower taste on top |
+| `passband_ripple` | 0..6 dB | a wide ripple is a specification, not an error |
+| `taps` | 0..2^20 | the cost is checked where it is known, against `max_taps` |
+| `max_taps` | >= 64 | a small ceiling just refuses more ratios, which somebody may mean |
+| `remez_max_taps` | 65..2^20 | it only decides when Parks-McClellan refuses; its allocation is `max_taps`'s |
+| `refine_rounds` | 1..10000 | a loop count. Zero is `design=window` |
+| `refine_patience` | 1..1000 | likewise |
+| `measure_points` | 4096..2^24 | **dead**: `measure` clamps at 4096 below and eight-per-tap above, so it could only reduce |
+| `cepstrum` | 2..256 | **dead**: `to_minimum_phase` takes `max(oversample, 2)` and caps the transform at 2^22 |
+| `phase_floor` | -400..0 dB | zero and above already *mean* "derive it", so the old check made an error of a synonym |
+| `dsp_eq` `taps` | >= 16 | one tap is a gain, which an equaliser may legitimately be asked for |
+
+**And taking that last floor off found a bug under it.** `design_fir` windows the truncated
+impulse with a Kaiser, and its ratio is `(n - half) / half` where `half` is `(taps - 1) / 2`.
+At one tap that is 0/0, which reaches the Bessel series as a NaN and comes back as
+`i0(0) / i0(beta)` — **60.4 dB of attenuation on a filter that was asked to be a gain**, and
+silently, because `std::max(0.0, NaN)` is 0 and nothing propagates. A window of one point has
+nothing to taper, so it is unity now. Measured through the real module, on a flat curve:
+`eq:taps=1` and `eq:taps=64` produce byte-identical output, at the same -17.62 dBFS peak and
+-29.27 dBFS RMS as a decode with no equaliser in the chain at all. Before, the first of those
+was sixty decibels down. This is the shape of most of what a range hides — not a value
+somebody would regret typing, but a code path nobody had run.
+
+**Two were arithmetic that the ranges had been standing in for**, and closing them is what
+made the removals honest rather than merely bold. Kaiser's order estimate divides by the
+transition band and is then cast to an unsigned integer: with `attenuation` free to be 1e18,
+or `bandwidth` a hair under one, the cast leaves the type's range, which is undefined rather
+than large. And the prototype's length is `taps * up + 1` in two numbers this program no
+longer chooses. Both saturate now, and `max_taps` refuses the result in words about the
+filter. `a specification too large to count is refused, not wrapped` is the test: every case
+in it was unreachable before and is a number somebody may type now.
+
+**And five stay, every one of them the DoS exception rather than a judgement.** The DSP ABI
+is `noexcept`, so a `std::bad_alloc` inside `configure` is not a refused stage but a
+terminated process — which makes a memory ceiling there load-bearing in a way
+`Player::set`'s was not, and it is why each of these now says so at the point it is enforced:
+`max_taps` at 2^26, `dsp_eq`'s `taps` at 2^20 (which is also where `taps * 8` stops fitting
+in unsigned 32-bit arithmetic), `dsp_eq`'s and `dsp_convolve`'s `partition` at 2^20,
+`dsp_convolve`'s `taps` at 2^24, and `dsp_eq`'s curve `points` at 4096. `dsp_mix`'s
+`channels <= 64` is not memory at all but the bus's own width, and `points >= 2` is a
+division by `points - 1`.
+
+The way to retire the five would be to stop the ABI being the place an allocation failure has
+nowhere to go — a guard at each module's entry points, turning `bad_alloc` into
+`MP_ERR_*` the way `Player::play_track` now turns it into a failed run. That is a change to
+six modules and it is not this one.
 
 **Settings**, with the two ways of reaching each one. The probe's flags are the tool's; the
 `[player]` keys are the settings file's, and what one of those *means* is decided in exactly
