@@ -91,6 +91,19 @@ enum class Kind : std::uint16_t {
     /// engine that does not know one answers `error`, which is exactly what a
     /// shell from the future should be told.
     save = 18,
+    /// **Measure this machine against these files and write it down.**
+    ///
+    /// A calibration is playback of a list with a report at the end, so it
+    /// arrives as one verb and takes nothing else with it: progress is
+    /// `event_log`, because the driver's own progress lines are log lines and a
+    /// shell that subscribed already shows them, and what is playing is
+    /// `Status`, because during a calibration something *is* playing. §10's
+    /// surface does not widen to hold this.
+    calibrate = 19,
+    /// What was measured, as the text of the profile. A shell displays it and
+    /// does not parse it: what a measurement means is the core's, which is the
+    /// same split §11 makes for the settings file.
+    profile = 20,
 
     // --- replies, engine to shell ---
     ok = 128,
@@ -100,10 +113,32 @@ enum class Kind : std::uint16_t {
     playlist_reply = 132,
     settings_reply = 133,
     log_reply = 134,
+    profile_reply = 135,
 
     // --- events, engine to shell, unasked ---
     event_state = 200,
     event_log = 201,
+};
+
+/// **What to measure, and how much of somebody's afternoon to spend on it.**
+///
+/// Every field is here because every field costs real time: a calibration
+/// cannot run faster than the material, so a shell that offered no choice would
+/// be a shell that spent an hour without asking. The engine turns this into
+/// `mp::CalibrationPlan`, which is where the meanings are; this is only the
+/// wire.
+struct Calibration {
+    std::vector<std::string> files;
+    /// `mp::Dimension` and `mp::Sweep` as integers. Named on the wire by their
+    /// numbers rather than their words, because a word is a second spelling to
+    /// keep in step and the core already has the first.
+    std::uint32_t dimensions = 1;
+    std::uint32_t sweep = 0;
+    std::uint32_t windows = 3;
+    double window_seconds = 10.0;
+    std::uint32_t start_ring = 0;
+    std::uint32_t lowest_ring = 1;
+    std::uint32_t highest_ring = 8192;
 };
 
 /// What the engine is doing.
@@ -240,6 +275,9 @@ void write(Writer& w, const Status& s);
 
 void write(Writer& w, const std::vector<Setting>& settings);
 [[nodiscard]] bool read(Reader& r, std::vector<Setting>& settings);
+
+void write(Writer& w, const Calibration& c);
+[[nodiscard]] bool read(Reader& r, Calibration& c);
 
 void write_strings(Writer& w, const std::vector<std::string>& items);
 [[nodiscard]] bool read_strings(Reader& r, std::vector<std::string>& items);

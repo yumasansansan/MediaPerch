@@ -2602,6 +2602,19 @@ a window owned by another:
                                                    the picture
 ```
 
+**What comes with the video path, and is easy to forget.** Two things are waiting on this
+section rather than on any decision of their own, and neither is visible from here unless it is
+written down:
+
+- **`Player` reads a buffering profile.** `show` does (§9.8.2); the engine does not, because
+  the profile is keyed on a class of *video* stream and a player with no video path has
+  nothing to ask about. The day `Player` builds a router and a video graph is the day it also
+  asks `mp::ring_for` where it builds the audio graph, and the `ring_periods` it passes has to
+  keep the *nobody said* distinction the probe's does or a measured profile will overrule a
+  person.
+- **The engine can run a calibration.** §10's surface carries the verb already; what it cannot
+  do is assemble the A/V graph a run measures, which is this section's work.
+
 Four properties follow, and they are the reason for the choice rather than pleasant side
 effects.
 
@@ -3491,8 +3504,9 @@ turn in which to answer the hold.
 
 **What is still not built is the rest of the tree consulting it.** `show` reads a profile;
 `play` and `Player` do not, because a player has no video shape to ask about until it has a
-video path (§9.7.1), and a shell has no way to run a calibration until §10's surface carries
-one. Both are the same shape of work and neither is a new decision.
+video path. That is §9.7.1's work, and §9.7.1 now says so out loud rather than leaving it to be
+inferred from a cross-reference. §10 carries the verb a shell needs; the engine answering it
+waits on the same video path.
 
 ##### `mediaperch-probe calibrate`, and what it measured
 
@@ -4195,6 +4209,40 @@ The engine is a headless process with no toolkit linked in. Shells attach.
 
 Because the surface is small and versioned, a third-party shell — a web UI, a hardware
 remote, a Linux Qt shell — is a normal thing to write rather than a fork.
+
+#### A calibration on this surface, without widening it
+
+§9.8.2's calibration is the first thing since this section was written that a shell would want
+to start and could not. **It fits in one verb, and the reason is that a calibration is
+playback of a list with a report at the end** — so almost all of it is already here:
+
+| what a shell needs | where it comes from | new? |
+|---|---|---|
+| start one | `Kind::calibrate`, carrying the files and the plan | **yes** |
+| what it is doing now | `Status`, because during a calibration something *is* playing | no |
+| how far along | `event_log`, because the driver's progress lines *are* log lines | no |
+| what it decided | `Kind::profile` / `profile_reply`, the profile as text | **yes** |
+
+Two verbs and one reply. **No new event, no new field on `Status`, and no second progress
+mechanism** — a shell that already subscribes and already shows a log tail shows a
+calibration's progress without a line of new code.
+
+`ipc::Calibration` carries the files and every choice that costs time: what to move, which way
+to sweep, how many windows and how long, and where the sweep starts and stops. All of them,
+because a calibration cannot run faster than the material and a shell that offered no choice
+would be a shell that spent an hour without asking. **`Dimension` and `Sweep` go on the wire as
+their numbers**, not their words: a word is a second spelling to keep in step and the core
+already has the first.
+
+The profile comes back as **text a shell displays and does not parse**. That is §11's split
+again: what a measurement means belongs to the core, and a shell that parsed it would be a
+second reader to keep in step with `mp::parse_profile`.
+
+**The messages are defined and the engine does not serve them yet**, which is not an oversight
+but the same dependency §9.7.1 has: `mediaperchd` has no video path, so it cannot assemble the
+A/V graph a calibration measures. An engine that does not know a kind answers `error`, which
+this section already says is what a shell from the future should be told, so the two halves can
+be built in either order.
 
 ---
 

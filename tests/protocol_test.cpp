@@ -283,3 +283,58 @@ TEST_CASE("every kind has a name", "[ipc][protocol]")
     CHECK(std::string{mp::ipc::kind_name(static_cast<mp::ipc::Kind>(9999))} == "unknown");
     CHECK(std::string{mp::ipc::state_name(mp::ipc::State::stopped)} == "stopped");
 }
+
+TEST_CASE("a calibration survives the wire", "[protocol]")
+{
+    // **Every field is a choice somebody made about their own afternoon.** A
+    // calibration cannot run faster than the material, so a field lost on the
+    // wire is an hour spent measuring something nobody asked for.
+    mp::ipc::Calibration sent;
+    sent.files = {"C:/clips/forest.mkv", "D:/a file with spaces.mp4"};
+    sent.dimensions = 3;
+    sent.sweep = 2;
+    sent.windows = 5;
+    sent.window_seconds = 12.5;
+    sent.start_ring = 128;
+    sent.lowest_ring = 16;
+    sent.highest_ring = 4096;
+
+    mp::ipc::Writer w;
+    mp::ipc::write(w, sent);
+
+    mp::ipc::Reader r{w.bytes()};
+    mp::ipc::Calibration got;
+    REQUIRE(mp::ipc::read(r, got));
+    CHECK(r.complete());
+    CHECK(got.files == sent.files);
+    CHECK(got.dimensions == sent.dimensions);
+    CHECK(got.sweep == sent.sweep);
+    CHECK(got.windows == sent.windows);
+    CHECK(got.window_seconds == sent.window_seconds);
+    CHECK(got.start_ring == sent.start_ring);
+    CHECK(got.lowest_ring == sent.lowest_ring);
+    CHECK(got.highest_ring == sent.highest_ring);
+}
+
+TEST_CASE("the calibration verbs have names, because a trace is read by a person",
+          "[protocol]")
+{
+    using mp::ipc::Kind;
+    CHECK(std::string{mp::ipc::kind_name(Kind::calibrate)} == "calibrate");
+    CHECK(std::string{mp::ipc::kind_name(Kind::profile)} == "profile");
+    CHECK(std::string{mp::ipc::kind_name(Kind::profile_reply)} == "profile_reply");
+}
+
+TEST_CASE("a truncated calibration is refused rather than half-read", "[protocol]")
+{
+    mp::ipc::Calibration sent;
+    sent.files = {"one.mkv"};
+    mp::ipc::Writer w;
+    mp::ipc::write(w, sent);
+
+    std::vector<std::uint8_t> cut = w.bytes();
+    cut.resize(cut.size() - 3);
+    mp::ipc::Reader r{cut};
+    mp::ipc::Calibration got;
+    CHECK_FALSE(mp::ipc::read(r, got));
+}

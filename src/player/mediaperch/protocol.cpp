@@ -63,6 +63,12 @@ const char* kind_name(Kind k) noexcept
         return "setting_set";
     case Kind::log:
         return "log";
+    case Kind::calibrate:
+        return "calibrate";
+    case Kind::profile:
+        return "profile";
+    case Kind::profile_reply:
+        return "profile_reply";
     case Kind::subscribe:
         return "subscribe";
     case Kind::quit:
@@ -320,6 +326,33 @@ bool read(Reader& r, Status& s)
     s.frames_rendered = r.u64();
     s.underruns = r.u64();
     s.error = r.str();
+    return r.ok();
+}
+
+void write(Writer& w, const Calibration& c)
+{
+    write_strings(w, c.files);
+    w.u32(c.dimensions);
+    w.u32(c.sweep);
+    w.u32(c.windows);
+    w.f64(c.window_seconds);
+    w.u32(c.start_ring);
+    w.u32(c.lowest_ring);
+    w.u32(c.highest_ring);
+}
+
+bool read(Reader& r, Calibration& c)
+{
+    if (!read_strings(r, c.files)) {
+        return false;
+    }
+    c.dimensions = r.u32();
+    c.sweep = r.u32();
+    c.windows = r.u32();
+    c.window_seconds = r.f64();
+    c.start_ring = r.u32();
+    c.lowest_ring = r.u32();
+    c.highest_ring = r.u32();
     return r.ok();
 }
 
