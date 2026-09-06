@@ -416,13 +416,11 @@ const MpVideoVtbl* ModuleRegistry::video(std::string_view id) const
     return id.empty() ? best : nullptr;
 }
 
-const MpVideoCodecVtbl* ModuleRegistry::video_codec_for(MpCodec codec, MpGraphicsApi api,
-                                                        const std::uint8_t* config,
-                                                        std::uint32_t config_bytes) const
+std::vector<ModuleRegistry::VideoCodecChoice> ModuleRegistry::video_codecs_for(
+    MpCodec codec, MpGraphicsApi api, const std::uint8_t* config,
+    std::uint32_t config_bytes) const
 {
-    const MpVideoCodecVtbl* best = nullptr;
-    std::uint32_t best_score = 0;
-    std::uint32_t best_priority = 0;
+    std::vector<VideoCodecChoice> found;
 
     for (const auto& module : modules_) {
         const MpModuleDesc& desc = module->desc();
@@ -451,14 +449,28 @@ const MpVideoCodecVtbl* ModuleRegistry::video_codec_for(MpCodec codec, MpGraphic
         if (score == 0) {
             continue;
         }
-        if (best == nullptr || score > best_score ||
-            (score == best_score && desc.priority > best_priority)) {
-            best = vtbl;
-            best_score = score;
-            best_priority = desc.priority;
-        }
+        found.push_back(VideoCodecChoice{vtbl, &desc, score});
     }
-    return best;
+
+    // Score first, priority breaking ties, as everywhere else. Stable, so two
+    // modules that agree on both stay in the order they loaded in.
+    std::stable_sort(found.begin(), found.end(),
+                     [](const VideoCodecChoice& a, const VideoCodecChoice& b) {
+                         if (a.score != b.score) {
+                             return a.score > b.score;
+                         }
+                         return a.desc->priority > b.desc->priority;
+                     });
+    return found;
+}
+
+const MpVideoCodecVtbl* ModuleRegistry::video_codec_for(MpCodec codec, MpGraphicsApi api,
+                                                        const std::uint8_t* config,
+                                                        std::uint32_t config_bytes) const
+{
+    const std::vector<VideoCodecChoice> found =
+        video_codecs_for(codec, api, config, config_bytes);
+    return found.empty() ? nullptr : found.front().vtbl;
 }
 
 const MpCodecVtbl* ModuleRegistry::codec_for(MpCodec codec, const std::uint8_t* config,

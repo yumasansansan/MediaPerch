@@ -2842,6 +2842,56 @@ What that buys is the thing §7 says about audio, arriving for video: the determ
 decoder is one in the tree, checkable the way `codec_alac` is, rather than a black box that
 a Windows update can change under a hash.
 
+#### HEVC has a decoder now, and it is not the operating system's
+
+**`codec_mft` was never an HEVC decoder; it was a hope that the machine had one.** Measured
+here: Windows ships an H.264 decoder in the box and no HEVC decoder at all. The only transform
+that answers for HEVC is `HEVCVideoExtension`, a Store package, which cannot be shipped with
+anything — and which, on the machine that *does* have it installed, turned out to
+offer no NV12 or P010 output when it was finally asked. A player whose HEVC support depends on
+somebody having installed something from a shop does not support HEVC.
+
+`codec_de265` is libde265 1.1.2, LGPL-3.0 for the library and MIT for the samples, which this
+tree's GPL-3.0-or-later may link. It reads the `hvcC`'s own chroma format and bit depths and
+declines anything that is not eight-bit 4:2:0, which is what libde265 does well — §7's
+rule that a decoder must not discover mid-file that it cannot do this, kept by refusing before
+the file starts.
+
+`parse_hvcc` went into `modules/shared/h264` beside `parse_avcc`, which is where that file's
+own header said it would go: *"HEVC is the same shape with a different configuration record.
+The parsing is separate; the emitting is identical."* The same `AvcConfig` comes out, because
+what a decoder needs from either record is a length size and the parameter sets in order.
+
+**Two things about the *host* had to change before the module could be reached**, and both
+were defects rather than adaptations:
+
+- **A probe that claims what the machine cannot do.** `codec_mft` scored 80 for HEVC without
+  ever asking whether a transform existed. It asks now, with the `MFTEnumEx` it was going to
+  run a moment later anyway.
+- **A ranked list nobody walked.** `show` asked the registry for the *best* video decoder and
+  stopped. `demuxers_for` has always returned a list because a demuxer can claim a container
+  and then decline what is inside it, and a decoder can do exactly the same: `codec_mft` finds
+  the Store extension, activates it, and only then discovers the output types. So
+  `video_codecs_for` returns the list, and `show` walks it and prints which one opened.
+
+#### Four bugs in one decoder, and what each of them looked like
+
+None of these was visible as an error. All four were found by counting.
+
+| what happened | why |
+|---|---|
+| **14 of 24 frames dropped** | the timestamp came from the last packet pushed rather than from the picture. HEVC reorders, so those are different frames, and the pacer was told each picture was due several frames early. `de265_push_NAL` takes a timestamp for exactly this reason |
+| **23 frames of 24, silently** | `de265_get_next_picture` is `peek` followed by `release`. Pairing it with a release of our own released the *next* picture, which is a no-op while the queue is empty and throws one away when it is not |
+| **23 frames again, differently** | `de265_push_data` finds NAL boundaries by scanning for start codes, so the last unit of a file is never terminated. The container already delimits them: an MP4 sample is a list of length-prefixed NALs, and `de265_push_NAL` takes one at a time |
+| **frames in decode order** | `de265_push_end_of_frame` fixes the count by sending each picture straight to the output queue, which is decode order. Giving libde265 the boundaries instead costs neither |
+
+The last two are the same mistake from two directions: **re-deriving something the container
+already knew.** The fix in both cases was to stop.
+
+`tests/codec_de265_test.cpp` checks the count against the packet count rather than against 24,
+so a different fixture asks the same question; and it checks that the timestamps increase,
+which is the assertion that would have caught the first row on its own.
+
 #### The container half of AV1 is done; the library is a build-system question
 
 **Done:** `MP_CODEC_AV1` is appended, `demux_mp4` recognises an `av01` sample entry, and the

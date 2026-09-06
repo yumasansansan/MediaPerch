@@ -55,3 +55,9 @@
 [submodule "external/libvpx"]
 	path = external/libvpx
 	url = https://github.com/webmproject/libvpx.git
+[submodule "external/libde265"]
+	path = external/libde265
+	url = https://github.com/strukturag/libde265.git
+[submodule "external/HM"]
+	path = external/HM
+	url = https://vcgit.hhi.fraunhofer.de/jvet/HM.git

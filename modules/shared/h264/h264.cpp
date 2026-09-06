@@ -357,6 +357,109 @@ SpsInfo sps_of(const AvcConfig& config)
     return SpsInfo{};
 }
 
+HevcConfig parse_hvcc(const std::uint8_t* data, std::size_t bytes)
+{
+    HevcConfig config{};
+    if (data == nullptr) {
+        return config;
+    }
+    Reader in{data, bytes};
+
+    // configurationVersion, then the profile space, tier and profile_idc packed
+    // into one byte. The profile is worth keeping: it is the difference between
+    // Main and Main 10 and a decoder that does only the first wants to know.
+    std::uint8_t packed = 0;
+    if (!in.skip(1) || !in.u8(packed)) {
+        return config;
+    }
+    config.profile_idc = packed & 0x1Fu;
+
+    // profile_compatibility_flags (4), constraint_indicator_flags (6),
+    // level_idc (1), then the two reserved-and-packed bytes holding
+    // min_spatial_segmentation_idc, and parallelismType. Eleven in all, none of
+    // which a decoder is told anything by that the parameter sets do not repeat.
+    if (!in.skip(4 + 6 + 1 + 2 + 1)) {
+        return config;
+    }
+
+    // Six reserved bits then chroma_format_idc; five then each bit depth.
+    if (!in.u8(packed)) {
+        return config;
+    }
+    config.chroma_format_idc = packed & 0x03u;
+    if (!in.u8(packed)) {
+        return config;
+    }
+    config.bit_depth_luma = (packed & 0x07u) + 8u;
+    if (!in.u8(packed)) {
+        return config;
+    }
+    config.bit_depth_chroma = (packed & 0x07u) + 8u;
+
+    // avgFrameRate, which the container states properly elsewhere and which is
+    // zero in most files anyway.
+    if (!in.skip(2)) {
+        return config;
+    }
+
+    // constantFrameRate (2), numTemporalLayers (3), temporalIdNested (1), and
+    // then the two bits that matter.
+    if (!in.u8(packed)) {
+        return config;
+    }
+    config.annex.length_size = static_cast<std::uint32_t>(packed & 0x03u) + 1u;
+    if (config.annex.length_size == 3) {
+        // Forbidden here for the reason it is forbidden in `avcC`.
+        return config;
+    }
+
+    // **The arrays, which is where `hvcC` stops looking like `avcC`.** HEVC has
+    // three kinds of parameter set rather than two -- a video parameter set
+    // above the sequence and picture ones -- and they arrive grouped by kind
+    // instead of in two counted lists. The order the arrays appear in is the
+    // order to emit them, and files write VPS, SPS, PPS; nothing here reorders,
+    // because a file that wrote them another way meant it.
+    std::uint8_t arrays = 0;
+    if (!in.u8(arrays)) {
+        return config;
+    }
+    for (std::uint32_t a = 0; a < arrays; ++a) {
+        // array_completeness (1), reserved (1), NAL_unit_type (6). The type is
+        // not checked: emitting whatever the record holds, in the order it
+        // holds it, is what a decoder wants, and a record carrying an SEI in
+        // there is not this function's to object to.
+        std::uint32_t count = 0;
+        if (!in.skip(1) || !in.u16(count)) {
+            return config;
+        }
+        for (std::uint32_t i = 0; i < count; ++i) {
+            std::uint32_t length = 0;
+            std::vector<std::uint8_t> nal;
+            if (!in.u16(length) || !in.take(length, nal)) {
+                return config;
+            }
+            config.annex.parameter_sets.push_back(std::move(nal));
+        }
+    }
+
+    config.annex.valid = !config.annex.parameter_sets.empty();
+    config.valid = config.annex.valid;
+    return config;
+}
+
+bool parameter_sets_annex_b(const AvcConfig& config, std::vector<std::uint8_t>& out)
+{
+    if (!config.valid) {
+        return false;
+    }
+    out.clear();
+    for (const std::vector<std::uint8_t>& nal : config.parameter_sets) {
+        out.insert(out.end(), std::begin(k_start_code), std::end(k_start_code));
+        out.insert(out.end(), nal.begin(), nal.end());
+    }
+    return true;
+}
+
 bool to_annex_b(const AvcConfig& config, const std::uint8_t* sample, std::size_t bytes,
                 bool with_parameter_sets, std::vector<std::uint8_t>& out)
 {
@@ -365,11 +468,8 @@ bool to_annex_b(const AvcConfig& config, const std::uint8_t* sample, std::size_t
     }
     out.clear();
 
-    if (with_parameter_sets) {
-        for (const std::vector<std::uint8_t>& nal : config.parameter_sets) {
-            out.insert(out.end(), std::begin(k_start_code), std::end(k_start_code));
-            out.insert(out.end(), nal.begin(), nal.end());
-        }
+    if (with_parameter_sets && !parameter_sets_annex_b(config, out)) {
+        return false;
     }
 
     std::size_t at = 0;

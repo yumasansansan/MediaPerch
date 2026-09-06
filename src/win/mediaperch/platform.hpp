@@ -255,12 +255,34 @@ public:
     /// The presenter, by id or by priority. `mp::Sink`'s question for pictures.
     [[nodiscard]] const MpVideoVtbl* video(std::string_view id = {}) const;
 
-    /// Which module decodes this video codec, on this graphics API.
+    struct VideoCodecChoice {
+        const MpVideoCodecVtbl* vtbl = nullptr;
+        const MpModuleDesc* desc = nullptr;
+        std::uint32_t score = 0;
+    };
+
+    /// Every module that decodes this video codec on this graphics API, best
+    /// first.
     ///
     /// **The API is part of the question**, which is what separates this from
     /// `codec_for`: a decoder that can hand a D3D11 presenter a texture it can
     /// sample scores differently from one that cannot, and §9.8.1 is why. A
     /// software decoder answers the same whatever is asked.
+    ///
+    /// **Best first, not best only**, for the reason `demuxers_for` gives and
+    /// for a case that was measured rather than imagined. `codec_mft` claimed
+    /// HEVC at 80 on this machine because an HEVC transform *is* registered --
+    /// `HEVCVideoExtension`, from the Store -- and then failed in `open` with
+    /// "the decoder offers no NV12 or P010 output". A host that asked for the
+    /// maximum and stopped had one answer and it was the wrong one, while a
+    /// decoder that could do the job sat below it in the list. A probe cannot
+    /// always know: finding out would mean activating the transform and
+    /// negotiating its output types, which is opening it.
+    [[nodiscard]] std::vector<VideoCodecChoice> video_codecs_for(
+        MpCodec codec, MpGraphicsApi api, const std::uint8_t* config,
+        std::uint32_t config_bytes) const;
+
+    /// The best of them, for a caller with nowhere to fall back to.
     [[nodiscard]] const MpVideoCodecVtbl* video_codec_for(MpCodec codec, MpGraphicsApi api,
                                                           const std::uint8_t* config,
                                                           std::uint32_t config_bytes) const;

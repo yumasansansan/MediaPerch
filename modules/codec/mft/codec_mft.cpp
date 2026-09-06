@@ -407,6 +407,41 @@ bool set_output_type(MpVideoCodec* c, std::string& why)
     return false;
 }
 
+/// Whether this machine has any decoder for `codec` at all.
+///
+/// **A probe that claims a codec the machine cannot decode is the defect §7
+/// exists to prevent**, and this one did. Measured here: Windows ships an
+/// H.264 decoder in the box and no HEVC decoder at all -- the only transform
+/// that answers for HEVC is `HEVCVideoExtension`, a Store package. So on a
+/// clean machine this module scored 80 for HEVC, won against a decoder that
+/// could actually do it, and then failed in `open`; the host reported "the
+/// video decoder would not open this stream" and stopped, because a decoder
+/// that claims and fails is not a decoder the host can route around.
+///
+/// Enumerating is what `activate` does anyway a moment later, so this asks the
+/// same question at the moment the answer changes something.
+bool have_transform(MpCodec codec)
+{
+    MFT_REGISTER_TYPE_INFO input{};
+    input.guidMajorType = MFMediaType_Video;
+    input.guidSubtype = subtype_of(codec);
+
+    IMFActivate** activates = nullptr;
+    UINT32 count = 0;
+    const HRESULT hr = ::MFTEnumEx(
+        MFT_CATEGORY_VIDEO_DECODER,
+        MFT_ENUM_FLAG_SORTANDFILTER | MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_ASYNCMFT |
+            MFT_ENUM_FLAG_HARDWARE,
+        &input, nullptr, &activates, &count);
+    if (activates != nullptr) {
+        for (UINT32 i = 0; i < count; ++i) {
+            activates[i]->Release();
+        }
+        ::CoTaskMemFree(activates);
+    }
+    return SUCCEEDED(hr) && count != 0;
+}
+
 /// Finds a transform for `codec`, preferring a hardware one when there is a
 /// device to bind it to.
 bool activate(MpVideoCodec* c, bool want_hardware, std::string& why)
@@ -499,6 +534,13 @@ MpResult MP_CALL codec_probe(MpCodec codec, MpGraphicsApi api, const std::uint8_
     // behind Media Foundation decodes, and the `avcC` says so before a decoder
     // is opened. See `within_reach`.
     if (!within_reach(codec, config, config_bytes)) {
+        return MP_OK;
+    }
+    // **And finally, whether the machine actually has one.** Everything above
+    // is about the stream; this is about the computer, and it is the check that
+    // was missing. It costs an `MFTEnumEx` per probe, which happens once when a
+    // file is opened.
+    if (!have_transform(codec)) {
         return MP_OK;
     }
     // Not 100: this is the operating system's decoder, and a module that

@@ -89,6 +89,52 @@ struct SpsInfo {
 /// The first SPS in a parsed `avcC`, read.
 [[nodiscard]] SpsInfo sps_of(const AvcConfig& config);
 
+/// What an `hvcC` says, which is an `avcC`'s two useful facts plus the three
+/// that let a decoder be declined before it is opened.
+///
+/// **The same `AvcConfig` comes out**, because the two records differ in how
+/// they are written and not in what a decoder needs from them: a length size,
+/// and the parameter sets in the order to emit them. `to_annex_b` takes that
+/// pair and has never known which record it came from -- which is what the note
+/// at the top of this file meant by the emitting being identical.
+///
+/// The three extra facts are `hvcC`'s own, sitting in bytes 16 to 18 where
+/// `avcC` has nothing: the chroma format and the two bit depths. H.264 hides
+/// those inside the SPS and this tree parses one to find them; HEVC states them
+/// in the record, so a `probe` can decline 4:2:2 or ten bits without reading a
+/// bitstream at all.
+struct HevcConfig {
+    /// Everything `to_annex_b` needs, filled the same way.
+    AvcConfig annex;
+    /// 0 monochrome, 1 is 4:2:0, 2 is 4:2:2, 3 is 4:4:4. Stated rather than
+    /// inferred, unlike H.264's.
+    std::uint32_t chroma_format_idc = 1;
+    std::uint32_t bit_depth_luma = 8;
+    std::uint32_t bit_depth_chroma = 8;
+    /// The general_profile_idc: 1 is Main, 2 Main 10, 3 Main Still Picture.
+    std::uint32_t profile_idc = 0;
+    bool valid = false;
+};
+
+/// Parses an `hvcC` box body.
+///
+/// Returns `valid == false` for anything it cannot read, which is the answer
+/// `parse_avcc` gives and for the same reason: a malformed record is a file to
+/// decline rather than to guess at.
+[[nodiscard]] HevcConfig parse_hvcc(const std::uint8_t* data, std::size_t bytes);
+
+/// Just the parameter sets, as Annex B, replacing `out`.
+///
+/// **A decoder wants them before the first sample and again after a reset**,
+/// and at neither of those moments is there a sample to attach them to.
+/// `to_annex_b` refuses a null one on purpose -- a sample that is not there is
+/// a caller's mistake, not an empty sample -- so asking for the sets alone is
+/// its own question with its own answer.
+///
+/// False when the config is not one, which is the only way this can fail.
+[[nodiscard]] bool parameter_sets_annex_b(const AvcConfig& config,
+                                          std::vector<std::uint8_t>& out);
+
 /// Rewrites one AVCC sample as Annex B, appending to `out`.
 ///
 /// `with_parameter_sets` prepends the SPS and PPS, which a decoder needs before

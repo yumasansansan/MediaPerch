@@ -39,6 +39,29 @@ git submodule update --init
 | `external/wavpack` | WavPack, lossless and lossy and DSD | `demux_wavpack` |
 | `external/asio` | the ASIO interface, headers only | `sink_asio` |
 | `external/vst3sdk/pluginterfaces` | the VST3 interfaces, and four .cpp files | `dsp_vst3` |
+| `external/dragonperch` | the INI parser the settings file is read with | `mediaperch_player` |
+| `external/dav1d` | AV1, the decoder written to be fast | `codec_dav1d` |
+| `external/aom` | AV1, the reference, to check dav1d against bit for bit | `codec_aom` |
+| `external/avm` | AV2 (AOM's research codec), decoder only | `codec_avm` |
+| `external/dav2d` | AV2, the fast decoder, when there is one to build | `codec_dav2d` |
+| `external/libvpx` | VP8 and VP9 | `codec_vpx` |
+| `external/libde265` | HEVC, and the only one this tree has — Windows ships no HEVC decoder | `codec_de265` |
+| `external/HM` | HEVC, the ITU/ISO/IEC reference, to check libde265 against | the cross-check test |
+
+**Two of those are references rather than decoders**, and the distinction is the method §12
+already uses for audio arriving for video: AV1 and HEVC are both defined bit-exactly, so two
+independent decoders must agree on every sample of every frame or one of them is wrong. That
+is a far stronger check than anything a single decoder can be held to on its own. `external/aom`
+is a module like any other; `external/HM` is not, because HM has no library API —
+`TDecTop::decode` is driven by two hundred and fifty lines of state in `TAppDecTop`, and what
+HM ships to be used is a program.
+
+**Licences, because they are why these two and not others.** libde265 is LGPL-3.0 for the
+library and MIT for the sample applications; HM is BSD-3-Clause from ITU/ISO/IEC, with a
+preamble worth reading before shipping anything built from it: *"This software may be subject
+to other third party and contributor rights, including patent rights, and no such rights are
+granted under this license."* That is a patent notice and not a licence restriction, and it
+applies to HEVC generally rather than to HM.
 
 `modules/video/d3d11` vendors nothing at all: Direct3D 11, DXGI and the shader compiler are
 in the Windows SDK the build already requires. The colour shader is compiled at run time

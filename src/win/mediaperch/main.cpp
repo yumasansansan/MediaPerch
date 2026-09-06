@@ -1634,20 +1634,37 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
 
     std::vector<std::uint8_t> config;
     (void)demux.stream_config(video_stream, config);
-    const MpVideoCodecVtbl* codec_vtbl = registry.video_codec_for(
+    // **Best first, and the next one when the best declines** -- the same rule
+    // the demuxer above follows, and for a case that was measured: this
+    // machine has an HEVC transform registered, so `codec_mft` claims HEVC at
+    // 80, and it fails in `open` with "the decoder offers no NV12 or P010
+    // output". Asking for the maximum and stopping got one answer and it was
+    // the wrong one, with a decoder that could do the job below it in the list.
+    const auto choices = registry.video_codecs_for(
         video_info.codec, have_device ? MP_GRAPHICS_D3D11 : MP_GRAPHICS_NONE,
         config.empty() ? nullptr : config.data(), static_cast<std::uint32_t>(config.size()));
-    if (codec_vtbl == nullptr) {
+    if (choices.empty()) {
         std::fprintf(stderr, "nothing here decodes that video codec\n");
         return 1;
     }
     mp::VideoDecoder decoder;
-    if (decoder.open(*codec_vtbl, video_info.codec, have_device ? &device : nullptr,
-                     config.empty() ? nullptr : config.data(),
-                     static_cast<std::uint32_t>(config.size())) != MP_OK) {
-        std::fprintf(stderr, "the video decoder would not open this stream\n");
+    const MpModuleDesc* decoder_desc = nullptr;
+    for (const auto& choice : choices) {
+        if (decoder.open(*choice.vtbl, video_info.codec, have_device ? &device : nullptr,
+                         config.empty() ? nullptr : config.data(),
+                         static_cast<std::uint32_t>(config.size())) == MP_OK) {
+            decoder_desc = choice.desc;
+            break;
+        }
+        decoder.close();
+    }
+    if (decoder_desc == nullptr) {
+        std::fprintf(stderr, "none of the %zu decoders for that codec would open this "
+                             "stream\n",
+                     choices.size());
         return 1;
     }
+    std::printf("decoder    %s\n", decoder_desc->id);
     std::printf("picture    %ux%u", picture.width, picture.height);
     if (picture.fps_den != 0) {
         std::printf(" at %.3f fps", static_cast<double>(picture.fps_num) / picture.fps_den);
