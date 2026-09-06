@@ -38,6 +38,8 @@
 #ifndef MEDIAPERCH_REFRESH_HPP
 #define MEDIAPERCH_REFRESH_HPP
 
+#include "mediaperch/rational.hpp"
+
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -46,25 +48,6 @@
 #include <vector>
 
 namespace mp {
-
-/// A rate as the two integers it is, because 60000/1001 is not a double.
-struct Rational {
-    std::uint32_t num = 0;
-    std::uint32_t den = 0;
-
-    [[nodiscard]] bool valid() const noexcept { return num != 0 && den != 0; }
-    [[nodiscard]] double hz() const noexcept
-    {
-        return den != 0 ? static_cast<double>(num) / den : 0.0;
-    }
-    friend bool operator==(const Rational& a, const Rational& b) noexcept
-    {
-        // Cross-multiplied, so 60/1 and 120/2 are the same rate. In 64 bits,
-        // because two 32-bit numerators are not.
-        return static_cast<std::uint64_t>(a.num) * b.den ==
-               static_cast<std::uint64_t>(b.num) * a.den;
-    }
-};
 
 /// One entry of a display's mode list.
 struct DisplayMode {

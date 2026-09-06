@@ -1890,15 +1890,73 @@ this panel would not show a 23.976 Hz mode at all until its timing was rebuilt, 
 that mode sits just above a line rate it refuses. Picking the slowest exact multiple by
 default would put a player on the least reliable mode a display has.
 
-**Two things the integration found.** A mode switch takes over a second, and with the switch
-after the audio half the wall clock had already started: the switch and the display's resync
-happened on its time, and a one-second file arrived with every frame already past — 24
-decoded, 24 dropped, one turn. It goes ahead of every clock now. And `vp9.webm` reports its
-match as *not* exact, at one slip per thirty days: Matroska states a frame duration in
-nanoseconds, and 41708333 ns is 24000/1001 to eight digits and not to the ninth. MP4 states a
-rational and can be exact; Matroska cannot. The ranking picks the same mode either way and
-says which of the two it had, which is the honest answer rather than a snap to what it
-probably meant.
+**A mode switch takes over a second**, and with the switch after the audio half the wall clock
+had already started: the switch and the display's resync happened on its time, and a
+one-second file arrived with every frame already past — 24 decoded, 24 dropped, one turn.
+It goes ahead of every clock now.
+
+#### A rate the container could only round
+
+`vp9.webm` first reported its 47.952 Hz match as *not* exact, at one slip per thirty days.
+**Matroska states a frame duration in whole nanoseconds**, and 24000/1001 is 41708333.33 of
+them, so a reader derives 1000000000/41708333 and the file has no way to say otherwise. MP4
+stores a timescale and a duration and can state the ratio; Matroska cannot.
+
+That is a lossy encoding with a decodable inverse, and `framerate.hpp` inverts it. **The
+numbers are the argument, not the intuition:**
+
+| | |
+|---|---|
+| largest error the rounding imposes | **4.0e-8** of the rate, at 119.88 fps |
+| closest two candidates | **1.0e-3**, every 1000/1001 pair |
+| margin between them | **25,000x** |
+| a rate that is genuinely not on the list | 23.98 exactly sits 1.7e-4 out, four thousand times the rounding |
+
+So the threshold is 1e-6, with twenty-five times the worst rounding below it and eighty times
+the nearest real oddity above. A rate inside it *is* the standard one; anything else is
+returned untouched, and `snapped` says which happened so a caller can print both — which
+`show` does, as the two ratios rather than as decimals that agree to seven places.
+
+**It is not in `demux_mkv`, and that split is the point.** A module reports what the file
+says; `1000000000/41708333` is what is in the file, and a demuxer that reported something else
+would be one whose output you could not check against a hex dump. Reading is the engine's.
+And it is not in `refresh.hpp` either, because any container that states a *duration* rather
+than a *rate* lands in the same place — the correction is common, and every consumer of
+`MpVideoInfo::fps_num` calls it rather than growing its own.
+
+What it cannot repair is a container that rounded coarsely. An MP4 written with a millisecond
+timescale stores a 23.976 fps frame as 42 ms, which reads back as 23.810: six parts in a
+thousand out, past any threshold that still tells 23.976 from 24, and genuinely ambiguous.
+That file is left alone, and is no use for matching a refresh rate either.
+
+#### And why that is not what `learn_refresh` needs
+
+The two look alike and are opposite, which is worth setting down because the wrong fix for the
+second is *tempting* now that `QueryDisplayConfig` reports a mode's rate exactly.
+
+| | the container's frame rate | the display's interval |
+|---|---|---|
+| what is wrong | a **quantisation**, by the file format | a **bias**, in an estimator |
+| how big | deterministic, at most 4.0e-8 | random, about 1.3e-2 |
+| is the true value written down? | yes, and the encoding is invertible | **no.** The crystal is the fact and nothing records it |
+| candidates | a short list, 1.0e-3 apart | none. A display runs at whatever it runs at |
+| the fix | invert the encoding | a better statistic |
+| can the fix be checked? | yes: it re-encodes to the same nanoseconds | only by measuring for longer |
+
+**Snapping the measured interval to the mode's nominal rate would be the wrong fix**, and it
+is exactly what the new API makes easy. §8 already refuses it: measured rather than asked,
+*because a mode that calls itself 60 Hz is 59.94*. The nominal is a label and the panel's
+crystal is the fact, and they differ by tens of parts per million.
+
+But the measurement is worse than that, and this is the part that changes the priority: **the
+estimator's bias is 1.3e-2 and the deviation it exists to catch is a crystal's, tens of parts
+per million** — hundreds of times smaller. That second figure is a consumer oscillator's
+specification rather than a measurement of this panel, which would take a long run to make;
+it does not have to be exact to carry the point. As it stands, taking the shortest gap is
+*less* accurate than believing the nominal rate would be. The argument for the minimum is sound about outliers, a
+gap can only be lengthened by a turn that was late, and wrong about symmetric jitter, whose
+minimum is low by roughly its spread. Elapsed time over turns taken, with the long gaps
+discarded, is the shape of the answer. Not done here.
 
 #### How large a picture, measured
 

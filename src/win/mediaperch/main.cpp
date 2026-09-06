@@ -8,6 +8,7 @@
 // before it does it.
 
 #include "mediaperch/platform.hpp"
+#include "mediaperch/framerate.hpp"
 #include "mediaperch/refresh_win.hpp"
 
 #include "mediaperch/display.hpp"
@@ -1664,7 +1665,13 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
     // is in force.
     mp::win::RefreshSwitch refresh;
     if (options.match_refresh) {
-        const mp::Rational fps{picture.fps_num, picture.fps_den};
+        // **What the container said, read as what the encoder meant.** A
+        // Matroska frame duration is whole nanoseconds and 24000/1001 is not,
+        // so vp9.webm states 1000000000/41708333 and means 23.976. See
+        // framerate.hpp for why undoing that is decoding rather than guessing.
+        bool snapped = false;
+        const mp::Rational fps =
+            mp::snap_frame_rate(mp::Rational{picture.fps_num, picture.fps_den}, &snapped);
         std::string mode_why;
         const std::vector<mp::DisplayMode> modes =
             mp::win::display_modes(window.handle(), mode_why);
@@ -1690,6 +1697,13 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
                 std::printf("           was %.3f Hz, chosen from %zu at this size, "
                             "and put back at the end\n",
                             now->refresh.hz(), ranked.size());
+                if (snapped) {
+                    // As the two ratios, because that is what differs: in
+                    // decimals they agree to seven places and the whole point
+                    // is the eighth.
+                    std::printf("           the file states %u/%u fps, read as %u/%u\n",
+                                picture.fps_num, picture.fps_den, fps.num, fps.den);
+                }
             } else {
                 std::printf("refresh    %s -- staying at %.3f Hz\n", mode_why.c_str(),
                             now->refresh.hz());

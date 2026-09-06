@@ -341,8 +341,15 @@ struct Track {
     /// Nanoseconds one frame lasts, from DefaultDuration. **Matroska states a
     /// duration per frame rather than a rate**, so the ratio this becomes is
     /// the reciprocal of a rounded nanosecond count and not the encoder's
-    /// original rational: 24000/1001 was written as 41708333 ns and cannot come
-    /// back out as 24000/1001.
+    /// original rational: 24000/1001 was written as 41708333 ns, and what a
+    /// reader derives is 1000000000/41708333.
+    ///
+    /// **That is what this reports, on purpose.** A module says what the file
+    /// says, and a demuxer whose output could not be checked against a hex dump
+    /// would be worth less than one that is merely inconvenient. Reading the
+    /// rounding back as the rate that produced it is the engine's, in
+    /// src/engine/mediaperch/framerate.hpp, which has the measurements that
+    /// make it a correction rather than a guess.
     std::uint64_t frame_duration_ns = 0;
     /// ISO/IEC 23091-2 code points; 2 is unspecified, which is what a file that
     /// says nothing leaves.

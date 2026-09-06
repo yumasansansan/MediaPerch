@@ -35,6 +35,8 @@ add_executable(mediaperch_tests
     # Which mode suits which frame rate, decided in exact arithmetic -- so a
     # machine with one 60 Hz panel checks every answer from a table.
     refresh_test.cpp
+    # And reading back a rate the container could only round.
+    framerate_test.cpp
     player_test.cpp
     property_test.cpp
     protocol_test.cpp
