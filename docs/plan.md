@@ -2620,18 +2620,38 @@ things about that reader are worth having written down:
 All twelve numbers are checked against what x265 was given, on a committed thirty-kilobyte
 fixture — the primaries, the white point, both luminances and both light levels.
 
-##### And the defect that file found
+##### And the defect that file found, then fixed
 
-**The colour tags on that same file are unspecified.** They were given to x265, they are in
-the bitstream's VUI, ffmpeg wrote no `colr` for them, and unlike the mastering display they
-are not repeated into an SEI. So the container says nothing, `assumed_transfer` falls back to
-BT.709, and **a PQ stream would be decoded with an SDR curve** — which is precisely the
-fault §9.1 is about, on a file somebody could actually have.
+**The colour tags on that same file were unspecified.** ffmpeg wrote no `colr` for them, and
+unlike the mastering display they are not repeated into an SEI. So the container said nothing,
+`assumed_transfer` fell back to BT.709, and **a PQ stream was decoded with an SDR curve** —
+precisely the fault §9.1 is about, on a file somebody could actually have.
 
-Reading them means walking an HEVC SPS to its VUI, which `parse_hvcc` deliberately does not
-do: the record states the chroma format and the bit depths, so a `probe` never needed a
-bitstream, and this is the first case that does. The test asserts the *current* behaviour
-rather than leaving it out, so that fixing it fails there and has to be looked at. `video_d3d11` hands it to `IDXGISwapChain4::SetHDRMetaData` **only on a PQ chain and
+They are in the SPS's VUI, so `mp::mft::hevc_colour` walks one. That is the first thing in
+this tree that reads an HEVC bitstream, and `parse_hvcc` had deliberately never needed to —
+the record states the chroma format and both bit depths, so a `probe` could decline a stream
+without one. The colour is not in the record, and this is the case that needs the walk.
+
+**Walking an SPS is mostly skipping it exactly**, which is the part worth having written down:
+`profile_tier_level` is eighty-eight bits and a level byte and then two flags per sub-layer;
+`scaling_list_data` is four sizes by six matrices of signed Exp-Golomb; and `st_ref_pic_set`
+is the one that has to *remember* something, because a set coded as a difference from an
+earlier one costs a number of bits that depends on how many pictures that earlier set had.
+Get any of them wrong and everything after shifts, which produces **a plausible wrong answer
+rather than a failure**. A box still wins where there is one: it is the container's own
+statement about its own track.
+
+##### And then the fixture was wrong, which the reader found
+
+With the walk in, the test still said unspecified — and a second parser written from the
+specification, in Python, agreed with it. **The file genuinely did not state them.**
+`-color_primaries bt2020 -color_trc smpte2084` are container-level tags in ffmpeg and do not
+reach x265; the encoder wants `colorprim` and `transfer` in `-x265-params`, and without them
+it wrote `matrix_coeffs = 9` and left the other two at 2. So the first fixture claimed to be
+HDR10 and was under-specified in exactly the way this reader exists to catch.
+
+The fixture states them now and the test reads 9, 16 and 9 out of the VUI. **The reader was
+right twice: once about the file, and once about the fixture.** `video_d3d11` hands it to `IDXGISwapChain4::SetHDRMetaData` **only on a PQ chain and
 only when the stream stated one** — inventing a mastering display is how a display
 tone-maps for a picture that does not exist.
 

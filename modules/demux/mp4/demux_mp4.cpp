@@ -1054,10 +1054,12 @@ try {
         // headers, so this costs no decoding. The boxes win when both are
         // there, because a box is the container's own statement.
         std::vector<std::uint8_t> blob;
-        if (!mp_video_has_mastering(&info) &&
-            codec_for(desc, blob) == MP_CODEC_HEVC && !blob.empty()) {
-            const mp::mft::HdrMetadata hdr =
-                mp::mft::hevc_hdr_metadata(mp::mft::parse_hvcc(blob.data(), blob.size()).annex);
+        const bool hevc = codec_for(desc, blob) == MP_CODEC_HEVC && !blob.empty();
+        const mp::mft::AvcConfig nals =
+            hevc ? mp::mft::parse_hvcc(blob.data(), blob.size()).annex : mp::mft::AvcConfig{};
+
+        if (!mp_video_has_mastering(&info) && hevc) {
+            const mp::mft::HdrMetadata hdr = mp::mft::hevc_hdr_metadata(nals);
             if (hdr.has_mastering) {
                 for (int i = 0; i < 3; ++i) {
                     info.mastering_primaries_x[i] = hdr.primaries_x[i];
@@ -1088,6 +1090,25 @@ try {
                 }
             }
         }
+
+        // **The colour, when the container did not say.** `colr` is optional
+        // and ffmpeg's MP4 muxer writes none, so a PQ stream can reach a
+        // renderer tagged unspecified -- which `assumed_transfer` reads as
+        // BT.709 and decodes with an SDR curve. The SPS's VUI has it, and this
+        // is the one thing in this module that needs a bitstream. A box still
+        // wins: it is the container's own statement about its own track.
+        if (hevc && info.primaries == 2 && info.transfer == 2) {
+            const mp::mft::HevcColour colour = mp::mft::hevc_colour(nals);
+            if (colour.valid) {
+                info.primaries = colour.primaries;
+                info.transfer = colour.transfer;
+                info.matrix = colour.matrix;
+                if (colour.full_range) {
+                    info.flags |= MP_VIDEO_FULL_RANGE;
+                }
+            }
+        }
+
     }
 
     std::memcpy(out, &info, std::min<std::size_t>(info.size, sizeof(info)));

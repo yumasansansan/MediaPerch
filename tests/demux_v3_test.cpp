@@ -981,21 +981,17 @@ TEST_CASE("the mastering display reaches the host, from where HEVC puts it",
     CHECK(picture.max_content_light_level == 1000u);
     CHECK(picture.max_frame_average_light_level == 400u);
 
-    // **And the colour tags are unspecified, which is a defect this file
-    // found.** They were given to x265 and they are in the bitstream's VUI;
-    // ffmpeg's MP4 muxer wrote no `colr` box for them either, and unlike the
-    // mastering display they are not repeated into an SEI. So the container
-    // says nothing, `assumed_transfer` falls back to BT.709, and a PQ stream
-    // would be decoded with an SDR curve -- which is exactly the fault §9.1 is
-    // about, on a real file.
-    //
-    // Reading them means walking an HEVC SPS to its VUI, which `parse_hvcc`
-    // deliberately does not do: the record states the chroma format and the bit
-    // depths, so a `probe` never needed a bitstream. This is the case that
-    // needs one. Asserted as it stands rather than left out, so that fixing it
-    // fails here and has to be looked at.
-    CHECK(picture.primaries == 2u);  // unspecified -- see above
-    CHECK(picture.transfer == 2u);
+    // **And the colour tags, which this file is the reason for reading from a
+    // bitstream.** They were given to x265 and they are in the SPS's VUI;
+    // ffmpeg's MP4 muxer wrote no `colr` box for them, and unlike the mastering
+    // display they are not repeated into an SEI. Without the VUI the container
+    // says nothing, `assumed_transfer` falls back to BT.709, and a PQ stream is
+    // decoded with an SDR curve -- §9.1's fault, on a file somebody could have.
+    CHECK(picture.primaries == 9u);   // BT.2020
+    CHECK(picture.transfer == 16u);   // ST.2084
+    CHECK(picture.matrix == 9u);      // BT.2020 non-constant luminance
+    // Studio range, which is what the stream says and what a video default is.
+    CHECK((picture.flags & MP_VIDEO_FULL_RANGE) == 0u);
 }
 
 TEST_CASE("a file that states no mastering display says so", "[demux][hdr]")

@@ -97,6 +97,19 @@ public:
         return true;
     }
 
+    /// **Bits, not bytes.** The byte reader above has a `skip` too and they
+    /// mean different things; this one is what a syntax element is measured in.
+    [[nodiscard]] bool skip(std::uint32_t count)
+    {
+        for (std::uint32_t i = 0; i < count; ++i) {
+            std::uint32_t bit = 0;
+            if (!u1(bit)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /// Unsigned Exp-Golomb: N zero bits, a one, then N more bits.
     [[nodiscard]] bool ue(std::uint32_t& out)
     {
@@ -484,6 +497,322 @@ std::uint32_t be32_at(const std::vector<std::uint8_t>& b, std::size_t at) noexce
 }
 
 } // namespace
+
+namespace {
+
+/// Signed Exp-Golomb, which `Bits` did not need until the scaling lists.
+bool se(Bits& in, std::int32_t& out)
+{
+    std::uint32_t coded = 0;
+    if (!in.ue(coded)) {
+        return false;
+    }
+    // k maps to (-1)^(k+1) * ceil(k/2): 0, 1, -1, 2, -2 ...
+    const std::uint32_t magnitude = (coded + 1u) / 2u;
+    out = (coded & 1u) != 0 ? static_cast<std::int32_t>(magnitude)
+                            : -static_cast<std::int32_t>(magnitude);
+    return true;
+}
+
+/// `profile_tier_level`, whose only job here is to be skipped exactly.
+///
+/// **Eleven bytes and a level byte for the general layer**, then two flags per
+/// sub-layer, then a padded byte, then the sub-layers themselves. Getting the
+/// length wrong shifts everything after it and produces a plausible wrong
+/// answer rather than a failure, which is why this is written out rather than
+/// approximated.
+bool skip_profile_tier_level(Bits& in, std::uint32_t sub_layers_minus1)
+{
+    // profile_space(2) tier(1) profile_idc(5) compatibility(32) four flags(4)
+    // reserved(43) inbld(1) = 88 bits, then general_level_idc(8).
+    if (!in.skip(88 + 8)) {
+        return false;
+    }
+    std::vector<bool> profile_present(sub_layers_minus1);
+    std::vector<bool> level_present(sub_layers_minus1);
+    for (std::uint32_t i = 0; i < sub_layers_minus1; ++i) {
+        std::uint32_t bit = 0;
+        if (!in.u1(bit)) {
+            return false;
+        }
+        profile_present[i] = bit != 0;
+        if (!in.u1(bit)) {
+            return false;
+        }
+        level_present[i] = bit != 0;
+    }
+    if (sub_layers_minus1 > 0 && !in.skip((8 - sub_layers_minus1) * 2)) {
+        return false;
+    }
+    for (std::uint32_t i = 0; i < sub_layers_minus1; ++i) {
+        if (profile_present[i] && !in.skip(88)) {
+            return false;
+        }
+        if (level_present[i] && !in.skip(8)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// `scaling_list_data`, likewise skipped exactly.
+bool skip_scaling_list_data(Bits& in)
+{
+    for (std::uint32_t size_id = 0; size_id < 4; ++size_id) {
+        for (std::uint32_t matrix_id = 0; matrix_id < 6;
+             matrix_id += (size_id == 3) ? 3u : 1u) {
+            std::uint32_t predicted = 0;
+            if (!in.u1(predicted)) {
+                return false;
+            }
+            if (predicted == 0) {
+                std::uint32_t delta = 0;
+                if (!in.ue(delta)) {
+                    return false;
+                }
+                continue;
+            }
+            const std::uint32_t coefficients =
+                std::min<std::uint32_t>(64u, 1u << (4u + (size_id << 1u)));
+            std::int32_t ignored = 0;
+            if (size_id > 1 && !se(in, ignored)) {
+                return false;
+            }
+            for (std::uint32_t i = 0; i < coefficients; ++i) {
+                if (!se(in, ignored)) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+/// `st_ref_pic_set`, which is the one part that has to *remember* something.
+///
+/// A set may be coded as a difference from an earlier one, and the number of
+/// bits that costs depends on how many pictures that earlier set had. So the
+/// counts are kept as they are read; skipping them without would work on most
+/// files and desynchronise on the ones that use prediction, which is again a
+/// plausible wrong answer.
+bool skip_st_ref_pic_set(Bits& in, std::uint32_t index, std::uint32_t count,
+                         std::vector<std::uint32_t>& deltas)
+{
+    std::uint32_t predicted = 0;
+    if (index != 0 && !in.u1(predicted)) {
+        return false;
+    }
+    if (predicted != 0) {
+        std::uint32_t delta_idx_minus1 = 0;
+        if (index == count && !in.ue(delta_idx_minus1)) {
+            return false;
+        }
+        std::uint32_t ignored = 0;
+        std::int32_t ignored_signed = 0;
+        (void)ignored_signed;
+        if (!in.skip(1) || !in.ue(ignored)) { // delta_rps_sign, abs_delta_rps_minus1
+            return false;
+        }
+        const std::uint32_t reference = index - (delta_idx_minus1 + 1u);
+        if (reference >= deltas.size()) {
+            return false;
+        }
+        std::uint32_t carried = 0;
+        for (std::uint32_t j = 0; j <= deltas[reference]; ++j) {
+            std::uint32_t used = 0;
+            if (!in.u1(used)) {
+                return false;
+            }
+            if (used == 0 && !in.skip(1)) { // use_delta_flag
+                return false;
+            }
+            carried += used != 0 ? 1u : 0u;
+        }
+        deltas.push_back(carried);
+        return true;
+    }
+
+    std::uint32_t negative = 0;
+    std::uint32_t positive = 0;
+    if (!in.ue(negative) || !in.ue(positive)) {
+        return false;
+    }
+    // A corrupt file can ask for more than any level allows; refusing beats
+    // spinning through a loop counted by whatever was in the bitstream.
+    if (negative > 4096 || positive > 4096) {
+        return false;
+    }
+    std::uint32_t ignored = 0;
+    for (std::uint32_t i = 0; i < negative + positive; ++i) {
+        if (!in.ue(ignored) || !in.skip(1)) {
+            return false;
+        }
+    }
+    deltas.push_back(negative + positive);
+    return true;
+}
+
+} // namespace
+
+HevcColour hevc_colour(const AvcConfig& config)
+{
+    HevcColour out;
+    for (const std::vector<std::uint8_t>& nal : config.parameter_sets) {
+        // NAL type 33 is the sequence parameter set. The header is two bytes.
+        if (nal.size() < 4 || ((nal[0] >> 1) & 0x3fu) != 33u) {
+            continue;
+        }
+        Bits in{nal.data() + 2, nal.size() - 2};
+
+        std::uint32_t sub_layers_minus1 = 0;
+        if (!in.skip(4) || !in.un(3, sub_layers_minus1) || !in.skip(1)) {
+            return out;
+        }
+        if (!skip_profile_tier_level(in, sub_layers_minus1)) {
+            return out;
+        }
+
+        std::uint32_t value = 0;
+        std::uint32_t chroma_format_idc = 0;
+        if (!in.ue(value) || !in.ue(chroma_format_idc)) { // sps_seq_parameter_set_id
+            return out;
+        }
+        if (chroma_format_idc == 3 && !in.skip(1)) { // separate_colour_plane_flag
+            return out;
+        }
+        if (!in.ue(value) || !in.ue(value)) { // pic width, pic height
+            return out;
+        }
+        std::uint32_t conformance = 0;
+        if (!in.u1(conformance)) {
+            return out;
+        }
+        if (conformance != 0) {
+            for (int i = 0; i < 4; ++i) {
+                if (!in.ue(value)) {
+                    return out;
+                }
+            }
+        }
+        if (!in.ue(value) || !in.ue(value) || !in.ue(value)) {
+            return out; // bit depths, log2_max_pic_order_cnt_lsb_minus4
+        }
+        std::uint32_t ordering = 0;
+        if (!in.u1(ordering)) {
+            return out;
+        }
+        for (std::uint32_t i = (ordering != 0 ? 0u : sub_layers_minus1);
+             i <= sub_layers_minus1; ++i) {
+            if (!in.ue(value) || !in.ue(value) || !in.ue(value)) {
+                return out;
+            }
+        }
+        for (int i = 0; i < 6; ++i) {
+            // The four log2 sizes and the two transform hierarchy depths.
+            if (!in.ue(value)) {
+                return out;
+            }
+        }
+        std::uint32_t scaling = 0;
+        if (!in.u1(scaling)) {
+            return out;
+        }
+        if (scaling != 0) {
+            std::uint32_t present = 0;
+            if (!in.u1(present)) {
+                return out;
+            }
+            if (present != 0 && !skip_scaling_list_data(in)) {
+                return out;
+            }
+        }
+        std::uint32_t pcm = 0;
+        if (!in.skip(2) || !in.u1(pcm)) { // amp_enabled, sample_adaptive_offset
+            return out;
+        }
+        if (pcm != 0) {
+            if (!in.skip(8) || !in.ue(value) || !in.ue(value) || !in.skip(1)) {
+                return out;
+            }
+        }
+        std::uint32_t sets = 0;
+        if (!in.ue(sets) || sets > 64) {
+            return out;
+        }
+        std::vector<std::uint32_t> deltas;
+        deltas.reserve(sets);
+        for (std::uint32_t i = 0; i < sets; ++i) {
+            if (!skip_st_ref_pic_set(in, i, sets, deltas)) {
+                return out;
+            }
+        }
+        std::uint32_t long_term = 0;
+        if (!in.u1(long_term)) {
+            return out;
+        }
+        if (long_term != 0) {
+            std::uint32_t count = 0;
+            if (!in.ue(count) || count > 64) {
+                return out;
+            }
+            // Each is log2_max_pic_order_cnt_lsb bits and a flag; the width was
+            // read above as a minus-4 and is needed here.
+            for (std::uint32_t i = 0; i < count; ++i) {
+                if (!in.skip(1)) { // used_by_curr_pic_lt_sps_flag, after the poc
+                    return out;
+                }
+            }
+        }
+        if (!in.skip(2)) { // temporal_mvp, strong_intra_smoothing
+            return out;
+        }
+        std::uint32_t vui = 0;
+        if (!in.u1(vui) || vui == 0) {
+            return out; // no VUI: unspecified, and saying so is the answer
+        }
+
+        std::uint32_t aspect = 0;
+        if (!in.u1(aspect)) {
+            return out;
+        }
+        if (aspect != 0) {
+            std::uint32_t idc = 0;
+            if (!in.un(8, idc)) {
+                return out;
+            }
+            if (idc == 255 && !in.skip(32)) {
+                return out;
+            }
+        }
+        std::uint32_t overscan = 0;
+        if (!in.u1(overscan)) {
+            return out;
+        }
+        if (overscan != 0 && !in.skip(1)) {
+            return out;
+        }
+        std::uint32_t signal = 0;
+        if (!in.u1(signal) || signal == 0) {
+            return out;
+        }
+        std::uint32_t full_range = 0;
+        std::uint32_t described = 0;
+        if (!in.skip(3) || !in.u1(full_range) || !in.u1(described)) {
+            return out;
+        }
+        out.full_range = full_range != 0;
+        if (described == 0) {
+            return out;
+        }
+        if (!in.un(8, out.primaries) || !in.un(8, out.transfer) ||
+            !in.un(8, out.matrix)) {
+            return out;
+        }
+        out.valid = true;
+        return out;
+    }
+    return out;
+}
 
 HdrMetadata hevc_hdr_metadata(const AvcConfig& config)
 {

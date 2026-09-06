@@ -116,6 +116,33 @@ struct HevcConfig {
     bool valid = false;
 };
 
+/// **How to decode the colour, as an HEVC SPS states it.**
+///
+/// The three ISO/IEC 23091-2 code points and the range flag, out of the SPS's
+/// VUI. `hvcC` does not carry them and MP4's `colr` box is optional -- measured
+/// on ffmpeg 9.0.1, its muxer writes no `colr` even for a stream tagged BT.2020
+/// and PQ. A container that says nothing leaves `assumed_transfer` at BT.709,
+/// which decodes a PQ stream with an SDR curve: §9.1's fault, on a real file.
+///
+/// `valid` false when the SPS has no VUI, no colour description, or could not
+/// be walked. **Not a guess in that case**: unspecified is what the ABI already
+/// means by 2, and a wrong code point is worse than an absent one.
+struct HevcColour {
+    std::uint32_t primaries = 2;
+    std::uint32_t transfer = 2;
+    std::uint32_t matrix = 2;
+    bool full_range = false;
+    bool valid = false;
+};
+
+/// Reads the first SPS among a config's NALs and returns what its VUI said.
+///
+/// **This is the one thing here that needs a bitstream**, which is why
+/// `parse_hvcc` never did: the record states the chroma format and both bit
+/// depths, so a `probe` could decline a stream without reading one. The colour
+/// is not in the record.
+[[nodiscard]] HevcColour hevc_colour(const AvcConfig& config);
+
 /// **What the content was graded on, as HEVC states it.**
 ///
 /// SMPTE ST 2086's mastering display and CTA-861.3's light levels, which HEVC
