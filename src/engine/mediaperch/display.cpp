@@ -24,7 +24,7 @@ constexpr double k_scale_wrong = 0.75;
 /// missed seven vertical blanks, which is a stall rather than a measurement --
 /// and the further out the multiple, the more the scale's own error moves the
 /// rounding.
-constexpr double k_span_most = 8.0;
+constexpr long long k_span_most = 8;
 
 /// How near a whole number of refreshes a gap has to land. A quarter is far
 /// looser than jitter needs and far tighter than picking the wrong integer
@@ -35,7 +35,7 @@ constexpr double k_span_tolerance = 0.25;
 /// Refreshes of span before the average is trusted over the shortest gap. Two,
 /// because the average is unbiased from the first one and only gets better,
 /// while the shortest gap's error is there from the start and stays.
-constexpr double k_span_enough = 2.0;
+constexpr std::uint64_t k_span_enough = 2;
 
 /// Whether two specs describe the same run from the same place.
 ///
@@ -83,7 +83,7 @@ void DisplayLoop::refresh_spec()
 double DisplayLoop::interval_now() const noexcept
 {
     if (span_refreshes_ >= k_span_enough && span_seconds_ > 0.0) {
-        return span_seconds_ / span_refreshes_;
+        return span_seconds_ / static_cast<double>(span_refreshes_);
     }
     return shortest_gap_;
 }
@@ -108,7 +108,7 @@ void DisplayLoop::learn_refresh(std::uint64_t ticks)
                 // span again from here rather than averaging over a lie.
                 shortest_gap_ = gap;
                 span_seconds_ = 0.0;
-                span_refreshes_ = 0.0;
+                span_refreshes_ = 0;
             } else if (gap < shortest_gap_) {
                 shortest_gap_ = gap;
             }
@@ -119,12 +119,17 @@ void DisplayLoop::learn_refresh(std::uint64_t ticks)
             // wrong one, and it is a percent out at worst.
             const double scale = interval_now();
             if (scale > 0.0) {
+                // `spans` is a measurement and stays a double; **the count is a
+                // count** and becomes an integer here and nowhere later. The
+                // input is bounded -- the gap window above is 0.5 ms to 200 ms
+                // and the scale cannot be under the same floor -- so `llround`
+                // has at most 400 to represent and no way to overflow.
                 const double spans = gap / scale;
-                const double whole = std::floor(spans + 0.5);
-                if (whole >= 1.0 && whole <= k_span_most &&
-                    std::abs(spans - whole) < k_span_tolerance) {
+                const long long whole = std::llround(spans);
+                if (whole >= 1 && whole <= k_span_most &&
+                    std::abs(spans - static_cast<double>(whole)) < k_span_tolerance) {
                     span_seconds_ += gap;
-                    span_refreshes_ += whole;
+                    span_refreshes_ += static_cast<std::uint64_t>(whole);
                 }
             }
         }

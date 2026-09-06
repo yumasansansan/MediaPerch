@@ -316,13 +316,14 @@ TEST_CASE("the refresh is the average over a span, not the shortest gap",
     const double truth = static_cast<double>(step) / k_tick_rate;
     const double noise = static_cast<double>(swing) / k_tick_rate;
     const mp::DisplayLoop::Stats stats = loop.stats();
-    REQUIRE(stats.refresh_span > 190.0);
+    REQUIRE(stats.refresh_span > 190u);
 
     // **The bound is derived rather than chosen.** After the span average, the
     // only noise left is the two endpoints', and it is divided by the elapsed
     // time between them -- so this is what the arithmetic allows and not a
     // number that happened to pass.
-    const double allowed = 2.0 * noise / (stats.refresh_span * truth);
+    const double allowed =
+        2.0 * noise / (static_cast<double>(stats.refresh_span) * truth);
     const double got = std::abs(stats.refresh_seconds - truth) / truth;
     INFO("measured " << stats.refresh_seconds << " against " << truth << " over "
                      << stats.refresh_span << " refreshes: " << got << " out, allowed "
@@ -357,7 +358,7 @@ TEST_CASE("a turn that missed a vertical blank is counted, not discarded",
           Catch::Approx(static_cast<double>(step) / k_tick_rate).epsilon(3e-4));
     // More refreshes than turns, which is the whole point: the missed blanks
     // are in the count.
-    CHECK(stats.refresh_span > static_cast<double>(stats.turns));
+    CHECK(stats.refresh_span > stats.turns);
 }
 
 TEST_CASE("a run that starts on a starved turn still finds the refresh",

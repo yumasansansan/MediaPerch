@@ -64,9 +64,17 @@ std::vector<Match> rank_modes(std::span<const DisplayMode> modes, Rational fps,
         m.nearest = static_cast<double>(rounded) / 2.0;
         m.exact = h.denominator != 0 && h.numerator % h.denominator == 0;
 
-        if (m.refreshes_per_frame < 1.0) {
-            // Below the frame rate. Reported rather than dropped from the list,
-            // because a caller with nothing better should be told what it has.
+        // **Fewer refreshes than frames, asked as the comparison it is**: the
+        // two rationals cross-multiplied, rather than `refresh.hz() / fps.hz()`
+        // against 1.0. Each side is a product of two 32-bit numbers and so has
+        // room in 64 bits -- which `2 * h.denominator` would not have had,
+        // since that denominator is itself already such a product. Reported
+        // rather than dropped from the list, because a caller with nothing
+        // better should be told what it has.
+        const bool slower_than_content =
+            static_cast<std::uint64_t>(mode.refresh.num) * fps.den <
+            static_cast<std::uint64_t>(fps.num) * mode.refresh.den;
+        if (slower_than_content) {
             m.cadence = Cadence::drops;
         } else if (rounded % 2 == 0) {
             m.cadence = Cadence::even;
@@ -98,8 +106,14 @@ std::vector<Match> rank_modes(std::span<const DisplayMode> modes, Rational fps,
         if (!a.exact && a.seconds_between_slips != b.seconds_between_slips) {
             return a.seconds_between_slips > b.seconds_between_slips;
         }
-        return prefer == Prefer::fastest ? a.mode.refresh.hz() > b.mode.refresh.hz()
-                                         : a.mode.refresh.hz() < b.mode.refresh.hz();
+        // Cross-multiplied rather than compared as doubles: two rationals a
+        // hair apart can land on the same double, and an ordering that cannot
+        // tell them apart is an ordering that returns whichever it saw first.
+        const std::uint64_t left =
+            static_cast<std::uint64_t>(a.mode.refresh.num) * b.mode.refresh.den;
+        const std::uint64_t right =
+            static_cast<std::uint64_t>(b.mode.refresh.num) * a.mode.refresh.den;
+        return prefer == Prefer::fastest ? left > right : left < right;
     });
     return out;
 }

@@ -1983,6 +1983,20 @@ to 0.003 ms, which matters as much: an estimate that moves between runs moves th
 it. `show` prints the span beside the figure, because the error is one timestamp's jitter
 divided by that number and it is what says how much of the third decimal to believe.
 
+**A count is an integer and an ordering is a comparison, and neither is a double.** The gap is
+a measurement and stays one; how many refreshes it *is* becomes a `std::uint64_t` at the one
+place that is decided and never goes back to a double. The same audit found two more beside
+it, in the mode policy:
+
+- whether a mode drops frames was `refresh.hz() / fps.hz() < 1.0`, and is now
+  `numerator < 2 * denominator` in the halves the cadence is already counted in;
+- the sort that breaks a tie by rate compared two doubles, where two rationals a hair apart
+  can land on the same one. Cross-multiplied in 64 bits now, the way `Rational::operator==`
+  always was.
+
+None of the three was giving a wrong answer on any mode this tree has seen. They were three
+places where the right answer rested on a rounding, and the exact form of each is free.
+
 The tests put the noise in on purpose, since a display cannot be asked to jitter: a frame
 clock on an exact grid, observed through a symmetric zero-mean cycle. The bound they check is
 derived from the swing and the span rather than chosen — what the arithmetic allows, not

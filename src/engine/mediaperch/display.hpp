@@ -148,7 +148,10 @@ public:
         /// How many refresh intervals `refresh_seconds` is averaged over. The
         /// estimate's error is about one timestamp's jitter divided by this, so
         /// it is the number that says how much to believe it.
-        double refresh_span = 0.0;
+        ///
+        /// An integer because it counts something. The seconds beside it are a
+        /// measurement and are a double for the same reason.
+        std::uint64_t refresh_span = 0;
     };
     [[nodiscard]] Stats stats() const noexcept { return stats_; }
     [[nodiscard]] const AvClock& clock() const noexcept { return clock_; }
@@ -178,7 +181,7 @@ private:
     /// Seconds of run, and refreshes in them, over the gaps that were a whole
     /// number of refreshes long.
     double span_seconds_ = 0.0;
-    double span_refreshes_ = 0.0;
+    std::uint64_t span_refreshes_ = 0;
     Stats stats_{};
 };
 
