@@ -1582,6 +1582,18 @@ enough to keep the file moving, and four is few enough round trips to be quiet o
 ordinary interleave — where the byte cap is what bites anyway, four audio packets
 being a few hundred bytes.
 
+**And a cap with a condition on it is not a bound.** The floor is right and it costs
+something: a queue holding fewer than four packets may pass the byte cap, so what one
+stream can hold is really the larger of that cap and four times whatever this file's
+packets are. That is the intent — it is what stops the cap being a resolution
+limit — but "as much as the file's packets happen to be" is not a bound, and a
+router with no bound is a file deciding how much memory this process uses. So there is a
+third number, `hard_bytes_per_stream`, with no condition on it at all: over that, a queue
+is full whatever it is holding. 256 MB, which is eight times the soft cap and comfortably
+above four packets of anything Direct3D will hold a picture of, so it never bites on a
+real file and always bites on one that would otherwise run the machine out of memory.
+Zero switches it off, which is a thing a measurement may want and a player never does.
+
 The second front end earned its place again on the way: `Limits` was a nested struct with
 default member initializers used as a default argument, which MSVC accepts and clang refuses
 -- and `PassthroughConfig` carries a comment saying exactly that, from the last time. It is
@@ -1752,10 +1764,11 @@ What runs out first is elsewhere, and the numbers are worth having:
   ten-bit is three to six gigabytes before anything is presented.
 - **Codec levels** cap lower than the presenter does. HEVC's highest level allows 35,651,584
   luma samples -- 8192x4352 -- so a conformant HEVC stream cannot reach 16K at all.
-- **`PacketRouter`'s cap** is 32 MB per stream by default, and a single 16K keyframe could be
-  larger than that. It still works: the cap is exceeded by at most the one packet that
-  discovers it, because a packet already read cannot be put back.
-
+- **`PacketRouter`'s caps** are 32 MB per stream by default and a single 16K keyframe
+  could be larger than that, which is why the byte cap does not bite until four packets
+  wait and why there is a second, unconditional one at 256 MB above it. Either is
+  exceeded by at most the one packet that discovers it, because a packet already read
+  cannot be put back.
 
 
 **`--no-audio`, and what it admits.** §8's clock is the audio device, and a file with no audio
@@ -1768,6 +1781,63 @@ does not cost is anything a person can hear, because there is nothing to hear.
 
 For audio-only playback the clock is used for gapless boundaries and for the position
 readout, and nothing else reads it.
+
+#### Which numbers are settings, and which are not
+
+A number in the source is a decision made on somebody else's behalf. Every number here that
+governs how much memory is held, or how often something wakes, is a flag; every number that
+is a guard against a bug or a fact about a format is not. Which is which, and why:
+
+**Settings**, with the two ways of reaching each one. The probe's flags are the tool's; the
+`[player]` keys are the settings file's, and what one of those *means* is decided in exactly
+one place — `Player::set` — so that the file and `mediaperch-cli set` cannot come to
+disagree.
+
+| number | default | probe flag | player key |
+|---|---|---|---|
+| `PacketRouterLimits::queued_bytes_per_stream` | 32 MiB | `--queue-limit` | — |
+| `PacketRouterLimits::queued_packets_floor` | 4 | `--queue-packets` | — |
+| `PacketRouterLimits::hard_bytes_per_stream` | 256 MiB | `--queue-hard` | — |
+| `TickClock`'s period | 2000 us | `--tick-period` | — |
+| `PassthroughConfig::ring_periods` | 8 | `--ring-periods` | `ring_periods` |
+| `PassthroughConfig::wait_timeout_ms` | 2000 | `--wait-timeout` | `wait_timeout` |
+| `ConvertConfig::{gain,dither,shaping,seed}` | unity, TPDF, none, fixed | `--gain`, `--dither`, `--shape`, `--dither-seed` | `gain`, `dither`, `shaping`, `dither_seed` |
+
+The four with no player key are the four the player cannot reach yet: it has no video path,
+so it opens one source per file and never builds a router or a frame clock. They become
+`Player::set` keys on the day it does, and not before — a setting that is listed, accepted
+and then does nothing is worse than one that does not exist.
+
+`show` prints the router's three in its header, because a limit nobody can see is a limit
+nobody can believe. It also took the audio ones' defaults and ignored the flags until now,
+which is the same failing in a smaller way: a setting that works in `play` and is quietly
+ignored in `show` teaches somebody something untrue about the program.
+
+**Not settings**, and the reason for each:
+
+- **`VideoGraph::fetch`'s 4096 turns** is a livelock guard. A decoder that answers "ask me
+  again" forever has to stop the loop rather than hang it, and a guard a user can raise is a
+  hang a user can ask for.
+- **`PacketRouter`'s spare buffers** was 4 and is now `queues + 1`, which is exactly how many
+  can be in flight: one per consumer plus the one being read into. A number that computes
+  itself needs no setting, and this is the better answer than making it one.
+- **`VideoPacer`'s half a lead** is the definition of *nearest*, not a threshold somebody
+  chose: a frame due less than half a presentation away is nearer to this one than to the
+  next. Moving it would not tune the pacing, it would bias it, and a pacer that is biased
+  early or late by policy is the thing this stopped doing.
+- **`DisplayLoop`'s 0.5 ms and 200 ms clamps** bound a *measurement*, not a policy. A gap
+  outside them is not a refresh interval — it is a thread that was descheduled, or a
+  clock that had not started — so widening them would not admit a display, it would
+  admit a mistake.
+- **`codec_mft`'s four drain attempts** and **the 8 KB a packet buffer starts at** are facts
+  rather than choices. The first is what the MFT drain protocol asks for; the second is a
+  starting size for a buffer that grows on demand, so a wrong value costs one reallocation.
+- **`WallClock`'s 48000** looks like a setting and is a unit. What it produces is divided by
+  the same number to get seconds, so the value cancels; all it fixes is granularity, at
+  21 microseconds.
+- **The daemon's 250 ms transport tick and 256-message backlog** are policy, and have no route
+  because the daemon has no configuration surface at all yet. They are its first two entries
+  when it gets one.
 
 ---
 

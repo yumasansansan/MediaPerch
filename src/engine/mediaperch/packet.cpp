@@ -296,9 +296,16 @@ bool PacketRouter::someone_is_full(const Queue* mine) const noexcept
         if (queue.get() == mine) {
             continue;
         }
+        // The cap with no condition on it, first, because it is the one that
+        // is a bound: the pair below can be passed by a file whose packets are
+        // large, which is deliberate, and this is what stops "large" from
+        // meaning "as much as it likes". See PacketRouterLimits.
+        if (limits_.hard_bytes_per_stream != 0 &&
+            queue->bytes >= limits_.hard_bytes_per_stream) {
+            return true;
+        }
         // Both, not either: the bytes bound the memory and the floor keeps a
-        // file whose packets are large from blocking on every one of them. See
-        // PacketRouterLimits.
+        // file whose packets are large from blocking on every one of them.
         if (queue->bytes >= limits_.queued_bytes_per_stream &&
             queue->waiting.size() >= limits_.queued_packets_floor) {
             return true;
@@ -320,10 +327,12 @@ std::vector<std::uint8_t> PacketRouter::spare()
 
 void PacketRouter::recycle(std::vector<std::uint8_t>&& used)
 {
-    // A handful, because the point is to stop allocating a megabyte per
-    // keyframe rather than to keep a pool. More than there are consumers is
-    // more than can be in flight.
-    if (spares_.size() < 4) {
+    // As many as can be in flight, and not one more: a buffer per consumer,
+    // plus the one being read into. Counted rather than guessed at -- this was
+    // four, which is the right answer for a file with three streams in it and
+    // an arbitrary one for every other file. The point is to stop allocating a
+    // megabyte per keyframe, not to keep a pool.
+    if (spares_.size() < queues_.size() + 1) {
         used.clear();
         spares_.push_back(std::move(used));
     }

@@ -193,8 +193,8 @@ public:
 /// for -- it caught it before the build did.
 struct PacketRouterLimits {
     /// How many bytes of one stream may wait for a consumer that is not
-    /// asking. Exceeded by at most one packet, because a packet already read
-    /// cannot be put back.
+    /// asking, once `queued_packets_floor` of them are waiting. Exceeded by at
+    /// most one packet, because a packet already read cannot be put back.
     ///
     /// Thirty-two megabytes is far past any sane interleave -- a second of 4K
     /// video is a few -- and small enough that a file which is not sane says so
@@ -219,6 +219,28 @@ struct PacketRouterLimits {
     /// where the byte cap is what bites anyway, four packets of audio being a
     /// few hundred bytes.
     std::uint32_t queued_packets_floor = 4;
+
+    /// The cap that has no condition on it. Zero switches it off.
+    ///
+    /// **The floor above took the absolute bound away**, and this puts one
+    /// back. `queued_bytes_per_stream` is a *soft* cap now: a queue holding
+    /// fewer than `queued_packets_floor` packets may pass it, so what one
+    /// stream can hold is really the larger of that cap and the floor times
+    /// the largest packet the file has. That is the point -- it is what stops
+    /// a byte cap from being a resolution limit -- but "as much as the file's
+    /// packets happen to be" is not a bound, and a router with no bound is a
+    /// file that decides how much memory this process uses.
+    ///
+    /// So: over this, a queue is full whatever it is holding. Two hundred and
+    /// fifty-six megabytes is eight times the soft cap and comfortably above
+    /// four packets of anything Direct3D will hold a picture of -- an intra
+    /// frame at 16384 wide, which is 190 MB before it is coded and a good deal
+    /// less after -- so it never bites on a real file and always bites on one
+    /// that would otherwise run the machine out of memory.
+    ///
+    /// One packet may still cross it, for the reason the soft cap can: a
+    /// packet already read cannot be put back.
+    std::size_t hard_bytes_per_stream = 256u * 1024u * 1024u;
 };
 
 class PacketRouter final {
@@ -317,9 +339,9 @@ private:
     };
 
     [[nodiscard]] Queue* find(std::uint32_t stream) noexcept;
-    /// Whether any queue other than `mine` is full -- over the byte cap *and*
-    /// past the packet floor -- which is when reading another packet could push
-    /// it further over.
+    /// Whether any queue other than `mine` is full -- over the soft cap *and*
+    /// past the packet floor, or over the hard cap whatever it holds -- which
+    /// is when reading another packet could push it further over.
     [[nodiscard]] bool someone_is_full(const Queue* mine) const noexcept;
     /// A vector with capacity, from the ones packets have already been in.
     [[nodiscard]] std::vector<std::uint8_t> spare();

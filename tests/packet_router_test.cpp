@@ -295,6 +295,51 @@ TEST_CASE("a packet floor keeps a big-packet file moving", "[packet][router]")
     CHECK(with > without);
 }
 
+TEST_CASE("the hard cap bounds what the floor let past", "[packet][router]")
+{
+    // **The floor took the bound away.** A queue holding fewer packets than the
+    // floor may pass the byte cap, so what one stream can hold became "the
+    // floor times whatever this file's packets are" -- which is the point, and
+    // is not a bound. The hard cap is the one with no condition on it, and this
+    // is the difference it makes.
+    Module module{MEDIAPERCH_DEMUX_MP4, MP_KIND_DEMUX};
+    REQUIRE(module.as<MpDemuxVtbl>() != nullptr);
+
+    const auto held = [&](std::size_t hard) {
+        mp::Demux demux;
+        REQUIRE(demux.open(*module.as<MpDemuxVtbl>(), MEDIAPERCH_TEST_AV) == MP_OK);
+        const Streams at = find_streams(demux);
+        REQUIRE(at.both);
+        const std::uint32_t both[] = {at.audio, at.video};
+        REQUIRE(demux.select_streams(both) == MP_OK);
+
+        // A floor no file this size reaches, which is a soft cap that never
+        // bites -- exactly the state a large-packet file puts the router in.
+        mp::PacketRouter::Limits limits;
+        limits.queued_bytes_per_stream = 1;
+        limits.queued_packets_floor = 100000;
+        limits.hard_bytes_per_stream = hard;
+        mp::PacketRouter router{demux, both, limits};
+        mp::IPacketFeed* video = router.feed(at.video);
+        REQUIRE(video != nullptr);
+
+        std::vector<Seen> got;
+        while (take(*video, got) == Got::packet) {
+        }
+        return router.stats().queued_bytes;
+    };
+
+    // Switched off, the audio queue grows until the file ends -- nothing stops
+    // it, because nothing was asked to.
+    const std::size_t unbounded = held(0);
+    CHECK(unbounded > 512);
+    // Turned on, it stops there instead. Over by at most one packet, for the
+    // reason the soft cap is: a packet already read cannot be put back.
+    const std::size_t bounded = held(512);
+    CHECK(bounded >= 512);
+    CHECK(bounded < unbounded);
+}
+
 TEST_CASE("a seek moves the file and empties what was read before it",
           "[packet][router]")
 {

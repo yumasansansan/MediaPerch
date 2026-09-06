@@ -98,6 +98,19 @@ struct Options {
     /// with a busier machine needed the first one bigger.
     std::uint32_t ring_periods = 8;
     std::uint32_t wait_timeout_ms = 2000;
+    /// `show`: what one stream may hold while the other consumer is not
+    /// asking. Mebibytes for the two caps, because that is the size a person
+    /// thinks about them in; packets for the floor. Zero for the hard cap
+    /// switches it off. See PacketRouterLimits, which explains why there are
+    /// three numbers and not one.
+    std::uint32_t queue_limit_mib = 32;
+    std::uint32_t queue_packets = 4;
+    std::uint32_t queue_hard_mib = 256;
+    /// `show`: the fallback frame clock's period, when there is no vertical
+    /// blank to wait on. Two milliseconds is eight wakeups per refresh at
+    /// 60 Hz, which is enough to land on every one of them and wasteful on a
+    /// machine that would rather sleep.
+    std::uint32_t tick_period_us = 2000;
     /// Whether a device that goes away mid-run is the end of the run, and how
     /// long to wait for one to come back before agreeing that it is.
     bool recover = true;
@@ -225,6 +238,11 @@ void usage()
               every other application on it.
   play        play a test tone.
               TAKES THE ENDPOINT for the whole duration.
+  show        open a file in a window and play it: one demuxer feeding both
+              halves, the audio device holding the clock, and the picture going
+              up against it. TAKES THE ENDPOINT unless --no-audio.
+  loudness    measure a file to ITU-R BS.1770 and print its ReplayGain figure.
+              Touches no device.
   modules     list what loaded, and what each one claims to be
   claims      who claims one file, and what is inside it: every demuxer's probe
               score, the streams each one finds, and the codec module that takes
@@ -359,6 +377,20 @@ Options
                     real-time, and a busy machine may want more
   --wait-timeout MS how long the render thread waits for a device that has
                     stopped signalling before calling it gone. Default 2000
+  --queue-limit MiB `show`: how much of one stream may wait while the other
+                    consumer is not asking. Default 32
+  --queue-packets N `show`: how many packets must be waiting before that cap is
+                    allowed to bite. Default 4, and the reason it exists is that
+                    a byte cap on its own is a resolution limit in disguise: one
+                    keyframe out of a 16K picture can be a good fraction of any
+                    fixed number, and a cap a single packet exceeds turns "wait
+                    for the other consumer" into "wait after every packet"
+  --queue-hard MiB  `show`: the cap with no condition on it, which is the one
+                    that is actually a bound -- the pair above can be passed by
+                    a file whose packets are large. Default 256, 0 for none
+  --tick-period US  `show`: the fallback frame clock's period, used when there
+                    is no vertical blank to wait on. Default 2000, which is
+                    eight wakeups per refresh at 60 Hz
   --no-recover      treat a device that disappears mid-run as the end of the
                     run. Without this, `play` waits for an endpoint to answer
                     again, rebuilds, and resumes from the frame the device had
@@ -443,6 +475,14 @@ bool parse(int argc, char** argv, Options& out)
             value(out.ring_periods);
         } else if (arg == "--wait-timeout") {
             value(out.wait_timeout_ms);
+        } else if (arg == "--queue-limit") {
+            value(out.queue_limit_mib);
+        } else if (arg == "--queue-packets") {
+            value(out.queue_packets);
+        } else if (arg == "--queue-hard") {
+            value(out.queue_hard_mib);
+        } else if (arg == "--tick-period") {
+            value(out.tick_period_us);
         } else if (arg == "--no-recover") {
             out.recover = false;
         } else if (arg == "--recover-timeout") {
@@ -1515,7 +1555,16 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
         std::fprintf(stderr, "the container would not serve those streams together\n");
         return 1;
     }
-    mp::PacketRouter router{demux, selected};
+    // **Every number the router holds memory by is a setting**, because a
+    // number chosen here is a number chosen for somebody else's file. The
+    // defaults are the struct's; these are the flags that move them.
+    mp::PacketRouter::Limits limits;
+    limits.queued_bytes_per_stream =
+        static_cast<std::size_t>(options.queue_limit_mib) * 1024u * 1024u;
+    limits.queued_packets_floor = options.queue_packets;
+    limits.hard_bytes_per_stream =
+        static_cast<std::size_t>(options.queue_hard_mib) * 1024u * 1024u;
+    mp::PacketRouter router{demux, selected, limits};
 
     // ---- the window, before the presenter, because the presenter wants an HWND
     mp::win::VideoWindow window;
@@ -1610,9 +1659,20 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
             return 1;
         }
         std::printf("audio      %s\n", mp::describe(negotiated.accepted).c_str());
+        // The same flags `play` takes, because `show` is `play` with a picture
+        // beside it and a setting that works in one and is ignored in the other
+        // is worse than a setting that does not exist.
+        mp::ConvertConfig conversion;
+        conversion.gain = options.gain;
+        conversion.dither = options.dither;
+        conversion.shaping = options.shaping;
+        conversion.seed = options.dither_seed;
+        mp::PassthroughConfig ring;
+        ring.ring_periods = options.ring_periods;
+        ring.wait_timeout_ms = options.wait_timeout_ms;
         if (mp::use_processed(options.path, negotiated.fidelity, options.gain != 1.0)) {
             processed = std::make_unique<mp::ProcessedGraph>(
-                audio_source, sink, negotiated.accepted, period, mp::ConvertConfig{});
+                audio_source, sink, negotiated.accepted, period, conversion, nullptr, ring);
             if (processed->start() != MP_OK) {
                 std::fprintf(stderr, "the audio graph would not start\n");
                 return 1;
@@ -1621,7 +1681,8 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
                 std::make_unique<mp::GraphClock<mp::ProcessedGraph>>(*processed);
         } else {
             exact = std::make_unique<mp::PassthroughGraph>(
-                audio_source, sink, negotiated.accepted, period, negotiated.fidelity);
+                audio_source, sink, negotiated.accepted, period, negotiated.fidelity,
+                nullptr, ring);
             if (exact->start() != MP_OK) {
                 std::fprintf(stderr, "the audio graph would not start\n");
                 return 1;
@@ -1647,14 +1708,25 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
 
     // ---- the display loop
     std::unique_ptr<mp::win::VBlankClock> vblank = mp::win::VBlankClock::open(window.handle());
-    mp::win::TickClock ticks;
+    mp::win::TickClock ticks{options.tick_period_us};
     mp::IFrameClock* frames = vblank != nullptr ? static_cast<mp::IFrameClock*>(vblank.get())
                                                 : static_cast<mp::IFrameClock*>(&ticks);
     if (vblank != nullptr && vblank->refresh_hz() > 0.0) {
         std::printf("display    %.0f Hz, paced on its vertical blank\n",
                     vblank->refresh_hz());
     } else {
-        std::printf("display    no output to wait on; pacing on a timer\n");
+        std::printf("display    no output to wait on; pacing on a timer at %u us\n",
+                    options.tick_period_us);
+    }
+    // A limit nobody can see is a limit nobody can believe. This is the memory
+    // one stream may take while the other consumer is busy, in the terms the
+    // flags set it in.
+    std::printf("queues     %u MiB per stream once %u packets wait, ",
+                options.queue_limit_mib, options.queue_packets);
+    if (options.queue_hard_mib != 0) {
+        std::printf("%u MiB whatever waits\n", options.queue_hard_mib);
+    } else {
+        std::printf("and no cap above that\n");
     }
     std::printf("\nclose the window to stop.\n");
     std::fflush(stdout);
