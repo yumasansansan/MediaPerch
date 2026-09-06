@@ -143,10 +143,26 @@ TEST_CASE("an engine refuses a setting it cannot make sense of", "[player]")
     CHECK(why.find("nonsense") != std::string::npos);
     CHECK_FALSE(player.set("path", "sideways", why));
     CHECK_FALSE(player.set("gain", "not a number", why));
-    CHECK_FALSE(player.set("gain", "1e9", why));
     CHECK_FALSE(player.set("dither", "sprinkles", why));
     CHECK_FALSE(player.set("share", "sometimes", why));
-    CHECK_FALSE(player.set("ring_periods", "1", why));
+
+    // **A number it cannot make sense of, and not a number it disapproves of.**
+    // The rule is C++'s own, restated for the person at the other end: give the
+    // user the choice even when the user may be wrong. So text with no number
+    // in it is refused, a number too large for the field is refused because it
+    // would arrive as a different number -- and everything else is taken.
+    CHECK_FALSE(player.set("gain", "1 and a half", why));
+    CHECK_FALSE(player.set("ring_periods", "-1", why));
+    CHECK_FALSE(player.set("dither_seed", "1e30", why));
+    CHECK_FALSE(player.set("gain", "inf", why));
+
+    CHECK(player.set("gain", "1e9", why));         // will clip, and says so by clipping
+    CHECK(player.set("gain", "-1", why));          // inverts, which is a thing to want
+    CHECK(player.set("ring_periods", "1", why));   // the lowest latency a machine can do
+    CHECK(player.set("ring_periods", "0", why));   // the ring sizer's own floor, then
+    CHECK(player.set("ring_periods", "100000", why));
+    CHECK(player.set("wait_timeout", "0", why));   // do not wait at all
+    CHECK(player.set("recover_timeout", "86400", why));
 
     CHECK(player.set("path", "processed", why));
     CHECK(player.set("gain", "0.5", why));

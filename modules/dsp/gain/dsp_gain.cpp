@@ -121,21 +121,36 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
     if (std::strcmp(key, "gain_db") == 0) {
         char* end = nullptr;
         const double db = std::strtod(value, &end);
-        if (end == value || !std::isfinite(db) || db > 24.0 || db < -144.0) {
+        // **No ceiling and no floor.** A gain stage that refuses +30 dB
+        // refuses somebody's reason for wanting it, and the reason is not
+        // knowable from in here. What is refused is a decibel figure with no
+        // number in it, and one whose linear gain a double cannot hold -- the
+        // second is arithmetic rather than judgement, because an infinite gain
+        // turns every sample into a NaN and stops being a gain.
+        if (end == value || !std::isfinite(db)) {
+            return MP_ERR_INVALID;
+        }
+        const double linear = std::pow(10.0, db / 20.0);
+        if (!std::isfinite(linear)) {
             return MP_ERR_INVALID;
         }
         d->gain_db = db;
-        d->gain = std::pow(10.0, db / 20.0);
+        d->gain = linear;
         return MP_OK;
     }
     if (std::strcmp(key, "gain") == 0) {
         char* end = nullptr;
         const double linear = std::strtod(value, &end);
-        if (end == value || !std::isfinite(linear) || linear < 0.0 || linear > 16.0) {
+        // Negative inverts the phase, which is a real thing to ask a gain
+        // stage for. The decibel figure reports the magnitude, because a
+        // logarithm has no sign to report, and -144 stands for silence, which
+        // has no logarithm at all.
+        if (end == value || !std::isfinite(linear)) {
             return MP_ERR_INVALID;
         }
         d->gain = linear;
-        d->gain_db = linear > 0.0 ? 20.0 * std::log10(linear) : -144.0;
+        const double magnitude = std::fabs(linear);
+        d->gain_db = magnitude > 0.0 ? 20.0 * std::log10(magnitude) : -144.0;
         return MP_OK;
     }
     return MP_ERR_UNSUPPORTED;

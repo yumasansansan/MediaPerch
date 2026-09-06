@@ -337,7 +337,10 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
     if (std::strcmp(key, "preamp") == 0) {
         char* end = nullptr;
         const double db = std::strtod(value, &end);
-        if (end == value || !std::isfinite(db) || db < -40.0 || db > 20.0) {
+        // Any decibel figure that is a number. The range that was here was
+        // a judgement about what somebody would want, which is not this
+        // module's to make -- see the gain module for the same reasoning.
+        if (end == value || !std::isfinite(db)) {
             return MP_ERR_INVALID;
         }
         d->preamp_db = db;

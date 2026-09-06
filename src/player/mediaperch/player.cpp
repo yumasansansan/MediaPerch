@@ -6,7 +6,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
+#include <new>
 #include <utility>
 
 namespace mp {
@@ -55,15 +57,36 @@ std::string joined(const std::vector<std::string>& items, char by)
     return out;
 }
 
-bool as_number(const std::string& text, double low, double high, double& out)
+/// A number, and no opinion about whether it is a sensible one.
+///
+/// **The range checks that used to be here are gone on purpose.** This tree's
+/// rule is C++'s own, restated for the person at the other end: give the user
+/// the choice even when the user may be wrong. A setting that refuses an
+/// unusual value refuses somebody's reason for wanting it, and the reason is
+/// not knowable from here -- a gain above unity is clipping to one listener and
+/// recovered headroom to another; one ring period is the lowest latency a
+/// machine can do and a stutter on the next machine along.
+///
+/// What is still refused is text that is not a number, and text whose number
+/// the destination cannot hold. Neither is a judgement about the value: the
+/// first has no value in it, and the second would arrive as a different number
+/// than the one that was typed.
+bool as_number(const std::string& text, double& out)
 {
     char* end = nullptr;
     const double parsed = std::strtod(text.c_str(), &end);
-    if (end == text.c_str() || *end != '\0' || parsed < low || parsed > high) {
+    if (end == text.c_str() || *end != '\0' || !std::isfinite(parsed)) {
         return false;
     }
     out = parsed;
     return true;
+}
+
+/// The same, for a field that is unsigned. `limit` is the destination type's own
+/// maximum and is never a policy -- see `as_number`.
+bool as_unsigned(const std::string& text, double limit, double& out)
+{
+    return as_number(text, out) && out >= 0.0 && out <= limit;
 }
 
 bool as_bool(const std::string& text, bool& out)
@@ -411,8 +434,10 @@ bool Player::set(const std::string& key, const std::string& value, std::string& 
             config_.dsp = split(value, ',');
             rebuild = true;
         } else if (key == "gain") {
-            if (!as_number(value, 0.0, 8.0, number)) {
-                why = "gain is linear, from 0 to 8";
+            // Linear and unbounded. Above unity clips, below zero inverts,
+            // and both are things somebody may want on purpose.
+            if (!as_number(value, number)) {
+                why = "gain is a number, linear rather than in decibels";
                 return false;
             }
             config_.conversion.gain = number;
@@ -431,22 +456,29 @@ bool Player::set(const std::string& key, const std::string& value, std::string& 
             config_.shaping_spec = value;
             rebuild = true;
         } else if (key == "dither_seed") {
-            if (!as_number(value, 0.0, 4294967295.0, number)) {
-                why = "dither_seed is a number";
+            if (!as_unsigned(value, 4294967295.0, number)) {
+                why = "dither_seed is a number that fits in 32 bits";
                 return false;
             }
             config_.conversion.seed = static_cast<std::uint32_t>(number);
             rebuild = true;
         } else if (key == "ring_periods") {
-            if (!as_number(value, 2.0, 4096.0, number)) {
-                why = "ring_periods is from 2 to 4096";
+            // No floor: the ring sizers already take the larger of what
+            // this asks for and what a ring has to be to be one, so zero is
+            // "as small as it can be" rather than a broken buffer. No ceiling
+            // either -- one that the machine cannot allocate is reported by
+            // the run that tried, not refused by a number chosen here.
+            if (!as_unsigned(value, 4294967295.0, number)) {
+                why = "ring_periods is a whole number of device periods";
                 return false;
             }
             config_.buffering.ring_periods = static_cast<std::uint32_t>(number);
             rebuild = true;
         } else if (key == "wait_timeout") {
-            if (!as_number(value, 1.0, 600000.0, number)) {
-                why = "wait_timeout is in milliseconds";
+            // Zero is a real answer: do not wait at all for a device that
+            // has stopped signalling.
+            if (!as_unsigned(value, 4294967295.0, number)) {
+                why = "wait_timeout is a whole number of milliseconds";
                 return false;
             }
             config_.buffering.wait_timeout_ms = static_cast<std::uint32_t>(number);
@@ -457,8 +489,8 @@ bool Player::set(const std::string& key, const std::string& value, std::string& 
                 return false;
             }
         } else if (key == "recover_timeout") {
-            if (!as_number(value, 0.0, 3600.0, number)) {
-                why = "recover_timeout is in seconds";
+            if (!as_unsigned(value, 4294967295.0, number)) {
+                why = "recover_timeout is a whole number of seconds";
                 return false;
             }
             config_.recover_timeout = static_cast<unsigned>(number);
@@ -747,46 +779,65 @@ Player::RunEnd Player::play_run(Queue& queue, Playlist& playlist, std::uint64_t&
          describe(negotiated.accepted) + (processing ? " (processed)" : " (bit-exact)"));
 
     RunEnd end = RunEnd::failed;
-    if (processing) {
-        ProcessedGraph graph{queue,
-                             sink,
-                             negotiated.accepted,
-                             period,
-                             config.conversion,
-                             nullptr,
-                             config.buffering,
-                             chain.empty() ? nullptr : &chain};
-        graph.set_position(queue.position());
-        {
-            const std::lock_guard lock{mutex_};
-            graph_b_ = &graph;
+    // **An enormous ring is the user's business; a terminated engine is not.**
+    // `ring_periods` has no ceiling any more -- `Player::set` says why -- so the
+    // buffers below are sized by a number this program did not choose, and a
+    // size the machine cannot meet has to come back as a run that failed. The
+    // alternative is an exception leaving the engine thread, which ends the
+    // process: refusing the setting up front was the old way of avoiding that,
+    // and it refused every large value to catch the few impossible ones.
+    try {
+        if (processing) {
+            ProcessedGraph graph{queue,
+                                 sink,
+                                 negotiated.accepted,
+                                 period,
+                                 config.conversion,
+                                 nullptr,
+                                 config.buffering,
+                                 chain.empty() ? nullptr : &chain};
+            graph.set_position(queue.position());
+            {
+                const std::lock_guard lock{mutex_};
+                graph_b_ = &graph;
+            }
+            end = pump(graph);
+            position = graph.position_frames();
+            {
+                const std::lock_guard lock{mutex_};
+                graph_b_ = nullptr;
+                position_ = position;
+                total_frames_ += graph.stats().frames_rendered;
+                total_underruns_ += graph.stats().underruns;
+            }
+        } else {
+            PassthroughGraph graph{queue,      sink,   negotiated.accepted, period,
+                                   negotiated.fidelity, nullptr, config.buffering};
+            graph.set_position(queue.position());
+            {
+                const std::lock_guard lock{mutex_};
+                graph_a_ = &graph;
+            }
+            end = pump(graph);
+            position = graph.position_frames();
+            {
+                const std::lock_guard lock{mutex_};
+                graph_a_ = nullptr;
+                position_ = position;
+                total_frames_ += graph.stats().frames_rendered;
+                total_underruns_ += graph.stats().underruns;
+            }
         }
-        end = pump(graph);
-        position = graph.position_frames();
-        {
-            const std::lock_guard lock{mutex_};
-            graph_b_ = nullptr;
-            position_ = position;
-            total_frames_ += graph.stats().frames_rendered;
-            total_underruns_ += graph.stats().underruns;
-        }
-    } else {
-        PassthroughGraph graph{queue,      sink,   negotiated.accepted, period,
-                               negotiated.fidelity, nullptr, config.buffering};
-        graph.set_position(queue.position());
-        {
-            const std::lock_guard lock{mutex_};
-            graph_a_ = &graph;
-        }
-        end = pump(graph);
-        position = graph.position_frames();
-        {
-            const std::lock_guard lock{mutex_};
-            graph_a_ = nullptr;
-            position_ = position;
-            total_frames_ += graph.stats().frames_rendered;
-            total_underruns_ += graph.stats().underruns;
-        }
+    } catch (const std::bad_alloc&) {
+        const std::string short_of_memory =
+            "not enough memory for the buffers that setting asks for";
+        note(short_of_memory);
+        const std::lock_guard lock{mutex_};
+        // Both, because whichever was set points at a graph that has gone.
+        graph_a_ = nullptr;
+        graph_b_ = nullptr;
+        error_ = short_of_memory;
+        end = RunEnd::failed;
     }
     {
         const std::lock_guard lock{mutex_};

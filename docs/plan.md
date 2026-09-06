@@ -1788,6 +1788,38 @@ A number in the source is a decision made on somebody else's behalf. Every numbe
 governs how much memory is held, or how often something wakes, is a flag; every number that
 is a guard against a bug or a fact about a format is not. Which is which, and why:
 
+**And a setting has no opinion about its value.** The rule is C++'s own — *give the
+programmer the choice even if the programmer might be wrong* — restated for the person
+at the other end of this program. `Player::set` used to answer `gain is linear, from 0 to 8`
+and `ring_periods is from 2 to 4096`, and those ranges are gone: a gain above unity is
+clipping to one listener and recovered headroom to another, one ring period is the lowest
+latency a machine can manage and a stutter on the next machine along, and which of those a
+person means is not knowable from inside `set`. What is still refused is text with no number
+in it, and a number the destination type cannot hold — neither is a judgement about
+the value, because the first has no value in it and the second would arrive as a different
+number than the one that was typed.
+
+Taking a range out has a cost, and paying it is the point rather than an afterthought. The
+`2..4096` on `ring_periods` was also, accidentally, what kept an impossible ring from
+reaching the allocator: with no ceiling the buffers are sized by a number this program did
+not choose, so a size the machine cannot meet now comes back as a run that failed, caught
+where the graph is built. Refusing every large value to catch the few impossible ones is
+what the old check did, and it is exactly the trade this rule says not to make.
+
+The same shape of check lives in the DSP modules, and the three that were plainly judgements
+about a value are gone too: `dsp_gain`'s +24/-144 dB and its 0..16 linear, `dsp_eq`'s
+-40..+20 dB preamp, and `dsp_convolve`'s -60..+30 dB make-up. Each now refuses a decibel
+figure that is not a number, and `dsp_gain` additionally refuses one whose *linear* gain a
+double cannot hold, which is arithmetic rather than judgement — an infinite gain turns every
+sample into a NaN and stops being a gain. A negative linear gain is now taken: it inverts the
+phase, and the decibel figure reports the magnitude because a logarithm has no sign.
+
+About a dozen ranges remain, in `dsp_resample`, `dsp_eq`, `dsp_convolve` and `dsp_mix`, and
+they are left because telling one kind from the other needs the algorithm read rather than
+the constant looked at. `channels > 64` is an array; `taps > 1 << 24` is memory; but
+`stopband 40..200 dB`, `passband 0.5..0.999` and `cepstrum 2..256` look like the ones
+already removed, and each wants its designer read before the number moves.
+
 **Settings**, with the two ways of reaching each one. The probe's flags are the tool's; the
 `[player]` keys are the settings file's, and what one of those *means* is decided in exactly
 one place — `Player::set` — so that the file and `mediaperch-cli set` cannot come to

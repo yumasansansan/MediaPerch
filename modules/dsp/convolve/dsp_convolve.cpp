@@ -235,7 +235,10 @@ MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) noexcept
     if (std::strcmp(key, "gain_db") == 0) {
         char* end = nullptr;
         const double db = std::strtod(value, &end);
-        if (end == value || !std::isfinite(db) || db < -60.0 || db > 30.0) {
+        // Any decibel figure that is a number; an impulse response needs
+        // whatever make-up gain it needs, and how much is the file's business
+        // rather than this module's.
+        if (end == value || !std::isfinite(db)) {
             return MP_ERR_INVALID;
         }
         d->gain_db = db;
