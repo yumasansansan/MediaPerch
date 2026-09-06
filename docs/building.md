@@ -46,7 +46,7 @@ git submodule update --init
 | `external/dav2d` | AV2, the fast decoder, when there is one to build | `codec_dav2d` |
 | `external/libvpx` | VP8 and VP9 | `codec_vpx` |
 | `external/libde265` | HEVC, and the only one this tree has — Windows ships no HEVC decoder | `codec_de265` |
-| `external/HM` | HEVC, the ITU/ISO/IEC reference, to check libde265 against | the cross-check test |
+| `external/HM` | HEVC, the ITU/ISO/IEC reference, to check libde265 against | `tests/hm_cross_test.cpp`, as a program |
 
 **Two of those are references rather than decoders**, and the distinction is the method §12
 already uses for audio arriving for video: AV1 and HEVC are both defined bit-exactly, so two
@@ -54,7 +54,11 @@ independent decoders must agree on every sample of every frame or one of them is
 is a far stronger check than anything a single decoder can be held to on its own. `external/aom`
 is a module like any other; `external/HM` is not, because HM has no library API —
 `TDecTop::decode` is driven by two hundred and fifty lines of state in `TAppDecTop`, and what
-HM ships to be used is a program.
+HM ships to be used is a program. So it is built as one and run as one, and
+`tests/hm/CMakeLists.txt` records what that costs: HM builds an encoder and five other
+programs beside the decoder, turns warnings into errors for a compiler generations newer than
+it, and writes its executable into its own source tree under a path with the compiler version
+in it. Three lines of build file each, and none of them is HM being wrong.
 
 **Licences, because they are why these two and not others.** libde265 is LGPL-3.0 for the
 library and MIT for the sample applications; HM is BSD-3-Clause from ITU/ISO/IEC, with a

@@ -2892,6 +2892,48 @@ already knew.** The fix in both cases was to stop.
 so a different fixture asks the same question; and it checks that the timestamps increase,
 which is the assertion that would have caught the first row on its own.
 
+#### And against the reference, sample for sample
+
+**HEVC's decoding process is defined bit-exactly**, so libde265 and HM must agree on every
+sample of every frame or one of them is wrong. That is a far stronger check than anything a
+single decoder can be held to: `codec_de265_test.cpp` can say a frame has more than one luma
+value, which rules out a cleared buffer and very little else. It is §12's method for audio,
+and `codec_aom`'s for AV1, arriving for HEVC.
+
+Measured, on the fixture: **24 frames, 442,368 samples, zero differing.**
+
+**HM is built and run as a program, not wrapped as a module**, and that is a decision with a
+reason rather than a shortcut. `TDecTop` has no entry point that is not two hundred and fifty
+lines of `TAppDecTop`'s state — `bNewPicture`, `executeLoopFilters`, POC tracking, an
+output routine walking a `TComList<TComPic*>` — and `TAppDecTop::decode()` reads its
+bitstream from a file. What HM ships to be used is a program. A module would mean
+reimplementing that state machine and maintaining it against upstream, and the result would be
+a decoder carrying HM's name that HM's authors had never run. Used as a program, the reference
+is the reference: what ITU/ISO/IEC published, driven the way they drive it.
+
+**The bitstream HM reads is built by this tree**, out of the container, with
+`mp::mft::to_annex_b` and the `hvcC` beside it. So the conversion HEVC shares with H.264 is
+under test as well, and by about the strongest check available: emit one NAL wrong and HM
+decodes something else, and *every* sample differs.
+
+Three things the build had to be told, none of them HM's fault:
+
+- **HM turns warnings into errors under MSVC**, in its own `bb_enable_warnings`, against a
+  compiler generations newer than the one it was written for. `/WX-` after their `/WX`. The
+  warnings in somebody else's reference implementation are not this tree's to fix.
+- **It builds an encoder, two analysers and three utilities** beside the decoder. The build
+  step names `TAppDecoder` and nothing else.
+- **It writes the executable into its own source tree**, under
+  `bin/<generator>/<compiler>-<version>/<arch>/<config>/`, which is BBuildEnv's convention and
+  is in HM's own `.gitignore`, so the submodule stays clean. The path carries the compiler's
+  version number, so it cannot be written down — `find_decoder.cmake` looks for it after
+  the build and copies it somewhere nameable.
+
+And one thing Windows had to be told: `std::system` runs `cmd /c <string>`, and cmd strips the
+first and last character when the string begins with a quote. A command whose program *and*
+arguments are quoted arrives with its first quote gone and its last one orphaned, and the error
+names the mangled string rather than the problem. The whole command is wrapped in a second pair.
+
 #### The container half of AV1 is done; the library is a build-system question
 
 **Done:** `MP_CODEC_AV1` is appended, `demux_mp4` recognises an `av01` sample entry, and the

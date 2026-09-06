@@ -155,6 +155,17 @@ if(TARGET mp_codec_de265 AND TARGET mp_demux_mp4)
     target_compile_definitions(mediaperch_tests PRIVATE
         "MEDIAPERCH_CODEC_DE265=\"$<TARGET_FILE:mp_codec_de265>\"")
     add_dependencies(mediaperch_tests mp_codec_de265)
+
+    # And against the reference, sample for sample. HM is a program rather than
+    # a library -- tests/hm/CMakeLists.txt says why -- so this is the one test
+    # here that runs somebody else's executable.
+    add_subdirectory(hm)
+    if(MEDIAPERCH_HM_FOUND)
+        target_sources(mediaperch_tests PRIVATE hm_cross_test.cpp)
+        target_compile_definitions(mediaperch_tests PRIVATE
+            "MEDIAPERCH_HM_DECODER=\"${MEDIAPERCH_HM_DECODER}\"")
+        add_dependencies(mediaperch_tests hm_external)
+    endif()
 endif()
 
 # VP8 and VP9 through the reference implementation, out of the container both
