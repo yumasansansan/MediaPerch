@@ -2940,12 +2940,68 @@ busy machine. At 32 periods, 96 ms, the audio never lost a buffer in four consec
 while the video went on dropping one to four frames of seventy-one. That is the acceptance
 condition exactly: the picture gives way, the sound does not.
 
-**What this does not say.** The default is still 8, and the default still underran here. A
-player that meets M6 out of the box has to either raise the ring when it sees a stream this
-expensive, or leave fewer cores to the decoder than there are — and which of those is right
-is a question this measurement asks rather than answers. What it settles is that the
-arithmetic works and the shape is sound: §8's clock held, and nothing rate-matched the audio
-to help it, because there is no method that could.
+**What this does not say.** The default is still 8, and the default still underran here. What
+it settles is that the arithmetic works and the shape is sound: §8's clock held, and nothing
+rate-matched the audio to help it, because there is no method that could.
+
+#### Why the ring, and three answers that turned out to be wrong
+
+The obvious reading of an underrun on a saturated machine is *a thread did not get scheduled*.
+Three experiments say it is not that, and each of them is worth keeping because each was the
+obvious next thing to try:
+
+| tried | at ring 8 | verdict |
+|---|---|---|
+| **MMCSS `Pro Audio` on the render thread** — which `show` was not doing at all: `play` passes the hooks and `show` passed `nullptr`, so every measurement ever taken through this command was taken at ordinary priority | 3, 23, 18 underruns | **no effect.** Fixed anyway: a command that measures the player should run the player's threads |
+| **the same on the *decode* thread**, which is the one that fills the ring and has never had any priority at all | 8, 30, 15 | **no effect** |
+| **the router's back pressure** — a consumer whose queue is full makes the *other* one wait, and a slow 4K decode is exactly how a video queue fills | peak 0.8 MiB against a 32 MiB cap | **never approached.** The mechanism exists and was not the mechanism |
+
+What the router *did* show is the shape of the coupling. `read` is 213 packets either way —
+71 video and 142 audio — but `queued` is 39 to 42 at ring 8 and **71 at ring 32**: with the
+larger ring the audio thread runs far enough ahead to pull every video packet off the demuxer
+before the video side asks for it. **One file has one position (§4), so whichever consumer
+asks first does the reading for both.** On a 4K file the audio decode thread spends most of
+its turns reading and copying video packets rather than filling its own ring, and the ring is
+what covers the time it is doing that.
+
+That is a mechanism the measurements are consistent with and have not proved. What is proved
+is narrower and still useful: **the lever is the ring, and it is not priority.**
+
+#### Sizing it, which is a question rather than an answer
+
+The ring and the decoder's thread count should both be settable — they are, through
+`--ring-periods` and this tree's `mp::decoder_threads()` respectively — and both should have
+a default derived from the file rather than from a constant. What is knowable before a frame
+is decoded is quite a lot:
+
+- **The geometry and rate**, from `MpVideoInfo`: width, height, fps as a ratio.
+- **The bit depth and chroma**, stated outright by `hvcC` and readable from the others.
+- **The codec level**, which is a *standardised* upper bound rather than an estimate. HEVC's
+  `general_level_idc` names a maximum luma sample rate; level 5.1 is 4K60 and level 4.1 is
+  1080p60. It is in the record before anything opens.
+- **The audio period**, from the sink, which is what a ring period is a multiple of.
+
+Four families of answer, and they are not exclusive:
+
+1. **From declared cost.** Luma samples per second times a per-codec throughput constant gives
+   cores wanted, and the shortfall gives the stall to buffer against. Decided before the first
+   frame; the constant is per-machine and per-codec, which this tree's *optimise maximally
+   rather than benchmark to decide* is uneasy about.
+2. **From the codec level**, which is (1) with a number the format defines instead of one
+   somebody measured. Cheaper to defend and coarser: a level is an upper bound and most
+   streams sit well under it.
+3. **Reserve rather than estimate.** Never give the decoder every core; never give the ring
+   less than some multiple of the worst frame interval. No constants about codecs at all, and
+   it targets the failure rather than its cause. It costs throughput on small machines.
+4. **Closed loop.** Grow the ring on evidence. The right signal is not an underrun — that
+   is already audible — but the ring's *low-water mark*: how close it came. The ring knows
+   its own occupancy, so a run that never dropped below half needs nothing and one that
+   touched a tenth is one period from a click. Reacting to a near miss is the only one of the
+   four that needs no model of the machine at all.
+
+The last is the one this tree is shaped for: it already measures rather than assumes
+everywhere else that a number matters, and a low-water mark is exactly the kind of thing
+`show` could print beside the underruns before anything is made automatic. **Not built.**
 
 #### `claims` had never once mentioned a video decoder
 

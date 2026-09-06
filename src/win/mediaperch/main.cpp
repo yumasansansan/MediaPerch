@@ -1739,6 +1739,12 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
     mp::PacketSource audio_source;
     std::unique_ptr<mp::PassthroughGraph> exact;
     std::unique_ptr<mp::ProcessedGraph> processed;
+    // **The render thread joins Pro Audio here too, and did not.** `play`
+    // passes these and `show` passed nullptr, so every measurement taken
+    // through `show` was taken with the audio render thread at ordinary
+    // priority -- which is not what the player does and is not what §14 says
+    // the thread is for. M6's acceptance was measured through this command.
+    mp::win::RenderThreadHooks audio_hooks;
     std::unique_ptr<mp::IAudioClockSource> audio_clock;
     mp::Sink sink;
 
@@ -1785,7 +1791,8 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
         ring.wait_timeout_ms = options.wait_timeout_ms;
         if (mp::use_processed(options.path, negotiated.fidelity, options.gain != 1.0)) {
             processed = std::make_unique<mp::ProcessedGraph>(
-                audio_source, sink, negotiated.accepted, period, conversion, nullptr, ring);
+                audio_source, sink, negotiated.accepted, period, conversion,
+                &audio_hooks, ring);
             if (processed->start() != MP_OK) {
                 std::fprintf(stderr, "the audio graph would not start\n");
                 return 1;
@@ -1795,7 +1802,7 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
         } else {
             exact = std::make_unique<mp::PassthroughGraph>(
                 audio_source, sink, negotiated.accepted, period, negotiated.fidelity,
-                nullptr, ring);
+                &audio_hooks, ring);
             if (exact->start() != MP_OK) {
                 std::fprintf(stderr, "the audio graph would not start\n");
                 return 1;
@@ -1887,6 +1894,18 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
                     static_cast<unsigned long long>(audio_stats.underruns),
                     static_cast<unsigned long long>(audio_stats.silent_frames));
     }
+
+    // **What the router held, which is the third thing in the room.** The
+    // audio and the video come out of one demuxer, and a consumer whose queue
+    // is full makes the *other* one wait -- so a slow video decode can reach
+    // the audio side without either thread being descheduled. `peak` is the
+    // number that says whether it did.
+    const mp::PacketRouter::Stats routed = router.stats();
+    std::printf("router     %llu packets read, %llu of them queued for the other "
+                "consumer, %.1f MiB peak\n",
+                static_cast<unsigned long long>(routed.read),
+                static_cast<unsigned long long>(routed.queued),
+                static_cast<double>(routed.peak_queued_bytes) / (1024.0 * 1024.0));
 
     std::printf("\nframes     %llu shown, %llu dropped, %llu decoded\n",
                 static_cast<unsigned long long>(stats.shown),
