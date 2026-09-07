@@ -214,6 +214,9 @@ public:
     void play(std::vector<std::string> files, std::size_t first = 0);
     /// Adds to the end without disturbing anything.
     void enqueue(const std::vector<std::string>& files);
+    /// The playlist as it is, from `index`: the click on a track. False, and
+    /// why, for an index the playlist does not have.
+    bool play_at(std::size_t index, std::string& why);
     void clear();
 
     void pause();

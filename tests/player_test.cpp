@@ -965,6 +965,40 @@ TEST_CASE("an engine joins two tracks and can be told to skip one", "[player]")
     player.shutdown();
 }
 
+TEST_CASE("a click on a track starts the run there", "[player]")
+{
+    // **Not a seek and not a string of nexts.** A queue records where a track
+    // began as it goes past it, so it cannot place one it has not reached; and
+    // each next opens a file and none of them is atomic. What a click means is
+    // the run starting again at that entry, which is a real gap and is what
+    // the person asked for.
+    Host host;
+    host.add("a", pattern(64 * 4 * 4000, 4));
+    host.add("b", pattern(64 * 4 * 4000, 5));
+    host.add("c", pattern(64 * 4 * 4000, 6));
+    mp::Player player{host};
+    player.start();
+    player.play({"a", "b", "c"});
+    REQUIRE(wait_for_state(player, mp::ipc::State::playing));
+    CHECK(player.status().index == 0);
+
+    std::string why;
+    REQUIRE(player.play_at(2, why));
+    REQUIRE(wait_for([&] {
+        const auto s = player.status();
+        return s.state == mp::ipc::State::playing && s.index == 2;
+    }));
+    CHECK(player.status().track == "c");
+    CHECK(player.status().count == 3);
+
+    // An entry the playlist does not have is refused with the count in it.
+    CHECK_FALSE(player.play_at(3, why));
+    CHECK(why.find("3 entries") != std::string::npos);
+    CHECK(player.status().index == 2);
+
+    player.shutdown();
+}
+
 TEST_CASE("an engine refuses a setting it cannot make sense of", "[player]")
 {
     Host host;

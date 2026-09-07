@@ -4,140 +4,68 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-    xmlns:canvas="using:MediaPerch.Shell.Canvas"
-    xmlns:controls="using:MediaPerch.Shell.Controls"
     mc:Ignorable="d">
 
-    <Grid x:Name="Root" RowDefinitions="Auto,*,Auto" Padding="16" RowSpacing="12">
+    <!-- Acrylic, behind everything including the title bar. The window's own
+         chrome is drawn by the system over it; what this shell draws is the
+         drag region below, the navigation, and a page. -->
+    <Window.SystemBackdrop>
+        <DesktopAcrylicBackdrop />
+    </Window.SystemBackdrop>
 
-        <!-- The connection, first and plainly, because a shell that cannot say
-             whether the engine is running is a shell that looks broken when it
-             is the engine that is not there. -->
-        <InfoBar Grid.Row="0"
-                 x:Name="Connection"
-                 IsOpen="True"
-                 IsClosable="False"
-                 Severity="Informational"
-                 Title="Not connected"
-                 Message="mediaperchd is not running, or is listening somewhere else."
-                 HorizontalAlignment="Stretch" />
+    <Grid RowDefinitions="Auto,*">
 
-        <ScrollViewer Grid.Row="1">
-            <StackPanel Spacing="16">
+        <!-- The title bar, extended into. Everything in it is drag region; the
+             caption buttons are the system's and sit on top. -->
+        <Grid x:Name="TitleBar" Grid.Row="0" Height="48" ColumnDefinitions="Auto,Auto,*">
+            <FontIcon Grid.Column="0" Glyph="&#xE768;" FontSize="14" Margin="16,0,8,0"
+                      VerticalAlignment="Center"
+                      Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <TextBlock Grid.Column="1" Text="MediaPerch"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       VerticalAlignment="Center" />
+            <TextBlock x:Name="ConnectionLine" Grid.Column="2" Margin="16,0,160,0"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+        </Grid>
 
-                <!-- The picture. §9.7.1: the engine draws into a composition
-                     surface it never shows, the handle crosses once, and this
-                     is where it becomes something the window composites. Black
-                     because that is what a picture sits on. -->
-                <Border x:Name="Picture"
-                        Height="270"
-                        CornerRadius="8"
-                        Background="Black"
-                        SizeChanged="OnPictureResized" />
-                <TextBlock x:Name="PictureLine"
-                           Style="{StaticResource CaptionTextBlockStyle}"
-                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                           TextWrapping="Wrap" />
+        <NavigationView x:Name="Nav" Grid.Row="1"
+                        PaneDisplayMode="LeftCompact"
+                        IsBackButtonVisible="Collapsed"
+                        IsSettingsVisible="False"
+                        OpenPaneLength="200"
+                        SelectionChanged="OnNavigate"
+                        ItemInvoked="OnInvoked">
+            <NavigationView.MenuItems>
+                <NavigationViewItem x:Name="NowItem" Content="Now playing" Tag="now">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE768;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Content="Playlist" Tag="playlist">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE8FD;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Content="Engine" Tag="graph">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE713;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+            </NavigationView.MenuItems>
+            <NavigationView.FooterMenuItems>
+                <!-- Not a page: invoking it reconnects. Where a person looks
+                     when the line in the title bar says the engine is gone. -->
+                <NavigationViewItem Content="Reconnect" Tag="reconnect"
+                                    SelectsOnInvoked="False">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE72C;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+            </NavigationView.FooterMenuItems>
 
-                <StackPanel Spacing="4">
-                    <TextBlock x:Name="TrackLine" Style="{StaticResource TitleTextBlockStyle}"
-                               Text="Nothing is playing" TextWrapping="Wrap" />
-                    <TextBlock x:Name="FormatLine"
-                               Style="{StaticResource BodyTextBlockStyle}"
-                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                               TextWrapping="Wrap" />
-                </StackPanel>
-
-                <!-- The transport. Only the verbs §10 actually has: there is no
-                     "play this one", because a queue records where a track
-                     began as it goes past it and cannot place one it has not
-                     reached. -->
-                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                    <Button x:Name="PreviousButton" Click="OnPrevious">
-                        <FontIcon Glyph="&#xE100;" FontSize="14" />
-                    </Button>
-                    <Button x:Name="PlayPause" Click="OnPlayPause" Width="96"
-                            Content="Pause" />
-                    <Button x:Name="StopButton" Click="OnStop">
-                        <FontIcon Glyph="&#xE71A;" FontSize="14" />
-                    </Button>
-                    <Button x:Name="NextButton" Click="OnNext">
-                        <FontIcon Glyph="&#xE101;" FontSize="14" />
-                    </Button>
-                    <Button x:Name="BackTen" Click="OnBackTen" Content="&#x2212;10s" />
-                    <Button x:Name="OnTen" Click="OnForwardTen" Content="+10s" />
-                    <TextBlock x:Name="PositionLine"
-                               VerticalAlignment="Center"
-                               Style="{StaticResource BodyTextBlockStyle}"
-                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                </StackPanel>
-
-                <Expander x:Name="PlaylistPanel" HorizontalAlignment="Stretch"
-                          Header="Playlist">
-                    <ItemsControl x:Name="PlaylistRows">
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate>
-                                <TextBlock Text="{Binding}" TextWrapping="NoWrap"
-                                           TextTrimming="CharacterEllipsis"
-                                           Style="{StaticResource BodyTextBlockStyle}" />
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-                </Expander>
-
-                <TextBlock Text="The shape it is in"
-                           Style="{StaticResource SubtitleTextBlockStyle}" />
-                <!-- Fusion's look over a chain's semantics: §10 says why it is
-                     a row and not a cloud. The console switch prints the same
-                     answer as text, which is how the wire stays checkable
-                     without looking at anything. -->
-                <ScrollViewer HorizontalScrollMode="Auto"
-                              HorizontalScrollBarVisibility="Auto"
-                              VerticalScrollMode="Disabled"
-                              VerticalScrollBarVisibility="Disabled">
-                    <canvas:NodeCanvas x:Name="Shape" />
-                </ScrollViewer>
-
-                <!-- One node's settings, opened by the button on it. -->
-                <Expander x:Name="NodePanel" Visibility="Collapsed"
-                          HorizontalAlignment="Stretch" IsExpanded="True">
-                    <Expander.Header>
-                        <TextBlock x:Name="NodeTitle" />
-                    </Expander.Header>
-                    <controls:SettingsEditor x:Name="NodeSettings" />
-                </Expander>
-
-                <!-- Everything else the engine will take, in the two places §11
-                     splits it into: what a run may change, and what was decided
-                     before there was a run. -->
-                <Expander x:Name="PlayerPanel" HorizontalAlignment="Stretch"
-                          Header="Player settings">
-                    <controls:SettingsEditor x:Name="PlayerSettings" />
-                </Expander>
-
-                <Expander x:Name="EnginePanel" HorizontalAlignment="Stretch"
-                          Header="Engine settings">
-                    <controls:SettingsEditor x:Name="EngineSettings" />
-                </Expander>
-
-                <Expander x:Name="ModulePanel" HorizontalAlignment="Stretch"
-                          Header="Modules">
-                    <ItemsControl x:Name="ModuleRows">
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate>
-                                <TextBlock Text="{Binding}" FontFamily="Consolas"
-                                           TextWrapping="NoWrap"
-                                           Style="{StaticResource CaptionTextBlockStyle}" />
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-                </Expander>
-            </StackPanel>
-        </ScrollViewer>
-
-        <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8">
-            <Button x:Name="Refresh" Content="Refresh" Click="OnRefresh" />
-            <Button x:Name="SaveButton" Content="Save settings" Click="OnSave" />
-        </StackPanel>
+            <Frame x:Name="Pages" />
+        </NavigationView>
     </Grid>
 </Window>

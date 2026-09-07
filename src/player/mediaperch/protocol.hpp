@@ -168,6 +168,15 @@ enum class Kind : std::uint16_t {
     /// The reply is `u64`, and zero means there is nothing to show: no picture
     /// in the current track, or a presenter that draws into a window instead.
     surface = 28,
+    /// `u32` index into the playlist. **The click on a track.** The run starts
+    /// again there, which is a real gap in exclusive mode -- the device stops,
+    /// the ring refills, the device starts -- and is what a person who clicked
+    /// asked for. It is not a seek, because a queue records where a track began
+    /// as it goes past it and cannot place one it has not reached; and it is
+    /// not a string of `next`s, because each of those opens a file and none of
+    /// them is atomic. Answered with `ok`, or `error` for an index the playlist
+    /// does not have.
+    play_at = 29,
 
     // --- replies, engine to shell ---
     ok = 128,

@@ -5477,6 +5477,45 @@ fits now, and the letterbox is the space around it. The picture's own size is th
 which exists precisely because a window cannot work it out: anamorphic 4:3 coded in a 16:9 frame
 is 16:9 only once something has read the track header.
 
+#### Three pages, acrylic, and a click on a track
+
+**The picture wants the whole window.** What is playing fills it, with the transport under it
+and nothing else in the way; the playlist and the engine's shape — the node canvas and every
+setting — are pages of their own behind a `NavigationView`. That is the shape Windows' own media
+player takes, and for the same reason: a video window is looked at, a settings canvas is worked
+in, and the two do not want each other's space. Acrylic behind everything, the title bar
+extended into, Segoe Fluent glyphs on the transport, the play button round and accented.
+
+**One pipe, one tick, however many pages.** Each page wants the same status, playlist and
+connection, and a client per page would be several shells to the engine asking the same question
+on several timers. `Session` is the one of each, and pages listen. The picture's page is cached
+for the life of the window (`NavigationCacheMode.Required`), because the engine's surface is
+composited into an element on it and a page destroyed on navigation would drop the visual and ask
+for the surface again on the way back; out of the tree its host has no size, so no size message
+goes, and coming back is a `SizeChanged`. Measured: `size 685x514` for a `picture 128x96` — the
+larger area, still 4:3 — and the same surface (`picture #1`) across every page change.
+
+**The scrubber is now possible**, because `status` answers `item_position` and `length` in the
+same unit: a drag seeks to where this track began plus the point, which is the queue's
+coordinate and what the engine's seek speaks.
+
+**And a click on a track is a verb**, `play_at`. It is not a seek, because a queue records where
+a track began as it goes past it and cannot place one it has not reached; and it is not a string
+of `next`s, because each of those opens a file and none of them is atomic. What a click means is
+the run starting again at that entry — a real gap in exclusive mode, the device stopping and the
+ring refilling, and exactly what a person who clicked asked for. `Player::play` already took a
+first index; the verb is that, with the playlist as it is. `mediaperch-cli goto 200` on a
+400-entry list: `track 200 of 400`, a new picture (`#2 of this run`), and `goto 999` refused with
+the count in the sentence.
+
+**The Debug CI job failed on a runtime mismatch, and the fix is where the source is.**
+`codec_de265` is pinned to the release runtime because libde265 is built once, as a release
+library, and is C++; it linked the `mediaperch_h264` archive, which follows the configuration,
+and a Debug archive against a release-pinned module is `RuntimeLibrary` and
+`_ITERATOR_DEBUG_LEVEL` mismatches. The archive is right for everything else that links it, so
+the pinned module compiles the one source itself, through an `INTERFACE` target that carries it:
+one copy of the source, one runtime per DLL.
+
 **What is left of M8**: dragging nodes to reorder a chain and adding one from the palette
 (`modules` already answers what there is to add), and opening files from the shell rather than
 from the CLI.
@@ -5611,7 +5650,7 @@ HDR state.
 | M6.8 | The video graph: decode, pace, present | **done.** VideoDecoder and Presenter behind their vtables -- mp::Sink for pictures -- and VideoGraph, which holds one frame, asks §8's pacer and presents. One frame and no queue, because a decoded frame is valid until the next call on the codec that produced it and a queue would have to copy what §9.8.1 went to some trouble not to copy; the lookahead is inside the decoder, which reorders B-frames and since M6.6 uses every core. No thread of its own either: the audio graphs own one because the device's event paces them, and video's pace is the display's, which belongs to the head. A drop does not cost a refresh -- one pump lets go of every frame whose time has passed, because letting one go per refresh would never catch the clock. After the first frame the decoder is asked what it actually produced and the presenter reconfigured where the bitstream disagrees with the container, except for the timescale and the frame rate, which a decoder never re-times. Packets arrive through IPacketFeed rather than from a demuxer, which is a hole with a name: §4 says one file has one position, so audio and video must share one demuxer, and the router that would do that is what comes next. Checked on demux_mp4 + codec_dav1d + video_d3d11 with a clock somebody chose: 24 shown and none dropped at the right speed with nothing more than a millisecond late, twelve dropped and twelve shown half a second behind with the picture still right at the end, and five hundred polls of a stopped clock holding it |
 | M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse. **Measured, and met at the default**: 3840x2160 HEVC with an audio track, 0 underruns and 0 silent frames while 1 to 4 frames of 71 were dropped. It was first met at `--ring-periods 32` against a default of 8 that underran; the default is 128 now, and the sections above are the measurements that moved it and what they do and do not say. Getting there took worker threads in `codec_de265` (one thread was a comment rather than a decision) and the ring. DirectComposition is still §9.7.1's shell case and unbuilt; hardware decode is `codec_mft` where the machine has a transform |
 | M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled. **All six steps of §9.7.2 are built**: the SDR white level, the output the window is on, PQ, HLG, BT.2390 in the shader, and the ABI append that carries what the content was graded on, filled from Matroska, from MP4's `mdcv`/`clli`, and from an HEVC prefix SEI where the container says nothing. Steps 3, 4 and 5 are formulas and are tested against them off-screen on WARP, so they run in CI on a machine with no display. **What is left is the half that is not a formula**: steps 1, 2 and 6 on real HDR hardware, written into [devices.md](devices.md) -- there is no HDR display here, and asserting they work without one is the exact failure §9.2 is the record of |
-| M8 | WinUI 3 shell | **most of it.** The project builds and its own reader decodes §10's wire against a running engine -- `MediaPerch.Shell.exe --check` prints the status and the graph, which is how the two descriptions of one format are held together. The canvas is drawn, the composition surface is composited, and the transport, playlist, module palette and settings screens are there -- every key the engine will take, per node and for the player and the engine, as something to type into, with the module's own refusal shown when it will not take it. Killing it mid-track changes nothing audible. **C#, WinUI 3, Native AOT**, `net10.0-windows10.0.26100.0` with a minimum of 22000, to Fluent 2, dependencies at their newest. Its settings screen is a **node canvas** in the shape of ComfyUI's and Fusion's: the chain as a topology, dragged to reorder, with a settings button per node. §10 says what that asks of the engine -- three verbs and no more -- and why the canvas is Fusion's look over a chain's semantics rather than a free-form DAG. The engine half of §9.7.1 is standing: the composition surface handle, the compositor's clock (not the swap chain's waitable, which was a black window until it was measured), the size message and the display message. The shell's half is done through WinUI's own compositor rather than DirectComposition, and *a shell that dies holding the picture* is a test rather than a claim. The picture survives a track boundary as the audio device does, and both it and `status` follow what is being heard rather than what is being decoded. What is left is dragging nodes to reorder, adding a stage from the palette, and opening files from the shell |
+| M8 | WinUI 3 shell | **most of it.** The project builds and its own reader decodes §10's wire against a running engine -- `MediaPerch.Shell.exe --check` prints the status and the graph, which is how the two descriptions of one format are held together. The canvas is drawn, the composition surface is composited, and the transport, playlist, module palette and settings screens are there -- every key the engine will take, per node and for the player and the engine, as something to type into, with the module's own refusal shown when it will not take it. Killing it mid-track changes nothing audible. **C#, WinUI 3, Native AOT**, `net10.0-windows10.0.26100.0` with a minimum of 22000, to Fluent 2, dependencies at their newest. Its settings screen is a **node canvas** in the shape of ComfyUI's and Fusion's: the chain as a topology, dragged to reorder, with a settings button per node. §10 says what that asks of the engine -- three verbs and no more -- and why the canvas is Fusion's look over a chain's semantics rather than a free-form DAG. The engine half of §9.7.1 is standing: the composition surface handle, the compositor's clock (not the swap chain's waitable, which was a black window until it was measured), the size message and the display message. The shell's half is done through WinUI's own compositor rather than DirectComposition, and *a shell that dies holding the picture* is a test rather than a claim. The picture survives a track boundary as the audio device does, and both it and `status` follow what is being heard rather than what is being decoded. The window is three pages behind a navigation pane, acrylic into the title bar, the picture filling the first with a Fluent transport and a scrubber under it; a click on a track is `play_at`. What is left is dragging nodes to reorder, adding a stage from the palette, and opening files from the shell |
 | M9 | Linux head | ALSA or PipeWire in an exclusive-equivalent mode, proving the core was actually portable |
 
 M1 and M2 are the ones that de-risk the project. If exclusive-mode negotiation and the

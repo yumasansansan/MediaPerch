@@ -59,6 +59,7 @@ public enum Kind : ushort
     EngineSettings = 26,
     EngineSettingSet = 27,
     Surface = 28,
+    PlayAt = 29,
 
     // replies, engine to shell
     Ok = 128,

@@ -498,6 +498,17 @@ bool IpcServer::handle(const std::shared_ptr<Client>& client, const ipc::Header&
     case ipc::Kind::stop:
         player_->stop();
         return ok();
+    case ipc::Kind::play_at: {
+        const std::uint32_t index = r.u32();
+        if (!r.complete()) {
+            return malformed();
+        }
+        std::string why;
+        if (!player_->play_at(index, why)) {
+            return fail(why);
+        }
+        return ok();
+    }
     case ipc::Kind::next:
         player_->next();
         return ok();

@@ -90,7 +90,13 @@ mediaperch_add_module(mp_codec_de265
     SOURCES codec_de265.cpp
     # `hvcC` to Annex B, which is `avcC` to Annex B with a different record in
     # front of it -- see modules/shared/h264, where the emitter never knew which.
-    LINK de265::de265 mediaperch_h264 mediaperch_decoder_threads)
+    #
+    # **The source, not the archive.** This module is pinned to the release
+    # runtime below, and libde265 is C++, so every object in this DLL has to
+    # carry the same runtime; the `mediaperch_h264` archive follows the
+    # configuration, and a Debug build of it fails the link with a
+    # RuntimeLibrary mismatch -- which is exactly what the Debug CI job did.
+    LINK de265::de265 mediaperch_h264_sources mediaperch_decoder_threads)
 
 set_target_properties(mp_codec_de265 PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")

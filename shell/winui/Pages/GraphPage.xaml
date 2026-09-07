@@ -1,0 +1,76 @@
+<Page
+    x:Class="MediaPerch.Shell.Pages.GraphPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:canvas="using:MediaPerch.Shell.Canvas"
+    xmlns:controls="using:MediaPerch.Shell.Controls"
+    mc:Ignorable="d">
+
+    <Grid RowDefinitions="Auto,*">
+
+        <CommandBar Grid.Row="0" DefaultLabelPosition="Right" Background="Transparent"
+                    HorizontalAlignment="Left" Margin="12,0,0,0">
+            <AppBarButton Label="Refresh" Click="OnRefresh">
+                <AppBarButton.Icon>
+                    <FontIcon Glyph="&#xE72C;" />
+                </AppBarButton.Icon>
+            </AppBarButton>
+            <AppBarButton Label="Save settings" Click="OnSave">
+                <AppBarButton.Icon>
+                    <FontIcon Glyph="&#xE74E;" />
+                </AppBarButton.Icon>
+            </AppBarButton>
+        </CommandBar>
+
+        <ScrollViewer Grid.Row="1" Padding="24,0,24,16">
+            <StackPanel Spacing="16">
+                <InfoBar x:Name="Note" IsOpen="False" IsClosable="True" />
+
+                <TextBlock Text="The shape it is in"
+                           Style="{StaticResource SubtitleTextBlockStyle}" />
+                <!-- Fusion's look over a chain's semantics: §10 says why it is
+                     a row and not a cloud. -->
+                <ScrollViewer HorizontalScrollMode="Auto"
+                              HorizontalScrollBarVisibility="Auto"
+                              VerticalScrollMode="Disabled"
+                              VerticalScrollBarVisibility="Disabled">
+                    <canvas:NodeCanvas x:Name="Shape" />
+                </ScrollViewer>
+
+                <!-- One node's settings, opened by the button on it. -->
+                <Expander x:Name="NodePanel" Visibility="Collapsed"
+                          HorizontalAlignment="Stretch" IsExpanded="True">
+                    <Expander.Header>
+                        <TextBlock x:Name="NodeTitle" />
+                    </Expander.Header>
+                    <controls:SettingsEditor x:Name="NodeSettings" />
+                </Expander>
+
+                <!-- Everything else the engine will take, in the two places §11
+                     splits it into: what a run may change, and what was decided
+                     before there was a run. -->
+                <Expander HorizontalAlignment="Stretch" Header="Player settings">
+                    <controls:SettingsEditor x:Name="PlayerSettings" />
+                </Expander>
+
+                <Expander HorizontalAlignment="Stretch" Header="Engine settings">
+                    <controls:SettingsEditor x:Name="EngineSettings" />
+                </Expander>
+
+                <Expander x:Name="ModulePanel" HorizontalAlignment="Stretch" Header="Modules">
+                    <ItemsControl x:Name="ModuleRows">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding}" FontFamily="Consolas"
+                                           TextWrapping="NoWrap"
+                                           Style="{StaticResource CaptionTextBlockStyle}" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </Expander>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</Page>

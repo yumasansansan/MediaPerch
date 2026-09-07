@@ -250,6 +250,23 @@ void Player::play(std::vector<std::string> files, std::size_t first)
     wake_.notify_all();
 }
 
+bool Player::play_at(std::size_t index, std::string& why)
+{
+    std::vector<std::string> files;
+    {
+        const std::lock_guard lock{mutex_};
+        if (index >= files_.size()) {
+            why = "the playlist has " + std::to_string(files_.size()) + " entries and no " +
+                  std::to_string(index + 1) + "th";
+            return false;
+        }
+        files = files_;
+    }
+    // The same request `play` makes, with a first item that is not the first.
+    play(std::move(files), index);
+    return true;
+}
+
 void Player::enqueue(const std::vector<std::string>& files)
 {
     const std::lock_guard lock{mutex_};

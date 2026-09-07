@@ -35,6 +35,7 @@ usage: mediaperch-cli [--pipe NAME] COMMAND [arguments]
   status            what is playing, in one screen
   play FILE...      replace the playlist and start
   add FILE...       append, without disturbing what is playing
+  goto N            play track N of the playlist, as `playlist` numbers them
   clear             empty the playlist and stop
   pause | resume | stop
   next | prev
@@ -213,6 +214,20 @@ int main(int argc, char** argv)
         mp::ipc::write_strings(w, files);
         if (!client.call(command == "play" ? mp::ipc::Kind::play : mp::ipc::Kind::enqueue,
                          w, reply, body, why)) {
+            return fail(why);
+        }
+        if (static_cast<mp::ipc::Kind>(reply.kind) != mp::ipc::Kind::ok) {
+            return fail(mp::win::error_text(reply, body));
+        }
+        return 0;
+    }
+    if (command == "goto") {
+        // One-based, as `playlist` prints them.
+        if (rest.empty() || std::atoi(rest[0].c_str()) < 1) {
+            return fail("goto needs the track's number, as `playlist` shows it");
+        }
+        w.u32(static_cast<std::uint32_t>(std::atoi(rest[0].c_str()) - 1));
+        if (!client.call(mp::ipc::Kind::play_at, w, reply, body, why)) {
             return fail(why);
         }
         if (static_cast<mp::ipc::Kind>(reply.kind) != mp::ipc::Kind::ok) {
