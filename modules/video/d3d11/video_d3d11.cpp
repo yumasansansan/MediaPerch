@@ -86,6 +86,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <memory>
@@ -775,8 +776,34 @@ struct MpVideo {
     /// display would actually get. A swap chain has no say -- FP16 is the most
     /// DXGI will present.
     bool wide_target = true;
+    /// **What the shell asked for, and what the picture is** (§9.7.1).
+    ///
+    /// `width` and `height` are the target: what is actually rendered into,
+    /// and what `read_back` hands over. `picture_*` is the stream's own size
+    /// after the container's aspect correction, kept because `native` has to
+    /// be able to come back. `asked_*` is zero until a shell says otherwise.
+    ///
+    /// The alternative §9.7.1 weighed was to render at the picture's size and
+    /// let the shell's visual carry a transform, which costs no message and no
+    /// resize. This costs one message and puts the scale **in the same fetch
+    /// as the chroma reconstruction**: a 4:2:0 frame is already being
+    /// resampled to reach full-rate RGB, so scaling in the same bilinear is
+    /// one interpolation where the other way is ours and then the
+    /// compositor's. It is also the only one of the two where the filter is
+    /// ours to improve later; a composition surface's is fixed and out of
+    /// reach.
+    ///
+    /// **The whole picture is drawn into the whole target.** Where black bars
+    /// go, if any, is the shell's -- it has the window and the compositor puts
+    /// the surface where it likes, and bars rendered here would be black
+    /// pixels a shell composites over its own background. What it needs to
+    /// work the fit out is the picture's size, which `describe` reports.
     std::uint32_t width = 0;
     std::uint32_t height = 0;
+    std::uint32_t picture_width = 0;
+    std::uint32_t picture_height = 0;
+    std::uint32_t asked_width = 0;
+    std::uint32_t asked_height = 0;
 
     mp::video::Stream stream{};
     /// **What the container said, kept whole.** `Stream` is the four numbers
@@ -799,6 +826,10 @@ struct MpVideo {
     /// frame, and a log line per frame is a log nobody reads.
     bool tone_map_complained = false;
     std::uint64_t frames = 0;
+    /// Whether the target holds a frame **at its current size**. A resize
+    /// leaves a back buffer whose contents are undefined, which is the same
+    /// hazard as reading before the first present and wants the same answer.
+    bool drawn = false;
     std::uint64_t last_pts = 0;
 
     std::string trouble;
@@ -1484,6 +1515,41 @@ bool make_composition_handle(MpVideo* v, std::string& why)
     return true;
 }
 
+/// The views over whatever `target` is now: the one everything draws through,
+/// and the staging texture `read_back` copies into.
+///
+/// Split out from `make_target` because a resize keeps the chain and replaces
+/// only these.
+bool make_target_views(MpVideo* v, std::string& why)
+{
+    v->target_view.reset();
+    v->staging.reset();
+
+    if (FAILED(v->device->CreateRenderTargetView(v->target.get(), nullptr,
+                                                 v->target_view.put()))) {
+        why = "no render target view";
+        return false;
+    }
+
+    // **`read_back` is the point, so the staging texture is not optional.** It
+    // is what turns every decision in colour_plan.hpp into pixels somebody can
+    // hash, on the same path the display gets.
+    D3D11_TEXTURE2D_DESC staging{};
+    staging.Width = v->width;
+    staging.Height = v->height;
+    staging.MipLevels = 1;
+    staging.ArraySize = 1;
+    staging.Format = target_format_of(v);
+    staging.SampleDesc.Count = 1;
+    staging.Usage = D3D11_USAGE_STAGING;
+    staging.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    if (FAILED(v->device->CreateTexture2D(&staging, nullptr, v->staging.put()))) {
+        why = "no staging texture, so nothing could be read back";
+        return false;
+    }
+    return true;
+}
+
 /// The swap chain, or the texture that stands in for one.
 bool make_target(MpVideo* v, std::string& why)
 {
@@ -1491,6 +1557,7 @@ bool make_target(MpVideo* v, std::string& why)
     v->target.reset();
     v->staging.reset();
     v->swap_chain.reset();
+    v->drawn = false;
 
     const DXGI_FORMAT format = target_format_of(v);
 
@@ -1602,29 +1669,70 @@ bool make_target(MpVideo* v, std::string& why)
         }
     }
 
-    if (FAILED(v->device->CreateRenderTargetView(v->target.get(), nullptr,
-                                                 v->target_view.put()))) {
-        why = "no render target view";
-        return false;
+    return make_target_views(v, why);
+}
+
+/// The target size: what the shell asked for, or the picture's own.
+void target_size(const MpVideo* v, std::uint32_t& width, std::uint32_t& height) noexcept
+{
+    width = v->asked_width != 0 ? v->asked_width : v->picture_width;
+    height = v->asked_height != 0 ? v->asked_height : v->picture_height;
+}
+
+/// **A new size on a presenter that is already running**, which is what a
+/// window being dragged by a corner looks like from here.
+///
+/// A swap chain resizes in place. Building a new one over the same composition
+/// surface handle would be a second chain on a surface that already has one,
+/// and DXGI is entitled to refuse that; `ResizeBuffers` is the operation this
+/// case exists for. Off screen there is no chain and the texture is simply
+/// made afresh.
+bool resize_target(MpVideo* v)
+{
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    target_size(v, width, height);
+    if (width == v->width && height == v->height) {
+        return true;
+    }
+    v->width = width;
+    v->height = height;
+    v->drawn = false;
+
+    if (!v->swap_chain) {
+        return make_target(v, v->trouble) && make_graded_target(v, v->trouble);
     }
 
-    // **`read_back` is the point, so the staging texture is not optional.** It
-    // is what turns every decision in colour_plan.hpp into pixels somebody can
-    // hash, on the same path the display gets.
-    D3D11_TEXTURE2D_DESC staging{};
-    staging.Width = v->width;
-    staging.Height = v->height;
-    staging.MipLevels = 1;
-    staging.ArraySize = 1;
-    staging.Format = format;
-    staging.SampleDesc.Count = 1;
-    staging.Usage = D3D11_USAGE_STAGING;
-    staging.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    if (FAILED(v->device->CreateTexture2D(&staging, nullptr, v->staging.put()))) {
-        why = "no staging texture, so nothing could be read back";
+    // **Every reference to the back buffer, gone first.** `ResizeBuffers`
+    // fails while one outlives it, and a render target still bound to the
+    // pipeline is such a reference -- which is why the unbind and the flush
+    // are here rather than left to the next draw.
+    ID3D11RenderTargetView* none[] = {nullptr};
+    v->context->OMSetRenderTargets(1, none, nullptr);
+    v->target_view.reset();
+    v->target.reset();
+    v->staging.reset();
+    v->context->Flush();
+
+    // Its own flags back, not a fresh guess at them: the composition chain is
+    // waitable and the window chain is not, and a resize that dropped the flag
+    // would take the frame clock with it.
+    DXGI_SWAP_CHAIN_DESC1 desc{};
+    if (FAILED(v->swap_chain->GetDesc1(&desc))) {
+        v->trouble = "the swap chain would not say what it is";
         return false;
     }
-    return true;
+    if (FAILED(v->swap_chain->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN,
+                                            desc.Flags))) {
+        v->trouble = "the swap chain would not resize";
+        return false;
+    }
+    if (FAILED(v->swap_chain->GetBuffer(0, __uuidof(ID3D11Texture2D),
+                                        reinterpret_cast<void**>(v->target.put())))) {
+        v->trouble = "no back buffer after the resize";
+        return false;
+    }
+    return make_target_views(v, v->trouble) && make_graded_target(v, v->trouble);
 }
 
 /// A dynamic texture and a view over it, made once and reused while the
@@ -1922,8 +2030,11 @@ try {
                                   .width = in->width,
                                   .height = in->height};
     v->full_range = (in->flags & MP_VIDEO_FULL_RANGE) != 0;
-    v->width = in->display_width != 0 ? in->display_width : in->width;
-    v->height = in->display_height != 0 ? in->display_height : in->height;
+    // The container's aspect correction is the picture's size, not the
+    // codec's: anamorphic 4:3 in a 16:9 frame is 16:9 the moment it is drawn.
+    v->picture_width = in->display_width != 0 ? in->display_width : in->width;
+    v->picture_height = in->display_height != 0 ? in->display_height : in->height;
+    target_size(v, v->width, v->height);
 
     if (!v->device && !make_device(v, v->trouble)) {
         return MP_ERR_UNSUPPORTED;
@@ -1950,6 +2061,7 @@ try {
     }
     v->configured = true;
     v->frames = 0;
+    v->drawn = false;
     v->trouble.clear();
     return MP_OK;
 } catch (...) {
@@ -2168,6 +2280,7 @@ try {
     }
 
     ++v->frames;
+    v->drawn = true;
     v->last_pts = frame->pts;
     return MP_OK;
 } catch (...) {
@@ -2215,7 +2328,7 @@ try {
     if (dst == nullptr || dst_bytes < needed) {
         return MP_ERR_NO_MEMORY; // the caller asks again with room, as read_packet does
     }
-    if (!v->configured || !v->staging || v->frames == 0) {
+    if (!v->configured || !v->staging || !v->drawn) {
         return MP_ERR_INVALID;
     }
 
@@ -2308,6 +2421,42 @@ try {
             return MP_OK;
         }
         return MP_ERR_INVALID;
+    }
+    if (std::strcmp(key, "size") == 0) {
+        // **§9.7.1's other decision, as a setting.** `WxH` in pixels, or
+        // `native` for the picture's own size. Settable at any time, before
+        // `configure` and between frames, because a window that has been
+        // resized is exactly this key arriving again.
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+        if (std::strcmp(value, "native") != 0) {
+            char* end = nullptr;
+            const unsigned long asked_width = std::strtoul(value, &end, 10);
+            if (end == value || (*end != 'x' && *end != 'X')) {
+                v->trouble = "a size is WxH, in pixels, or native";
+                return MP_ERR_INVALID;
+            }
+            const char* rest = end + 1;
+            const unsigned long asked_height = std::strtoul(rest, &end, 10);
+            // 16384 is what Direct3D 11 will make a texture of; past it the
+            // device refuses, and refusing here says which number was wrong.
+            if (end == rest || *end != '\0' || asked_width == 0 || asked_height == 0 ||
+                asked_width > 16384 || asked_height > 16384) {
+                v->trouble = "a size is WxH, in pixels, neither zero nor over 16384";
+                return MP_ERR_INVALID;
+            }
+            width = static_cast<std::uint32_t>(asked_width);
+            height = static_cast<std::uint32_t>(asked_height);
+        }
+        if (width == v->asked_width && height == v->asked_height) {
+            return MP_OK;
+        }
+        v->asked_width = width;
+        v->asked_height = height;
+        if (!v->configured) {
+            return MP_OK; // `configure` will read it
+        }
+        return resize_target(v) ? MP_OK : MP_ERR_UNSUPPORTED;
     }
     if (std::strcmp(key, "precision") == 0) {
         // Off-screen only, and it is the difference between measuring the
@@ -2421,6 +2570,31 @@ try {
     case 11:
         std::snprintf(out, out_bytes, "trouble\t%s\twhat went wrong (read only)",
                       v->trouble.empty() ? "nothing" : v->trouble.c_str());
+        return MP_OK;
+    case 12:
+        // **What was asked for, not what it came to.** This row round-trips
+        // through `set`, so `native` has to read back as `native` rather than
+        // as the size it happens to resolve to; `picture` below is where the
+        // number comes from.
+        if (v->asked_width != 0) {
+            std::snprintf(out, out_bytes,
+                          "size\t%ux%u\twhat it renders at; a shell sets this when its "
+                          "window changes",
+                          v->asked_width, v->asked_height);
+        } else {
+            std::snprintf(out, out_bytes,
+                          "size\tnative\twhat it renders at; a shell sets this when its "
+                          "window changes");
+        }
+        return MP_OK;
+    case 13:
+        // **The number a shell cannot work out for itself.** It has the
+        // window; it does not have the container's aspect correction, and a
+        // shell that guessed at it would stretch every anamorphic file.
+        std::snprintf(out, out_bytes,
+                      "picture\t%ux%u\tthe video's own size, which is what a shell fits "
+                      "(read only)",
+                      v->picture_width, v->picture_height);
         return MP_OK;
     default:
         break;

@@ -3048,7 +3048,7 @@ stating before the messages, because the messages are what is left over once it 
 |---|---|---|
 | the composition surface handle | engine — shell | once, when a graph is built |
 | the display: which monitor, HDR or not, its white and its peak | shell — engine | when the window moves or the mode changes |
-| the size to render at | shell — engine | when the window resizes, if at all — see below |
+| the size to render at | shell — engine | when the window resizes |
 | transport, playlist, settings, log | both | §10, already there |
 
 **The engine paces itself, and needs no window to do it.** `show` waits on `WaitForVBlank`
@@ -3069,12 +3069,31 @@ system gamma, the encoding. So the shell says, and it says it again whenever its
 crosses a monitor or the user toggles HDR. **This is a message that has to exist**, and it is
 the only one in this list that is not already implied by §10.
 
-**Who scales is a decision, not a detail.** The engine can render at the video's native size
-and let the shell's visual carry a transform, which costs no resize and no message at all;
-or the shell can ask for a size and the engine renders there, which puts the scaling in our
-own shader beside the chroma reconstruction rather than in the compositor's bilinear.
-The first is simpler and the second is better for the thing this program is about. **Not
-decided.** What is decided is that it is one message either way.
+**Who scales: the shell says a size, and the engine renders there.** The alternative was to
+render at the picture's native size and let the shell's visual carry a transform, which costs
+no resize and no message at all. It was the simpler one and it was not chosen, for two
+reasons that are the same reason. A 4:2:0 frame is **already** being resampled to reach
+full-rate RGB — the chroma planes are half-size and the shader fetches them bilinearly — so
+scaling in that same fetch is one interpolation, where a transform on the visual is ours and
+then the compositor's, one after the other. And a composition surface's scaling is a fixed
+bilinear nobody in this tree can reach, while a filter in our own pixel shader is a filter
+§9.8.3 can improve later without asking anybody. **Where the quality of the picture is the
+point, the resampling belongs where we can see it.**
+
+So `video_d3d11` takes `set("size", "WxH")`, or `native` for the picture's own, at any time —
+before `configure`, and again between frames, because a window dragged by a corner is this
+key arriving again. A swap chain resizes in place (`ResizeBuffers`, with its own flags read
+back so the waitable one stays waitable); off screen the texture is remade. A resized back
+buffer holds whatever it holds, so `read_back` refuses until something is drawn into it,
+which is the same answer it gives before the first present.
+
+**The whole picture goes into the whole target, and the fit is the shell's.** Letterboxing
+here would be black pixels a shell then composites over its own background, and the shell is
+the one that has the window and places the visual. What it cannot work out for itself is the
+picture's *size*, because the container's aspect correction is not in its window: anamorphic
+4:3 coded in a 16:9 frame is 16:9 only once something has read the track header. So
+`describe` reports `picture` beside `size`, and a shell computes the fit from it. **One message either way, and the number it needs to send
+one comes back on the settings surface.**
 
 #### What `Player` grows, and what it does not
 

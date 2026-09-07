@@ -243,6 +243,30 @@ std::vector<std::uint8_t> flat(std::uint32_t width, std::uint32_t height, std::u
     return out;
 }
 
+/// Four flat quadrants, so a scaled picture can be told from a cropped one:
+/// under a scale the top-left colour is still in the top-left corner of a
+/// larger target, and under a crop it is the only colour left in it.
+std::vector<std::uint8_t> quadrants(std::uint32_t width, std::uint32_t height)
+{
+    // b, g, r per quadrant: red, green, blue, white -- the ends of the
+    // eight-bit range, so the expected linear value is exactly zero or one and
+    // the margin below is about the shader rather than about the pattern.
+    static constexpr std::uint8_t k_corner[4][3] = {
+        {0x00, 0x00, 0xFF}, {0x00, 0xFF, 0x00}, {0xFF, 0x00, 0x00}, {0xFF, 0xFF, 0xFF}};
+    std::vector<std::uint8_t> out(static_cast<std::size_t>(width) * height * 4u);
+    for (std::uint32_t y = 0; y < height; ++y) {
+        for (std::uint32_t x = 0; x < width; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(y) * width + x) * 4u;
+            const int corner = (y >= height / 2 ? 2 : 0) + (x >= width / 2 ? 1 : 0);
+            out[i] = k_corner[corner][0];
+            out[i + 1] = k_corner[corner][1];
+            out[i + 2] = k_corner[corner][2];
+            out[i + 3] = 255;
+        }
+    }
+    return out;
+}
+
 } // namespace
 
 TEST_CASE("a presenter renders with no window, so the pixels can be checked",
@@ -435,6 +459,101 @@ TEST_CASE("what a person can set, and what it reports back", "[video][d3d11]")
     // path -- and `applied` says what is actually happening rather than what
     // was requested, which is the difference `describe` exists to carry.
     CHECK(presenter.described("applied") == "none");
+}
+
+TEST_CASE("the shell says a size and the engine renders there", "[video][d3d11]")
+{
+    // **§9.7.1's scaling decision, measured.** The other way round was for the
+    // engine to render at the picture's size and the shell's visual to carry a
+    // transform; this way the scale lands in the same bilinear fetch that
+    // already reconstructs chroma, and the filter stays ours to improve. What
+    // the test has to show is that the picture is *scaled* into the target
+    // rather than drawn at its own size in a corner of it.
+    Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
+    const MpVideoVtbl& vtbl = *module.as<MpVideoVtbl>();
+
+    Presenter presenter{vtbl, 64, 48};
+    REQUIRE(presenter.ok());
+
+    // Asked before `configure`, which is a shell that already knows how big
+    // its window is by the time it opens the file.
+    REQUIRE(vtbl.set(presenter.handle(), "size", "256x192") == MP_OK);
+    REQUIRE(presenter.configure() == "");
+    CHECK(presenter.described("size") == "256x192");
+    // The picture's own size is the one number a shell cannot work out for
+    // itself -- the container's aspect correction is not in its window -- so
+    // it is reported separately, and it does not move when the target does.
+    CHECK(presenter.described("picture") == "64x48");
+
+    REQUIRE(presenter.present(quadrants(64, 48), 64, 48) == MP_OK);
+    std::vector<float> shown = presenter.read_back();
+    REQUIRE(shown.size() == 256u * 192u * 4u);
+
+    auto shows = [&shown](std::uint32_t stride, std::uint32_t x, std::uint32_t y, float r,
+                          float g, float b) {
+        const std::size_t i = (static_cast<std::size_t>(y) * stride + x) * 4u;
+        INFO("at " << x << ", " << y);
+        CHECK(shown[i + 0] == Catch::Approx(r).margin(1e-6));
+        CHECK(shown[i + 1] == Catch::Approx(g).margin(1e-6));
+        CHECK(shown[i + 2] == Catch::Approx(b).margin(1e-6));
+    };
+    // Well inside each quadrant, so bilinear has two identical texels to
+    // interpolate between and the answer is the texel. **(40, 40) is the one
+    // that decides it**: scaled it is the source's top-left and red; drawn
+    // unscaled it would be the source's bottom-right and white.
+    shows(256, 40, 40, 1.0f, 0.0f, 0.0f);
+    shows(256, 200, 40, 0.0f, 1.0f, 0.0f);
+    shows(256, 40, 150, 0.0f, 0.0f, 1.0f);
+    shows(256, 200, 150, 1.0f, 1.0f, 1.0f);
+
+    // **A window dragged by a corner is this key arriving again.** The target
+    // is remade at the new size, and until something is drawn into it there is
+    // nothing to read -- a resized back buffer holds whatever it holds, and
+    // saying so is the same answer as before the first present.
+    REQUIRE(vtbl.set(presenter.handle(), "size", "32x24") == MP_OK);
+    CHECK(presenter.described("size") == "32x24");
+    CHECK(presenter.read_back().empty());
+
+    REQUIRE(presenter.present(quadrants(64, 48), 64, 48) == MP_OK);
+    shown = presenter.read_back();
+    REQUIRE(shown.size() == 32u * 24u * 4u);
+    shows(32, 5, 5, 1.0f, 0.0f, 0.0f);
+    shows(32, 26, 18, 1.0f, 1.0f, 1.0f);
+
+    // And back to what the container said, which is what `native` is for.
+    REQUIRE(vtbl.set(presenter.handle(), "size", "native") == MP_OK);
+    CHECK(presenter.described("size") == "native");
+    REQUIRE(presenter.present(quadrants(64, 48), 64, 48) == MP_OK);
+    CHECK(presenter.read_back().size() == 64u * 48u * 4u);
+}
+
+TEST_CASE("a size that is not a size is refused rather than rounded",
+          "[video][d3d11]")
+{
+    Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
+    const MpVideoVtbl& vtbl = *module.as<MpVideoVtbl>();
+
+    Presenter presenter{vtbl, 16, 16};
+    REQUIRE(presenter.ok());
+
+    // A zero dimension is a target nobody can draw into, a missing separator
+    // is half a size, and 20000 is past what Direct3D 11 will make a texture
+    // of -- refused here, by the number, rather than reaching a device that
+    // says only that it failed.
+    for (const char* bad : {"", "abc", "0x16", "16x0", "16", "16x", "x16", "20000x16",
+                            "16x20000", "16x16 ", "16x16junk", "-1x16"}) {
+        INFO("size: " << bad);
+        CHECK(vtbl.set(presenter.handle(), "size", bad) == MP_ERR_INVALID);
+    }
+    // Refused means unchanged, so a shell that sent nonsense still has the
+    // picture it had.
+    CHECK(presenter.described("size") == "native");
+
+    CHECK(vtbl.set(presenter.handle(), "size", "16384x16384") == MP_OK);
+    CHECK(vtbl.set(presenter.handle(), "size", "1X1") == MP_OK);
+    CHECK(presenter.described("size") == "1x1");
 }
 
 TEST_CASE("what presenting in FP16 costs, measured rather than assumed",
