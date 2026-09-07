@@ -3097,17 +3097,78 @@ one comes back on the settings surface.**
 
 #### What `Player` grows, and what it does not
 
-The assembly `show` does — a router reading one file for two consumers, a video decoder, a
-presenter, a display loop and a frame clock — moves into `src/player`, where it is portable
-and where the calibration driver can already reach it. `IEngineHost` gains two doors beside
-the four it has: **open a presenter** and **open a video decoder**. That is §15-legitimate
+The assembly `show` does — a video decoder, a presenter, a display loop and a frame
+clock — **has moved**, as `mp::VideoPath` in `src/player`. `IEngineHost` has two doors beside
+the four it had: **open a presenter** and **open a video decoder**. That is §15-legitimate
 from the day it is written, because the head implements it and the tests fake it, which is
-exactly `IEngineHost`'s own justification.
+exactly `IEngineHost`'s own justification — and the tests do fake it, in
+`tests/fake_video.hpp`, which is how the whole assembly is now checked on a machine with no
+display.
 
 What does *not* move is anything that knows what an `HWND` is. The presenter takes a
 composition surface and reports a handle; the decoder takes the presenter's device (§9.8.1);
 the display loop waits on whatever `IFrameClock` it was handed. **The engine still has no
-window and no toolkit**, which is the sentence the whole section exists to keep true.
+window and no toolkit**, which is the sentence the whole section exists to keep true. `show`
+keeps exactly four things: the window, the message pump, the mode switch and the report.
+
+#### One route from a source to a device
+
+The move turned up a gap that was nobody's decision: **`show` accepted `--dsp` and dropped
+it.** Its own comment says the flags are `play`'s *because* "a setting that works in one and
+is ignored in the other is worse than a setting that does not exist", and this was that
+setting — `show` had no `DspChain` at all. Found while trying to play a **mono** fixture on
+a stereo-only endpoint, which is a refusal by design until `--dsp mix:channels=2` is asked
+for: nothing here resamples or remixes on its own, and that refusal is most of why the program
+exists.
+
+**Fixing it in `show` would have been the wrong fix.** Four callers — `play`, `decode`, `show`
+and `mp::Player` — ask the same five questions in the same order: what does the chain turn
+the offer into, what will the device take, how big is a period, what block is the chain then
+sized for, and is this Path B. Each had its own copy of the answer, `show`'s copy being the
+empty one. A bug in a sequence written four times is not fixed once; it is fixed once *per
+copy*, which is the same as never.
+
+So the sequence is `mp::wire_up` in [wiring.hpp](../src/engine/mediaperch/wiring.hpp) and the
+three callers that have a device go through it. What stays with each caller is what is
+genuinely its own: which stages to build (a registry, or `IEngineHost::dsp`), which device to
+open, and **how to report a refusal** — the probe prints a paragraph to stderr and the engine
+puts one line in a status, so `wire_up` hands back the `Negotiated` and phrases nothing.
+`decode` is the fourth and stays outside, because it has no device to negotiate with; what it
+shares is `dsp_bus_format` and the chain itself.
+
+`show` also gained a line `play` does not have: **the latency the chain adds**. §8 makes the
+audio device the master clock, so a stage that delays the audio delays what the picture is
+paced against, and a lip-sync error nobody was told about is the one kind this program must
+not introduce quietly.
+
+**And a ceiling came back out.** `set("size", …)` had refused anything over 16384, which is
+what Direct3D 11 will make a texture of. That is a limit written in one module about every
+device it will ever open, and the device refuses it anyway, in its own words and at the moment
+it actually cannot — the same argument that retired thirteen ranges from the DSP settings
+above. What is left is what a size cannot be: not a number, or zero. `20000x20000` is taken,
+and `configure` is where it fails.
+
+Three decisions were forced by the move rather than chosen for it.
+
+- **The loop's thread is `VideoPath`'s.** `DisplayLoop` still owns none — which thread pumps
+  a window's messages is the head's business — but that argument is about the *head's*
+  thread, and every caller was writing the same `std::thread`, `cancel`, `join` by hand.
+- **`IFrameClock` grew `cancel`.** A loop is stopped from outside it, and `wait` blocks for a
+  whole refresh; the two Windows clocks already had the method and the interface had no way
+  to say it. The default does nothing, which is right for a clock that counts.
+- **A resize takes the loop's hold.** `set_size` is `seek_together`'s shape pointed at a
+  different cause: hold, wait to be told the loop has parked, tell the presenter, release.
+  Two threads inside one graphics context is what it exists to prevent, and a window dragged
+  by a corner is that call arriving forty times a second. `show` polls the client area rather
+  than handling `WM_SIZE`, because a window procedure that waits for a loop to park is a
+  window Windows calls unresponsive.
+
+**What is still missing before `Player` shows a picture**, and it is one thing: `open_source`
+hands back an `ISource`, which is audio. A file with both halves in it is one demuxer, one
+position and a `PacketRouter` (§4), so the door that feeds a `VideoPath` is **a router rather
+than a source** — and that changes `Playlist`, `Queue` and `play_run`, which is why it is
+its own step rather than a line in this one. `VideoPath` is written against an `IPacketFeed`
+precisely so that it does not care which side of that change it is on.
 
 **What else comes with the video path, and is easy to forget.** Two things are waiting on this
 section rather than on any decision of their own, and neither is visible from here unless it is
@@ -4805,7 +4866,7 @@ HDR state.
 | M0 | Repository skeleton, CMake presets, CI | `core` builds alone with the platform directories off the include path, and CI fails if that stops being true |
 | M1 | WASAPI exclusive, event-driven, sine from memory | a 1 kHz tone plays for an hour at the minimum device period with zero underruns; the realign path in §14 is exercised deliberately |
 | M2 | Module ABI v1 + `decode_native` + `sink_capture` + the two throwaway ABI probes (§2) | **done, and since superseded by M4.5** -- `decode_native` was split into demuxers and codecs and no module by that name is left. `decode_native` (WAV and FLAC, `dr_wav`/`dr_flac`) decoded to hashes identical to FFmpeg's; the fake sink in `tests/` and the tee in `verify` both prove the bytes reach the device unaltered. Both ABI probes are written and run: a C11 module and a Rust `cdylib` produce identical frame counts through the same vtable, and a panic thrown on purpose inside the Rust one is contained at the boundary and comes back as `MP_ERR_INVALID`. See [abi/README.md](../abi/README.md) |
-| M3 | `mediaperch-cli` and the IPC | **done.** `mediaperchd` is the engine and has no toolkit in it; `mediaperch-cli` drives it over a named pipe with a versioned binary framing. `mp::Player` is in the core, so the whole engine is tested with no COM and no hardware, and `IEngineHost` is the four things it asks an operating system for. The row is done when killing the shell mid-track is inaudible, and that is a test: three shells attached, subscribed, and cut off, with the underrun count still zero. Both of the things this row was last waiting on are in: §11's INI file, which round-trips through its own fuzzer, and the Win32 notification icon §10 asks for -- play and pause, previous, next, stop, and Settings greyed out with *why* when no shell is installed, because a menu item that silently does nothing reads as a bug in the engine. `--no-tray` is what a service wants. `Tray::run` is the engine's main loop when there is an icon, on the thread that otherwise has nothing to do, and it reaches `mp::Player` through the same commands a shell uses |
+| M3 | `mediaperch-cli` and the IPC | **done.** `mediaperchd` is the engine and has no toolkit in it; `mediaperch-cli` drives it over a named pipe with a versioned binary framing. `mp::Player` is in the core, so the whole engine is tested with no COM and no hardware, and `IEngineHost` is what it asks an operating system for -- four things then, six since §9.7.1's video path moved into the core. The row is done when killing the shell mid-track is inaudible, and that is a test: three shells attached, subscribed, and cut off, with the underrun count still zero. Both of the things this row was last waiting on are in: §11's INI file, which round-trips through its own fuzzer, and the Win32 notification icon §10 asks for -- play and pause, previous, next, stop, and Settings greyed out with *why* when no shell is installed, because a menu item that silently does nothing reads as a bug in the engine. `--no-tray` is what a service wants. `Tray::run` is the engine's main loop when there is an icon, on the thread that otherwise has nothing to do, and it reaches `mp::Player` through the same commands a shell uses |
 | M4 | Path B: f64 bus, DSP chain, resampler, dither. Gapless, seek | **done**, and the passthrough path still contains no float. Gapless is `mp::Queue`, a source whose `read` does not stop at a track boundary; seek and pause are on both graphs; every DSP stage can be told to forget where it was. A device that is taken away (`AUDCLNT_E_DEVICE_INVALIDATED`) is a rebuild rather than an ending, and so is switching *paths*: both resume on the frame the device stopped on, which is the only thing a rebuild point can honestly promise and is checked byte for byte |
 | M5 | `decode_mf` and `decode_ffmpeg`, and the resolution table | **done.** `ctest -R format_matrix` builds one file per format, shows it to every decoder, and rewrites the matrix in the README -- and fails when the README stops matching. `mediaperch-probe claims` shows every decoder's probe score for a file, so a cell can say whether a decoder *claimed* the file or was forced to try. The lossless corpus comes from the reference encoders rather than FFmpeg, whose FLAC encoder writes 24 bits when asked for 32. Generating it found two claims in [formats.md](formats.md) that had gone stale and one real gap: nothing but Media Foundation claimed WMA |
 | M4.5 | ABI v2: the container decides (§12) | **done.** Every format this tree reads resolves container-first: eight demuxers and seven codecs, and each one decodes to the hash its v1 decoder produced. Two formats gained a first-class reader on the way -- MPEG layer II, which had gone to FFmpeg, and OggFLAC, which `demux_ogg` had been naming since step 4 with nothing to hand it to. Seeking became the host's, once, rather than each decoder's separately: a seek to an arbitrary sample lands byte-identically in WAV, native FLAC, OggFLAC and ALAC-in-MP4, which are four unrelated framings. Modules are laid out and installed by kind -- `modules/<kind>/<name>` in the tree, `bin/<config>/modules/<kind>/` out of it. Step 7 deleted `MP_KIND_DECODER`, the eight modules that used it, `mp::Decoder`, the registry's second resolution path, and one submodule that had no caller left |

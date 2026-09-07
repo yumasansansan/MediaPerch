@@ -41,6 +41,8 @@ add_library(mediaperch_player STATIC
     mediaperch/profile.hpp
     mediaperch/settings.cpp
     mediaperch/settings.hpp
+    mediaperch/video_path.cpp
+    mediaperch/video_path.hpp
 )
 add_library(MediaPerch::player ALIAS mediaperch_player)
 

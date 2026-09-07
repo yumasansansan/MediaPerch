@@ -156,6 +156,70 @@ Sink EngineHost::open_sink(const std::string& want, bool shared, std::string& re
     return Sink{vtbl, handle};
 }
 
+std::unique_ptr<Presenter> EngineHost::open_presenter(void* window, std::string& module,
+                                                      std::string& why)
+{
+    const MpModuleDesc* desc = nullptr;
+    const MpVideoVtbl* vtbl = registry_->video({}, &desc);
+    if (vtbl == nullptr || desc == nullptr) {
+        why = "no presenter module is loaded";
+        return nullptr;
+    }
+
+    auto presenter = std::make_unique<Presenter>();
+    if (presenter->open(*vtbl, window) != MP_OK) {
+        why = std::string{desc->id} + " would not open a presenter";
+        return nullptr;
+    }
+    if (window == nullptr) {
+        // **§9.7.1, as the setting the presenter takes.** Asked before
+        // `configure`, because it decides what kind of swap chain there is,
+        // and refused loudly rather than quietly falling back to a texture
+        // nobody composites -- an engine whose picture goes nowhere is worse
+        // than one that says it cannot draw.
+        const MpResult told = presenter->set("surface", "composition");
+        if (told != MP_OK) {
+            why = std::string{desc->id} + " has no composition surface: " +
+                  result_name(told);
+            return nullptr;
+        }
+    }
+    module = desc->id;
+    return presenter;
+}
+
+std::unique_ptr<VideoDecoder> EngineHost::open_video_decoder(
+    MpCodec codec, const MpGraphicsDevice* device, const std::uint8_t* config,
+    std::uint32_t config_bytes, std::string& module, std::string& why)
+{
+    // **The API is part of the question** (§9.8.1): a decoder that can hand
+    // this presenter a texture it can sample scores differently from one that
+    // cannot. It comes off the device rather than being named here, so a head
+    // that grows a D3D12 presenter asks the right question without this
+    // function being touched.
+    const auto choices = registry_->video_codecs_for(
+        codec, device != nullptr ? device->api : MP_GRAPHICS_NONE, config, config_bytes);
+    if (choices.empty()) {
+        why = "nothing here decodes that video codec";
+        return nullptr;
+    }
+
+    // Best first, and the next one when the best declines -- see
+    // `video_codecs_for`, which is where the measurement that forced this is
+    // written down.
+    auto decoder = std::make_unique<VideoDecoder>();
+    for (const auto& choice : choices) {
+        if (decoder->open(*choice.vtbl, codec, device, config, config_bytes) == MP_OK) {
+            module = choice.desc->id;
+            return decoder;
+        }
+        decoder->close();
+    }
+    why = "none of the " + std::to_string(choices.size()) +
+          " decoders for that codec would open this stream";
+    return nullptr;
+}
+
 const MpDspVtbl* EngineHost::dsp(const std::string& id)
 {
     return registry_->dsp(id);

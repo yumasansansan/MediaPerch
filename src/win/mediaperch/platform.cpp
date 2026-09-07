@@ -389,9 +389,14 @@ std::vector<ModuleRegistry::DemuxChoice> ModuleRegistry::demuxers_for(
     return ranked;
 }
 
-const MpVideoVtbl* ModuleRegistry::video(std::string_view id) const
+const MpVideoVtbl* ModuleRegistry::video(std::string_view id,
+                                         const MpModuleDesc** out_desc) const
 {
+    if (out_desc != nullptr) {
+        *out_desc = nullptr;
+    }
     const MpVideoVtbl* best = nullptr;
+    const MpModuleDesc* best_desc = nullptr;
     std::uint32_t best_priority = 0;
     for (const auto& module : modules_) {
         const MpModuleDesc& desc = module->desc();
@@ -404,14 +409,21 @@ const MpVideoVtbl* ModuleRegistry::video(std::string_view id) const
         }
         if (!id.empty()) {
             if (id == desc.id) {
+                if (out_desc != nullptr) {
+                    *out_desc = &desc;
+                }
                 return vtbl;
             }
             continue;
         }
         if (best == nullptr || desc.priority > best_priority) {
             best = vtbl;
+            best_desc = &desc;
             best_priority = desc.priority;
         }
+    }
+    if (id.empty() && out_desc != nullptr) {
+        *out_desc = best_desc;
     }
     return id.empty() ? best : nullptr;
 }

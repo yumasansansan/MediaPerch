@@ -253,7 +253,12 @@ public:
                                                std::uint32_t config_bytes) const;
 
     /// The presenter, by id or by priority. `mp::Sink`'s question for pictures.
-    [[nodiscard]] const MpVideoVtbl* video(std::string_view id = {}) const;
+    ///
+    /// `desc` comes back with the module it was, when a caller is going to
+    /// name it -- which `IEngineHost::open_presenter` is, because a run that
+    /// says which decoder it used and not which presenter is half a report.
+    [[nodiscard]] const MpVideoVtbl* video(std::string_view id = {},
+                                           const MpModuleDesc** desc = nullptr) const;
 
     struct VideoCodecChoice {
         const MpVideoCodecVtbl* vtbl = nullptr;

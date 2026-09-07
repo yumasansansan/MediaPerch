@@ -538,12 +538,13 @@ TEST_CASE("a size that is not a size is refused rather than rounded",
     Presenter presenter{vtbl, 16, 16};
     REQUIRE(presenter.ok());
 
-    // A zero dimension is a target nobody can draw into, a missing separator
-    // is half a size, and 20000 is past what Direct3D 11 will make a texture
-    // of -- refused here, by the number, rather than reaching a device that
-    // says only that it failed.
-    for (const char* bad : {"", "abc", "0x16", "16x0", "16", "16x", "x16", "20000x16",
-                            "16x20000", "16x16 ", "16x16junk", "-1x16"}) {
+    // A zero dimension is a target nobody can draw into and a missing
+    // separator is half a size. **That is the whole list**: what is *large* is
+    // not here, because the device refuses what it cannot make, in its own
+    // words and at the moment it actually cannot -- the same argument that
+    // retired thirteen ranges from the DSP settings.
+    for (const char* bad : {"", "abc", "0x16", "16x0", "16", "16x", "x16", "16x16 ",
+                            "16x16junk"}) {
         INFO("size: " << bad);
         CHECK(vtbl.set(presenter.handle(), "size", bad) == MP_ERR_INVALID);
     }
@@ -551,7 +552,11 @@ TEST_CASE("a size that is not a size is refused rather than rounded",
     // picture it had.
     CHECK(presenter.described("size") == "native");
 
-    CHECK(vtbl.set(presenter.handle(), "size", "16384x16384") == MP_OK);
+    // Past Direct3D 11's texture limit, and taken: nothing is allocated until
+    // `configure`, and what refuses it then is the device rather than a number
+    // written in this file.
+    CHECK(vtbl.set(presenter.handle(), "size", "20000x20000") == MP_OK);
+    CHECK(presenter.described("size") == "20000x20000");
     CHECK(vtbl.set(presenter.handle(), "size", "1X1") == MP_OK);
     CHECK(presenter.described("size") == "1x1");
 }

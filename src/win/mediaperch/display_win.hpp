@@ -39,7 +39,7 @@ public:
     }
 
     /// Stops the loop that is waiting on it. Safe from another thread.
-    void cancel() noexcept { cancelled_ = true; }
+    void cancel() noexcept override { cancelled_ = true; }
 
 private:
     std::uint32_t period_us_;
@@ -80,7 +80,7 @@ public:
         return refresh_hz_ > 0.0 ? 1.0 / refresh_hz_ : 0.0;
     }
 
-    void cancel() noexcept { cancelled_ = true; }
+    void cancel() noexcept override { cancelled_ = true; }
 
     /// What the display says it refreshes at, for the log. Zero when it did
     /// not say.
@@ -149,6 +149,16 @@ public:
 
     /// The HWND, for `MpVideoVtbl::open`. Null until `open` succeeded.
     [[nodiscard]] void* handle() const noexcept { return window_; }
+
+    /// The client area, in pixels.
+    ///
+    /// **What §9.7.1 hands to the engine.** The decision there was that the
+    /// shell says a size and the engine renders at it, so the scale happens in
+    /// our own shader beside the chroma reconstruction rather than in the
+    /// compositor's bilinear -- and this is the number a shell sends. False
+    /// before `open`, and false for a window that has been minimised, whose
+    /// client area is nothing and whose size is not a size to render at.
+    [[nodiscard]] bool client_size(std::uint32_t& width, std::uint32_t& height) const;
 
     /// Handles what has arrived without blocking. False once the window has
     /// been closed, which is a person saying stop.

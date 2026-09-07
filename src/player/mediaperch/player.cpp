@@ -2,6 +2,8 @@
 
 #include "mediaperch/player.hpp"
 
+#include "mediaperch/wiring.hpp"
+
 #include "mediaperch/result.hpp"
 
 #include <algorithm>
@@ -724,58 +726,32 @@ Player::RunEnd Player::play_run(Queue& queue, Playlist& playlist, std::uint64_t&
         return RunEnd::failed;
     }
 
-    // What the device is asked for. A chain that resamples or remixes changes
-    // what has to reach it, so the rate and the channels come from the chain's
-    // output -- but the sample type stays the source's, because the f64 bus is
-    // this program's business and offering the device f64 would say the file
-    // was something it is not.
-    Format offered = source_format;
-    PathPolicy policy = config.path;
-    if (!chain.empty()) {
-        if (!chain.configure(dsp_bus_format(source_format), 4096, why)) {
-            note(why);
-            const std::lock_guard lock{mutex_};
-            error_ = why;
-            return RunEnd::failed;
+    // **The one route from a source to a device** (wiring.hpp): configure the
+    // chain, work out what to offer, negotiate, size the chain to the device's
+    // period. `play` and `show` in the probe make the same call. Four copies of
+    // this sequence had drifted apart once already, which is how a flag came to
+    // be accepted and dropped by one of them.
+    Wired wired;
+    if (!wire_up(sink, source_format, chain, config.path,
+                 config.conversion.gain != 1.0, wired, why)) {
+        if (!wired.negotiated.ok) {
+            // Phrased here rather than in `wire_up`, because a shell reads one
+            // line of status and the probe prints a paragraph to stderr.
+            why = "the device would take none of " + std::to_string(wired.negotiated.tried) +
+                  " candidate formats for " + describe(wired.offered);
         }
-        offered.sample_rate = chain.output_format().sample_rate;
-        offered.channels = chain.output_format().channels;
-        offered.channel_mask = chain.output_format().channel_mask;
-        // A stage exists in order to change the samples. There is nothing left
-        // for a policy to decide.
-        policy = PathPolicy::processed;
-    }
-
-    const auto negotiated = negotiate_best(sink, offered, policy);
-    if (!negotiated.ok) {
-        why = "the device would take none of " + std::to_string(negotiated.tried) +
-              " candidate formats for " + describe(offered);
         note(why);
         const std::lock_guard lock{mutex_};
         error_ = why;
         return RunEnd::failed;
     }
-
-    std::uint32_t period = 0;
-    if (sink.period_frames(period) != MP_OK || period == 0) {
-        why = "the device did not report a buffer size";
-        note(why);
-        const std::lock_guard lock{mutex_};
-        error_ = why;
-        return RunEnd::failed;
-    }
-    if (!chain.empty() && !chain.configure(dsp_bus_format(source_format), period, why)) {
-        note(why);
-        const std::lock_guard lock{mutex_};
-        error_ = why;
-        return RunEnd::failed;
-    }
+    const Negotiated& negotiated = wired.negotiated;
+    const std::uint32_t period = wired.period_frames;
 
     // A gain changes the samples whatever the formats say, so it counts towards
     // the answer; see use_processed. A chain does too, and is already the
-    // reason `policy` was forced above.
-    const bool processing =
-        use_processed(policy, negotiated.fidelity, config.conversion.gain != 1.0);
+    // reason the policy was forced inside `wire_up`.
+    const bool processing = wired.processed;
     {
         const std::lock_guard lock{mutex_};
         // It negotiated, so this configuration is one the device will take.

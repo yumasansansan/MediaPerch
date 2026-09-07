@@ -2438,11 +2438,16 @@ try {
             }
             const char* rest = end + 1;
             const unsigned long asked_height = std::strtoul(rest, &end, 10);
-            // 16384 is what Direct3D 11 will make a texture of; past it the
-            // device refuses, and refusing here says which number was wrong.
-            if (end == rest || *end != '\0' || asked_width == 0 || asked_height == 0 ||
-                asked_width > 16384 || asked_height > 16384) {
-                v->trouble = "a size is WxH, in pixels, neither zero nor over 16384";
+            // **No ceiling here, on purpose.** An earlier version refused
+            // anything over 16384 because that is what Direct3D 11 will make a
+            // texture of -- but the device refuses it too, in its own words and
+            // at the moment it actually cannot, and a limit written here is a
+            // limit that has to be right about every device this module will
+            // ever open. The same argument retired thirteen ranges from the
+            // DSP settings. What is left is what a size cannot be: not a
+            // number, or zero, which is not a target anything can draw into.
+            if (end == rest || *end != '\0' || asked_width == 0 || asked_height == 0) {
+                v->trouble = "a size is WxH, in pixels, and neither of them zero";
                 return MP_ERR_INVALID;
             }
             width = static_cast<std::uint32_t>(asked_width);

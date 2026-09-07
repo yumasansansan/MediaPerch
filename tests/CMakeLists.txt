@@ -38,6 +38,9 @@ add_executable(mediaperch_tests
     # And reading back a rate the container could only round.
     framerate_test.cpp
     player_test.cpp
+    # The video half of §9.7.1's assembly, with a presenter and a decoder made
+    # of counters -- which is the point: `VideoPath` never learns which.
+    video_path_test.cpp
     property_test.cpp
     protocol_test.cpp
     repack_test.cpp

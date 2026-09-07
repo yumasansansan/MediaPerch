@@ -64,6 +64,8 @@ add_library(mediaperch_engine STATIC
     mediaperch/sine.cpp
     mediaperch/sine.hpp
     mediaperch/sink.cpp
+    mediaperch/wiring.cpp
+    mediaperch/wiring.hpp
     mediaperch/sink.hpp
     mediaperch/source.hpp
 )

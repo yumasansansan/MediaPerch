@@ -263,6 +263,23 @@ bool VideoWindow::open(const std::string& title, std::uint32_t width, std::uint3
     return true;
 }
 
+bool VideoWindow::client_size(std::uint32_t& width, std::uint32_t& height) const
+{
+    width = 0;
+    height = 0;
+    if (window_ == nullptr) {
+        return false;
+    }
+    RECT rect{};
+    if (GetClientRect(static_cast<HWND>(window_), &rect) == 0 ||
+        rect.right <= rect.left || rect.bottom <= rect.top) {
+        return false;
+    }
+    width = static_cast<std::uint32_t>(rect.right - rect.left);
+    height = static_cast<std::uint32_t>(rect.bottom - rect.top);
+    return true;
+}
+
 bool VideoWindow::pump_messages()
 {
     MSG message{};

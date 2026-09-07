@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// The four things the engine asks Windows for.
+// The six things the engine asks Windows for.
 //
 // `mp::Player` is portable and knows nothing about LoadLibrary, MMDevice or
 // paths with drive letters. This is where all of that is, and it is small on
@@ -39,6 +39,18 @@ public:
                                          std::string& decoder, std::string& why);
     Sink open_sink(const std::string& want, bool shared, std::string& resolved,
                    std::string& why) override;
+    /// §9.7.1's presenter. **A null window is not off-screen here**: it is a
+    /// composition surface a shell composites, because that is what a
+    /// windowless engine's picture is for. A measurement that wants a texture
+    /// nobody shows asks the module directly, which is what the tests do.
+    std::unique_ptr<Presenter> open_presenter(void* window, std::string& module,
+                                              std::string& why) override;
+    std::unique_ptr<VideoDecoder> open_video_decoder(MpCodec codec,
+                                                     const MpGraphicsDevice* device,
+                                                     const std::uint8_t* config,
+                                                     std::uint32_t config_bytes,
+                                                     std::string& module,
+                                                     std::string& why) override;
     [[nodiscard]] const MpDspVtbl* dsp(const std::string& id) override;
     [[nodiscard]] bool device_ready(const std::string& want, bool shared) override;
     void log(const std::string& line) override;

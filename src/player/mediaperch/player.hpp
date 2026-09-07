@@ -34,6 +34,7 @@
 #include "mediaperch/queue.hpp"
 #include "mediaperch/sink.hpp"
 #include "mediaperch/source.hpp"
+#include "mediaperch/video.hpp"
 
 #include <atomic>
 #include <condition_variable>
@@ -49,8 +50,15 @@ namespace mp {
 
 /// What the engine needs from the operating system it happens to be on.
 ///
-/// Four things, and no more: open a file, open a device, find a filter, say
-/// something. Everything else the engine does itself.
+/// Six things, and no more: open a file, open a device, find a filter, say
+/// something -- and, since §9.7.1's video path moved in here, open a presenter
+/// and open a video decoder. Everything else the engine does itself.
+///
+/// **The two new ones are doors, not policy.** Which presenter module is
+/// loaded and which decoder claims a codec is a registry's business, and a
+/// registry is a `LoadLibrary` away from being portable; what to do with what
+/// comes back -- hand the presenter's device to the decoder, build the graph,
+/// run the loop -- is `mp::VideoPath`, and that is here.
 class IEngineHost {
 public:
     virtual ~IEngineHost() = default;
@@ -73,6 +81,26 @@ public:
     /// Whether an endpoint is there at all. Asked while waiting for one that
     /// was pulled out, so it must be cheap and must not disturb anything.
     [[nodiscard]] virtual bool device_ready(const std::string& want, bool shared) = 0;
+
+    /// Opens a presenter.
+    ///
+    /// `window` is the head's own and is opaque here -- an HWND on Windows.
+    /// **Null is the engine's case and not a degraded one**: §9.7.1 has a
+    /// windowless engine draw into a composition surface a shell composites,
+    /// and only a tool that owns a window passes one. `module` comes back with
+    /// which one it was, for the report.
+    virtual std::unique_ptr<Presenter> open_presenter(void* window, std::string& module,
+                                                      std::string& why) = 0;
+
+    /// A decoder for `codec`: best first, and the next one when the best
+    /// declines -- the rule `open_source` follows, and for a case that was
+    /// measured rather than imagined (see §9.8.1's note on codec_mft).
+    ///
+    /// `device` is the presenter's, or null for a decoder that works in system
+    /// memory. §9.8.1 is why it is passed rather than made.
+    virtual std::unique_ptr<VideoDecoder> open_video_decoder(
+        MpCodec codec, const MpGraphicsDevice* device, const std::uint8_t* config,
+        std::uint32_t config_bytes, std::string& module, std::string& why) = 0;
 
     /// One line for the log tail. Called from the engine thread.
     virtual void log(const std::string& line) = 0;

@@ -16,6 +16,7 @@
 #include "mediaperch/display.hpp"
 #include "mediaperch/display_win.hpp"
 #include "mediaperch/video.hpp"
+#include "mediaperch/video_path.hpp"
 
 #include "mediaperch/compare.hpp"
 #include "mediaperch/dsp.hpp"
@@ -36,6 +37,7 @@
 #include "mediaperch/sine.hpp"
 #include "mediaperch/sink.hpp"
 #include "mediaperch/verify.hpp"
+#include "mediaperch/wiring.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -289,6 +291,12 @@ void usage()
   show        open a file in a window and play it: one demuxer feeding both
               halves, the audio device holding the clock, and the picture going
               up against it. TAKES THE ENDPOINT unless --no-audio.
+              Takes the same audio flags `play` does, --dsp included: a file
+              whose rate or channel count the device refuses needs a stage
+              named, because nothing here resamples or remixes on its own.
+              Takes the same audio flags `play` does, --dsp included: a file
+              whose rate or channel count the device refuses needs a stage
+              named, because nothing here resamples or remixes on its own.
   calibrate   measure what this machine needs to play these files, and write it
               down. Plays each file, in windows, at one ring size after another.
               TAKES THE ENDPOINT, at real speed, for as long as the windows add
@@ -1786,66 +1794,48 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
         return 1;
     }
 
-    const MpVideoVtbl* video_vtbl = registry.video();
-    if (video_vtbl == nullptr) {
-        std::fprintf(stderr, "no presenter module is loaded\n");
-        return 1;
-    }
-    mp::Presenter presenter;
-    if (presenter.open(*video_vtbl, window.handle()) != MP_OK ||
-        presenter.configure(picture) != MP_OK) {
-        std::fprintf(stderr, "the presenter would not take that picture\n");
+    mp::IPacketFeed* video_feed = router.feed(video_stream);
+    if (video_feed == nullptr) {
+        std::fprintf(stderr, "the router has no feed for the video stream\n");
         return 1;
     }
 
-    // §9.8.1: the decoder is handed the presenter's device rather than making
-    // one, so a hardware decoder's textures are ones this presenter can sample.
-    MpGraphicsDevice device{};
-    const bool have_device = presenter.get_device(device) == MP_OK;
+    // **The assembly is not here any more** (§9.7.1). A presenter, a decoder
+    // handed the presenter's device, and the graph between them are exactly
+    // what a windowless engine needs too, so they are `mp::VideoPath` in
+    // `src/player` and this passes the one thing that genuinely is a window.
+    // What `show` keeps is the HWND, the message pump, the mode switch and the
+    // report -- and the report is the reason the module names are asked for
+    // rather than assumed.
+    mp::LogRing log;
+    (void)log.listen([&options](const std::string& line) {
+        if (options.verbose) {
+            std::fprintf(stderr, "%s\n", line.c_str());
+        }
+    });
+    mp::win::EngineHost host{registry, log};
 
     std::vector<std::uint8_t> config;
     (void)demux.stream_config(video_stream, config);
-    // **Best first, and the next one when the best declines** -- the same rule
-    // the demuxer above follows, and for a case that was measured: this
-    // machine has an HEVC transform registered, so `codec_mft` claims HEVC at
-    // 80, and it fails in `open` with "the decoder offers no NV12 or P010
-    // output". Asking for the maximum and stopping got one answer and it was
-    // the wrong one, with a decoder that could do the job below it in the list.
-    const auto choices = registry.video_codecs_for(
-        video_info.codec, have_device ? MP_GRAPHICS_D3D11 : MP_GRAPHICS_NONE,
-        config.empty() ? nullptr : config.data(), static_cast<std::uint32_t>(config.size()));
-    if (choices.empty()) {
-        std::fprintf(stderr, "nothing here decodes that video codec\n");
+    mp::VideoPath::Config want;
+    want.decoder_threads = options.decoder_threads;
+    // **The window's client area, because §9.7.1 decided the scale is ours.**
+    // The engine renders at the size it is told and the sampling that does it
+    // is the same fetch that reconstructs chroma; the window is the only thing
+    // that knows what that size is, and it says so again on every resize.
+    (void)window.client_size(want.width, want.height);
+
+    mp::VideoPath video_path;
+    std::string trouble;
+    if (!video_path.open(host, window.handle(), *video_feed, picture, video_info.codec,
+                   config.empty() ? nullptr : config.data(),
+                   static_cast<std::uint32_t>(config.size()), want, trouble)) {
+        std::fprintf(stderr, "%s\n", trouble.c_str());
         return 1;
     }
-    mp::VideoDecoder decoder;
-    const MpModuleDesc* decoder_desc = nullptr;
-    for (const auto& choice : choices) {
-        if (decoder.open(*choice.vtbl, video_info.codec, have_device ? &device : nullptr,
-                         config.empty() ? nullptr : config.data(),
-                         static_cast<std::uint32_t>(config.size())) == MP_OK) {
-            decoder_desc = choice.desc;
-            break;
-        }
-        decoder.close();
-    }
-    if (decoder_desc == nullptr) {
-        std::fprintf(stderr, "none of the %zu decoders for that codec would open this "
-                             "stream\n",
-                     choices.size());
-        return 1;
-    }
-    std::printf("decoder    %s\n", decoder_desc->id);
+    mp::Presenter& presenter = video_path.presenter();
+    std::printf("decoder    %s\n", video_path.modules().decoder.c_str());
     if (options.decoder_threads != 0) {
-        // **Between `open` and the first packet**, which is where a decoder
-        // that starts a worker pool can still be told how big to make it.
-        const std::string count = std::to_string(options.decoder_threads);
-        const MpResult told = decoder.set("threads", count.c_str());
-        if (told != MP_OK) {
-            std::fprintf(stderr, "%s would not take %u threads: %s\n", decoder_desc->id,
-                         options.decoder_threads, mp::result_name(told));
-            return 1;
-        }
         std::printf("threads    %u, asked for\n", options.decoder_threads);
     }
     // **What the colour pipeline decided, where a person can see it.** §9's
@@ -1940,15 +1930,15 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
         }
     }
 
-    mp::IPacketFeed* video_feed = router.feed(video_stream);
-    if (video_feed == nullptr) {
-        std::fprintf(stderr, "the router has no feed for the video stream\n");
-        return 1;
-    }
-    mp::VideoGraph video_graph{*video_feed, decoder, presenter, picture};
+    mp::VideoGraph& video_graph = video_path.graph();
 
     // ---- the audio half, which is where the master clock comes from
     mp::PacketSource audio_source;
+    // **Declared before the graphs, so it outlives them.** A `ProcessedGraph`
+    // holds a pointer to this and the render thread is inside it until `stop`
+    // returns; reverse destruction order is what makes that safe rather than a
+    // comment asking somebody to be careful.
+    mp::DspChain chain;
     std::unique_ptr<mp::PassthroughGraph> exact;
     std::unique_ptr<mp::ProcessedGraph> processed;
     // **The render thread joins Pro Audio here too, and did not.** `play`
@@ -1993,18 +1983,55 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
         if (!sink) {
             return 1;
         }
-        const auto negotiated =
-            mp::negotiate_best(sink, audio_source.format(), options.path);
-        if (!negotiated.ok) {
-            report_refusal(negotiated);
+        // **The stages a person named, which `show` was accepting and
+        // dropping.** Nothing in this program resamples or remixes on its own
+        // -- that refusal is most of why it exists -- so a mono file on a
+        // stereo-only device is a refusal until somebody says
+        // `--dsp mix:channels=2`. `play` honoured that flag and `show` did not,
+        // which is exactly the failure the comment below names.
+        for (const std::string& spec : options.dsp) {
+            if (!add_dsp_stage(registry, spec, chain, why)) {
+                std::fprintf(stderr, "%s\n", why.c_str());
+                return 1;
+            }
+        }
+
+        // **The one route, which is why `--dsp` works here at all.** `wire_up`
+        // configures the chain, works out what to offer, negotiates, and sizes
+        // the chain to the period the device named. Every caller with a device
+        // goes through it; `show` used to have no copy of that sequence, which
+        // is how a flag came to be accepted and dropped.
+        mp::Wired wired;
+        if (!mp::wire_up(sink, audio_source.format(), chain, options.path,
+                         options.gain != 1.0, wired, why)) {
+            if (!wired.negotiated.ok && wired.period_frames == 0 && why.empty()) {
+                report_refusal(wired.negotiated);
+            } else if (!wired.negotiated.ok) {
+                report_refusal(wired.negotiated);
+            } else {
+                std::fprintf(stderr, "%s\n", why.c_str());
+            }
             return 1;
         }
-        std::uint32_t period = 0;
-        if (sink.period_frames(period) != MP_OK || period == 0) {
-            std::fprintf(stderr, "the device did not report a buffer size\n");
-            return 1;
-        }
+        const mp::Negotiated& negotiated = wired.negotiated;
+        const std::uint32_t period = wired.period_frames;
         std::printf("audio      %s\n", mp::describe(negotiated.accepted).c_str());
+        if (!chain.empty()) {
+            std::printf("chain      ");
+            for (std::size_t i = 0; i < chain.size(); ++i) {
+                std::printf("%s%s", i == 0 ? "" : " -> ", chain.at(i).name().c_str());
+            }
+            std::printf(" on an f64 bus, %s\n",
+                        mp::describe(chain.output_format()).c_str());
+            if (const std::uint32_t delay = chain.latency_frames(); delay != 0) {
+                // **Said out loud, because §8 makes this the master clock.** A
+                // stage that delays the audio delays the thing the picture is
+                // paced against, and a lip-sync error nobody was told about is
+                // the one kind this program must not produce quietly.
+                std::printf("latency    %u frames (%.2f ms) the chain adds\n", delay,
+                            1000.0 * delay / chain.output_format().sample_rate);
+            }
+        }
         // Kept out here because the run's report turns bytes of ring into
         // milliseconds of audio, and this is what says how many bytes a
         // millisecond is.
@@ -2041,10 +2068,10 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
             ring.ring_periods = asked;
         }
         ring.wait_timeout_ms = options.wait_timeout_ms;
-        if (mp::use_processed(options.path, negotiated.fidelity, options.gain != 1.0)) {
+        if (wired.processed) {
             processed = std::make_unique<mp::ProcessedGraph>(
                 audio_source, sink, negotiated.accepted, period, conversion,
-                &audio_hooks, ring);
+                &audio_hooks, ring, chain.empty() ? nullptr : &chain);
             if (processed->start() != MP_OK) {
                 std::fprintf(stderr, "the audio graph would not start\n");
                 return 1;
@@ -2103,15 +2130,21 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
     std::printf("\nclose the window to stop.\n");
     std::fflush(stdout);
 
-    mp::DisplayLoop loop{video_graph, *audio_clock, *frames};
-    std::atomic<bool> done{false};
-    // **The loop is not on this thread**, because `WaitForVBlank` blocks for a
-    // whole refresh and a message queue nobody drains for sixteen milliseconds
-    // is a window Windows calls unresponsive.
-    std::thread painter{[&] {
-        loop.run();
-        done.store(true, std::memory_order_release);
-    }};
+    // **The loop is not on this thread**, because `IFrameClock::wait` blocks
+    // for a whole refresh and a message queue nobody drains for sixteen
+    // milliseconds is a window Windows calls unresponsive. `VideoPath` owns
+    // that thread; what is left here is joining it before the clocks it waits
+    // on stop existing, which is what the guard below is for. The
+    // `std::thread` this replaced had the same requirement and no guard.
+    if (!video_path.start(*audio_clock, *frames, trouble)) {
+        std::fprintf(stderr, "%s\n", trouble.c_str());
+        return 1;
+    }
+    const struct StopAtExit {
+        mp::VideoPath& path;
+        ~StopAtExit() { path.stop(); }
+    } stop_at_exit{video_path};
+    mp::DisplayLoop& loop = video_path.loop();
 
     // **A file with a picture in it, seeked.** §4 gives the file one position
     // and the router owns it, so this is one move that three things have to
@@ -2137,15 +2170,26 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
                   std::chrono::microseconds{
                       static_cast<std::int64_t>(options.play_seconds * 1'000'000.0)}
             : std::chrono::steady_clock::time_point::max();
-    while (!done.load(std::memory_order_acquire) && window.pump_messages() &&
+    while (!video_path.ended() && window.pump_messages() &&
            std::chrono::steady_clock::now() < stop_at) {
+        // **§9.7.1's resize message, in the only shell there is yet.** Polled
+        // rather than handled in WM_SIZE, so that the hold it takes on the
+        // display loop is taken from this thread and not from inside a window
+        // procedure -- a hold waits for the loop to park, and a window
+        // procedure that waits is a window Windows calls unresponsive.
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+        if (window.client_size(width, height) &&
+            (width != want.width || height != want.height)) {
+            want.width = width;
+            want.height = height;
+            if (!video_path.set_size(width, height, trouble)) {
+                std::fprintf(stderr, "%s\n", trouble.c_str());
+            }
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds{4});
     }
-    if (vblank != nullptr) {
-        vblank->cancel();
-    }
-    ticks.cancel();
-    painter.join();
+    video_path.stop();
 
     if (exact) {
         exact->stop();
@@ -2369,54 +2413,28 @@ RunOutcome play_run(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& regis
         return RunOutcome{1};
     }
 
-    // What the device is asked for. A chain that resamples or remixes changes
-    // what has to reach the device, so the rate and the channels come from its
-    // output -- but the sample type stays the source's, because the f64 bus is
-    // this program's business and offering the device f64 first would say the
-    // file was something it was not.
-    mp::Format offered = source_format;
-    mp::PathPolicy policy = options.path;
-    if (!chain.empty()) {
-        // Sized provisionally: the device has not said how big a period is yet,
-        // and all that is wanted here is the format that comes out the far end.
-        if (!chain.configure(mp::dsp_bus_format(source_format), 4096, why)) {
+    // **The one route.** See wiring.hpp: configure the chain, work out what to
+    // offer, negotiate, size the chain to the device's period. `show` and
+    // `mp::Player` go through the same call, which is the point of it being one.
+    mp::Wired wired;
+    if (!mp::wire_up(sink, source_format, chain, options.path, options.gain != 1.0, wired,
+                     why)) {
+        if (!wired.negotiated.ok) {
+            report_refusal(wired.negotiated);
+        } else {
             std::fprintf(stderr, "%s\n", why.c_str());
-            return RunOutcome{1};
         }
-        offered.sample_rate = chain.output_format().sample_rate;
-        offered.channels = chain.output_format().channels;
-        offered.channel_mask = chain.output_format().channel_mask;
-        // A stage exists in order to change the samples. There is nothing left
-        // for a policy to decide, and pretending otherwise would end in a
-        // bit-exact claim over audio that had been through a filter.
-        policy = mp::PathPolicy::processed;
-    }
-
-    const auto negotiated = mp::negotiate_best(sink, offered, policy);
-    if (!negotiated.ok) {
-        report_refusal(negotiated);
         return RunOutcome{1};
     }
-
-    std::uint32_t period = 0;
-    if (sink.period_frames(period) != MP_OK || period == 0) {
-        std::fprintf(stderr, "the device did not report a buffer size\n");
-        return RunOutcome{1};
-    }
-
-    if (!chain.empty() && !chain.configure(mp::dsp_bus_format(source_format), period, why)) {
-        // Same chain, now sized for the block the graph will actually feed it.
-        std::fprintf(stderr, "%s\n", why.c_str());
-        return RunOutcome{1};
-    }
+    const mp::Negotiated& negotiated = wired.negotiated;
+    const std::uint32_t period = wired.period_frames;
 
     std::printf("device     %s\n", device_id.empty() ? "(default endpoint)" : device_id.c_str());
     std::printf("mode       %s\n", options.shared ? "shared" : "exclusive");
     std::printf("format     %s\n", mp::describe(negotiated.accepted).c_str());
     // A gain changes the samples whatever the formats say; a chain does too,
-    // and is already the reason `policy` was forced above.
-    const bool processing =
-        mp::use_processed(policy, negotiated.fidelity, options.gain != 1.0);
+    // and is already the reason the policy was forced inside `wire_up`.
+    const bool processing = wired.processed;
     std::printf("path       %s%s  [--path %s]\n",
                 processing                                    ? "PROCESSED -- the samples are changed"
                 : negotiated.fidelity == mp::Fidelity::exact  ? "passthrough, memcpy"

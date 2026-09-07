@@ -1,17 +1,24 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// What an operating system looks like to `mp::Player`, in about eighty lines.
+// What an operating system looks like to `mp::Player`.
 //
 // That is the useful thing this file says: `IEngineHost` is the whole of what
 // the engine asks a platform for, so a platform a test invents is enough to run
-// the entire product with no COM, no LoadLibrary and no audio hardware. If this
-// file ever grows, the split between the core and the head has moved and
-// somebody should ask why.
+// the entire product with no COM, no LoadLibrary, no audio hardware and no
+// display. If this file ever grows, the split between the core and the head has
+// moved and somebody should ask why.
+//
+// **It grew once, and the answer was good.** §9.7.1's video path moved into
+// `src/player`, so the engine now asks for a presenter and a video decoder as
+// well; the counters that answer those two are in fake_video.hpp, beside the
+// audio ones here, and `mp::VideoPath` is what does the assembling. What did
+// *not* happen is any of the assembly moving into a host.
 
 #ifndef MEDIAPERCH_TESTS_FAKE_HOST_HPP
 #define MEDIAPERCH_TESTS_FAKE_HOST_HPP
 
 #include "fake_sink.hpp"
+#include "fake_video.hpp"
 
 #include "mediaperch/player.hpp"
 
@@ -119,6 +126,52 @@ public:
         return std::make_unique<Tape>(found->second.first, found->second.second);
     }
 
+    /// §9.7.1's two doors, made of counters. **`VideoPath` cannot tell**, and
+    /// that is the claim: it opens both through here, hands one's device to the
+    /// other and runs the loop, without ever learning whether the presenter is
+    /// Direct3D or two atomics.
+    std::unique_ptr<Presenter> open_presenter(void* window, std::string& module,
+                                              std::string& why) override
+    {
+        if (!presenter_) {
+            why = "no presenter module is loaded";
+            return nullptr;
+        }
+        auto presenter = std::make_unique<Presenter>();
+        if (presenter->open(fake_presenter_vtbl(), window) != MP_OK) {
+            why = "video_test would not open a presenter";
+            return nullptr;
+        }
+        module = "video_test";
+        return presenter;
+    }
+
+    std::unique_ptr<VideoDecoder> open_video_decoder(MpCodec codec,
+                                                     const MpGraphicsDevice* device,
+                                                     const std::uint8_t* config,
+                                                     std::uint32_t config_bytes,
+                                                     std::string& module,
+                                                     std::string& why) override
+    {
+        if (!video_codec_) {
+            why = "nothing here decodes that video codec";
+            return nullptr;
+        }
+        auto decoder = std::make_unique<VideoDecoder>();
+        if (decoder->open(fake_video_codec_vtbl(), codec, device, config, config_bytes) !=
+            MP_OK) {
+            why = "none of the 1 decoders for that codec would open this stream";
+            return nullptr;
+        }
+        module = "vcodec_test";
+        return decoder;
+    }
+
+    /// A machine with no presenter, or none that decodes this. Both are real
+    /// answers a head gives, and both are error paths worth walking.
+    void no_presenter() noexcept { presenter_ = false; }
+    void no_video_codec() noexcept { video_codec_ = false; }
+
     Sink open_sink(const std::string& want, bool shared, std::string& resolved,
                    std::string& why) override
     {
@@ -169,6 +222,8 @@ private:
     std::map<std::string, std::pair<Format, std::vector<std::uint8_t>>> files_;
     std::unique_ptr<FakeSink> device_;
     bool present_ = true;
+    bool presenter_ = true;
+    bool video_codec_ = true;
     mutable std::mutex mutex_;
     std::vector<std::string> lines_;
 };

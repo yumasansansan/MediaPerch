@@ -42,6 +42,14 @@ public:
     /// Blocks until the display will take another frame. False when it cannot
     /// say -- a display that went away, or a loop that should stop.
     virtual bool wait() = 0;
+    /// Makes `wait` answer false, now and from then on.
+    ///
+    /// **A loop is stopped from outside it.** `wait` blocks for a whole
+    /// refresh, and whoever owns the loop needs a way to say stop that does
+    /// not take sixteen milliseconds to be heard. The default does nothing,
+    /// which is right for a clock that counts: it stops when its count runs
+    /// out, and there is nothing for a canceller to do.
+    virtual void cancel() noexcept {}
     /// What the display says it refreshes at, in seconds, or zero when it did
     /// not say. A starting point only: `DisplayLoop` measures the real one,
     /// because a display that calls itself 60 Hz is usually 59.94.
