@@ -64,6 +64,28 @@ public:
         std::uint32_t height = 0;
     };
 
+    /// **What the shell says the display is** (§9.4, §9.7.1).
+    ///
+    /// The one thing a windowless engine cannot work out for itself: given no
+    /// window, a presenter falls back to the first output, and for an engine
+    /// that is not a fallback but a guess about which monitor the picture is
+    /// on. Every §9 decision turns on it -- the tone mapper, the SDR boost, the
+    /// HLG system gamma, the encoding.
+    struct DisplayIs {
+        bool hdr = false;
+        /// Advanced Color on with an SDR mode: a wide-gamut display managing
+        /// its own colour. Only distinguishable from plain SDR on Windows 11
+        /// 24H2 and later, so a shell that cannot tell leaves it false.
+        bool wide = false;
+        /// `DISPLAYCONFIG_SDR_WHITE_LEVEL` in nits. 80 is scRGB's reference and
+        /// what a display that does not say is assumed to use.
+        float white_nits = 80.0f;
+        /// The brightest it claims. **HLG needs it and PQ does not**: PQ states
+        /// absolute nits, HLG's OOTF has a system gamma that is a function of
+        /// this. 1000 is BT.2100's reference display.
+        float peak_nits = 1000.0f;
+    };
+
     /// What it turned out to be, for whoever reports the run.
     struct Modules {
         std::string presenter;
@@ -136,6 +158,22 @@ public:
     bool set_size(std::uint32_t width, std::uint32_t height, std::string& why,
                   std::chrono::milliseconds deadline = std::chrono::milliseconds{500});
 
+    /// **§9.7.1's other message.** Which display the picture is on, and what it
+    /// is. Sent when a shell's window crosses a monitor or somebody toggles
+    /// HDR, and once when the file opens.
+    ///
+    /// More expensive than a resize and rarer: the whole colour plan is decided
+    /// again and the swap chain rebuilt from its answer, because the format and
+    /// the colour space may both have changed. Takes the same hold on the loop,
+    /// for the same reason.
+    bool set_display(const DisplayIs& display, std::string& why,
+                     std::chrono::milliseconds deadline = std::chrono::milliseconds{500});
+
+    /// Back to the presenter working it out for itself, which is what a window
+    /// this process owns wants and what an off-screen measurement needs.
+    bool probe_display(std::string& why,
+                       std::chrono::milliseconds deadline = std::chrono::milliseconds{500});
+
     [[nodiscard]] const Modules& modules() const noexcept { return modules_; }
 
     /// The three pieces, for the caller that reports the run and for
@@ -149,9 +187,14 @@ public:
     [[nodiscard]] DisplayLoop& loop() noexcept { return *loop_; }
 
 private:
-    /// One `size` at the presenter, with the value spelled the way §9.7.1's
-    /// setting takes it.
-    bool tell_size(std::uint32_t width, std::uint32_t height, std::string& why);
+    /// One setting at the presenter, taking the loop's hold if it is turning.
+    ///
+    /// **Every message that changes what the presenter is doing goes through
+    /// here.** A resize replaces the swap chain's buffers and a display change
+    /// replaces the chain; a graphics context is not two threads' to share, and
+    /// one place to take the hold is one place to get it right.
+    bool tell(const char* key, const char* value, std::string& why,
+              std::chrono::milliseconds deadline);
 
     std::unique_ptr<Presenter> presenter_;
     std::unique_ptr<VideoDecoder> decoder_;

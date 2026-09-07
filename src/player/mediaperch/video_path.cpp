@@ -127,7 +127,42 @@ void VideoPath::stop() noexcept
     frames_ = nullptr;
 }
 
-bool VideoPath::tell_size(std::uint32_t width, std::uint32_t height, std::string& why)
+bool VideoPath::tell(const char* key, const char* value, std::string& why,
+                     std::chrono::milliseconds deadline)
+{
+    if (presenter_ == nullptr) {
+        why = "there is no presenter to tell";
+        return false;
+    }
+    const auto say = [&] {
+        const MpResult told = presenter_->set(key, value);
+        if (told != MP_OK) {
+            why = std::string{"the presenter would not take "} + key + " = " + value + ": " +
+                  result_name(told);
+            return false;
+        }
+        return true;
+    };
+    if (!running()) {
+        return say();
+    }
+
+    loop_->hold();
+    // The same wait `seek_together` takes, and for the same reason it takes a
+    // deadline: a loop whose display has gone away has no turn in which to
+    // answer, and refusing the message because nobody is drawing would be
+    // refusing for the wrong reason.
+    const auto give_up_at = std::chrono::steady_clock::now() + deadline;
+    while (!loop_->parked() && std::chrono::steady_clock::now() < give_up_at) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    const bool ok = say();
+    loop_->release();
+    return ok;
+}
+
+bool VideoPath::set_size(std::uint32_t width, std::uint32_t height, std::string& why,
+                         std::chrono::milliseconds deadline)
 {
     char value[32];
     if (width == 0 || height == 0) {
@@ -135,38 +170,27 @@ bool VideoPath::tell_size(std::uint32_t width, std::uint32_t height, std::string
     } else {
         std::snprintf(value, sizeof value, "%ux%u", width, height);
     }
-    const MpResult told = presenter_->set("size", value);
-    if (told != MP_OK) {
-        why = std::string{"the presenter would not render at "} + value + ": " +
-              result_name(told);
-        return false;
-    }
-    return true;
+    return tell("size", value, why, deadline);
 }
 
-bool VideoPath::set_size(std::uint32_t width, std::uint32_t height, std::string& why,
-                         std::chrono::milliseconds deadline)
+bool VideoPath::set_display(const DisplayIs& display, std::string& why,
+                            std::chrono::milliseconds deadline)
 {
-    if (presenter_ == nullptr) {
-        why = "there is no presenter to resize";
-        return false;
-    }
-    if (!running()) {
-        return tell_size(width, height, why);
-    }
+    // Every field, every time. A message that carried only what changed would
+    // put the presenter's idea of the display and the shell's out of step the
+    // first time one was dropped, and there is nothing to gain: this is sent
+    // when a window crosses a monitor, which is rare.
+    char value[128];
+    std::snprintf(value, sizeof value, "hdr=%d,wide=%d,white=%.4f,peak=%.4f",
+                  display.hdr ? 1 : 0, display.wide ? 1 : 0,
+                  static_cast<double>(display.white_nits),
+                  static_cast<double>(display.peak_nits));
+    return tell("display", value, why, deadline);
+}
 
-    loop_->hold();
-    // The same wait `seek_together` takes, and for the same reason it takes a
-    // deadline: a loop whose display has gone away has no turn in which to
-    // answer, and refusing to resize because nobody is drawing would be
-    // refusing for the wrong reason.
-    const auto give_up_at = std::chrono::steady_clock::now() + deadline;
-    while (!loop_->parked() && std::chrono::steady_clock::now() < give_up_at) {
-        std::this_thread::sleep_for(std::chrono::milliseconds{1});
-    }
-    const bool ok = tell_size(width, height, why);
-    loop_->release();
-    return ok;
+bool VideoPath::probe_display(std::string& why, std::chrono::milliseconds deadline)
+{
+    return tell("display", "probe", why, deadline);
 }
 
 } // namespace mp

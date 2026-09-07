@@ -515,6 +515,26 @@ bool IpcServer::handle(const std::shared_ptr<Client>& client, const ipc::Header&
         }
         return ok();
     }
+    case ipc::Kind::display: {
+        const std::uint8_t known = r.u8();
+        const std::uint8_t hdr = r.u8();
+        const std::uint8_t wide = r.u8();
+        const double white = r.f64();
+        const double peak = r.f64();
+        if (!r.complete()) {
+            return malformed();
+        }
+        mp::VideoPath::DisplayIs display;
+        display.hdr = hdr != 0;
+        display.wide = wide != 0;
+        display.white_nits = static_cast<float>(white);
+        display.peak_nits = static_cast<float>(peak);
+        std::string why;
+        if (!player_->set_display(known != 0, display, why)) {
+            return fail(why);
+        }
+        return ok();
+    }
     case ipc::Kind::playlist: {
         if (!r.complete()) {
             return malformed();

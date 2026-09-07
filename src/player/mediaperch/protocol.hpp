@@ -104,6 +104,24 @@ enum class Kind : std::uint16_t {
     /// does not parse it: what a measurement means is the core's, which is the
     /// same split §11 makes for the settings file.
     profile = 20,
+    /// **Which display the picture is on, and what it is** (§9.4, §9.7.1).
+    ///
+    /// The one thing a windowless engine cannot work out for itself: given no
+    /// window a presenter falls back to the first output, and for an engine
+    /// that is a guess about which monitor the picture is on. Every §9 decision
+    /// turns on it -- the tone mapper, the SDR boost, the HLG system gamma, the
+    /// encoding -- so the shell says, and says it again whenever its window
+    /// crosses a monitor or somebody toggles HDR.
+    ///
+    /// **A message and not a setting**, which is the distinction §11 draws: the
+    /// keys under `[player]` are things a person chose and a file remembers,
+    /// and where a window happens to be is neither. A saved one would be a
+    /// stale one, replayed at the next startup about a monitor that may be gone.
+    ///
+    /// `u8 known, u8 hdr, u8 wide, f64 white_nits, f64 peak_nits`. `known` zero
+    /// is *work it out yourself*, which is what a shell sends when it stops
+    /// knowing -- minimised, or moved to a display it cannot describe.
+    display = 21,
 
     // --- replies, engine to shell ---
     ok = 128,

@@ -54,6 +54,15 @@ struct Settings {
     /// scores. **A reordering, not a veto**: a module named here that does not
     /// recognise a file is not a reason to refuse the file.
     std::vector<std::string> decoders;
+    /// Where this machine's buffering profile is (§9.8.2). Empty means the
+    /// one beside this file, which is where `calibrate` writes it.
+    ///
+    /// **In `[engine]` rather than `[player]`, because it is not a setting.**
+    /// The keys under `[player]` are arguments to `Player::set` and a person
+    /// can change any of them while something is playing; this names a file to
+    /// read at startup, which is the same kind of thing as where the modules
+    /// are.
+    std::string profile;
     /// Everything else, in the order the file gave it, for `Player::set`.
     std::vector<PlayerSetting> player;
 };

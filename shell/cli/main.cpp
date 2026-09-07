@@ -38,6 +38,11 @@ usage: mediaperch-cli [--pipe NAME] COMMAND [arguments]
   pause | resume | stop
   next | prev
   seek [+|-]SECONDS absolute, or relative when it is signed
+  display WHAT      which display the picture is on: `probe` to let the engine
+                    work it out, or hdr|sdr with the white level and the peak
+                    in nits -- `display hdr 480 1000`. A shell sends this when
+                    its window crosses a monitor; here it is mostly a way to
+                    see what a display it is not on would do
   playlist          every track, with an arrow at the current one
   settings          every setting, its value and what it means
   set KEY VALUE     change one. `set path processed` switches paths where it
@@ -239,6 +244,48 @@ int main(int argc, char** argv)
         w.u8(relative ? 1u : 0u);
         w.i64(static_cast<std::int64_t>(seconds * status.source.sample_rate));
         if (!client.call(mp::ipc::Kind::seek, w, reply, body, why)) {
+            return fail(why);
+        }
+        if (static_cast<mp::ipc::Kind>(reply.kind) != mp::ipc::Kind::ok) {
+            return fail(mp::win::error_text(reply, body));
+        }
+        return 0;
+    }
+    if (command == "display") {
+        if (rest.empty()) {
+            return fail("display needs `probe`, or hdr|sdr with a white level and a peak");
+        }
+        if (rest.front() == "probe") {
+            w.u8(0u); // not known: the engine works it out
+            w.u8(0u);
+            w.u8(0u);
+            w.f64(0.0);
+            w.f64(0.0);
+        } else {
+            const bool hdr = rest.front() == "hdr";
+            if (!hdr && rest.front() != "sdr") {
+                return fail("`" + rest.front() + "` is not hdr, sdr or probe");
+            }
+            // **The standards' defaults when nothing is said**, which is what a
+            // shell that cannot tell should send: 80 nits is scRGB's reference
+            // white and 1000 is BT.2100's reference display.
+            double white = 80.0;
+            double peak = 1000.0;
+            for (std::size_t i = 1; i < rest.size() && i <= 2; ++i) {
+                char* end = nullptr;
+                const double nits = std::strtod(rest[i].c_str(), &end);
+                if (end == rest[i].c_str() || nits <= 0.0) {
+                    return fail("`" + rest[i] + "` is not a number of nits");
+                }
+                (i == 1 ? white : peak) = nits;
+            }
+            w.u8(1u);
+            w.u8(hdr ? 1u : 0u);
+            w.u8(0u); // wide: only Windows 11 24H2 can tell, and a person cannot
+            w.f64(white);
+            w.f64(peak);
+        }
+        if (!client.call(mp::ipc::Kind::display, w, reply, body, why)) {
             return fail(why);
         }
         if (static_cast<mp::ipc::Kind>(reply.kind) != mp::ipc::Kind::ok) {

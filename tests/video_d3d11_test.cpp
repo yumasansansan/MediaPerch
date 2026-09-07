@@ -461,6 +461,78 @@ TEST_CASE("what a person can set, and what it reports back", "[video][d3d11]")
     CHECK(presenter.described("applied") == "none");
 }
 
+TEST_CASE("the shell says what the display is, and the colour plan follows",
+          "[video][d3d11]")
+{
+    // **§9.7.1's other message.** `probe_display` takes a window and, given
+    // none, falls back to the first output -- which for a windowless engine is
+    // not a fallback but a guess about which monitor the picture is on. Every
+    // §9 decision turns on it, so this checks a decision and not a describe
+    // row: §9.6's SDR boost is `white / 80`, and 480 nits is a factor of six
+    // that nothing on this machine would have produced by itself.
+    Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
+    const MpVideoVtbl& vtbl = *module.as<MpVideoVtbl>();
+
+    Presenter presenter{vtbl, 16, 16};
+    REQUIRE(presenter.ok());
+    CHECK(presenter.described("display_from") == "this process");
+
+    REQUIRE(vtbl.set(presenter.handle(), "display", "hdr=1,white=480,peak=600") == MP_OK);
+    REQUIRE(presenter.configure() == "");
+
+    CHECK(presenter.described("display_from") == "the shell");
+    CHECK(presenter.described("display") == "HDR, white 480 nits, peak 600 nits");
+    // The decision, not the report: sRGB content on a 480-nit HDR display is
+    // multiplied by six so that white lands where the desktop's white is.
+    CHECK(presenter.described("sdr_scale") == "6.0000");
+    // And the buffer follows from it -- an HDR display with something
+    // composited over the video is scRGB, which is what §9.5 chose.
+    CHECK(presenter.described("encoding") == "linear scRGB");
+
+    // **Said again, mid-run, which is a window crossing a monitor.** The whole
+    // plan is decided afresh and the chain rebuilt from its answer.
+    REQUIRE(presenter.present(flat(16, 16, 0x40, 0x40, 0x40), 16, 16) == MP_OK);
+    REQUIRE(vtbl.set(presenter.handle(), "display", "hdr=0,white=240,peak=240") == MP_OK);
+    CHECK(presenter.described("display") == "SDR, white 240 nits, peak 240 nits");
+    // An SDR display needs no boost, whatever its white level: the desktop's
+    // white *is* the buffer's white when the buffer is not scRGB.
+    CHECK(presenter.described("sdr_scale") == "1.0000");
+    REQUIRE(presenter.present(flat(16, 16, 0x40, 0x40, 0x40), 16, 16) == MP_OK);
+
+    // And back to the presenter working it out for itself.
+    REQUIRE(vtbl.set(presenter.handle(), "display", "probe") == MP_OK);
+    CHECK(presenter.described("display_from") == "this process");
+}
+
+TEST_CASE("a display that is not one is refused with the field named",
+          "[video][d3d11]")
+{
+    Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
+    const MpVideoVtbl& vtbl = *module.as<MpVideoVtbl>();
+
+    Presenter presenter{vtbl, 16, 16};
+    REQUIRE(presenter.ok());
+
+    // A trailing comma is not on this list: it is sloppy and unambiguous, and
+    // `--dsp` takes one too. What is refused is what cannot be read.
+    for (const char* bad : {"hdr", "hdr=", "brightness=400", "=1", "hdr=yes"}) {
+        INFO("display: " << bad);
+        CHECK(vtbl.set(presenter.handle(), "display", bad) == MP_ERR_INVALID);
+    }
+    // Refused means unchanged: nothing was half-applied.
+    CHECK(presenter.described("display_from") == "this process");
+
+    // Any subset, in any order, and the rest keep the standards' defaults --
+    // 80 nits is scRGB's reference white and 1000 is BT.2100's reference
+    // display, which is what a shell that does not know should be given.
+    CHECK(vtbl.set(presenter.handle(), "peak=1500,hdr=1", "x") == MP_ERR_UNSUPPORTED);
+    REQUIRE(vtbl.set(presenter.handle(), "display", "peak=1500,hdr=1") == MP_OK);
+    REQUIRE(presenter.configure() == "");
+    CHECK(presenter.described("display") == "HDR, white 80 nits, peak 1500 nits");
+}
+
 TEST_CASE("the shell says a size and the engine renders there", "[video][d3d11]")
 {
     // **§9.7.1's scaling decision, measured.** The other way round was for the

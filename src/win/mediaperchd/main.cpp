@@ -24,6 +24,7 @@
 #include "mediaperch/log.hpp"
 #include "mediaperch/platform.hpp"
 #include "mediaperch/player.hpp"
+#include "mediaperch/profile.hpp"
 #include "mediaperch/settings.hpp"
 #include "mediaperch/tray.hpp"
 #include "mediaperch/win_headers.hpp"
@@ -289,6 +290,31 @@ int main(int argc, char** argv)
     mp::win::EngineHost host{registry, log};
     host.prefer(settings.decoders);
     mp::Player player{host};
+
+    // **§9.8.2's profile, read the way §11 says: the head opens the file and
+    // the portable half decides what the text means.** Never fatal -- a run
+    // without one is the run this program made before there were any, and the
+    // engine's own generous default is what a measurement is measured against.
+    {
+        std::filesystem::path where =
+            settings.profile.empty()
+                ? (config.empty() ? std::filesystem::path{}
+                                  : config.parent_path() / "profile.ini")
+                : std::filesystem::path{settings.profile};
+        std::string text;
+        if (!where.empty() && read_file(where, text)) {
+            mp::ProfileText read = mp::parse_profile(text, where.filename().string());
+            for (const std::string& complaint : read.complaints) {
+                log.add(complaint);
+            }
+            const std::size_t measured = read.profile.measured.size();
+            player.use_profile(std::move(read.profile));
+            log.add("profile from " + where.string() + ": " + std::to_string(measured) +
+                    (measured == 1 ? " class measured" : " classes measured"));
+        } else if (!where.empty()) {
+            log.add("no profile at " + where.string() + ", so the defaults it is");
+        }
+    }
 
     // The file, then the flags. A setting neither names keeps its default, and
     // a setting the file got wrong is named with the line it was on.

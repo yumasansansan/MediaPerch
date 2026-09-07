@@ -30,6 +30,7 @@
 #include "mediaperch/negotiation.hpp"
 #include "mediaperch/passthrough.hpp"
 #include "mediaperch/processed.hpp"
+#include "mediaperch/buffering.hpp"
 #include "mediaperch/protocol.hpp"
 #include "mediaperch/queue.hpp"
 #include "mediaperch/sink.hpp"
@@ -149,6 +150,19 @@ struct PlayerConfig {
     /// so the words are kept as well as the filter.
     std::string shaping_spec = "0";
     PassthroughConfig buffering;
+    /// **Whether a person chose `ring_periods`, as against it being the
+    /// default.** §9.8.2's three answers are in an order that respects who said
+    /// what: a number somebody typed wins outright, then a measurement made on
+    /// this machine, then the engine's generous default. Without this flag the
+    /// first two are indistinguishable, and a profile would quietly overrule a
+    /// person -- which is the one direction this must not be wrong in.
+    bool ring_periods_chosen = false;
+    /// What this machine measured for itself (§9.8.2), or empty.
+    ///
+    /// **Handed in rather than read here.** §11: the head opens files and the
+    /// portable half decides what the text means, so a head reads the file and
+    /// `mp::parse_profile` turns it into this.
+    Profile profile;
     /// `name` or `name:key=value,...`, in the order they run in.
     std::vector<std::string> dsp;
     bool recover = true;
@@ -193,6 +207,24 @@ public:
     // --- settings -----------------------------------------------------------
 
     [[nodiscard]] std::vector<ipc::Setting> settings() const;
+    /// The buffering profile to consult (§9.8.2). Takes effect on the next
+    /// track, because the ring is decided when a graph is built.
+    void use_profile(Profile profile);
+
+    /// **Which display the picture is on** (§9.4, §9.7.1), from the shell that
+    /// has the window. Applied at once to whatever is showing and remembered
+    /// for the next track.
+    ///
+    /// `known` false is *work it out yourself*: the presenter probes, which is
+    /// right for a window this process owns and is the only honest answer when
+    /// a shell has stopped knowing.
+    ///
+    /// False and a reason only when a presenter refused it. **A run with no
+    /// picture takes it and says nothing**, because a shell should not have to
+    /// know whether the current track has video to tell the engine where its
+    /// window is.
+    bool set_display(bool known, const VideoPath::DisplayIs& display, std::string& why);
+
     /// Applies one setting. False and a reason when the value is not one.
     ///
     /// A setting that changes the path rebuilds the graph where it stands: the
@@ -268,6 +300,11 @@ private:
     /// changed setting -- opens it again, which costs a decoder and a presenter
     /// and is the price of the audio graph being the thing a rebuild is about.
     std::unique_ptr<VideoPath> video_;
+    /// What the shell last said the display is, applied to every picture this
+    /// engine opens until it says otherwise. Under the mutex: it arrives on an
+    /// IPC thread and is read by the engine thread.
+    bool display_known_ = false;
+    VideoPath::DisplayIs display_{};
 
     PlayerConfig config_;
     /// The config the current run was actually built from. A setting that turns

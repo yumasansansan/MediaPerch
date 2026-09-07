@@ -57,6 +57,8 @@ SettingsFile read_settings(std::string_view text, std::string_view name)
                     out.settings.allow = split_list(entry.value);
                 } else if (entry.key == "decoders") {
                     out.settings.decoders = split_list(entry.value);
+                } else if (entry.key == "profile") {
+                    out.settings.profile = entry.value;
                 } else {
                     out.complaints.push_back(
                         say(name, entry.line, "there is no engine setting called `" +
@@ -108,6 +110,9 @@ std::string write_settings(const Settings& settings)
     out += "allow = " + list(settings.allow) + "\n";
     out += "# Decoders to try before the scores decide, in this order.\n";
     out += "decoders = " + list(settings.decoders) + "\n";
+    out += "# This machine's buffering profile, from `mediaperch-probe calibrate`.\n";
+    out += "# Empty is profile.ini beside this file.\n";
+    out += "profile = " + settings.profile + "\n";
     out += "\n[player]\n";
     for (const PlayerSetting& setting : settings.player) {
         out += setting.key + " = " + setting.value + "\n";

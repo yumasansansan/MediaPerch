@@ -3047,7 +3047,7 @@ stating before the messages, because the messages are what is left over once it 
 | | crosses | when |
 |---|---|---|
 | the composition surface handle | engine — shell | once, when a graph is built |
-| the display: which monitor, HDR or not, its white and its peak | shell — engine | when the window moves or the mode changes |
+| the display: which monitor, HDR or not, its white and its peak | shell — engine | when the window moves or the mode changes. **Built**: `ipc::Kind::display` |
 | the size to render at | shell — engine | when the window resizes |
 | transport, playlist, settings, log | both | §10, already there |
 
@@ -3067,7 +3067,8 @@ windowless engine that fallback is not a fallback, it is a guess about which mon
 picture is on, and every §9 decision turns on it: the tone mapper, the SDR boost, the HLG
 system gamma, the encoding. So the shell says, and it says it again whenever its window
 crosses a monitor or the user toggles HDR. **This is a message that has to exist**, and it is
-the only one in this list that is not already implied by §10.
+the only one in this list that is not already implied by §10. It exists now — see *The
+profile, and the display* below.
 
 **Who scales: the shell says a size, and the engine renders there.** The alternative was to
 render at the picture's native size and let the shell's visual carry a transform, which costs
@@ -3211,14 +3212,55 @@ read; the event is made once with the chain now and closed with it. And `FakeSin
 extrapolated forward by however long the machine had been up — every video frame there will
 ever be, dropped. A device nobody has driven has no position, and it says so.
 
+#### The profile, and the display
+
+Two things were waiting on the video path and are in.
+
+**`Player` reads a buffering profile** (§9.8.2). Three answers, in the order that respects who
+said what: a number somebody typed wins outright, then a measurement made on this machine for
+this class of stream, then the engine's own generous default — which is what the two above are
+measured against. `PlayerConfig::ring_periods_chosen` is what makes the first two
+distinguishable, and without it a profile would quietly overrule a person, which is the one
+direction this must not be wrong in. Asked **only for a track with a picture in it**, because a
+class of *video* stream is what the profile is keyed on and an audio-only track has no class to
+look up — which is also why the engine could not do this until it had a video path at all.
+`mediaperchd` reads the file the way §11 says: the head opens it, `mp::parse_profile` decides
+what the text means, and a run without one is the run this program made before there were any.
+`[engine] profile` names it, defaulting to `profile.ini` beside the settings file, which is
+where `calibrate` writes it.
+
+**The display message exists** (§9.4, §9.7.1). `probe_display` takes a window and, given none,
+falls back to the first output; for a windowless engine that is not a fallback but a guess about
+which monitor the picture is on, and every §9 decision turns on it. So the shell says:
+`ipc::Kind::display` carries *known*, *hdr*, *wide*, the white level and the peak, `Player`
+applies it to whatever is showing and remembers it for the next track, and `video_d3d11` takes
+it as `set("display", "hdr=1,wide=0,white=480,peak=600")` — or `probe` to go back to working
+it out, which is what a window this process owns wants and what the off-screen measurements
+need.
+
+Three decisions in it:
+
+- **A message and not a setting.** §11's rule is that the keys under `[player]` are things a
+  person chose and a file remembers; where a window happens to be is neither, and a saved one
+  would be replayed at the next startup about a monitor that may be gone.
+- **Every field, every time.** A message carrying only what changed would put the shell's idea
+  of the display and the presenter's out of step the first time one was dropped, and there is
+  nothing to gain: this is sent when a window crosses a monitor.
+- **Said again mid-run means the whole plan again.** The tone mapper, the SDR boost, the HLG
+  system gamma and the swap chain's own format all follow from it, so `replan` is `plan_for`
+  and a rebuilt target — more than a resize costs, and rarer. It takes the same hold on the
+  display loop that a resize does, through the one place that takes it.
+
+The test is a decision rather than a describe row: sRGB content on a display the shell says is
+480-nit HDR gets §9.6's boost of exactly six, which is a number nothing on this machine would
+have produced by itself.
+
 **What `Player` still does not do**, and each is its own step:
 
-- **Read a buffering profile** (§9.8.2). `show` does; the engine now has the video path the
-  profile is keyed on, so the day this lands it asks `mp::ring_for` where it builds the audio
-  graph — and the `ring_periods` it passes has to keep the *nobody said* distinction the
-  probe's does, or a measured profile will overrule a person.
-- **Answer `calibrate`.** §10's surface carries the verb; what it could not do was assemble
-  the A/V graph a run measures, and now it can.
+- **Answer `calibrate`.** §10's surface carries the verb and the engine can now assemble the
+  A/V graph a run measures. What is left is the driver: a calibration is playback of a list at
+  one ring size after another, and an engine that is already playing something has to decide
+  what that means.
 - **Cross a track boundary with the picture.** A queue plays a playlist gaplessly inside one
   run, so the audio can move to the next file while the video graph is still reading the last
   one's feed. Until a boundary rebuilds the picture, the picture stops when the audio leaves

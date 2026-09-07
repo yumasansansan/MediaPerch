@@ -486,6 +486,8 @@ bool Player::set(const std::string& key, const std::string& value, std::string& 
                 return false;
             }
             config_.buffering.ring_periods = static_cast<std::uint32_t>(number);
+            // Somebody said. From here a measured profile does not overrule it.
+            config_.ring_periods_chosen = true;
             rebuild = true;
         } else if (key == "prefill_periods") {
             // Zero is a real answer and not a broken one: start the device on
@@ -538,6 +540,36 @@ bool Player::set(const std::string& key, const std::string& value, std::string& 
 // --------------------------------------------------------------------------
 // The engine thread
 // --------------------------------------------------------------------------
+
+void Player::use_profile(Profile profile)
+{
+    const std::lock_guard lock{mutex_};
+    config_.profile = std::move(profile);
+}
+
+bool Player::set_display(bool known, const VideoPath::DisplayIs& display, std::string& why)
+{
+    {
+        const std::lock_guard lock{mutex_};
+        display_known_ = known;
+        display_ = display;
+    }
+    // **Applied now as well as remembered.** A window that crossed a monitor
+    // did so while something was playing, and a message that only took effect
+    // on the next track would leave the picture graded for the display it left.
+    //
+    // Read without the mutex because `video_` is the engine thread's -- built
+    // and destroyed in `play_run` -- and this is an IPC thread. The race is
+    // real and it is benign in one direction only: a picture opened between
+    // these two lines picks up the value stored above, and one destroyed picks
+    // up nothing. What must not happen is this thread holding a pointer while
+    // that one frees it, which is why the picture stops with the run and not
+    // with a message.
+    if (!video_ || !video_->opened()) {
+        return true;
+    }
+    return known ? video_->set_display(display, why) : video_->probe_display(why);
+}
 
 void Player::set_state(ipc::State state)
 {
@@ -778,6 +810,33 @@ Player::RunEnd Player::play_run(Queue& queue, Playlist& playlist, std::uint64_t&
     note("playing " + playlist.path(queue.index()) + " on " + device + " as " +
          describe(negotiated.accepted) + (processing ? " (processed)" : " (bit-exact)"));
 
+    // **§9.8.2's three answers, in the order that respects who said what.** A
+    // number somebody typed wins outright. Failing that, a measurement made on
+    // this machine for this class of stream. Failing that, the engine's own
+    // generous default, which is what the two above are measured against.
+    //
+    // **Only for a track with a picture in it**, because that is what the
+    // profile is keyed on: a class of *video* stream is what makes a decode
+    // expensive enough for the ring to matter, and an audio-only track has no
+    // class to look up. It is also why the engine could not do this until it
+    // had a video path at all.
+    if (!config.ring_periods_chosen && !config.profile.measured.empty()) {
+        if (IMedia* media = playlist.at_media(queue.index());
+            media != nullptr && media->video() != nullptr) {
+            const IMedia::Picture shot = media->picture();
+            const StreamShape shape{shot.codec, shot.info.width, shot.info.height,
+                                    shot.info.fps_num, shot.info.fps_den};
+            const std::uint32_t asked =
+                ring_for(shape, config.profile, period, negotiated.accepted.sample_rate,
+                         config.buffering.ring_periods);
+            if (asked != config.buffering.ring_periods) {
+                note("profile: " + std::to_string(asked) + " ring periods rather than " +
+                     std::to_string(config.buffering.ring_periods) + ", measured here");
+                config.buffering.ring_periods = asked;
+            }
+        }
+    }
+
     // **The picture, before the graph and after the device.** Before, because
     // a presenter and a decoder take milliseconds to open and the first frame
     // should not wait on them; after, because §9.8.1 hands the decoder the
@@ -872,6 +931,13 @@ void Player::open_video(Playlist& playlist, std::size_t index)
     const IMedia::Picture picture = media->picture();
     auto path = std::make_unique<VideoPath>();
     std::string why;
+    bool known = false;
+    VideoPath::DisplayIs display;
+    {
+        const std::lock_guard lock{mutex_};
+        known = display_known_;
+        display = display_;
+    }
     if (!path->open(*host_, nullptr, *media->video(), picture.info, picture.codec,
                     picture.config, picture.config_bytes, {}, why)) {
         // **Not fatal, and said once.** A file whose picture will not open is a
@@ -880,6 +946,13 @@ void Player::open_video(Playlist& playlist, std::size_t index)
         // worse when it gained a feature.
         note("playing without the picture: " + why);
         return;
+    }
+    // **Before anything is drawn, and after `configure`.** The plan is decided
+    // at `configure` from whatever the presenter then believed; saying it here
+    // decides it again, once, rather than letting the first frames go up graded
+    // for a guess.
+    if (known && !path->set_display(display, why)) {
+        note("the display the shell named was refused: " + why);
     }
     video_ = std::move(path);
 }

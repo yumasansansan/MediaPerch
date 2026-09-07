@@ -67,6 +67,8 @@ const char* kind_name(Kind k) noexcept
         return "calibrate";
     case Kind::profile:
         return "profile";
+    case Kind::display:
+        return "display";
     case Kind::profile_reply:
         return "profile_reply";
     case Kind::subscribe:

@@ -168,6 +168,174 @@ TEST_CASE("a picture that will not open is a track that still plays",
     player.shutdown();
 }
 
+namespace {
+
+/// A measurement for the class `TapeMedia` says its picture is, at a ring size
+/// nothing else would choose, so a log line naming it can only have come from
+/// here.
+mp::Profile measured_profile(double ring_ms)
+{
+    mp::Measurement one;
+    one.shape = mp::StreamShape{MP_CODEC_AV1, 16, 16, 25, 1};
+    one.ring_ms = ring_ms;
+    one.file = "a test";
+    one.runs = 3;
+    mp::Profile out;
+    out.measured.push_back(one);
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("a profile measured on this machine sizes the ring", "[player][profile]")
+{
+    // **§9.8.2 reaching the engine.** `show` has asked the profile since the
+    // calibration was built; the engine could not, because the profile is keyed
+    // on a class of *video* stream and there was no video path to have one. Now
+    // there is.
+    Host host;
+    host.add("film", pattern(4096, 7));
+    host.add_video("film");
+
+    mp::Player player{host};
+    // 100 ms of a 64-frame period at 44100 Hz is about 69 periods, which is
+    // nothing like the default and could not have come from anywhere else.
+    player.use_profile(measured_profile(100.0));
+    player.start();
+    player.play({"film"});
+    REQUIRE(wait_for_state(player, mp::ipc::State::playing));
+    REQUIRE(wait_for_state(player, mp::ipc::State::stopped));
+
+    CHECK(host.said("profile: "));
+    CHECK(host.said("ring periods rather than"));
+    player.shutdown();
+}
+
+TEST_CASE("a number somebody typed is not overruled by a measurement",
+          "[player][profile]")
+{
+    // **The one direction this must not be wrong in.** §9.8.2's three answers
+    // are in an order that respects who said what, and a profile that quietly
+    // replaced a person's number would make the setting a suggestion.
+    Host host;
+    host.add("film", pattern(4096, 8));
+    host.add_video("film");
+
+    mp::Player player{host};
+    player.use_profile(measured_profile(100.0));
+    std::string why;
+    REQUIRE(player.set("ring_periods", "40", why));
+    player.start();
+    player.play({"film"});
+    REQUIRE(wait_for_state(player, mp::ipc::State::playing));
+    REQUIRE(wait_for_state(player, mp::ipc::State::stopped));
+
+    CHECK_FALSE(host.said("profile: "));
+    player.shutdown();
+}
+
+TEST_CASE("a track with no picture has no class to look up", "[player][profile]")
+{
+    // The profile is keyed on a class of video stream, so an audio-only track
+    // is not a small measurement -- it is not a measurement at all, and asking
+    // would be asking about the wrong thing.
+    Host host;
+    host.add("song", pattern(4096, 9));
+
+    mp::Player player{host};
+    player.use_profile(measured_profile(100.0));
+    player.start();
+    player.play({"song"});
+    REQUIRE(wait_for_state(player, mp::ipc::State::playing));
+    REQUIRE(wait_for_state(player, mp::ipc::State::stopped));
+
+    CHECK_FALSE(host.said("profile: "));
+    player.shutdown();
+}
+
+TEST_CASE("the shell says which display, and the engine tells the presenter",
+          "[player][video]")
+{
+    // **§9.7.1's other message, end to end inside the engine.** A windowless
+    // presenter falls back to the first output, which is a guess about which
+    // monitor the picture is on; the shell has the window and says. What is
+    // checked here is that it arrives -- what it then *decides* is
+    // video_d3d11_test.cpp's, where the numbers come back out as pixels.
+    mp::test::presenter_log().reset();
+    mp::test::decoder_log().reset();
+
+    Host host;
+    // Long enough that the track is still playing when the second message
+    // arrives: the fake device is paced far faster than real time, and a
+    // half-second file is over before a test can say anything twice.
+    host.add("film", pattern(2 * 1024 * 1024, 6));
+    host.add_video("film");
+    // A picture with nothing to pace it is a picture the engine drops, so the
+    // second message would have nowhere to go. That is `start_video`'s rule
+    // and it is right -- a presenter that cannot be paced draws nothing and
+    // should not hold a graphics device open.
+    host.pace_with([] { return std::make_unique<Endless>(); });
+
+    mp::Player player{host};
+    mp::VideoPath::DisplayIs display;
+    display.hdr = true;
+    display.white_nits = 480.0f;
+    display.peak_nits = 600.0f;
+    std::string why;
+    // **Before anything is playing**, and it is remembered rather than
+    // refused: a shell should not have to wait for a track to say where its
+    // window is.
+    REQUIRE(player.set_display(true, display, why));
+
+    player.start();
+    player.play({"film"});
+    REQUIRE(wait_for_state(player, mp::ipc::State::playing));
+    REQUIRE(wait_for([] {
+        const std::lock_guard lock{mp::test::presenter_log().mutex};
+        return mp::test::presenter_log().configured;
+    }));
+
+    REQUIRE(wait_for([] {
+        return !mp::test::presenter_log().setting("display").empty();
+    }));
+    CHECK(mp::test::presenter_log().setting("display") ==
+          "hdr=1,wide=0,white=480.0000,peak=600.0000");
+
+    // Said again while it is playing, which is a window crossing a monitor.
+    display.hdr = false;
+    display.white_nits = 240.0f;
+    REQUIRE(player.set_display(true, display, why));
+    CHECK(mp::test::presenter_log().setting("display") ==
+          "hdr=0,wide=0,white=240.0000,peak=600.0000");
+
+    // And stopping knowing is a message too, not a silence.
+    REQUIRE(player.set_display(false, display, why));
+    CHECK(mp::test::presenter_log().setting("display") == "probe");
+
+    player.shutdown();
+}
+
+TEST_CASE("a display message with no picture to apply it to is still taken",
+          "[player][video]")
+{
+    // A shell should not have to know whether the current track has video to
+    // tell the engine where its window is, and it will be right for the next
+    // one that does.
+    mp::test::presenter_log().reset();
+
+    Host host;
+    host.add("song", pattern(4096, 10));
+    mp::Player player{host};
+    player.start();
+
+    mp::VideoPath::DisplayIs display;
+    display.hdr = true;
+    std::string why;
+    CHECK(player.set_display(true, display, why));
+    CHECK(why.empty());
+    player.shutdown();
+}
+
 TEST_CASE("an engine plays what it is told to", "[player]")
 {
     Host host;

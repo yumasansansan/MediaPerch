@@ -828,6 +828,20 @@ struct MpVideo {
     /// clips the whites, which reads as a contrast setting rather than a bug.
     bool full_range = false;
     mp::video::Display display{};
+    /// **What the shell said the display is** (§9.7.1), or nothing.
+    ///
+    /// `probe_display` takes a window and, given none, falls back to the first
+    /// output -- which for a windowless engine is not a fallback but a guess
+    /// about which monitor the picture is on, and every §9 decision turns on
+    /// it: the tone mapper, the SDR boost, the HLG system gamma, the encoding.
+    /// A shell has the window and knows; this is where it says so, and it says
+    /// it again whenever its window crosses a monitor or somebody toggles HDR.
+    ///
+    /// Empty is *ask the operating system*, which is right for a window this
+    /// process owns and for the off-screen measurements -- the two cases that
+    /// can answer for themselves -- and is the default for that reason.
+    bool display_told = false;
+    mp::video::Display told_display{};
     mp::video::Plan plan{};
     mp::video::ToneMap preferred = mp::video::ToneMap::driver;
     bool composited = true;
@@ -1704,6 +1718,34 @@ bool make_target(MpVideo* v, std::string& why)
     return make_target_views(v, why);
 }
 
+/// **The display changed under a presenter that is already running.**
+///
+/// A window crossed a monitor, or somebody toggled HDR. Every §9 decision turns
+/// on what the display is -- the tone mapper, the SDR boost, the HLG system
+/// gamma, and the swap chain's own format -- so this is `plan_for` again and
+/// the target rebuilt from its answer. More than a resize costs, and rarer:
+/// a window is dragged forty times a second and crosses a monitor once.
+///
+/// The swap chain goes with it, because the format may have. `ResizeBuffers`
+/// can change a format, but not the colour space it was created against, and a
+/// chain built for scRGB fp16 is not the chain HDR10 wants.
+bool replan(MpVideo* v)
+{
+    v->display = v->display_told ? v->told_display
+                                 : probe_display(v->factory.get(), v->window);
+    v->plan = mp::video::plan_for(v->stream, v->display, v->preferred, v->composited);
+    if (!make_target(v, v->trouble) || !make_graded_target(v, v->trouble)) {
+        return false;
+    }
+    // A provider that is not ours needs its own device, and which provider the
+    // plan wants may have just changed.
+    if (maps_elsewhere(v) && v->plan.tone_map == mp::video::ToneMap::d2d && !v->d2d_device &&
+        !make_d2d(v, v->trouble)) {
+        return false;
+    }
+    return true;
+}
+
 /// The target size: what the shell asked for, or the picture's own.
 void target_size(const MpVideo* v, std::uint32_t& width, std::uint32_t& height) noexcept
 {
@@ -2075,7 +2117,10 @@ try {
         return MP_ERR_UNSUPPORTED;
     }
 
-    v->display = probe_display(v->factory.get(), v->window);
+    // What the shell said, or what this process can find out. The order is
+    // the point: a caller that knows beats a probe that is guessing.
+    v->display = v->display_told ? v->told_display
+                                 : probe_display(v->factory.get(), v->window);
     v->plan = mp::video::plan_for(v->stream, v->display, v->preferred, v->composited);
 
     if (!make_target(v, v->trouble)) {
@@ -2454,6 +2499,61 @@ try {
         }
         return MP_ERR_INVALID;
     }
+    if (std::strcmp(key, "display") == 0) {
+        // `hdr=1,white=480,peak=1000`, in any order and with any subset given;
+        // `probe` goes back to asking the operating system. The names are the
+        // fields of §9.4's `Display` and the unit is nits, because that is what
+        // every §9 decision is written in.
+        if (std::strcmp(value, "probe") == 0) {
+            v->display_told = false;
+        } else {
+            mp::video::Display said{};
+            const char* at = value;
+            while (*at != '\0') {
+                char name[16];
+                std::size_t n = 0;
+                while (*at != '\0' && *at != '=' && n + 1 < sizeof name) {
+                    name[n++] = *at++;
+                }
+                name[n] = '\0';
+                if (*at != '=') {
+                    v->trouble = "a display is hdr=0|1, wide=0|1, white=<nits>, "
+                                 "peak=<nits>, or the word probe";
+                    return MP_ERR_INVALID;
+                }
+                ++at;
+                char* end = nullptr;
+                const double number = std::strtod(at, &end);
+                if (end == at) {
+                    v->trouble = std::string{"`"} + name + "` needs a number";
+                    return MP_ERR_INVALID;
+                }
+                at = end;
+                if (std::strcmp(name, "hdr") == 0) {
+                    said.hdr = number != 0.0;
+                } else if (std::strcmp(name, "wide") == 0) {
+                    said.wide = number != 0.0;
+                } else if (std::strcmp(name, "white") == 0) {
+                    said.sdr_white_nits = static_cast<float>(number);
+                } else if (std::strcmp(name, "peak") == 0) {
+                    said.peak_nits = static_cast<float>(number);
+                } else {
+                    v->trouble = std::string{"a display has no `"} + name +
+                                 "`; it has hdr, wide, white and peak";
+                    return MP_ERR_INVALID;
+                }
+                if (*at == ',') {
+                    ++at;
+                }
+            }
+            v->display_told = true;
+            v->told_display = said;
+        }
+        if (!v->configured) {
+            return MP_OK; // `configure` will read it
+        }
+        return replan(v) ? MP_OK : MP_ERR_UNSUPPORTED;
+    }
     if (std::strcmp(key, "size") == 0) {
         // **§9.7.1's other decision, as a setting.** `WxH` in pixels, or
         // `native` for the picture's own size. Settable at any time, before
@@ -2633,6 +2733,15 @@ try {
                       "picture\t%ux%u\tthe video's own size, which is what a shell fits "
                       "(read only)",
                       v->picture_width, v->picture_height);
+        return MP_OK;
+    case 14:
+        // **Who said what the display is**, which is the difference between a
+        // decision and a guess. A windowless engine that fell back to the first
+        // output would report the same three numbers and be wrong about which
+        // monitor they belong to, and nothing else in the report would say so.
+        std::snprintf(out, out_bytes,
+                      "display_from\t%s\twho said what the display is (read only)",
+                      v->display_told ? "the shell" : "this process");
         return MP_OK;
     default:
         break;
