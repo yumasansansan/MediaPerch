@@ -13,7 +13,12 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 using mp::test::cd_audio;
@@ -21,6 +26,147 @@ using mp::test::Host;
 using mp::test::pattern;
 using mp::test::wait_for;
 using mp::test::wait_for_state;
+
+namespace {
+
+/// A display that never runs out, so the picture ends when the track does
+/// rather than when the clock does.
+class Endless final : public mp::IFrameClock {
+public:
+    bool wait() override
+    {
+        if (cancelled_.load(std::memory_order_acquire)) {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        now_ += 166'667;
+        return !cancelled_.load(std::memory_order_acquire);
+    }
+    [[nodiscard]] double nominal_interval() const override { return 1.0 / 60.0; }
+    [[nodiscard]] std::uint64_t now() const override { return now_; }
+    [[nodiscard]] std::uint64_t rate() const override { return 10'000'000; }
+    void cancel() noexcept override { cancelled_.store(true, std::memory_order_release); }
+
+private:
+    std::uint64_t now_ = 0;
+    std::atomic<bool> cancelled_{false};
+};
+
+} // namespace
+
+TEST_CASE("an engine opens the picture in a file and closes it with the track",
+          "[player][video]")
+{
+    // **§9.7.1 reaching `Player`.** One file, opened once, with both halves
+    // coming out of it (§4); a presenter opened through `IEngineHost`; a
+    // decoder handed that presenter's graphics device (§9.8.1); and a display
+    // loop on a thread of its own. None of it needs a window, a GPU or a
+    // display, which is the whole reason the assembly moved into `src/player`.
+    //
+    // **What this test is not about is pacing.** Whether a frame is shown,
+    // dropped or held is §8's arithmetic against a clock somebody drives, and
+    // it is checked where a clock can be driven: avsync_test.cpp for the
+    // decision, display_loop_test.cpp for the loop that makes it, and
+    // video_path_test.cpp for the assembly running against one. Driving the
+    // device's own clock from here would be a third copy of that, in the one
+    // test where the device is being paced by something else.
+    mp::test::presenter_log().reset();
+    mp::test::decoder_log().reset();
+    {
+        const std::lock_guard lock{mp::test::decoder_log().mutex};
+        mp::test::decoder_log().frames = 100'000;
+    }
+
+    Host host;
+    host.add("film", pattern(65536, 3));
+    host.add_video("film");
+    host.pace_with([] { return std::make_unique<Endless>(); });
+
+    mp::Player player{host};
+    player.start();
+    player.play({"film"});
+    REQUIRE(wait_for_state(player, mp::ipc::State::playing));
+
+    // The presenter was opened and told what the container said about the
+    // picture -- not about the audio, and not the decoder's own answer, which
+    // arrives later and only if the bitstream disagrees.
+    REQUIRE(wait_for([] {
+        const std::lock_guard lock{mp::test::presenter_log().mutex};
+        return mp::test::presenter_log().configured;
+    }));
+    {
+        const std::lock_guard lock{mp::test::presenter_log().mutex};
+        CHECK(mp::test::presenter_log().info.width == 16u);
+        CHECK(mp::test::presenter_log().info.height == 16u);
+        CHECK(mp::test::presenter_log().info.timescale == 1000u);
+    }
+    // And a decoder was opened rather than merely chosen.
+    {
+        const std::lock_guard lock{mp::test::decoder_log().mutex};
+        CHECK(mp::test::decoder_log().open);
+    }
+
+    // The track ends, and the picture is closed with it: the loop's thread
+    // joined and the decoder shut, rather than left turning against a graph
+    // that has gone.
+    REQUIRE(wait_for_state(player, mp::ipc::State::stopped));
+    REQUIRE(wait_for([] {
+        const std::lock_guard lock{mp::test::decoder_log().mutex};
+        return !mp::test::decoder_log().open;
+    }));
+    {
+        const std::lock_guard lock{mp::test::presenter_log().mutex};
+        CHECK_FALSE(mp::test::presenter_log().open);
+    }
+    CHECK(player.status().underruns == 0);
+
+    player.shutdown();
+}
+
+TEST_CASE("a file with no picture plays exactly as it did", "[player][video]")
+{
+    // The ordinary case, and the one that must not have changed: nothing is
+    // opened, nothing is presented, and the audio is what it was.
+    mp::test::presenter_log().reset();
+
+    Host host;
+    host.add("song", pattern(4096, 4));
+    mp::Player player{host};
+    player.start();
+    player.play({"song"});
+    REQUIRE(wait_for_state(player, mp::ipc::State::playing));
+    REQUIRE(wait_for_state(player, mp::ipc::State::stopped));
+
+    const std::lock_guard lock{mp::test::presenter_log().mutex};
+    CHECK_FALSE(mp::test::presenter_log().open);
+    CHECK_FALSE(mp::test::presenter_log().configured);
+    CHECK(mp::test::presenter_log().presented.load(std::memory_order_relaxed) == 0u);
+    player.shutdown();
+}
+
+TEST_CASE("a picture that will not open is a track that still plays",
+          "[player][video]")
+{
+    // **A player that got worse when it gained a feature** is the failure this
+    // guards against. A machine with no presenter module is a machine that
+    // plays the audio, and says once why there is nothing to look at.
+    mp::test::presenter_log().reset();
+
+    Host host;
+    host.add("film", pattern(4096, 5));
+    host.add_video("film");
+    host.no_presenter();
+
+    mp::Player player{host};
+    player.start();
+    player.play({"film"});
+    REQUIRE(wait_for_state(player, mp::ipc::State::playing));
+    REQUIRE(wait_for_state(player, mp::ipc::State::stopped));
+
+    CHECK(player.status().underruns == 0);
+    CHECK(host.said("playing without the picture"));
+    player.shutdown();
+}
 
 TEST_CASE("an engine plays what it is told to", "[player]")
 {

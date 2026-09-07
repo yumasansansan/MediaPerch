@@ -692,6 +692,10 @@ struct MpVideo {
         if (composition != nullptr) {
             ::CloseHandle(composition);
         }
+        // The compositor's event is one of ours too, for the same reason.
+        if (waitable != nullptr) {
+            ::CloseHandle(waitable);
+        }
     }
 
     Com<ID3D11Device> device;
@@ -771,6 +775,12 @@ struct MpVideo {
     /// an HWND chain draws into a window this process owns, which is the thing
     /// §9.7.1 decided against for an engine and is right for the probe.
     HANDLE composition = nullptr;
+    /// **The compositor's own event, made once.** A waitable swap chain hands
+    /// one back and the caller owns it -- `GetFrameLatencyWaitableObject`
+    /// duplicates on every call, so asking in `describe` leaked a handle per
+    /// row a shell read. Made with the chain, reported from here, and closed
+    /// with it.
+    HANDLE waitable = nullptr;
     bool warp = false;
     /// Off-screen only: single precision unless a caller asks for the format a
     /// display would actually get. A swap chain has no say -- FP16 is the most
@@ -1565,6 +1575,10 @@ bool make_target(MpVideo* v, std::string& why)
     v->target.reset();
     v->staging.reset();
     v->swap_chain.reset();
+    if (v->waitable != nullptr) {
+        CloseHandle(v->waitable);
+        v->waitable = nullptr;
+    }
     v->drawn = false;
 
     const DXGI_FORMAT format = target_format_of(v);
@@ -1618,6 +1632,16 @@ bool make_target(MpVideo* v, std::string& why)
             }
         }
         set_hdr_metadata(v);
+
+        // **The frame clock, taken once.** §9.7.1: an engine with no window
+        // has no vertical blank to wait on, and this event is what the
+        // compositor sets instead. Whoever drives the loop waits on it.
+        Com<IDXGISwapChain2> chain2;
+        if (SUCCEEDED(v->swap_chain->QueryInterface(
+                __uuidof(IDXGISwapChain2), reinterpret_cast<void**>(chain2.put())))) {
+            v->waitable = chain2->GetFrameLatencyWaitableObject();
+        }
+
         if (FAILED(v->swap_chain->GetBuffer(0, __uuidof(ID3D11Texture2D),
                                             reinterpret_cast<void**>(v->target.put())))) {
             why = "no back buffer on the composition chain";
@@ -2527,13 +2551,7 @@ try {
         // boundary, and a shell duplicates it by value out of an IPC message;
         // printing it is how a settings surface carries one.
         if (v->composition != nullptr) {
-            HANDLE waitable = nullptr;
-            Com<IDXGISwapChain2> chain2;
-            if (v->swap_chain &&
-                SUCCEEDED(v->swap_chain->QueryInterface(
-                    __uuidof(IDXGISwapChain2), reinterpret_cast<void**>(chain2.put())))) {
-                waitable = chain2->GetFrameLatencyWaitableObject();
-            }
+            const HANDLE waitable = v->waitable;
             std::snprintf(out, out_bytes,
                           "surface\tcomposition 0x%llx, waitable 0x%llx"
                           "\twhere it draws and what paces it (read only)",

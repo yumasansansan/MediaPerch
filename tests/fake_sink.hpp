@@ -90,6 +90,7 @@ public:
         const std::lock_guard lock{mutex_};
         clock_frames_ = device_frames;
         clock_ticks_ = ticks;
+        told_ = true;
     }
 
     /// A `mp::Sink` pointing at this object. Non-owning: `close` is a no-op, so
@@ -127,6 +128,16 @@ private:
         }
         FakeSink& me = self(s);
         const std::lock_guard lock{me.mutex_};
+        if (!me.told_) {
+            // **A device nobody has driven has no position, and saying zero
+            // would be worse than saying nothing.** A zero frame count stamped
+            // with tick zero reads as a device that started at the epoch, so
+            // §8's extrapolation carries it forward by however long this
+            // machine has been up -- which drops every video frame there will
+            // ever be. `AvClock` is right to refuse a reading it has not had;
+            // this is the fake learning to withhold one.
+            return MP_ERR_UNSUPPORTED;
+        }
         *frames = me.clock_frames_;
         *ticks = me.clock_ticks_;
         return MP_OK;
@@ -204,6 +215,9 @@ private:
     MpSinkVtbl vtbl_{};
     std::uint64_t clock_frames_ = 0;
     std::uint64_t clock_ticks_ = 0;
+    /// Whether anybody has said where the device is. Until somebody has, it
+    /// has no position -- see `get_position_thunk`.
+    bool told_ = false;
     FakeSinkRules rules_;
     std::vector<Format> offered_;
     Format accepted_{};

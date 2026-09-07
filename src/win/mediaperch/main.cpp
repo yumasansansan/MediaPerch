@@ -1334,18 +1334,17 @@ const char* rival_label(const std::string& id)
 /// the source, `verify` sends the bytes to a device and reads them back, and
 /// `loudness` meters them -- four answers about one file that would be worth
 /// nothing if they were answers about four different ways of opening it.
-std::unique_ptr<mp::ISource> open_file(mp::win::EngineHost& host, const std::string& path,
-                                       std::string_view prefer, const char* what)
+std::unique_ptr<mp::IMedia> open_file(mp::win::EngineHost& host, const std::string& path,
+                                      std::string_view prefer, const char* what)
 {
-    std::string opened_by;
     std::string why;
-    auto source = host.open_source(path, prefer, opened_by, why);
-    if (!source) {
+    auto media = host.open_media(path, prefer, why);
+    if (!media) {
         std::fprintf(stderr, "cannot %s %s: %s\n", what, path.c_str(),
                      why.empty() ? "nothing here reads it" : why.c_str());
         return nullptr;
     }
-    return source;
+    return media;
 }
 
 /// The two numbers that decide how much slack the decode thread has.
@@ -1467,36 +1466,32 @@ public:
         }
         opened_.resize(std::max(opened_.size(), index + 1));
         if (opened_[index]) {
-            return opened_[index].get();
+            return &opened_[index]->audio();
         }
         const std::string& path = options_->files[index];
-        std::string opened_by;
         std::string why;
-        auto source = host_->open_source(path, options_->decoder_id, opened_by, why);
-        if (!source) {
+        auto media = host_->open_media(path, options_->decoder_id, why);
+        if (!media) {
             // Recorded rather than fatal: a playlist that silently plays four of
             // its five entries is worse than one that says which it skipped.
             std::fprintf(stderr, "skipping %s: %s\n", path.c_str(),
                          why.empty() ? "no module recognised it" : why.c_str());
             return nullptr;
         }
-        names_.resize(std::max(names_.size(), index + 1));
-        names_[index] = opened_by;
-        opened_[index] = std::move(source);
-        return opened_[index].get();
+        opened_[index] = std::move(media);
+        return &opened_[index]->audio();
     }
 
     [[nodiscard]] const std::string& decoder_name(std::size_t index) const
     {
         static const std::string none;
-        return index < names_.size() ? names_[index] : none;
+        return index < opened_.size() && opened_[index] ? opened_[index]->decoder() : none;
     }
 
 private:
     mp::win::EngineHost* host_;
     const Options* options_;
-    std::vector<std::unique_ptr<mp::ISource>> opened_;
-    std::vector<std::string> names_;
+    std::vector<std::unique_ptr<mp::IMedia>> opened_;
 };
 
 /// One run: everything from the source to the device, played once.
@@ -2906,7 +2901,7 @@ int compare_command(mp::win::EngineHost& host, const Options& options)
     }
     mp::Format source_format;
     std::vector<float> source;
-    if (!read_as_float(*source_input, source_format, source)) {
+    if (!read_as_float(source_input->audio(), source_format, source)) {
         std::fprintf(stderr, "cannot read the source %s\n", options.source.c_str());
         return 1;
     }
@@ -2917,7 +2912,7 @@ int compare_command(mp::win::EngineHost& host, const Options& options)
     }
     mp::Format subject_format;
     std::vector<float> subject;
-    if (!read_as_float(*subject_input, subject_format, subject)) {
+    if (!read_as_float(subject_input->audio(), subject_format, subject)) {
         std::fprintf(stderr, "cannot decode %s\n", options.file.c_str());
         return 1;
     }
@@ -2949,14 +2944,13 @@ int compare_command(mp::win::EngineHost& host, const Options& options)
     // anything away that the other one kept.
     bool rival_ok = true;
     if (options.rival_id != "none") {
-        std::string rival_id;
         std::string rival_why;
-        auto rival_input =
-            host.open_source(options.file, options.rival_id, rival_id, rival_why);
+        auto rival_input = host.open_media(options.file, options.rival_id, rival_why);
         if (rival_input) {
+            const std::string rival_id = rival_input->decoder();
             mp::Format rival_format;
             std::vector<float> other;
-            if (read_as_float(*rival_input, rival_format, other) &&
+            if (read_as_float(rival_input->audio(), rival_format, other) &&
                 rival_format.channels == channels) {
                 const mp::Comparison theirs = mp::compare(
                     source.data(), source_frames, other.data(), other.size() / channels, channels,
@@ -3916,17 +3910,17 @@ int main(int argc, char** argv)
         }
 #endif
 
-        std::string opened_by;
         std::string why;
-        auto source = host.open_source(options.file, options.decoder_id, opened_by, why);
-        if (!source) {
+        auto media = host.open_media(options.file, options.decoder_id, why);
+        if (!media) {
             std::fprintf(stderr, "cannot %s %s: %s\n", options.command.c_str(),
                          options.file.c_str(),
                          why.empty() ? "nothing here reads it" : why.c_str());
             return 1;
         }
-        std::printf("decoder    %s%s\n", opened_by.c_str(),
+        std::printf("decoder    %s%s\n", media->decoder().c_str(),
                     options.decoder_id.empty() ? "" : "  [forced]");
+        mp::ISource* source = &media->audio();
 
         if (options.command == "decode") {
             return decode(*source, registry, options);

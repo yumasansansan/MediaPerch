@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// The six things the engine asks Windows for.
+// The seven things the engine asks Windows for.
 //
 // `mp::Player` is portable and knows nothing about LoadLibrary, MMDevice or
 // paths with drive letters. This is where all of that is, and it is small on
@@ -10,6 +10,7 @@
 #ifndef MEDIAPERCH_WIN_ENGINE_HOST_HPP
 #define MEDIAPERCH_WIN_ENGINE_HOST_HPP
 
+#include "mediaperch/display_win.hpp"
 #include "mediaperch/log.hpp"
 #include "mediaperch/platform.hpp"
 #include "mediaperch/player.hpp"
@@ -27,16 +28,18 @@ public:
     {
     }
 
-    std::unique_ptr<ISource> open_source(const std::string& path, std::string& decoder,
-                                         std::string& why) override;
+    std::unique_ptr<IMedia> open_media(const std::string& path, std::string& why) override;
 
     /// The same resolution with one demuxer named, which then gets no fallback:
     /// "use that one" answered with a different one is not an answer.
     ///
     /// The probe and the engine share this on purpose: two ways of opening a
-    /// file that were not the same way would be worse than either.
-    std::unique_ptr<ISource> open_source(const std::string& path, std::string_view prefer,
-                                         std::string& decoder, std::string& why);
+    /// file that were not the same way would be worse than either. It is also
+    /// why there is no `open_source` beside it any more -- the commands that
+    /// want only the audio take `IMedia::audio()`, which is the same file
+    /// opened the same way.
+    std::unique_ptr<IMedia> open_media(const std::string& path, std::string_view prefer,
+                                       std::string& why);
     Sink open_sink(const std::string& want, bool shared, std::string& resolved,
                    std::string& why) override;
     /// §9.7.1's presenter. **A null window is not off-screen here**: it is a
@@ -51,6 +54,8 @@ public:
                                                      std::uint32_t config_bytes,
                                                      std::string& module,
                                                      std::string& why) override;
+    [[nodiscard]] std::unique_ptr<IFrameClock> frame_clock(Presenter& presenter,
+                                                           void* window) override;
     [[nodiscard]] const MpDspVtbl* dsp(const std::string& id) override;
     [[nodiscard]] bool device_ready(const std::string& want, bool shared) override;
     void log(const std::string& line) override;

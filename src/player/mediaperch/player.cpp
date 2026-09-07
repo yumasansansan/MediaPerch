@@ -121,10 +121,20 @@ public:
         : host_(&host), files_(std::move(files))
     {
         opened_.resize(files_.size());
-        names_.resize(files_.size());
     }
 
     ISource* at(std::size_t index) override
+    {
+        IMedia* media = at_media(index);
+        return media != nullptr ? &media->audio() : nullptr;
+    }
+
+    /// The whole file, for the caller that wants the picture too.
+    ///
+    /// `at` is `IPlaylist`'s and hands back the audio because that is what a
+    /// `Queue` reads; this is the same object with the rest of it still
+    /// attached, and both point into one demuxer with one position (§4).
+    IMedia* at_media(std::size_t index)
     {
         if (index >= files_.size()) {
             return nullptr;
@@ -133,23 +143,21 @@ public:
             return opened_[index].get();
         }
         std::string why;
-        std::string decoder;
-        auto source = host_->open_source(files_[index], decoder, why);
-        if (!source) {
+        auto media = host_->open_media(files_[index], why);
+        if (!media) {
             // Recorded rather than fatal: a playlist that silently plays four
             // of its five entries is worse than one that says which it skipped.
             host_->log("skipping " + files_[index] + ": " + why);
             return nullptr;
         }
-        names_[index] = decoder;
-        opened_[index] = std::move(source);
+        opened_[index] = std::move(media);
         return opened_[index].get();
     }
 
     [[nodiscard]] const std::string& decoder_name(std::size_t index) const
     {
         static const std::string none;
-        return index < names_.size() ? names_[index] : none;
+        return index < opened_.size() && opened_[index] ? opened_[index]->decoder() : none;
     }
     [[nodiscard]] const std::string& path(std::size_t index) const
     {
@@ -160,8 +168,7 @@ public:
 private:
     IEngineHost* host_;
     std::vector<std::string> files_;
-    std::vector<std::unique_ptr<ISource>> opened_;
-    std::vector<std::string> names_;
+    std::vector<std::unique_ptr<IMedia>> opened_;
 };
 
 // --------------------------------------------------------------------------
@@ -771,6 +778,12 @@ Player::RunEnd Player::play_run(Queue& queue, Playlist& playlist, std::uint64_t&
     note("playing " + playlist.path(queue.index()) + " on " + device + " as " +
          describe(negotiated.accepted) + (processing ? " (processed)" : " (bit-exact)"));
 
+    // **The picture, before the graph and after the device.** Before, because
+    // a presenter and a decoder take milliseconds to open and the first frame
+    // should not wait on them; after, because §9.8.1 hands the decoder the
+    // presenter's graphics device and neither exists until now.
+    open_video(playlist, queue.index());
+
     RunEnd end = RunEnd::failed;
     // **An enormous ring is the user's business; a terminated engine is not.**
     // `ring_periods` has no ceiling any more -- `Player::set` says why -- so the
@@ -832,11 +845,65 @@ Player::RunEnd Player::play_run(Queue& queue, Playlist& playlist, std::uint64_t&
         error_ = short_of_memory;
         end = RunEnd::failed;
     }
+    stop_video();
+    video_.reset();
     {
         const std::lock_guard lock{mutex_};
         queue_ = nullptr;
     }
     return end;
+}
+
+
+void Player::open_video(Playlist& playlist, std::size_t index)
+{
+    video_.reset();
+
+    IMedia* media = playlist.at_media(index);
+    if (media == nullptr || media->video() == nullptr) {
+        return; // most files, and not an error
+    }
+
+    // **§9.7.1's headless case**: no window, so the presenter draws into a
+    // composition surface a shell composites, and the frame clock is the event
+    // that compositor sets. A shell that is not there yet means a picture
+    // nobody is looking at, which costs a decode and is what a shell attaching
+    // mid-track has to find already running.
+    const IMedia::Picture picture = media->picture();
+    auto path = std::make_unique<VideoPath>();
+    std::string why;
+    if (!path->open(*host_, nullptr, *media->video(), picture.info, picture.codec,
+                    picture.config, picture.config_bytes, {}, why)) {
+        // **Not fatal, and said once.** A file whose picture will not open is a
+        // file that plays, which is exactly what it did before there was a
+        // video path at all; refusing the track would be a player that got
+        // worse when it gained a feature.
+        note("playing without the picture: " + why);
+        return;
+    }
+    video_ = std::move(path);
+}
+
+void Player::start_video(IAudioClockSource& audio)
+{
+    if (!video_ || !video_->opened()) {
+        return;
+    }
+    // **After the audio graph has started**, because §8 makes the audio device
+    // the master clock and a picture paced against a clock that is not running
+    // is a picture paced against a guess.
+    std::string why;
+    if (!video_->start(audio, why)) {
+        note("the picture will not be shown: " + why);
+        video_.reset();
+    }
+}
+
+void Player::stop_video() noexcept
+{
+    if (video_) {
+        video_->stop();
+    }
 }
 
 template <typename Graph>
@@ -854,17 +921,38 @@ Player::RunEnd Player::pump(Graph& graph)
     }
 
     RunEnd end = RunEnd::finished;
-    while (graph.running()) {
-        if (quit_.load(std::memory_order_acquire) ||
-            stop_wanted_.load(std::memory_order_acquire)) {
-            end = RunEnd::stopped;
-            break;
+    {
+        // The graph, as §8's master clock. Scoped so that the picture is
+        // stopped and its thread joined before this goes -- the display loop
+        // reads this every turn.
+        GraphClock<Graph> audible{graph};
+        start_video(audible);
+
+        // **The track the picture belongs to.** A queue plays a playlist
+        // gaplessly inside one run, so the audio may move to the next file
+        // while the video graph is still reading the last one's feed. Until a
+        // boundary rebuilds the picture -- its own step -- the picture stops
+        // when the audio leaves the file it came from, which is honest and is
+        // not a frame of the wrong film.
+        const std::size_t showing = queue_ != nullptr ? queue_->index() : 0;
+
+        while (graph.running()) {
+            if (quit_.load(std::memory_order_acquire) ||
+                stop_wanted_.load(std::memory_order_acquire)) {
+                end = RunEnd::stopped;
+                break;
+            }
+            if (rebuild_wanted_.exchange(false, std::memory_order_acq_rel)) {
+                end = RunEnd::rebuild;
+                break;
+            }
+            if (video_ && queue_ != nullptr && queue_->index() != showing) {
+                stop_video();
+                video_.reset();
+            }
+            std::this_thread::sleep_for(k_poll);
         }
-        if (rebuild_wanted_.exchange(false, std::memory_order_acq_rel)) {
-            end = RunEnd::rebuild;
-            break;
-        }
-        std::this_thread::sleep_for(k_poll);
+        stop_video();
     }
     graph.stop();
 

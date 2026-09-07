@@ -25,7 +25,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <functional>
 #include <map>
+#include <set>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -95,6 +97,67 @@ inline std::vector<std::uint8_t> pattern(std::size_t bytes, std::uint8_t seed)
     return out;
 }
 
+/// A file, as `IEngineHost` hands one back: bytes for the audio, and a video
+/// feed when the test asked for one.
+///
+/// **The two share nothing here and that is a fake's licence.** A real one is a
+/// demuxer, a router and one position (§4); what a `Player` test is checking is
+/// that the picture is opened, started against the audio clock, and stopped --
+/// not that a router routes, which is packet_test.cpp's.
+class TapeMedia final : public IMedia {
+public:
+    TapeMedia(const Format& format, std::vector<std::uint8_t> data, bool with_video)
+        : audio_(format, std::move(data)), with_video_(with_video)
+    {
+    }
+
+    [[nodiscard]] ISource& audio() noexcept override { return audio_; }
+    [[nodiscard]] IPacketFeed* video() noexcept override
+    {
+        return with_video_ ? &feed_ : nullptr;
+    }
+    [[nodiscard]] Picture picture() const noexcept override
+    {
+        Picture out;
+        out.info.size = sizeof(out.info);
+        out.info.width = 16;
+        out.info.height = 16;
+        out.info.display_width = 16;
+        out.info.display_height = 16;
+        out.info.timescale = 1000;
+        out.info.fps_num = 25;
+        out.info.fps_den = 1;
+        out.codec = MP_CODEC_AV1;
+        return out;
+    }
+    [[nodiscard]] const std::string& decoder() const noexcept override { return by_; }
+
+private:
+    /// A packet whenever asked, because what the audio does is the subject and
+    /// a feed that ran out would end the picture before the track did.
+    class Endless final : public IPacketFeed {
+    public:
+        MpResult next(std::vector<std::uint8_t>& buffer, MpPacket& out) override
+        {
+            buffer.assign(16, 0x5A);
+            out = MpPacket{};
+            out.size = sizeof(out);
+            out.bytes = static_cast<std::uint32_t>(buffer.size());
+            out.frame = frame_;
+            frame_ += 40;
+            return MP_OK;
+        }
+
+    private:
+        std::uint64_t frame_ = 0;
+    };
+
+    Tape audio_;
+    Endless feed_;
+    bool with_video_;
+    std::string by_{"decode_test"};
+};
+
 /// A name is a file, a device is the fake sink, and a log line is a string.
 class Host final : public IEngineHost {
 public:
@@ -114,22 +177,39 @@ public:
         files_[name] = {format, std::move(bytes)};
     }
 
-    std::unique_ptr<ISource> open_source(const std::string& path, std::string& decoder,
-                                         std::string& why) override
+    std::unique_ptr<IMedia> open_media(const std::string& path, std::string& why) override
     {
         const auto found = files_.find(path);
         if (found == files_.end()) {
             why = "no decoder recognised it";
             return nullptr;
         }
-        decoder = "decode_test";
-        return std::make_unique<Tape>(found->second.first, found->second.second);
+        return std::make_unique<TapeMedia>(found->second.first, found->second.second,
+                                           with_video_.count(path) != 0);
     }
+
+    /// Says this file has a picture in it, so a `Player` test can watch the
+    /// video path being opened, started and stopped.
+    void add_video(const std::string& name) { with_video_.insert(name); }
 
     /// §9.7.1's two doors, made of counters. **`VideoPath` cannot tell**, and
     /// that is the claim: it opens both through here, hands one's device to the
     /// other and runs the loop, without ever learning whether the presenter is
     /// Direct3D or two atomics.
+    /// Null: the fake presenter has no swap chain and nothing that will show
+    /// what it draws, so nothing that says when. A `VideoPath` that wants to
+    /// run in a test is handed a clock by the test.
+    [[nodiscard]] std::unique_ptr<IFrameClock> frame_clock(Presenter&, void*) override
+    {
+        return frames_ ? frames_() : nullptr;
+    }
+
+    /// What `frame_clock` should answer, when a test wants the picture to run.
+    void pace_with(std::function<std::unique_ptr<IFrameClock>()> make)
+    {
+        frames_ = std::move(make);
+    }
+
     std::unique_ptr<Presenter> open_presenter(void* window, std::string& module,
                                               std::string& why) override
     {
@@ -220,6 +300,8 @@ public:
 
 private:
     std::map<std::string, std::pair<Format, std::vector<std::uint8_t>>> files_;
+    std::set<std::string> with_video_;
+    std::function<std::unique_ptr<IFrameClock>()> frames_;
     std::unique_ptr<FakeSink> device_;
     bool present_ = true;
     bool presenter_ = true;

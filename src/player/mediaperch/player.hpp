@@ -35,6 +35,7 @@
 #include "mediaperch/sink.hpp"
 #include "mediaperch/source.hpp"
 #include "mediaperch/video.hpp"
+#include "mediaperch/video_path.hpp"
 
 #include <atomic>
 #include <condition_variable>
@@ -50,9 +51,10 @@ namespace mp {
 
 /// What the engine needs from the operating system it happens to be on.
 ///
-/// Six things, and no more: open a file, open a device, find a filter, say
-/// something -- and, since §9.7.1's video path moved in here, open a presenter
-/// and open a video decoder. Everything else the engine does itself.
+/// Seven things, and no more: open a file, open a device, find a filter, say
+/// something -- and, since §9.7.1's video path moved in here, open a presenter,
+/// open a video decoder, and answer when the next frame may be drawn.
+/// Everything else the engine does itself.
 ///
 /// **The two new ones are doors, not policy.** Which presenter module is
 /// loaded and which decoder claims a codec is a registry's business, and a
@@ -63,12 +65,17 @@ class IEngineHost {
 public:
     virtual ~IEngineHost() = default;
 
-    /// Opens `path` with whichever decoder claims it. Returns nullptr and fills
-    /// `why` when nothing does -- which is a skipped track, not a failed
-    /// playlist.
-    virtual std::unique_ptr<ISource> open_source(const std::string& path,
-                                                 std::string& decoder,
-                                                 std::string& why) = 0;
+    /// Opens `path` with whichever demuxer claims it and whichever codec
+    /// claims its audio. Returns nullptr and fills `why` when nothing does --
+    /// which is a skipped track, not a failed playlist.
+    ///
+    /// **It opens the file, not the audio.** §4 gives a file one position, so
+    /// a host that returned a bare `ISource` and left the video to be opened
+    /// separately would be returning one of two demuxers -- and a seek would
+    /// then have to move both and land them on the same moment. `IMedia` is
+    /// the file, and what it hands out shares that position.
+    virtual std::unique_ptr<IMedia> open_media(const std::string& path,
+                                               std::string& why) = 0;
 
     /// Opens an endpoint. `want` is a name to match, or empty for the default;
     /// `resolved` comes back with what was actually opened, for the report.
@@ -91,6 +98,23 @@ public:
     /// which one it was, for the report.
     virtual std::unique_ptr<Presenter> open_presenter(void* window, std::string& module,
                                                       std::string& why) = 0;
+
+    /// When the next frame may be drawn, for a presenter that has one.
+    ///
+    /// **Asked after `configure`, and that is why it is not part of opening
+    /// one.** A composition presenter has no swap chain until it has been given
+    /// a picture, and the event the compositor sets is made with the chain;
+    /// a caller that wanted the clock at `open` would be asking before there
+    /// was one. A window presenter could answer earlier and does not, because
+    /// two ways of getting a clock is the drift this door exists to avoid.
+    ///
+    /// Null is a real answer: an off-screen presenter has nothing to pace on,
+    /// and the caller supplies its own clock or does not draw. Nothing here can
+    /// be built in the core -- a vertical blank and a waitable handle are both
+    /// an operating system's, which is what puts this behind this interface at
+    /// all.
+    [[nodiscard]] virtual std::unique_ptr<IFrameClock> frame_clock(Presenter& presenter,
+                                                                   void* window) = 0;
 
     /// A decoder for `codec`: best first, and the next one when the best
     /// declines -- the rule `open_source` follows, and for a case that was
@@ -207,6 +231,16 @@ private:
     /// not there or will not take a setting.
     bool build_chain(DspChain& chain, std::string& why);
 
+    /// Opens the picture, if the track has one and a presenter will take it.
+    /// **Never fatal**: a file whose video will not open is a file that plays,
+    /// which is what it would have done before there was a video path at all.
+    void open_video(Playlist& playlist, std::size_t index);
+    /// Starts it against the clock the audio graph is now running on (§8).
+    /// Non-template so that `pump` can call it -- `GraphClock<Graph>` is an
+    /// `IAudioClockSource` and that is all this needs to know.
+    void start_video(IAudioClockSource& audio);
+    void stop_video() noexcept;
+
     void set_state(ipc::State state);
     void note(const std::string& line);
     /// Waits for a device to answer again, or gives up. False also when
@@ -225,6 +259,15 @@ private:
     Queue* queue_ = nullptr;
     PassthroughGraph* graph_a_ = nullptr;
     ProcessedGraph* graph_b_ = nullptr;
+
+    /// The picture, when the current track has one. Null for most files, which
+    /// is not an error and is why nothing above tests it before playing.
+    ///
+    /// **Owned by the engine thread**, built in `play_run` and destroyed there,
+    /// so nothing takes the mutex to reach it. A rebuild -- a lost device, a
+    /// changed setting -- opens it again, which costs a decoder and a presenter
+    /// and is the price of the audio graph being the thing a rebuild is about.
+    std::unique_ptr<VideoPath> video_;
 
     PlayerConfig config_;
     /// The config the current run was actually built from. A setting that turns

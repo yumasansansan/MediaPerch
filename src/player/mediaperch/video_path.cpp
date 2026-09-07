@@ -21,6 +21,7 @@ bool VideoPath::open(IEngineHost& host, void* window, IPacketFeed& feed,
 {
     stop();
     graph_.reset();
+    own_frames_.reset();
     decoder_.reset();
     presenter_.reset();
     modules_ = Modules{};
@@ -73,7 +74,20 @@ bool VideoPath::open(IEngineHost& host, void* window, IPacketFeed& feed,
     presenter_ = std::move(presenter);
     decoder_ = std::move(decoder);
     graph_ = std::make_unique<VideoGraph>(feed, *decoder_, *presenter_, picture);
+    // **After `configure`, which is where the chain the event belongs to is
+    // made.** Null is a real answer and not a failure: an off-screen presenter
+    // has nothing that will show what it draws, so nothing that says when.
+    own_frames_ = host.frame_clock(*presenter_, window);
     return true;
+}
+
+bool VideoPath::start(IAudioClockSource& audio, std::string& why)
+{
+    if (own_frames_ == nullptr) {
+        why = "this presenter has no clock to pace on";
+        return false;
+    }
+    return start(audio, *own_frames_, why);
 }
 
 bool VideoPath::start(IAudioClockSource& audio, IFrameClock& frames, std::string& why)

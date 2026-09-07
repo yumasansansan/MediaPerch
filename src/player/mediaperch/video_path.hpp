@@ -93,12 +93,24 @@ public:
 
     [[nodiscard]] bool opened() const noexcept { return graph_ != nullptr; }
 
-    /// Starts the display loop on a thread of its own.
+    /// Starts the display loop on a thread of its own, on the clock the
+    /// presenter brought with it.
     ///
     /// **Not this thread**, because `IFrameClock::wait` blocks for a whole
     /// refresh and a head that waited in it would be a window Windows calls
     /// unresponsive.
+    ///
+    /// False when the presenter brought none -- off-screen, or a display that
+    /// would not answer. The caller then supplies one or does not draw.
+    bool start(IAudioClockSource& audio, std::string& why);
+
+    /// The same, on a clock the caller has instead. `show` uses it for the
+    /// tick fallback a machine with no vertical blank gets.
     bool start(IAudioClockSource& audio, IFrameClock& frames, std::string& why);
+
+    /// The clock the presenter brought, or null. Handed out so a report can
+    /// say what is pacing the picture, which is a thing worth printing.
+    [[nodiscard]] IFrameClock* clock() noexcept { return own_frames_.get(); }
 
     /// Cancels the frame clock and joins. Safe twice, and safe unopened.
     void stop() noexcept;
@@ -145,6 +157,10 @@ private:
     std::unique_ptr<VideoDecoder> decoder_;
     std::unique_ptr<VideoGraph> graph_;
     std::unique_ptr<DisplayLoop> loop_;
+    /// **The presenter's own**, fetched once `configure` has made the swap
+    /// chain there is an event on. Owned here because the presenter is owned
+    /// here and the two go together.
+    std::unique_ptr<IFrameClock> own_frames_;
     Modules modules_;
 
     IFrameClock* frames_ = nullptr;

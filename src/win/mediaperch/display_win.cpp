@@ -263,6 +263,33 @@ bool VideoWindow::open(const std::string& title, std::uint32_t width, std::uint3
     return true;
 }
 
+bool WaitableClock::wait()
+{
+    if (cancelled_ || waitable_ == nullptr) {
+        return false;
+    }
+    // A second, not INFINITE. A compositor that has stopped setting the event
+    // -- a session locked, a shell gone -- must not hold the loop's thread
+    // where nothing can join it; a timeout is a turn with nothing drawn, which
+    // is what `DisplayLoop` does with any turn whose clock has not moved.
+    const DWORD woke = WaitForSingleObject(static_cast<HANDLE>(waitable_), 1000);
+    return !cancelled_ && (woke == WAIT_OBJECT_0 || woke == WAIT_TIMEOUT);
+}
+
+std::uint64_t WaitableClock::now() const
+{
+    LARGE_INTEGER counter{};
+    QueryPerformanceCounter(&counter);
+    return static_cast<std::uint64_t>(counter.QuadPart);
+}
+
+std::uint64_t WaitableClock::rate() const
+{
+    LARGE_INTEGER frequency{};
+    QueryPerformanceFrequency(&frequency);
+    return static_cast<std::uint64_t>(frequency.QuadPart);
+}
+
 bool VideoWindow::client_size(std::uint32_t& width, std::uint32_t& height) const
 {
     width = 0;

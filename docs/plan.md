@@ -3166,12 +3166,63 @@ Three decisions were forced by the move rather than chosen for it.
   than handling `WM_SIZE`, because a window procedure that waits for a loop to park is a
   window Windows calls unresponsive.
 
-**What is still missing before `Player` shows a picture**, and it is one thing: `open_source`
-hands back an `ISource`, which is audio. A file with both halves in it is one demuxer, one
-position and a `PacketRouter` (§4), so the door that feeds a `VideoPath` is **a router rather
-than a source** — and that changes `Playlist`, `Queue` and `play_run`, which is why it is
-its own step rather than a line in this one. `VideoPath` is written against an `IPacketFeed`
-precisely so that it does not care which side of that change it is on.
+#### The door opens a file, not an audio stream
+
+`open_source` handed back an `ISource`, which is audio, and a caller that wanted the picture
+would have had to open the file a second time — two demuxers, two positions, and a seek that
+has to move both and land them on the same moment, which the ABI header says at length is the
+thing to avoid. So the door is **`open_media`**, and `mp::IMedia` is §4 as a type: one file,
+opened once, with everything a player wants coming out of it.
+
+The two halves are deliberately not symmetrical. The **audio is an `ISource`**, because that
+is what the graphs take and because §8 makes the audio device the master clock, so it has to
+be playing before anything else is decided. The **video is an `IPacketFeed`** and three facts
+about the stream, because a video decoder is opened against a presenter's graphics device
+(§9.8.1) and the host has no presenter — whoever has one opens it, which is `VideoPath`.
+
+Four things fell out of writing it:
+
+- **The router is there even when the file has no video**, with one stream in it. A second
+  code path for the common case would be a second place for a seek to behave differently, and
+  it costs nothing measurable: a consumer asking for its own stream has the demuxer read
+  straight into that consumer's buffer. `decode`'s SHA-256 for `av.mp4` is unchanged, which is
+  what makes that a measurement rather than a claim.
+- **A demuxer that decodes for itself is the one shape a router cannot serve.** `demux_mf` and
+  `demux_ffmpeg` hand over frames rather than packets (MP_STREAM_SELF_DECODES), so a file they
+  claim takes the plain path and has no picture. Asked of the file rather than of the module's
+  name.
+- **A container that will not serve both streams together still plays.** What is dropped is
+  the picture, not the track: a player that refused a file because its video could not be read
+  alongside would be a player that got worse when it gained a feature. The same rule covers a
+  presenter that will not open and a codec nobody has — each says so once, in the log, and the
+  audio plays.
+- **A seventh door: `frame_clock`.** *When may the next frame be drawn* is an operating
+  system's question and there is no way to answer it in the core. It is asked **after
+  `configure`**, because a composition presenter has no swap chain until it has been given a
+  picture and the compositor's event is made with the chain; a window presenter could answer
+  earlier and does not, because two ways of getting a clock is the drift the door exists to
+  prevent. That count is written down in `IEngineHost` on purpose, so the eighth has to argue
+  with a number.
+
+Two things the work turned up that were nobody's plan. `GetFrameLatencyWaitableObject`
+duplicates on every call, so reporting the handle in `describe` leaked one per row a shell
+read; the event is made once with the chain now and closed with it. And `FakeSink` answered
+`get_position` with zero frames at tick zero before anybody had driven it, which §8 then
+extrapolated forward by however long the machine had been up — every video frame there will
+ever be, dropped. A device nobody has driven has no position, and it says so.
+
+**What `Player` still does not do**, and each is its own step:
+
+- **Read a buffering profile** (§9.8.2). `show` does; the engine now has the video path the
+  profile is keyed on, so the day this lands it asks `mp::ring_for` where it builds the audio
+  graph — and the `ring_periods` it passes has to keep the *nobody said* distinction the
+  probe's does, or a measured profile will overrule a person.
+- **Answer `calibrate`.** §10's surface carries the verb; what it could not do was assemble
+  the A/V graph a run measures, and now it can.
+- **Cross a track boundary with the picture.** A queue plays a playlist gaplessly inside one
+  run, so the audio can move to the next file while the video graph is still reading the last
+  one's feed. Until a boundary rebuilds the picture, the picture stops when the audio leaves
+  the file it came from, which is honest and is not a frame of the wrong film.
 
 **What else comes with the video path, and is easy to forget.** Two things are waiting on this
 section rather than on any decision of their own, and neither is visible from here unless it is

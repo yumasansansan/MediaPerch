@@ -9,6 +9,7 @@
 
 #include "mediaperch/display.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -131,6 +132,38 @@ private:
 /// headless engine which creates windows is not headless, and that the frame
 /// crosses the process boundary as a DirectComposition surface instead. This is
 /// for `mediaperch-probe`, which is one program looking at one file.
+
+/// **The compositor's own event, as a frame clock** (§9.7.1).
+///
+/// An engine with no window has no vertical blank to wait on. A composition
+/// swap chain asked for `DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT`
+/// hands back an event the compositor sets when it will take another frame,
+/// which is `WaitForVBlank`'s question answered by the thing that will actually
+/// show the picture -- and it is the third `IFrameClock`, beside the vblank and
+/// the tick, that §9.7.1 said this shape would produce.
+///
+/// **The handle is the presenter's and is not closed here.** It is made once
+/// with the swap chain and closed with it; a clock that closed it would leave
+/// the module reporting a handle that is not one.
+class WaitableClock final : public mp::IFrameClock {
+public:
+    explicit WaitableClock(void* waitable) noexcept : waitable_(waitable) {}
+
+    bool wait() override;
+    [[nodiscard]] std::uint64_t now() const override;
+    [[nodiscard]] std::uint64_t rate() const override;
+    void cancel() noexcept override { cancelled_ = true; }
+
+    /// Zero: the compositor does not say what interval it will take frames at,
+    /// and `DisplayLoop` measures the real one anyway -- which it does better
+    /// than any mode's label, per §8's note on the estimator.
+    [[nodiscard]] double nominal_interval() const override { return 0.0; }
+
+private:
+    void* waitable_;
+    std::atomic<bool> cancelled_{false};
+};
+
 class VideoWindow final {
 public:
     VideoWindow() = default;
