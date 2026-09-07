@@ -254,6 +254,53 @@ TEST_CASE("skip abandons the rest of a track and the device does not notice",
 // Pause and seek
 // --------------------------------------------------------------------------
 
+TEST_CASE("a next is a seek that lands on the following track, and drops what was read ahead",
+          "[transport][queue]")
+{
+    // **What a "next" button means.** The decoder reads ahead by the ring's
+    // depth; `skip` abandons *its* track and leaves the ring alone, so the rest
+    // of what is playing plays out first. `request_next` turns the next seek --
+    // to the device's own frame -- into a landing on the start of the track
+    // after the one that frame is in, with everything past that frame thrown
+    // away and decoded again from the right place.
+    const auto first = pattern(4096, 5);
+    const auto second = pattern(4096, 6);
+    Tape a{cd_audio(), first};
+    Tape b{cd_audio(), second};
+    Fixed playlist{{&a, &b}};
+
+    mp::Queue queue{playlist};
+    std::string why;
+    REQUIRE(queue.open(why));
+
+    // The decoder is well into the second track; the listener is in the first.
+    std::vector<std::uint8_t> ahead(first.size() + 512);
+    REQUIRE(queue.read(ahead.data(), ahead.size()) == ahead.size());
+    REQUIRE(queue.index() == 1);
+    const std::uint64_t heard = 300;
+    REQUIRE(queue.index_at(heard) == 0);
+
+    queue.request_next();
+    REQUIRE(queue.seek(heard));
+    // The second track, from its start, at the frame the listener was at:
+    // the timeline does not jump and the read-ahead is gone.
+    CHECK(queue.index() == 1);
+    CHECK(queue.index_at(heard) == 1);
+    CHECK(queue.start_at(heard) == heard);
+    CHECK(queue.index_at(heard - 1) == 0);
+    CHECK(queue.item_position() == 0);
+    CHECK(queue.position() == heard);
+    std::vector<std::uint8_t> got(512);
+    REQUIRE(queue.read(got.data(), got.size()) == got.size());
+    CHECK(std::equal(got.begin(), got.end(), second.begin()));
+
+    // And a next on the last track is the end, here rather than later.
+    queue.request_next();
+    REQUIRE(queue.seek(heard + 100));
+    CHECK(queue.read(got.data(), got.size()) == 0);
+    CHECK(queue.stopped() == mp::QueueStop::end);
+}
+
 TEST_CASE("pausing stops the device and resuming carries on", "[transport]")
 {
     Tape tape{cd_audio(), pattern(44100 * 4, 7)}; // a second or so

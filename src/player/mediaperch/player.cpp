@@ -342,9 +342,35 @@ bool Player::seek(std::int64_t frames, bool relative)
 
 void Player::next()
 {
+    // Held for the whole call, as `seek` holds it: the graph may not be
+    // destroyed underneath this, and the engine thread clears these pointers
+    // under the same lock before it destroys anything.
     const std::lock_guard lock{mutex_};
-    if (queue_ != nullptr) {
-        // The queue is asked, not the graph. The device never notices.
+    if (queue_ == nullptr) {
+        return;
+    }
+    if (graph_a_ == nullptr && graph_b_ == nullptr) {
+        // Nothing is running, so there is no ring to throw away and no
+        // listener to count from: the decoder's own track is the only one.
+        queue_->skip();
+        return;
+    }
+    // **From where the listener is, and the ring goes with it.** `skip` asked
+    // the decoder to abandon its track, which with a deep ring can be a track
+    // the listener has not reached, and left the ring alone, so the rest of
+    // what was playing played out first -- a button that seemed to do nothing
+    // for most of a second. A seek to the device's own position, with the
+    // queue told to land on the next track, does what the button means: the
+    // ring is reset, silence is written while the next track is decoded to
+    // the floor, and it starts the moment it is there. `Queue::request_next`
+    // says why that is a seek and not a skip.
+    const std::uint64_t here = graph_a_ != nullptr ? graph_a_->position_frames()
+                                                   : graph_b_->position_frames();
+    queue_->request_next();
+    const bool moved = graph_a_ != nullptr ? graph_a_->seek(here) : graph_b_->seek(here);
+    if (!moved) {
+        // A source that cannot seek. The old way is what is left.
+        queue_->cancel_next();
         queue_->skip();
     }
 }
@@ -356,14 +382,17 @@ void Player::previous()
         return;
     }
     // What a "previous" button means everywhere: the start of this track,
-    // unless you have only just got here, in which case the one before.
-    const std::uint64_t start = queue_->item_start();
+    // unless you have only just got here, in which case the one before. *This
+    // track* is the one being heard, asked at the device's position; the
+    // decoder's is up to a ring's depth ahead.
     const std::uint64_t here = graph_a_ != nullptr   ? graph_a_->position_frames()
                                : graph_b_ != nullptr ? graph_b_->position_frames()
-                                                     : start;
+                                                     : queue_->item_start();
+    const std::uint64_t start = queue_->start_at(here);
     const std::uint64_t grace = queue_->format().sample_rate * 3ull;
-    const std::uint64_t target =
-        (here > start + grace || !queue_->has_previous()) ? start : queue_->previous_start();
+    const std::uint64_t target = (here > start + grace || !queue_->has_previous_at(here))
+                                     ? start
+                                     : queue_->previous_start_at(here);
     if (graph_a_ != nullptr) {
         (void)graph_a_->seek(target);
     } else if (graph_b_ != nullptr) {

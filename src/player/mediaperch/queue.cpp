@@ -30,6 +30,46 @@ bool Queue::open(std::string& why)
     return true;
 }
 
+bool Queue::jump(std::size_t index, std::uint64_t at)
+{
+    ISource* item = playlist_->at(index);
+    if (item == nullptr) {
+        // "Next" on the last track is the end -- which is what it was when the
+        // decoder was asked to skip instead -- and it is the end *here*, not
+        // after the rest of the track has played.
+        stopped_ = QueueStop::end;
+        done_ = true;
+        position_ = at;
+        return true;
+    }
+    // The one thing a queue may not do, exactly as `advance` refuses it: the
+    // run ends saying which format the next track wants.
+    if (item->format() != format_) {
+        next_format_ = item->format();
+        stopped_ = QueueStop::format_change;
+        done_ = true;
+        position_ = at;
+        return true;
+    }
+    if (!item->seek(0)) {
+        return false;
+    }
+    // Everything the decoder had recorded past this frame was read on a pass
+    // this has just undone.
+    while (!marks_.empty() && marks_.back().run_base >= at) {
+        marks_.pop_back();
+    }
+    marks_.push_back(Mark{at, index, 0});
+    ++completed_;
+    index_ = index;
+    current_ = item;
+    position_ = at;
+    done_ = false;
+    skip_.store(false, std::memory_order_release);
+    stopped_ = QueueStop::end;
+    return true;
+}
+
 bool Queue::advance()
 {
     ISource* next = playlist_->at(index_ + 1);
@@ -124,6 +164,20 @@ std::uint64_t Queue::start_at(std::uint64_t run) const noexcept
     return marks_.empty() ? 0 : marks_[mark_for(run)].run_base;
 }
 
+bool Queue::has_previous_at(std::uint64_t run) const noexcept
+{
+    return !marks_.empty() && mark_for(run) > 0;
+}
+
+std::uint64_t Queue::previous_start_at(std::uint64_t run) const noexcept
+{
+    if (marks_.empty()) {
+        return 0;
+    }
+    const std::size_t m = mark_for(run);
+    return m > 0 ? marks_[m - 1].run_base : 0;
+}
+
 std::uint64_t Queue::item_start() const noexcept
 {
     return marks_.empty() ? 0 : marks_[mark_for(position_)].run_base;
@@ -159,6 +213,11 @@ bool Queue::seek(std::uint64_t frame)
     // still has it, because a playlist that forgot what it had already handed
     // out could not be asked twice.
     const Mark mark = marks_[mark_for(frame)];
+    // A "next" is a seek that lands on the track after this one, at its
+    // start, from this frame. See `request_next`.
+    if (next_wanted_.exchange(false, std::memory_order_acq_rel)) {
+        return jump(mark.index + 1, frame);
+    }
     ISource* item = playlist_->at(mark.index);
     if (item == nullptr || !item->seek(mark.item_base + (frame - mark.run_base))) {
         return false;

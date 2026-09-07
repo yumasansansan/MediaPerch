@@ -421,8 +421,10 @@ TEST_CASE("a track with no picture ends it, and the next one gets its size back"
     REQUIRE(wait_for([] {
         return !mp::test::presenter_log().setting("size").empty();
     }));
-    // A different picture, and the size the shell asked for is on it.
-    CHECK(player.picture_generation() > first);
+    // A different picture, and the size the shell asked for is on it. Waited
+    // for rather than checked: the presenter's own log fills inside `open`,
+    // and the generation counts at the end of it, a moment later.
+    REQUIRE(wait_for([&] { return player.picture_generation() > first; }));
     CHECK(mp::test::presenter_log().setting("size") == "640x360");
 
     player.shutdown();
@@ -960,6 +962,39 @@ TEST_CASE("an engine joins two tracks and can be told to skip one", "[player]")
     player.next();
     REQUIRE(wait_for([&] { return player.status().index == 1; }));
     CHECK(player.status().track == "b");
+    REQUIRE(wait_for_state(player, mp::ipc::State::stopped));
+    CHECK(player.status().underruns == 0);
+    player.shutdown();
+}
+
+TEST_CASE("next starts the following track now, from where the listener is", "[player]")
+{
+    // The button, end to end: the ring is thrown away and refilled from the
+    // next track's start, the device is fed silence for exactly that long, and
+    // nothing underruns. Two tracks long enough that the decoder is well ahead.
+    Host host;
+    host.add("a", pattern(64 * 4 * 4000, 4));
+    host.add("b", pattern(64 * 4 * 4000, 5));
+    mp::Player player{host};
+    player.start();
+    player.play({"a", "b"});
+    REQUIRE(wait_for_state(player, mp::ipc::State::playing));
+    REQUIRE(wait_for([&] { return player.status().position > 2000; }));
+    const auto before = player.status();
+    REQUIRE(before.index == 0);
+
+    player.next();
+    REQUIRE(wait_for([&] { return player.status().index == 1; }));
+    const auto after = player.status();
+    CHECK(after.state == mp::ipc::State::playing);
+    CHECK(after.track == "b");
+    // From its start, and the queue's clock did not jump backwards to get there.
+    CHECK(after.item_position < 64 * 4000 / 4);
+    CHECK(after.position >= before.position);
+    CHECK(after.underruns == 0);
+
+    // A next on the last track ends the run, now rather than after the rest.
+    player.next();
     REQUIRE(wait_for_state(player, mp::ipc::State::stopped));
     CHECK(player.status().underruns == 0);
     player.shutdown();

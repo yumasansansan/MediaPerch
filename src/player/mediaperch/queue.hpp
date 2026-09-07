@@ -111,6 +111,33 @@ public:
     /// the length of a track nobody has played is a guess.
     [[nodiscard]] std::size_t index_at(std::uint64_t run) const noexcept;
     [[nodiscard]] std::uint64_t start_at(std::uint64_t run) const noexcept;
+    /// `has_previous` and `previous_start`, for a frame somebody else counted.
+    [[nodiscard]] bool has_previous_at(std::uint64_t run) const noexcept;
+    [[nodiscard]] std::uint64_t previous_start_at(std::uint64_t run) const noexcept;
+
+    /// **The next track from where the listener is, and the ring goes with
+    /// it.** Set before a seek to the device's own position: that seek then
+    /// maps the frame to the *start of the track after* the one it falls in,
+    /// rather than to the place in it, and everything the decoder had read
+    /// past the device -- the rest of the track being heard, and whatever of
+    /// the next one was already in the ring -- is thrown away with the ring
+    /// and decoded again from the right place.
+    ///
+    /// This is what a "next" button means, and `skip` is not it. `skip` asks
+    /// the decoder to abandon *its* track, which with a deep ring is a track
+    /// the listener has not reached; and it leaves the ring alone, so the rest
+    /// of the current track plays out before anything changes -- which, from
+    /// the button, reads as the player ignoring you. A seek already does the
+    /// two things wanted here: the ring is reset, and the render thread writes
+    /// silence until the ring is back at its floor, so the next track starts
+    /// the moment it is decoded and never underruns on the way.
+    ///
+    /// Consumed by that one seek, on the decode thread, which is the only
+    /// thread that may touch the marks; atomic because it is asked for on
+    /// whichever thread a shell is on.
+    void request_next() noexcept { next_wanted_.store(true, std::memory_order_release); }
+    /// For a request whose seek never happened -- a source that cannot seek.
+    void cancel_next() noexcept { next_wanted_.store(false, std::memory_order_release); }
 
     /// The queue frame at which the current item began, and the one before it.
     /// What a "previous track" button needs, and it is a question only the
@@ -122,6 +149,9 @@ public:
 private:
     /// Opens item `index_ + 1`, or reports why it will not.
     [[nodiscard]] bool advance();
+    /// The track at `index`, beginning at queue frame `at`. What `request_next`
+    /// turns a seek into; see it for why. No track there is the end.
+    [[nodiscard]] bool jump(std::size_t index, std::uint64_t at);
 
     /// A boundary the queue has crossed: at queue frame `run_base` item
     /// `index` began, and it began at its own frame `item_base`.
@@ -150,6 +180,7 @@ private:
     std::uint64_t position_ = 0;
     QueueStop stopped_ = QueueStop::end;
     std::atomic<bool> skip_{false};
+    std::atomic<bool> next_wanted_{false};
     bool done_ = false;
 };
 

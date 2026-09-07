@@ -5516,6 +5516,38 @@ and a Debug archive against a release-pinned module is `RuntimeLibrary` and
 the pinned module compiles the one source itself, through an `INTERFACE` target that carries it:
 one copy of the source, one runtime per DLL.
 
+#### Next is a seek, and the ring goes with it
+
+**`skip` was not what the button means.** It asked the decoder to abandon *its* track — which
+with a 128-period ring can be a track the listener has not reached — and it left the ring alone,
+so the rest of what was playing played out before anything changed: a button that seemed to do
+nothing for most of a second. Two things were wanted, and the decision was that both are
+non-negotiable: the ring is thrown away *now*, and nothing underruns.
+
+**A seek already does exactly that.** `perform_seek` runs on the decode thread: it parks the
+render thread, resets the ring, seeks the source, and fills back to the floor while the render
+thread writes silence — counted as `silent`, not as an underrun — and playback resumes the
+moment the floor is reached. That is the answer to *can it wait even if the device catches up,
+and start the instant the ring is full*: it can, it does, and the floor is the second of the two
+ring settings. So `next` is now a seek to the device's own position with the queue told, through
+`request_next`, to land that frame on the start of the track after the one it falls in. The
+queue's timeline does not jump, the marks past the frame are dropped (they were read on a pass
+that has just been undone), and everything the decoder had read ahead is decoded again from the
+right place. `previous` asks the same question at the same position. A next on the last track is
+the end, now rather than after the rest.
+
+Measured, over a queue of one-second files: `next` returned in 37 ms with the queue's clock
+3564 frames further on — the silence, the refill and the pipe — five in a row went from track
+4 to 9, `previous` went back one, and there were 0 underruns and one picture throughout.
+
+**The two ring settings, since the question came up.** `ring_periods` (128) is how much the ring
+*can* hold: a bet about the worst stall in a file, which is not knowable before opening it, and
+so generous. `prefill_periods` (32) is how much of it is filled before the device starts and
+before a seek — or now a next — resumes: the floor. The two were once the same number, and
+that made a seek's silence as long as the ring was large; the floor is why a ring can be as deep
+as the worst stall deserves without every seek paying for it. Zero is a real answer (start on
+whatever the first acquire can be given), and so is a number past the end (all of it).
+
 **What is left of M8**: dragging nodes to reorder a chain and adding one from the palette
 (`modules` already answers what there is to add), and opening files from the shell rather than
 from the CLI.
