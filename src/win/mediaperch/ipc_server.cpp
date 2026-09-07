@@ -515,6 +515,41 @@ bool IpcServer::handle(const std::shared_ptr<Client>& client, const ipc::Header&
         }
         return ok();
     }
+    case ipc::Kind::calibrate: {
+        ipc::Calibration asked;
+        if (!read(r, asked) || !r.complete()) {
+            return malformed();
+        }
+        if (asked.files.empty()) {
+            return fail("a calibration needs files to measure");
+        }
+        // **The wire's numbers become the core's meanings here**, which is the
+        // only place that knows both. `mp::CalibrationPlan` is where a
+        // dimension and a sweep mean something; the wire carries them as
+        // integers so that a word does not have to be kept in step twice.
+        mp::CalibrationPlan plan;
+        plan.dimensions = static_cast<mp::Dimension>(asked.dimensions);
+        plan.sweep = static_cast<mp::Sweep>(asked.sweep);
+        plan.windows.count = asked.windows;
+        plan.windows.seconds = asked.window_seconds;
+        if (asked.start_ring != 0) {
+            plan.start_ring = asked.start_ring;
+        }
+        plan.lowest_ring = asked.lowest_ring;
+        plan.highest_ring = asked.highest_ring;
+        player_->calibrate(std::move(asked.files), plan);
+        return ok();
+    }
+    case ipc::Kind::profile: {
+        if (!r.complete()) {
+            return malformed();
+        }
+        // The text, not the numbers. What a measurement *means* is the core's,
+        // which is the same split §11 makes for the settings file: a shell
+        // displays this and does not parse it.
+        w.str(player_->profile_text());
+        return client->send(ipc::frame(ipc::Kind::profile_reply, id, w));
+    }
     case ipc::Kind::display: {
         const std::uint8_t known = r.u8();
         const std::uint8_t hdr = r.u8();

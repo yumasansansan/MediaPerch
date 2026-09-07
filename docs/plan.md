@@ -3255,16 +3255,40 @@ The test is a decision rather than a describe row: sRGB content on a display the
 480-nit HDR gets §9.6's boost of exactly six, which is a number nothing on this machine would
 have produced by itself.
 
-**What `Player` still does not do**, and each is its own step:
+#### The engine measures itself
 
-- **Answer `calibrate`.** §10's surface carries the verb and the engine can now assemble the
-  A/V graph a run measures. What is left is the driver: a calibration is playback of a list at
-  one ring size after another, and an engine that is already playing something has to decide
-  what that means.
-- **Cross a track boundary with the picture.** A queue plays a playlist gaplessly inside one
-  run, so the audio can move to the next file while the video graph is still reading the last
-  one's feed. Until a boundary rebuilds the picture, the picture stops when the audio leaves
-  the file it came from, which is honest and is not a frame of the wrong film.
+**`calibrate` is answered.** §10 has carried the verb since the driver was written; what the
+engine could not do was assemble the A/V graph a run measures. It can, so it does.
+
+The question the doc left open was what a calibration means for an engine that is already
+playing something, and the answer is that **it takes the machine over**: what was playing
+stops, the sweep runs on the engine thread, and nothing else plays until it is done. Measuring
+beside a playlist would be measuring a machine that is doing something else, which is the one
+thing a measurement must not do. A sweep queued while a playlist is waiting goes first, for the
+same reason: the other order opens a device and closes it for nothing.
+
+`Player` is the `ICalibrationHost` — `inspect` opens the file and reads the class of stream
+off it, `play` is one window with one ring size, and `say` is a log line, which a subscribed
+shell already shows. Two decisions inside `play`:
+
+- **No DSP chain.** A calibration measures the path the profile is keyed on, and a stage
+  somebody added is a different path: measuring with it in would write down a number that stops
+  being true the moment the stage is removed.
+- **Seeked before anything is started.** The window's start moves the source while nothing is
+  reading it, so there is nothing to hold still and no `seek_together` — and moving the router
+  then is what clears the video's queue as well (§4).
+
+A ring the machine cannot allocate is a run that failed rather than a process that ended, and
+the sweep reads that as *do not go larger*. `mediaperch-cli calibrate FILE...` starts one and
+`mediaperch-cli profile` prints what it concluded, as the text of the file: what a measurement
+*means* is the core's, which is the same split §11 makes for the settings file.
+
+**And the picture crosses a track boundary.** A queue joins two files with no gap in the audio,
+so the video graph was left reading a feed belonging to the file the audio had left; it is torn
+down and built again against the new one while the device keeps being fed. That costs a decoder
+and a presenter — milliseconds, on the engine thread rather than the render one — and a file
+with no picture after one that had is a picture that ends, which `open_video` answers by doing
+nothing.
 
 **What else comes with the video path, and is easy to forget.** Two things are waiting on this
 section rather than on any decision of their own, and neither is visible from here unless it is
@@ -4962,7 +4986,7 @@ HDR state.
 | M0 | Repository skeleton, CMake presets, CI | `core` builds alone with the platform directories off the include path, and CI fails if that stops being true |
 | M1 | WASAPI exclusive, event-driven, sine from memory | a 1 kHz tone plays for an hour at the minimum device period with zero underruns; the realign path in §14 is exercised deliberately |
 | M2 | Module ABI v1 + `decode_native` + `sink_capture` + the two throwaway ABI probes (§2) | **done, and since superseded by M4.5** -- `decode_native` was split into demuxers and codecs and no module by that name is left. `decode_native` (WAV and FLAC, `dr_wav`/`dr_flac`) decoded to hashes identical to FFmpeg's; the fake sink in `tests/` and the tee in `verify` both prove the bytes reach the device unaltered. Both ABI probes are written and run: a C11 module and a Rust `cdylib` produce identical frame counts through the same vtable, and a panic thrown on purpose inside the Rust one is contained at the boundary and comes back as `MP_ERR_INVALID`. See [abi/README.md](../abi/README.md) |
-| M3 | `mediaperch-cli` and the IPC | **done.** `mediaperchd` is the engine and has no toolkit in it; `mediaperch-cli` drives it over a named pipe with a versioned binary framing. `mp::Player` is in the core, so the whole engine is tested with no COM and no hardware, and `IEngineHost` is what it asks an operating system for -- four things then, six since §9.7.1's video path moved into the core. The row is done when killing the shell mid-track is inaudible, and that is a test: three shells attached, subscribed, and cut off, with the underrun count still zero. Both of the things this row was last waiting on are in: §11's INI file, which round-trips through its own fuzzer, and the Win32 notification icon §10 asks for -- play and pause, previous, next, stop, and Settings greyed out with *why* when no shell is installed, because a menu item that silently does nothing reads as a bug in the engine. `--no-tray` is what a service wants. `Tray::run` is the engine's main loop when there is an icon, on the thread that otherwise has nothing to do, and it reaches `mp::Player` through the same commands a shell uses |
+| M3 | `mediaperch-cli` and the IPC | **done.** `mediaperchd` is the engine and has no toolkit in it; `mediaperch-cli` drives it over a named pipe with a versioned binary framing. `mp::Player` is in the core, so the whole engine is tested with no COM and no hardware, and `IEngineHost` is what it asks an operating system for -- four things then, seven since §9.7.1's video path moved into the core. The row is done when killing the shell mid-track is inaudible, and that is a test: three shells attached, subscribed, and cut off, with the underrun count still zero. Both of the things this row was last waiting on are in: §11's INI file, which round-trips through its own fuzzer, and the Win32 notification icon §10 asks for -- play and pause, previous, next, stop, and Settings greyed out with *why* when no shell is installed, because a menu item that silently does nothing reads as a bug in the engine. `--no-tray` is what a service wants. `Tray::run` is the engine's main loop when there is an icon, on the thread that otherwise has nothing to do, and it reaches `mp::Player` through the same commands a shell uses |
 | M4 | Path B: f64 bus, DSP chain, resampler, dither. Gapless, seek | **done**, and the passthrough path still contains no float. Gapless is `mp::Queue`, a source whose `read` does not stop at a track boundary; seek and pause are on both graphs; every DSP stage can be told to forget where it was. A device that is taken away (`AUDCLNT_E_DEVICE_INVALIDATED`) is a rebuild rather than an ending, and so is switching *paths*: both resume on the frame the device stopped on, which is the only thing a rebuild point can honestly promise and is checked byte for byte |
 | M5 | `decode_mf` and `decode_ffmpeg`, and the resolution table | **done.** `ctest -R format_matrix` builds one file per format, shows it to every decoder, and rewrites the matrix in the README -- and fails when the README stops matching. `mediaperch-probe claims` shows every decoder's probe score for a file, so a cell can say whether a decoder *claimed* the file or was forced to try. The lossless corpus comes from the reference encoders rather than FFmpeg, whose FLAC encoder writes 24 bits when asked for 32. Generating it found two claims in [formats.md](formats.md) that had gone stale and one real gap: nothing but Media Foundation claimed WMA |
 | M4.5 | ABI v2: the container decides (§12) | **done.** Every format this tree reads resolves container-first: eight demuxers and seven codecs, and each one decodes to the hash its v1 decoder produced. Two formats gained a first-class reader on the way -- MPEG layer II, which had gone to FFmpeg, and OggFLAC, which `demux_ogg` had been naming since step 4 with nothing to hand it to. Seeking became the host's, once, rather than each decoder's separately: a seek to an arbitrary sample lands byte-identically in WAV, native FLAC, OggFLAC and ALAC-in-MP4, which are four unrelated framings. Modules are laid out and installed by kind -- `modules/<kind>/<name>` in the tree, `bin/<config>/modules/<kind>/` out of it. Step 7 deleted `MP_KIND_DECODER`, the eight modules that used it, `mp::Decoder`, the registry's second resolution path, and one submodule that had no caller left |

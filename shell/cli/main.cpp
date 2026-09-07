@@ -43,6 +43,11 @@ usage: mediaperch-cli [--pipe NAME] COMMAND [arguments]
                     in nits -- `display hdr 480 1000`. A shell sends this when
                     its window crosses a monitor; here it is mostly a way to
                     see what a display it is not on would do
+  calibrate FILE... measure what this machine needs to play these files and keep
+                    the answer. **Takes the engine over** and takes minutes: a
+                    calibration cannot run faster than the material. Progress is
+                    log lines, so `log` or a subscribed shell shows it
+  profile           what the last calibration concluded, as the text of the file
   playlist          every track, with an arrow at the current one
   settings          every setting, its value and what it means
   set KEY VALUE     change one. `set path processed` switches paths where it
@@ -249,6 +254,42 @@ int main(int argc, char** argv)
         if (static_cast<mp::ipc::Kind>(reply.kind) != mp::ipc::Kind::ok) {
             return fail(mp::win::error_text(reply, body));
         }
+        return 0;
+    }
+    if (command == "calibrate") {
+        if (rest.empty()) {
+            return fail("calibrate needs files to measure");
+        }
+        mp::ipc::Calibration asked;
+        asked.files = rest;
+        write(w, asked);
+        if (!client.call(mp::ipc::Kind::calibrate, w, reply, body, why)) {
+            return fail(why);
+        }
+        if (static_cast<mp::ipc::Kind>(reply.kind) != mp::ipc::Kind::ok) {
+            return fail(mp::win::error_text(reply, body));
+        }
+        std::printf("measuring %zu file%s; watch `mediaperch-cli log` for progress\n",
+                    rest.size(), rest.size() == 1 ? "" : "s");
+        return 0;
+    }
+    if (command == "profile") {
+        if (!client.call(mp::ipc::Kind::profile, reply, body, why)) {
+            return fail(why);
+        }
+        if (static_cast<mp::ipc::Kind>(reply.kind) != mp::ipc::Kind::profile_reply) {
+            return fail(mp::win::error_text(reply, body));
+        }
+        mp::ipc::Reader r{body.data(), body.size()};
+        const std::string text = r.str();
+        if (!r.complete()) {
+            return fail("the engine sent a profile this build cannot read");
+        }
+        if (text.empty()) {
+            std::printf("nothing has been measured on this machine yet\n");
+            return 0;
+        }
+        std::fwrite(text.data(), 1, text.size(), stdout);
         return 0;
     }
     if (command == "display") {

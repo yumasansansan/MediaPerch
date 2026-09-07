@@ -336,6 +336,75 @@ TEST_CASE("a display message with no picture to apply it to is still taken",
     player.shutdown();
 }
 
+TEST_CASE("the engine measures this machine and keeps the answer",
+          "[player][calibrate]")
+{
+    // **§9.8.2's calibration, run by the engine.** §10 has carried the verb
+    // since the driver was written; what the engine could not do was assemble
+    // the A/V graph a run measures, and now it can. A calibration takes the
+    // machine over -- what was playing stops -- because measuring beside a
+    // playlist would be measuring a machine that is doing something else.
+    mp::test::presenter_log().reset();
+    mp::test::decoder_log().reset();
+
+    Host host;
+    host.add("film", pattern(64 * 1024, 11));
+    host.add_video("film");
+    host.pace_with([] { return std::make_unique<Endless>(); });
+
+    mp::Player player{host};
+    player.start();
+    CHECK(player.profile_text().find("[measurement]") == std::string::npos);
+
+    mp::CalibrationPlan plan;
+    // Two rings and one window each, which is four seconds of nothing and a
+    // fifth of a second of this. `ring_order` gives powers of two because
+    // `ByteRing` rounds to one and the sizes between are the same ring.
+    plan.sweep = mp::Sweep::every;
+    plan.lowest_ring = 4;
+    plan.highest_ring = 8;
+    plan.windows.count = 1;
+    plan.windows.seconds = 0.05;
+    player.calibrate({"film"}, plan);
+
+    REQUIRE(wait_for([&] { return host.said("measured "); }));
+    CHECK(host.said("measuring 1 file"));
+
+    // Applied as well as reported: a measurement this machine made about itself
+    // is the answer to the question the default is a guess at.
+    const std::string text = player.profile_text();
+    CHECK(text.find("[measurement]") != std::string::npos);
+    // And the presenter was in the path, which is what makes it a measurement
+    // of *video* rather than of an audio graph with a name.
+    {
+        const std::lock_guard lock{mp::test::presenter_log().mutex};
+        CHECK(mp::test::presenter_log().info.width == 16u);
+    }
+    player.shutdown();
+}
+
+TEST_CASE("a file with no picture in it is skipped, not failed",
+          "[player][calibrate]")
+{
+    // The profile is keyed on a class of video stream, so a file with none has
+    // no class to be measured against. Named, and the calibration goes on.
+    Host host;
+    host.add("song", pattern(4096, 12));
+
+    mp::Player player{host};
+    player.start();
+
+    mp::CalibrationPlan plan;
+    plan.windows.count = 1;
+    plan.windows.seconds = 0.05;
+    player.calibrate({"song"}, plan);
+
+    REQUIRE(wait_for([&] { return host.said("skipped song"); }));
+    CHECK(host.said("no video in it"));
+    CHECK(player.profile_text().find("[measurement]") == std::string::npos);
+    player.shutdown();
+}
+
 TEST_CASE("an engine plays what it is told to", "[player]")
 {
     Host host;

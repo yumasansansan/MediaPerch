@@ -31,6 +31,7 @@
 #include "mediaperch/passthrough.hpp"
 #include "mediaperch/processed.hpp"
 #include "mediaperch/buffering.hpp"
+#include "mediaperch/calibrate.hpp"
 #include "mediaperch/protocol.hpp"
 #include "mediaperch/queue.hpp"
 #include "mediaperch/sink.hpp"
@@ -169,7 +170,7 @@ struct PlayerConfig {
     unsigned recover_timeout = 30;
 };
 
-class Player {
+class Player final : public ICalibrationHost {
 public:
     explicit Player(IEngineHost& host);
     ~Player();
@@ -211,6 +212,27 @@ public:
     /// track, because the ring is decided when a graph is built.
     void use_profile(Profile profile);
 
+    // --- measuring this machine (§9.8.2) -------------------------------------
+
+    /// **Measures what this machine needs to play these files, and keeps it.**
+    ///
+    /// A calibration is playback of a list at one ring size after another, so
+    /// it cannot run faster than the material and it needs the device. **It
+    /// takes the engine over**: what was playing stops, the sweep runs on the
+    /// engine thread, and nothing else plays until it is done. The alternative
+    /// -- measuring beside a playlist -- would be measuring a machine that is
+    /// doing something else, which is the one thing a measurement must not do.
+    ///
+    /// Posted rather than run here, because a shell asking for one must not
+    /// block for the afternoon it takes. Progress arrives as log lines, which
+    /// a subscribed shell already shows, and `status` says what is playing --
+    /// because during a calibration something is.
+    void calibrate(std::vector<std::string> files, CalibrationPlan plan);
+
+    /// The profile as text, in the form §11's file takes. Empty until a
+    /// calibration has run in this process or one was handed in.
+    [[nodiscard]] std::string profile_text() const;
+
     /// **Which display the picture is on** (§9.4, §9.7.1), from the shell that
     /// has the window. Applied at once to whatever is showing and remembered
     /// for the next track.
@@ -251,13 +273,23 @@ private:
         std::uint64_t from = 0;
     };
 
+    /// A calibration nobody has started yet. Queued rather than run where it
+    /// was asked for, because a shell asking for one must not block for the
+    /// afternoon it takes.
+    struct Sweeping {
+        std::vector<std::string> files;
+        CalibrationPlan plan;
+    };
+
     void run();
+    /// One calibration, on the engine thread. Takes the machine over.
+    void run_sweep(const Sweeping& sweep);
     /// One playlist, from `first`, until it ends or something interrupts it.
     void play_request(const Request& request);
     /// One device, one graph. Returns why it ended and where it was.
     RunEnd play_run(Queue& queue, Playlist& playlist, std::uint64_t& position);
     template <typename Graph>
-    RunEnd pump(Graph& graph);
+    RunEnd pump(Graph& graph, Playlist& playlist);
 
     /// Builds the chain from `config_.dsp`. False and a reason when a stage is
     /// not there or will not take a setting.
@@ -267,11 +299,26 @@ private:
     /// **Never fatal**: a file whose video will not open is a file that plays,
     /// which is what it would have done before there was a video path at all.
     void open_video(Playlist& playlist, std::size_t index);
+    /// The same, for a file that is not in a playlist -- which is what a
+    /// calibration run is.
+    void open_video(IMedia* media, std::uint32_t decoder_threads);
     /// Starts it against the clock the audio graph is now running on (§8).
     /// Non-template so that `pump` can call it -- `GraphClock<Graph>` is an
     /// `IAudioClockSource` and that is all this needs to know.
     void start_video(IAudioClockSource& audio);
     void stop_video() noexcept;
+
+    // `ICalibrationHost`. Called from the engine thread, by `mp::calibrate`.
+    bool inspect(const std::string& file, StreamShape& shape, double& duration,
+                 std::string& why) override;
+    bool play(const CalibrationRun& run, RunResult& result, std::string& why) override;
+    void say(const std::string& line) override;
+
+    /// One calibration run, played to the end of its window. The half of `play`
+    /// that is the same whichever graph the path chose, so that the two
+    /// branches are a type and not a second copy of the measurement.
+    template <typename Graph>
+    void measure(Graph& graph, const CalibrationRun& run, RunResult& result);
 
     void set_state(ipc::State state);
     void note(const std::string& line);
@@ -313,6 +360,9 @@ private:
     PlayerConfig applied_;
     std::vector<std::string> files_;
     std::deque<Request> requests_;
+    /// At most one at a time: a second while the first is running would be two
+    /// measurements of one machine at once, which is neither of them.
+    std::deque<Sweeping> sweeps_;
 
     ipc::State state_ = ipc::State::stopped;
     /// What the last run settled on, for `status` between runs.

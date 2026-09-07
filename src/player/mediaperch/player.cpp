@@ -2,6 +2,7 @@
 
 #include "mediaperch/player.hpp"
 
+#include "mediaperch/profile.hpp"
 #include "mediaperch/wiring.hpp"
 
 #include "mediaperch/result.hpp"
@@ -586,22 +587,253 @@ void Player::run()
 {
     while (!quit_.load(std::memory_order_acquire)) {
         Request request;
+        Sweeping sweep;
+        bool measuring = false;
         {
             std::unique_lock lock{mutex_};
             wake_.wait(lock, [this] {
-                return quit_.load(std::memory_order_acquire) || !requests_.empty();
+                return quit_.load(std::memory_order_acquire) || !requests_.empty() ||
+                       !sweeps_.empty();
             });
             if (quit_.load(std::memory_order_acquire)) {
                 return;
             }
-            request = std::move(requests_.front());
-            requests_.pop_front();
+            // **A calibration first, because it takes the machine over.** A
+            // playlist asked for while one is queued is a playlist that waits;
+            // the other order would start a run and then stop it, which is a
+            // device opened and closed for nothing.
+            if (!sweeps_.empty()) {
+                sweep = std::move(sweeps_.front());
+                sweeps_.pop_front();
+                measuring = true;
+            } else {
+                request = std::move(requests_.front());
+                requests_.pop_front();
+            }
         }
         // Consumed here rather than in `play`: whatever asked for this run also
         // asked the previous one to end, and that flag has done its work.
         stop_wanted_.store(false, std::memory_order_release);
-        play_request(request);
+        if (measuring) {
+            run_sweep(sweep);
+        } else {
+            play_request(request);
+        }
     }
+}
+
+// --------------------------------------------------------------------------
+// Measuring this machine (§9.8.2)
+// --------------------------------------------------------------------------
+
+void Player::calibrate(std::vector<std::string> files, CalibrationPlan plan)
+{
+    {
+        const std::lock_guard lock{mutex_};
+        sweeps_.push_back(Sweeping{std::move(files), plan});
+    }
+    // What is playing stops, so that the measurement is of a machine playing
+    // the file under test and nothing else.
+    stop_wanted_.store(true, std::memory_order_release);
+    wake_.notify_all();
+}
+
+std::string Player::profile_text() const
+{
+    const std::lock_guard lock{mutex_};
+    return write_profile(config_.profile);
+}
+
+void Player::run_sweep(const Sweeping& sweep)
+{
+    if (sweep.files.empty()) {
+        note("a calibration with no files in it has nothing to measure");
+        set_state(ipc::State::stopped);
+        return;
+    }
+    note("measuring " + std::to_string(sweep.files.size()) +
+         (sweep.files.size() == 1 ? " file" : " files") +
+         "; this cannot run faster than the material");
+
+    const CalibrationReport report = mp::calibrate(*this, sweep.files, sweep.plan);
+
+    for (const std::string& skipped : report.skipped) {
+        note("skipped " + skipped);
+    }
+    note("measured " + std::to_string(report.profile.measured.size()) +
+         (report.profile.measured.size() == 1 ? " class of stream in "
+                                              : " classes of stream in ") +
+         std::to_string(report.runs) + (report.runs == 1 ? " run" : " runs"));
+    {
+        const std::lock_guard lock{mutex_};
+        // **Applied as well as reported.** A measurement this machine made
+        // about itself is the answer to the question the default is a guess at,
+        // and a shell that had to hand it back would be a shell that could
+        // forget to.
+        config_.profile = report.profile;
+    }
+    set_state(ipc::State::stopped);
+}
+
+void Player::say(const std::string& line)
+{
+    note(line);
+}
+
+bool Player::inspect(const std::string& file, StreamShape& shape, double& duration,
+                     std::string& why)
+{
+    auto media = host_->open_media(file, why);
+    if (!media) {
+        return false;
+    }
+    if (media->video() == nullptr) {
+        // **Not a failure of the calibration.** The profile is keyed on a class
+        // of video stream, so a file with none has no class to be measured
+        // against; it is skipped and named.
+        why = "no video in it, so there is no class of stream to measure";
+        return false;
+    }
+    const IMedia::Picture shot = media->picture();
+    shape = StreamShape{shot.codec, shot.info.width, shot.info.height, shot.info.fps_num,
+                        shot.info.fps_den};
+
+    const Format& format = media->audio().format();
+    duration = format.sample_rate != 0
+                   ? static_cast<double>(media->audio().length_frames()) /
+                         static_cast<double>(format.sample_rate)
+                   : 0.0;
+    return true;
+}
+
+template <typename Graph>
+void Player::measure(Graph& graph, const CalibrationRun& run, RunResult& result)
+{
+    if (graph.start() != MP_OK) {
+        return;
+    }
+    // **Named, not a temporary.** `DisplayLoop` keeps a reference to this for
+    // as long as its thread turns, and a temporary would be gone at the end of
+    // the call that handed it over.
+    GraphClock<Graph> audible{graph};
+    start_video(audible);
+
+    const auto until = std::chrono::steady_clock::now() +
+                       std::chrono::microseconds{
+                           static_cast<std::int64_t>(run.seconds * 1'000'000.0)};
+    while (graph.running() && std::chrono::steady_clock::now() < until) {
+        if (quit_.load(std::memory_order_acquire) ||
+            stop_wanted_.load(std::memory_order_acquire)) {
+            break;
+        }
+        std::this_thread::sleep_for(k_poll);
+    }
+
+    stop_video();
+    const auto stats = graph.stats();
+    graph.stop();
+
+    result.ok = true;
+    result.underruns = stats.underruns;
+    result.low_water_bytes = stats.low_water_bytes;
+    result.ring_bytes = stats.ring_bytes;
+    if (video_) {
+        result.frames_dropped = video_->graph().stats().dropped;
+    }
+}
+
+bool Player::play(const CalibrationRun& run, RunResult& result, std::string& why)
+{
+    result = RunResult{};
+
+    PlayerConfig config;
+    {
+        const std::lock_guard lock{mutex_};
+        config = config_;
+    }
+
+    auto media = host_->open_media(run.file, why);
+    if (!media) {
+        return false;
+    }
+
+    std::string device;
+    Sink sink = host_->open_sink(config.device, config.shared, device, why);
+    if (!sink) {
+        return false;
+    }
+
+    // **No chain.** A calibration measures the path the profile is keyed on,
+    // and a stage somebody added is a different path -- measuring with it in
+    // would write a number down that stops being true the moment it is removed.
+    DspChain chain;
+    Wired wired;
+    if (!wire_up(sink, media->audio().format(), chain, config.path,
+                 config.conversion.gain != 1.0, wired, why)) {
+        if (!wired.negotiated.ok) {
+            why = "the device would take none of " +
+                  std::to_string(wired.negotiated.tried) + " candidate formats for " +
+                  describe(wired.offered);
+        }
+        return false;
+    }
+
+    // **Seeked before anything is started**, so there is nothing to hold still:
+    // the source is not being read yet, and moving the router now is what
+    // clears the video's queue as well (§4).
+    if (run.at_seconds > 0.0 && media->audio().seekable()) {
+        const auto frame = static_cast<std::uint64_t>(
+            run.at_seconds * media->audio().format().sample_rate);
+        (void)media->audio().seek(frame);
+    }
+
+    PassthroughConfig ring = config.buffering;
+    if (run.ring_periods != 0) {
+        ring.ring_periods = run.ring_periods;
+    }
+
+    open_video(media.get(), run.decoder_threads);
+    {
+        const std::lock_guard lock{mutex_};
+        track_ = run.file;
+        decoder_ = media->decoder();
+        device_ = device;
+        source_ = media->audio().format();
+        wire_ = wired.negotiated.accepted;
+        fidelity_ = static_cast<std::uint32_t>(wired.negotiated.fidelity);
+        processed_ = wired.processed;
+        error_.clear();
+        state_ = ipc::State::playing;
+    }
+
+    try {
+        if (wired.processed) {
+            ProcessedGraph graph{media->audio(),       sink,    wired.negotiated.accepted,
+                                 wired.period_frames,  config.conversion,
+                                 nullptr,              ring};
+            measure(graph, run, result);
+        } else {
+            PassthroughGraph graph{media->audio(),      sink, wired.negotiated.accepted,
+                                   wired.period_frames, wired.negotiated.fidelity,
+                                   nullptr,             ring};
+            measure(graph, run, result);
+        }
+    } catch (const std::bad_alloc&) {
+        // A ring the machine cannot allocate is a run that failed, not a
+        // process that ended. The sweep reads that as *do not go larger*.
+        why = "not enough memory for a ring of " + std::to_string(ring.ring_periods) +
+              " periods";
+        video_.reset();
+        return false;
+    }
+    video_.reset();
+
+    // The device's own numbers, because milliseconds is what a profile stores
+    // and periods do not survive being written down.
+    result.period_frames = wired.period_frames;
+    result.sample_rate = wired.negotiated.accepted.sample_rate;
+    result.frame_bytes = frame_bytes(wired.negotiated.accepted);
+    return result.ok;
 }
 
 void Player::play_request(const Request& request)
@@ -866,7 +1098,7 @@ Player::RunEnd Player::play_run(Queue& queue, Playlist& playlist, std::uint64_t&
                 const std::lock_guard lock{mutex_};
                 graph_b_ = &graph;
             }
-            end = pump(graph);
+            end = pump(graph, playlist);
             position = graph.position_frames();
             {
                 const std::lock_guard lock{mutex_};
@@ -883,7 +1115,7 @@ Player::RunEnd Player::play_run(Queue& queue, Playlist& playlist, std::uint64_t&
                 const std::lock_guard lock{mutex_};
                 graph_a_ = &graph;
             }
-            end = pump(graph);
+            end = pump(graph, playlist);
             position = graph.position_frames();
             {
                 const std::lock_guard lock{mutex_};
@@ -916,9 +1148,13 @@ Player::RunEnd Player::play_run(Queue& queue, Playlist& playlist, std::uint64_t&
 
 void Player::open_video(Playlist& playlist, std::size_t index)
 {
+    open_video(playlist.at_media(index), 0);
+}
+
+void Player::open_video(IMedia* media, std::uint32_t decoder_threads)
+{
     video_.reset();
 
-    IMedia* media = playlist.at_media(index);
     if (media == nullptr || media->video() == nullptr) {
         return; // most files, and not an error
     }
@@ -929,6 +1165,8 @@ void Player::open_video(Playlist& playlist, std::size_t index)
     // nobody is looking at, which costs a decode and is what a shell attaching
     // mid-track has to find already running.
     const IMedia::Picture picture = media->picture();
+    VideoPath::Config want;
+    want.decoder_threads = decoder_threads;
     auto path = std::make_unique<VideoPath>();
     std::string why;
     bool known = false;
@@ -939,7 +1177,7 @@ void Player::open_video(Playlist& playlist, std::size_t index)
         display = display_;
     }
     if (!path->open(*host_, nullptr, *media->video(), picture.info, picture.codec,
-                    picture.config, picture.config_bytes, {}, why)) {
+                    picture.config, picture.config_bytes, want, why)) {
         // **Not fatal, and said once.** A file whose picture will not open is a
         // file that plays, which is exactly what it did before there was a
         // video path at all; refusing the track would be a player that got
@@ -980,7 +1218,7 @@ void Player::stop_video() noexcept
 }
 
 template <typename Graph>
-Player::RunEnd Player::pump(Graph& graph)
+Player::RunEnd Player::pump(Graph& graph, Playlist& playlist)
 {
     const MpResult started = graph.start();
     if (started != MP_OK) {
@@ -1002,12 +1240,9 @@ Player::RunEnd Player::pump(Graph& graph)
         start_video(audible);
 
         // **The track the picture belongs to.** A queue plays a playlist
-        // gaplessly inside one run, so the audio may move to the next file
-        // while the video graph is still reading the last one's feed. Until a
-        // boundary rebuilds the picture -- its own step -- the picture stops
-        // when the audio leaves the file it came from, which is honest and is
-        // not a frame of the wrong film.
-        const std::size_t showing = queue_ != nullptr ? queue_->index() : 0;
+        // gaplessly inside one run, so the audio moves to the next file while
+        // the video graph is still reading the last one's feed.
+        std::size_t showing = queue_ != nullptr ? queue_->index() : 0;
 
         while (graph.running()) {
             if (quit_.load(std::memory_order_acquire) ||
@@ -1019,9 +1254,21 @@ Player::RunEnd Player::pump(Graph& graph)
                 end = RunEnd::rebuild;
                 break;
             }
-            if (video_ && queue_ != nullptr && queue_->index() != showing) {
+            if (queue_ != nullptr && queue_->index() != showing) {
+                // **A track boundary, and the picture follows it.** The audio
+                // does not stop -- that is what gapless is -- so the picture is
+                // torn down and built again against the new file's feed while
+                // the device keeps being fed. It costs a decoder and a
+                // presenter, which is milliseconds, and it happens on this
+                // thread rather than the render one.
+                //
+                // A file with no picture after one that had is a picture that
+                // ends, and the other way round is one that begins: `open_video`
+                // answers both by doing nothing when there is no video.
+                showing = queue_->index();
                 stop_video();
-                video_.reset();
+                open_video(playlist, showing);
+                start_video(audible);
             }
             std::this_thread::sleep_for(k_poll);
         }
