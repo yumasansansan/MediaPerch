@@ -470,6 +470,11 @@ const MpDspVtbl* EngineHost::dsp(const std::string& id)
     return registry_->dsp(id);
 }
 
+const MpVideoDspVtbl* EngineHost::video_dsp(const std::string& id)
+{
+    return registry_->video_dsp(id);
+}
+
 bool EngineHost::device_ready(const std::string& want, bool shared)
 {
     // Opening it is the test rather than enumerating it: an endpoint can be

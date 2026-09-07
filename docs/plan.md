@@ -4789,6 +4789,37 @@ and blue, which also catches the axis order — the format varies red fastest an
 Direct3D 3D texture, and getting that backwards is a picture no identity test can see is
 wrong. Both run on WARP with no display.
 
+#### And the engine assembles it
+
+`VideoPath` carries the chain now, so `mediaperchd` grades a picture rather than only
+`vdsp_lut_test` doing it. `video_dsp` is the setting, in the same grammar `dsp` uses —
+`name` or `name:key=value,...`, in the order they run — because two grammars for one idea
+would be one too many. **A separate list from `dsp` and not an extension of it**: they are not
+alternatives and a stage cannot move between them, since one takes an f64 bus of samples and
+the other takes a texture.
+
+`IEngineHost` gains an eighth door, `video_dsp(id)`, which is `dsp(id)` for the other vtable.
+A door that answered `void*` would be a door that had given up on saying what it returns.
+
+Three things the wiring decided:
+
+- **The chain opens after `configure` and before the first frame.** After, because a stage
+  opens on the presenter's graphics device (§9.8.1) and there is none until then; before,
+  so nothing is ever shown ungraded that was meant to be graded.
+- **A stage that will not open is a run without it**, said once in the log. Same rule as a
+  presenter that will not open and a codec nobody has: a player that got worse when it gained
+  a feature is the failure to guard against.
+- **Setting a video stage is not a rebuild, and setting an audio one is.** This is the one
+  place the two chains differ, and it follows from where each runs: an audio stage's `set`
+  would have to reach a render thread with a three-millisecond deadline, so it rebuilds; a
+  video stage's happens under the display loop's hold and costs a held frame. `node_settings`
+  on a `vdsp.` node asks the live stage for the same reason, and there is no opening a second
+  one for the question, because there is exactly one graphics device.
+
+The canvas sees `vsource -> vdsp.0 -> ... -> presenter`. **The presenter is the end of the
+line even though the chain runs inside it**: what a canvas draws is where a stage sits in the
+picture's path, not which object owns the pass.
+
 **And one bug worth keeping.** The first version of the second pass rebound the pixel shader
 and the texture and nothing else. A stage is a *program*: it draws with its own vertex shader,
 its own sampler and its own constant buffer, at the same slots the presenter uses. So the

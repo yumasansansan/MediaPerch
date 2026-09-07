@@ -53,7 +53,7 @@ namespace mp {
 
 /// What the engine needs from the operating system it happens to be on.
 ///
-/// Seven things, and no more: open a file, open a device, find a filter, say
+/// Eight things, and no more: open a file, open a device, find a filter, say
 /// something -- and, since §9.7.1's video path moved in here, open a presenter,
 /// open a video decoder, and answer when the next frame may be drawn.
 /// Everything else the engine does itself.
@@ -86,6 +86,15 @@ public:
 
     /// A DSP stage by module id, or nullptr.
     [[nodiscard]] virtual const MpDspVtbl* dsp(const std::string& id) = 0;
+
+    /// The same for a video stage (§9.8.3). **A separate door because it is a
+    /// separate vtable**, not because finding a module is a different problem:
+    /// one that answered `void*` would be a door that had given up on saying
+    /// what it returns.
+    [[nodiscard]] virtual const MpVideoDspVtbl* video_dsp(const std::string&)
+    {
+        return nullptr;
+    }
 
     /// **Every module that is loaded**, for §10's palette: which kind, which
     /// id, what priority it declared, and whether §11's allow-list names it.
@@ -175,6 +184,11 @@ struct PlayerConfig {
     Profile profile;
     /// `name` or `name:key=value,...`, in the order they run in.
     std::vector<std::string> dsp;
+    /// The same for the picture (§9.8.3), which runs in linear light inside the
+    /// presenter. **A separate list because it is a separate chain**: they are
+    /// not alternatives and a stage cannot move between them -- one takes an
+    /// f64 bus of samples and the other takes a texture.
+    std::vector<std::string> video_dsp;
     bool recover = true;
     unsigned recover_timeout = 30;
 };

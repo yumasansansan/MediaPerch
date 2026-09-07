@@ -207,6 +207,9 @@ public:
     /// these, and a stage nobody had written when this was compiled is found
     /// the same way as one that ships with it.
     [[nodiscard]] const MpDspVtbl* dsp(std::string_view id) const;
+    /// The same for a video stage (§9.8.3). A separate lookup because it is a
+    /// separate kind and a separate vtable.
+    [[nodiscard]] const MpVideoDspVtbl* video_dsp(std::string_view id) const;
     /// Every loaded DSP module, for `--dsp list` and for a settings dialogue.
     [[nodiscard]] std::vector<const MpModuleDesc*> dsps() const;
 

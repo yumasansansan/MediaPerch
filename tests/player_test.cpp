@@ -563,6 +563,118 @@ TEST_CASE("the palette is every module the host loaded", "[player][graph]")
     CHECK(rows[1].kind == 9u);
 }
 
+TEST_CASE("a video chain is opened, handed over, and drawn as nodes",
+          "[player][video][graph]")
+{
+    // **§9.8.3 reaching the canvas.** A video stage opens on the presenter's
+    // device, is handed to the presenter rather than run beside it, and appears
+    // between the decoder and the presenter -- which is where it *is*, even
+    // though it runs inside the presenter's two halves. That last point is the
+    // one a canvas has to draw honestly.
+    mp::test::presenter_log().reset();
+    mp::test::decoder_log().reset();
+    mp::test::stage_log().reset();
+
+    Host host;
+    host.add("film", pattern(64 * 1024, 21));
+    host.add_video("film");
+    host.add_video_dsp("vdsp_test", &mp::test::fake_video_stage_vtbl());
+    host.pace_with([] { return std::make_unique<Endless>(); });
+
+    mp::Player player{host};
+    std::string why;
+    REQUIRE(player.set("video_dsp", "test,test:amount=3", why));
+
+    player.start();
+    player.play({"film"});
+    REQUIRE(wait_for_state(player, mp::ipc::State::playing));
+    REQUIRE(wait_for([] {
+        const std::lock_guard lock{mp::test::presenter_log().mutex};
+        return mp::test::presenter_log().stages == 2u;
+    }));
+    {
+        const std::lock_guard lock{mp::test::stage_log().mutex};
+        CHECK(mp::test::stage_log().opened == 2u);
+        CHECK(mp::test::stage_log().configured);
+        // The spec's settings reached it before it was handed over, so nothing
+        // is ever shown through a stage that has not been told what it is.
+        CHECK(mp::test::stage_log().amount == "3");
+    }
+
+    // **The nodes, in the order they run.** The presenter is the end of the
+    // line even though the chain runs inside it: what a canvas draws is where
+    // a stage sits in the picture's path, not which object owns the pass.
+    const mp::ipc::Graph shape = player.graph();
+    const auto has_edge = [&shape](const std::string& from, const std::string& to) {
+        return std::any_of(shape.edges.begin(), shape.edges.end(),
+                           [&](const mp::ipc::Edge& e) {
+                               return e.from == from && e.to == to;
+                           });
+    };
+    CHECK(has_edge("vsource", "vdsp.0"));
+    CHECK(has_edge("vdsp.0", "vdsp.1"));
+    CHECK(has_edge("vdsp.1", "presenter"));
+
+    // And the settings button works on one, live -- which for a video stage is
+    // the loop's hold rather than a rebuild, because there is one device and
+    // one presenter and no opening a second for the question.
+    const std::vector<mp::ipc::Setting> rows = player.node_settings("vdsp.0");
+    REQUIRE_FALSE(rows.empty());
+    CHECK(rows[0].key == "amount");
+    REQUIRE(player.set_node("vdsp.0", "amount", "9", why));
+    {
+        const std::lock_guard lock{mp::test::stage_log().mutex};
+        CHECK(mp::test::stage_log().amount == "9");
+    }
+    // A key the stage does not have is refused with the module named.
+    CHECK_FALSE(player.set_node("vdsp.0", "nonsense", "1", why));
+    CHECK(why.find("vdsp_test") != std::string::npos);
+
+    player.shutdown();
+    // Every stage that was opened was closed, and before the presenter that was
+    // holding them.
+    const std::lock_guard lock{mp::test::stage_log().mutex};
+    CHECK(mp::test::stage_log().closed == mp::test::stage_log().opened);
+}
+
+TEST_CASE("a video stage that will not open leaves a picture that still plays",
+          "[player][video]")
+{
+    // The same rule the audio side has and the presenter has: a run that got
+    // worse when it gained a feature is the failure to guard against.
+    mp::test::presenter_log().reset();
+    mp::test::stage_log().reset();
+    {
+        const std::lock_guard lock{mp::test::stage_log().mutex};
+        mp::test::stage_log().refuse_open = true;
+    }
+
+    Host host;
+    host.add("film", pattern(4096, 22));
+    host.add_video("film");
+    host.add_video_dsp("vdsp_test", &mp::test::fake_video_stage_vtbl());
+    host.pace_with([] { return std::make_unique<Endless>(); });
+
+    mp::Player player{host};
+    std::string why;
+    REQUIRE(player.set("video_dsp", "test", why));
+    player.start();
+    player.play({"film"});
+    REQUIRE(wait_for_state(player, mp::ipc::State::playing));
+    REQUIRE(wait_for([] {
+        const std::lock_guard lock{mp::test::presenter_log().mutex};
+        return mp::test::presenter_log().configured;
+    }));
+
+    // The picture is there and the chain is empty, which is one pass.
+    {
+        const std::lock_guard lock{mp::test::presenter_log().mutex};
+        CHECK(mp::test::presenter_log().stages == 0u);
+    }
+    CHECK(player.status().underruns == 0);
+    player.shutdown();
+}
+
 TEST_CASE("an engine plays what it is told to", "[player]")
 {
     Host host;

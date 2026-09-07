@@ -129,6 +129,72 @@ void Presenter::close() noexcept
     handle_ = nullptr;
 }
 
+MpResult VideoStage::open(const MpVideoDspVtbl& vtbl, const MpGraphicsDevice* device)
+{
+    close();
+    if (vtbl.size < sizeof(MpVideoDspVtbl) || vtbl.open == nullptr) {
+        return MP_ERR_UNSUPPORTED;
+    }
+    MpVideoDsp* handle = nullptr;
+    const MpResult opened = vtbl.open(device, &handle);
+    if (opened != MP_OK || handle == nullptr) {
+        return opened == MP_OK ? MP_ERR_UNSUPPORTED : opened;
+    }
+    vtbl_ = &vtbl;
+    handle_ = handle;
+    return MP_OK;
+}
+
+void VideoStage::close() noexcept
+{
+    if (vtbl_ != nullptr && handle_ != nullptr && vtbl_->close != nullptr) {
+        vtbl_->close(handle_);
+    }
+    vtbl_ = nullptr;
+    handle_ = nullptr;
+}
+
+MpResult VideoStage::set(const char* key, const char* value) noexcept
+{
+    if (!*this || vtbl_->set == nullptr) {
+        return MP_ERR_UNSUPPORTED;
+    }
+    return vtbl_->set(handle_, key, value);
+}
+
+MpResult VideoStage::describe(std::uint32_t index, char* out,
+                              std::uint32_t out_bytes) noexcept
+{
+    if (!*this || vtbl_->describe == nullptr) {
+        return MP_END;
+    }
+    return vtbl_->describe(handle_, index, out, out_bytes);
+}
+
+MpVideoStage VideoStage::handed() const noexcept
+{
+    MpVideoStage out{};
+    out.size = sizeof(out);
+    out.vtbl = vtbl_;
+    out.handle = handle_;
+    return out;
+}
+
+MpResult Presenter::stages(const MpVideoStage* stages, std::uint32_t count) noexcept
+{
+    if (!*this) {
+        return MP_ERR_INVALID;
+    }
+    // **Read no further than the module says its vtable goes.** `stages` was
+    // appended, so a presenter built against the older header has no such
+    // entry and answers by not having one rather than by being called through
+    // a pointer past the end of its own table.
+    if (vtbl_->size < sizeof(MpVideoVtbl) || vtbl_->stages == nullptr) {
+        return MP_ERR_UNSUPPORTED;
+    }
+    return vtbl_->stages(handle_, stages, count);
+}
+
 MpResult Presenter::configure(const MpVideoInfo& info) noexcept
 {
     return *this ? vtbl_->configure(handle_, &info) : MP_ERR_INVALID;

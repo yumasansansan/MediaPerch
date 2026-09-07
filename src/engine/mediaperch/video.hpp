@@ -107,9 +107,54 @@ public:
     MpResult read_back(void* dst, std::size_t dst_bytes, std::uint32_t& width,
                        std::uint32_t& height, MpPixelLayout& layout) noexcept;
 
+    /// **§9.8.3's chain, handed over.** The presenter runs these between its
+    /// decode and its encode; `count` zero clears them, which is one pass.
+    ///
+    /// MP_ERR_UNSUPPORTED from a module built before the entry point existed,
+    /// which is what the size prefix is for and is not an error a caller has to
+    /// treat as one: it means *this presenter has no chain*, and a run without
+    /// a grade is the run this program made before there were any.
+    MpResult stages(const MpVideoStage* stages, std::uint32_t count) noexcept;
+
 private:
     const MpVideoVtbl* vtbl_ = nullptr;
     MpVideo* handle_ = nullptr;
+};
+
+/// A video DSP stage, behind the C vtable. `mp::DspStage` for pictures.
+///
+/// **It opens on the presenter's device** (§9.8.1, §9.8.3): a stage that made
+/// its own would produce textures the presenter cannot sample without a copy
+/// through system memory, which is the round trip this tree's whole video path
+/// is arranged to avoid.
+class VideoStage final {
+public:
+    VideoStage() noexcept = default;
+    ~VideoStage() { close(); }
+
+    VideoStage(const VideoStage&) = delete;
+    VideoStage& operator=(const VideoStage&) = delete;
+    VideoStage(VideoStage&&) = delete;
+    VideoStage& operator=(VideoStage&&) = delete;
+
+    MpResult open(const MpVideoDspVtbl& vtbl, const MpGraphicsDevice* device);
+    void close() noexcept;
+
+    explicit operator bool() const noexcept
+    {
+        return vtbl_ != nullptr && handle_ != nullptr;
+    }
+
+    MpResult set(const char* key, const char* value) noexcept;
+    /// One `key\tcurrent\tdescription` row, MP_END past the last.
+    MpResult describe(std::uint32_t index, char* out, std::uint32_t out_bytes) noexcept;
+
+    /// How a presenter is handed this one. Valid while this is.
+    [[nodiscard]] MpVideoStage handed() const noexcept;
+
+private:
+    const MpVideoDspVtbl* vtbl_ = nullptr;
+    MpVideoDsp* handle_ = nullptr;
 };
 
 /// §8 applied: decode, and present when the audio clock says so.

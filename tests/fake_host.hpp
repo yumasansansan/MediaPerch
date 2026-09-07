@@ -281,6 +281,16 @@ public:
     /// the chain and ask the engine what shape it is in.
     void add_dsp(const std::string& id, const MpDspVtbl* vtbl) { dsp_[id] = vtbl; }
 
+    [[nodiscard]] const MpVideoDspVtbl* video_dsp(const std::string& id) override
+    {
+        const auto found = vdsp_.find(id);
+        return found == vdsp_.end() ? nullptr : found->second;
+    }
+    void add_video_dsp(const std::string& id, const MpVideoDspVtbl* vtbl)
+    {
+        vdsp_[id] = vtbl;
+    }
+
     [[nodiscard]] std::vector<ipc::ModuleRow> modules() override { return modules_; }
     void add_module(ipc::ModuleRow row) { modules_.push_back(std::move(row)); }
     [[nodiscard]] bool device_ready(const std::string&, bool) override { return present_; }
@@ -313,6 +323,7 @@ private:
     std::map<std::string, std::pair<Format, std::vector<std::uint8_t>>> files_;
     std::set<std::string> with_video_;
     std::map<std::string, const MpDspVtbl*> dsp_;
+    std::map<std::string, const MpVideoDspVtbl*> vdsp_;
     std::vector<ipc::ModuleRow> modules_;
     std::function<std::unique_ptr<IFrameClock>()> frames_;
     std::unique_ptr<FakeSink> device_;

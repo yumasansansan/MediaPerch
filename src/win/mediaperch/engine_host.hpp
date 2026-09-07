@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// The seven things the engine asks Windows for.
+// The eight things the engine asks Windows for.
 //
 // `mp::Player` is portable and knows nothing about LoadLibrary, MMDevice or
 // paths with drive letters. This is where all of that is, and it is small on
@@ -57,6 +57,7 @@ public:
     [[nodiscard]] std::unique_ptr<IFrameClock> frame_clock(Presenter& presenter,
                                                            void* window) override;
     [[nodiscard]] const MpDspVtbl* dsp(const std::string& id) override;
+    [[nodiscard]] const MpVideoDspVtbl* video_dsp(const std::string& id) override;
     [[nodiscard]] std::vector<ipc::ModuleRow> modules() override;
     [[nodiscard]] bool device_ready(const std::string& want, bool shared) override;
     void log(const std::string& line) override;

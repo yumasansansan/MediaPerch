@@ -62,6 +62,11 @@ public:
         /// changes -- see `set_size`.
         std::uint32_t width = 0;
         std::uint32_t height = 0;
+
+        /// **§9.8.3's chain**, as `name` or `name:key=value,key=value` in the
+        /// order it runs -- the same grammar the audio chain's `--dsp` uses,
+        /// because two grammars for one idea would be one too many.
+        std::vector<std::string> stages;
     };
 
     /// **What the shell says the display is** (§9.4, §9.7.1).
@@ -176,6 +181,25 @@ public:
 
     [[nodiscard]] const Modules& modules() const noexcept { return modules_; }
 
+    /// How many stages are in the chain, and what one of them is called. A
+    /// canvas asks by index because that is the order they run in, which is the
+    /// one thing a chain has that a set does not.
+    [[nodiscard]] std::size_t stage_count() const noexcept { return stages_.size(); }
+    [[nodiscard]] const std::string& stage_module(std::size_t index) const noexcept;
+
+    /// One stage's own settings, and changing one.
+    ///
+    /// **Both take the display loop's hold**, for the reason `set_size` does: a
+    /// stage is a module the loop's thread is inside every frame, and asking it
+    /// anything from another thread while it is there is a data race rather
+    /// than a question.
+    [[nodiscard]] std::vector<std::string> stage_describe(
+        std::size_t index,
+        std::chrono::milliseconds deadline = std::chrono::milliseconds{500});
+    bool set_stage(std::size_t index, const std::string& key, const std::string& value,
+                   std::string& why,
+                   std::chrono::milliseconds deadline = std::chrono::milliseconds{500});
+
     /// The three pieces, for the caller that reports the run and for
     /// `seek_together`, which needs the graph and the loop and the audio.
     ///
@@ -196,7 +220,16 @@ private:
     bool tell(const char* key, const char* value, std::string& why,
               std::chrono::milliseconds deadline);
 
+    /// Opens the chain from `want.stages` and hands it to the presenter.
+    /// Never fatal: a stage that will not open is a stage the run says it is
+    /// without, and the picture is still a picture.
+    void open_stages(IEngineHost& host, const Config& want);
+    /// Everything the presenter must be told again after the chain changed.
+    bool hand_over(std::string& why);
+
     std::unique_ptr<Presenter> presenter_;
+    std::vector<std::unique_ptr<VideoStage>> stages_;
+    std::vector<std::string> stage_modules_;
     std::unique_ptr<VideoDecoder> decoder_;
     std::unique_ptr<VideoGraph> graph_;
     std::unique_ptr<DisplayLoop> loop_;

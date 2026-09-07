@@ -296,6 +296,22 @@ const MpDspVtbl* ModuleRegistry::dsp(std::string_view id) const
     return nullptr;
 }
 
+const MpVideoDspVtbl* ModuleRegistry::video_dsp(std::string_view id) const
+{
+    for (const auto& module : modules_) {
+        const MpModuleDesc& desc = module->desc();
+        if (desc.kind != MP_KIND_VDSP || id != desc.id) {
+            continue;
+        }
+        const auto* vtbl = static_cast<const MpVideoDspVtbl*>(desc.vtbl);
+        // Every call this host makes, which for a stage is all of them: a
+        // partial one would be a stage that opened and then could not be told
+        // anything.
+        return (vtbl != nullptr && vtbl->size >= sizeof(MpVideoDspVtbl)) ? vtbl : nullptr;
+    }
+    return nullptr;
+}
+
 std::vector<const MpModuleDesc*> ModuleRegistry::dsps() const
 {
     std::vector<const MpModuleDesc*> out;

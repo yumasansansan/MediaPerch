@@ -973,16 +973,16 @@ is either inside it or talking to it.
 
 **`mp::Player` is in the core, and that is the load-bearing decision.** A playlist, a queue
 and the decision to rebuild a graph are not Windows. What genuinely belongs to a platform is
-seven things — open a file with a decoder, open an endpoint, find a filter, say something, and
-since the video path moved in, open a presenter, open a video decoder, and say when the next
-frame may be drawn — and those are
+eight things — open a file with a decoder, open an endpoint, find a filter, find a *video*
+filter, say something, and since the video path moved in, open a presenter, open a video
+decoder, and say when the next frame may be drawn — and those are
 `IEngineHost`, which the Windows head implements in one small file. The test suite implements
 it too, which is why the whole engine can be tested with no COM, no `LoadLibrary`, no audio
 hardware and no display: `tests/player_test.cpp` plays a playlist, pauses it, seeks it, loses
 a device and rebuilds, all against the same fake sink the graph tests use, and
 `tests/video_path_test.cpp` assembles the picture against a presenter made of counters.
 
-**Seven is not four, and the growth is the thing to watch.** Each of the two new doors was
+**Eight is not four, and the growth is the thing to watch.** Each of the two new doors was
 added with the rest of its work in the core — `mp::VideoPath` is the assembly and the doors
 only find modules — but an `IEngineHost` that keeps growing is a split drawn in the wrong
 place, and the count is written here so that the next addition has to argue with a number.

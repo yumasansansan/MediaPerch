@@ -390,6 +390,8 @@ std::vector<ipc::Setting> Player::settings() const
         "bitexact, exactonly, auto or processed -- what may happen to the samples");
     row("dsp", joined(config_.dsp, ','),
         "stages in the order they run, `name` or `name:key=value,key=value`");
+    row("video_dsp", joined(config_.video_dsp, ','),
+        "the same for the picture: stages in linear light inside the presenter");
     row("gain", std::to_string(config_.conversion.gain),
         "linear, not decibels. Only on the processed path");
     row("dither", dither_kind_name(config_.conversion.dither),
@@ -446,6 +448,13 @@ bool Player::set(const std::string& key, const std::string& value, std::string& 
             rebuild = true;
         } else if (key == "dsp") {
             config_.dsp = split(value, ',');
+            rebuild = true;
+        } else if (key == "video_dsp") {
+            // **A rebuild for the same reason the audio chain is one.** The
+            // chain is opened when the picture is, on the presenter's device,
+            // and a stage inserted underneath a display loop that is inside
+            // `process` is a data race rather than a setting.
+            config_.video_dsp = split(value, ',');
             rebuild = true;
         } else if (key == "gain") {
             // Linear and unbounded. Above unity clips, below zero inverts,
@@ -657,9 +666,18 @@ ipc::Graph Player::graph() const
     if (video_ && video_->opened()) {
         node("vsource", ipc::NodeKind::video_source, video_->modules().decoder,
              "the video decoder", 0);
+        std::string before = "vsource";
+        for (std::size_t i = 0; i < video_->stage_count(); ++i) {
+            const std::string id = "vdsp." + std::to_string(i);
+            const std::string module = video_->stage_module(i);
+            node(id.c_str(), ipc::NodeKind::video_stage, module, module,
+                 ipc::MP_NODE_REMOVABLE | ipc::MP_NODE_SETTABLE);
+            edge(before, id);
+            before = id;
+        }
         node("presenter", ipc::NodeKind::presenter, video_->modules().presenter,
              "the colour pipeline and the display", ipc::MP_NODE_SETTABLE);
-        edge("vsource", "presenter");
+        edge(before, "presenter");
     }
     return out;
 }
@@ -702,6 +720,28 @@ std::vector<ipc::Setting> Player::node_settings(const std::string& node) const
         return out;
     }
 
+    if (node.rfind("vdsp.", 0) == 0) {
+        // **Asked of the live stage, under the display loop's hold.** Unlike an
+        // audio stage there is no opening one for the question: a video stage
+        // opens on the presenter's device (§9.8.1) and there is exactly one of
+        // those. The hold is `set_size`'s, for the same reason.
+        if (video_ == nullptr) {
+            return {};
+        }
+        const auto index = static_cast<std::size_t>(std::atoi(node.c_str() + 5));
+        std::vector<ipc::Setting> out;
+        for (const std::string& line : video_->stage_describe(index)) {
+            const std::size_t first = line.find('\t');
+            if (first == std::string::npos) {
+                continue;
+            }
+            const std::size_t second = line.find('\t', first + 1);
+            out.push_back(ipc::Setting{
+                line.substr(0, first), line.substr(first + 1, second - first - 1),
+                second == std::string::npos ? std::string{} : line.substr(second + 1)});
+        }
+        return out;
+    }
     if (node.rfind("dsp.", 0) != 0) {
         return {};
     }
@@ -753,6 +793,39 @@ bool Player::set_node(const std::string& node, const std::string& key,
         // The same keys under a different name, so `set` decides what they mean
         // and there is one place that does.
         return set(key, value, why);
+    }
+    if (node.rfind("vdsp.", 0) == 0) {
+        // **Applied to the stage rather than rebuilt into it**, which is the
+        // one place the two chains differ: a video stage's `set` happens under
+        // the loop's hold and costs a held frame, where an audio stage's would
+        // have to reach a render thread with a 3 ms deadline and so rebuilds.
+        // The spec is updated too, so `save` writes down what is running.
+        if (video_ == nullptr) {
+            why = "nothing is showing a picture, so there is no chain to set";
+            return false;
+        }
+        const auto index = static_cast<std::size_t>(std::atoi(node.c_str() + 5));
+        if (!video_->set_stage(index, key, value, why)) {
+            return false;
+        }
+        const std::lock_guard lock{mutex_};
+        if (index < config_.video_dsp.size()) {
+            std::string& spec = config_.video_dsp[index];
+            const std::size_t colon = spec.find(':');
+            std::string kept = spec.substr(0, colon);
+            std::string rest = colon == std::string::npos ? std::string{}
+                                                          : spec.substr(colon + 1);
+            // Whatever was there for this key goes; the new one is appended.
+            std::string built;
+            for (const std::string& one : split(rest, ',')) {
+                if (one.rfind(key + "=", 0) != 0 && !one.empty()) {
+                    built += (built.empty() ? "" : ",") + one;
+                }
+            }
+            built += (built.empty() ? "" : ",") + key + "=" + value;
+            spec = kept + ":" + built;
+        }
+        return true;
     }
     if (node.rfind("dsp.", 0) != 0) {
         why = "there is no node called `" + node + "`";
@@ -1434,6 +1507,10 @@ void Player::open_video(IMedia* media, std::uint32_t decoder_threads)
     const IMedia::Picture picture = media->picture();
     VideoPath::Config want;
     want.decoder_threads = decoder_threads;
+    {
+        const std::lock_guard lock{mutex_};
+        want.stages = config_.video_dsp;
+    }
     auto path = std::make_unique<VideoPath>();
     std::string why;
     bool known = false;
