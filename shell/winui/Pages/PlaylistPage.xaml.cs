@@ -49,6 +49,10 @@ public sealed partial class PlaylistPage : Page
             drawn.Add($"{mark}  {i + 1,3}.  {Session.Leaf(files[i])}");
         }
         Heading.Text = files.Count == 0 ? "Playlist" : $"Playlist  ({files.Count})";
+        if (!playing && Session.Current.Status.Error.Length != 0)
+        {
+            Tell(Session.Current.Status.Error);
+        }
         if (_dragging || drawn.SequenceEqual(_rows))
         {
             return;

@@ -930,20 +930,45 @@ TEST_CASE("an engine plays what it is told to", "[player]")
     player.shutdown();
 }
 
-TEST_CASE("an engine says which track it could not open", "[player]")
+TEST_CASE("an engine says which track it could not open, and plays the rest", "[player]")
 {
     // Recorded rather than fatal: a playlist that silently plays four of its
-    // five entries is worse than one that says which it skipped.
+    // five entries is worse than one that says which it skipped -- and one
+    // that stops at the second because it would not open is worse again,
+    // which is what this did until the queue learned to walk past.
     Host host;
     host.add("good", pattern(2048, 2));
+    host.add("last", pattern(2048, 3));
     mp::Player player{host};
     player.start();
-    player.play({"good", "missing"});
+    player.play({"good", "missing", "last"});
     // Waiting for `playing` first, because `stopped` is also where it started:
     // a test that waits for the state it began in has not waited at all.
     REQUIRE(wait_for_state(player, mp::ipc::State::playing));
     REQUIRE(wait_for([&] { return host.said("skipping missing"); }));
+    REQUIRE(wait_for([&] { return player.status().track == "last"; }));
+    CHECK(player.status().index == 2);
     REQUIRE(wait_for_state(player, mp::ipc::State::stopped));
+    CHECK(player.status().error.empty());
+    CHECK(player.status().underruns == 0);
+    player.shutdown();
+}
+
+TEST_CASE("a playlist with nothing that opens says why, in the words of whoever refused it",
+          "[player]")
+{
+    // What three video-only WebMs dropped on the shell produced was *the
+    // playlist has nothing at 0*, which is true and says nothing; the engine
+    // log had *no audio track in it* all along. The run's error is the
+    // playlist's own line now: the last entry refused, by name, and the count.
+    Host host;
+    mp::Player player{host};
+    player.start();
+    player.play({"C:\\somewhere\\first.mkv", "C:\\somewhere\\second.mkv"});
+    REQUIRE(wait_for([&] { return !player.status().error.empty(); }));
+    CHECK(player.status().error ==
+          "2 entries would not open; the last, second.mkv: no decoder recognised it");
+    CHECK(player.status().state == mp::ipc::State::stopped);
     player.shutdown();
 }
 

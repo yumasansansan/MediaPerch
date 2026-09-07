@@ -1482,6 +1482,8 @@ public:
         return &opened_[index]->audio();
     }
 
+    std::size_t size() const override { return options_->files.size(); }
+
     [[nodiscard]] const std::string& decoder_name(std::size_t index) const
     {
         static const std::string none;

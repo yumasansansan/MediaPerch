@@ -154,12 +154,18 @@ public:
         : host_(&host), files_(std::move(files))
     {
         opened_.resize(files_.size());
+        refused_.resize(files_.size());
     }
 
     ISource* at(std::size_t index) override
     {
         IMedia* media = at_media(index);
         return media != nullptr ? &media->audio() : nullptr;
+    }
+    std::size_t size() const override
+    {
+        const std::lock_guard lock{lock_};
+        return files_.size();
     }
 
     /// **Moves an entry the queue has not reached.** The decode thread opens
@@ -186,6 +192,7 @@ public:
         };
         shift(files_, from, to);
         shift(opened_, from, to);
+        shift(refused_, from, to);
     }
 
     /// The whole file, for the caller that wants the picture too.
@@ -202,16 +209,51 @@ public:
         if (opened_[index]) {
             return opened_[index].get();
         }
+        if (!refused_[index].empty()) {
+            // Asked again -- a queue walks past it on every pass -- and the
+            // answer has not changed. Once in the log is the right number.
+            return nullptr;
+        }
         std::string why;
         auto media = host_->open_media(files_[index], why);
         if (!media) {
             // Recorded rather than fatal: a playlist that silently plays four
             // of its five entries is worse than one that says which it skipped.
-            host_->log("skipping " + files_[index] + ": " + why);
+            // The queue walks past it, and the reason is kept for the run that
+            // finds nothing to play at all -- see `refusals`.
+            refused_[index] = why.empty() ? "no module recognised it" : why;
+            host_->log("skipping " + files_[index] + ": " + refused_[index]);
             return nullptr;
         }
         opened_[index] = std::move(media);
         return opened_[index].get();
+    }
+
+    /// What would not open, in the words of whoever refused it, for the run
+    /// that found nothing to play: the last entry refused, named the way a
+    /// person names a file, and how many there were. Empty when nothing was.
+    [[nodiscard]] std::string refusals() const
+    {
+        const std::lock_guard lock{lock_};
+        std::size_t count = 0;
+        std::size_t last = 0;
+        for (std::size_t i = 0; i < refused_.size(); ++i) {
+            if (!refused_[i].empty()) {
+                ++count;
+                last = i;
+            }
+        }
+        if (count == 0) {
+            return {};
+        }
+        const std::string& path = files_[last];
+        const std::size_t slash = path.find_last_of("\\/");
+        std::string line = (slash == std::string::npos ? path : path.substr(slash + 1)) +
+                           ": " + refused_[last];
+        if (count > 1) {
+            line = std::to_string(count) + " entries would not open; the last, " + line;
+        }
+        return line;
     }
 
     // By value, both: a reference into a vector that `move` can shift is a
@@ -233,6 +275,8 @@ private:
     mutable std::mutex lock_;
     std::vector<std::string> files_;
     std::vector<std::unique_ptr<IMedia>> opened_;
+    /// Why entry `i` would not open, once it has been tried; empty until then.
+    std::vector<std::string> refused_;
 };
 
 // --------------------------------------------------------------------------
@@ -1473,6 +1517,13 @@ void Player::play_request(const Request& request)
         Queue queue{playlist, first};
         std::string why;
         if (!queue.open(why)) {
+            // In the playlist's words when it has any: it is what tried to
+            // open each entry, and *no audio track in it* is the sentence a
+            // shell should show, not *nothing would open*.
+            const std::string refused = playlist.refusals();
+            if (!refused.empty()) {
+                why = refused;
+            }
             note(why);
             const std::lock_guard lock{mutex_};
             error_ = why;

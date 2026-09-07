@@ -120,9 +120,14 @@ public:
     IPlaylist& operator=(IPlaylist&&) = delete;
     virtual ~IPlaylist() = default;
 
-    /// The source at `index`, or nullptr past the end. Called from the decode
-    /// thread, at the moment the previous one runs out, so it may open a file.
+    /// The source at `index`, or nullptr past the end -- **or for an entry
+    /// that would not open**, which `at` cannot tell apart and `size` can: a
+    /// queue walks past the second and stops at the first. Called from the
+    /// decode thread, at the moment the previous one runs out, so it may open
+    /// a file.
     [[nodiscard]] virtual ISource* at(std::size_t index) = 0;
+    /// How many entries there are, opened or not.
+    [[nodiscard]] virtual std::size_t size() const = 0;
 };
 
 /// What the render thread needs from the platform and the core cannot provide.

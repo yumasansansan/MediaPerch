@@ -5676,6 +5676,48 @@ player's level had two formats in one playlist; there is one now.
 
 **M8 is done, polish included.**
 
+#### Three files that did nothing, and the sentence that was wrong twice
+
+**Open files did nothing, and the log said nothing.** `Windows.Storage.Pickers.FileOpenPicker`
+with `InitializeWithWindow` shows no dialog in an unpackaged app and never returns, so the
+button's handler awaited for ever and logged nothing on either side of it. The App SDK's own
+`Microsoft.Windows.Storage.Pickers.FileOpenPicker(AppWindow.Id)` is the one for this shape of
+app; it opens, remembers where it was, and says in the log what it did. Files can be dropped on
+the window as well: on the playlist page they are added, anywhere else they play, and a dropped
+folder is its files one level down. What a file is, is the demuxer's decision, so nothing is
+filtered by name on the way in. And the picture page shows the engine's `error` when nothing is
+playing, where before a file that would not play left it saying *Nothing is playing* and no
+more.
+
+**The three files were valid, could not play, and the engine said the wrong thing about them
+twice.** They were Windows' own HDR samples, VP9 with no audio track. §8 rules that out — the
+audio device is the clock, and a file with no audio has nothing to be played against — and the
+design says so: *said, rather than played*. What was said was *the playlist has nothing at 0*,
+which is true of an empty playlist and was not what happened; and the engine log, which nobody
+dropping a file reads, said *the container would not open* about a container `demux_mkv` had
+opened and read. Two bugs, one message each:
+
+- **`open_media` kept the last candidate's refusal.** `demux_mkv` and `demux_ffmpeg` both score
+  100 on a WebM; the first opened it and said *no audio track in it*, the second will not open
+  a file with no audio stream at all, and its verdict on the container overwrote the first's
+  verdict on the contents. A refusal from a module that read the file stands now; the latest one
+  is kept only until there is such a verdict.
+- **The queue took an entry that would not open for the end of the playlist.** `IPlaylist::at`
+  answered nullptr for both and nothing told them apart, so a playlist of five whose second
+  would not open played one — the comment on `at_media` about *silently playing four of five*
+  described a case that could not occur, and `QueueStop::unreadable`, written for exactly this,
+  was set by nothing. `IPlaylist` has `size` now; the queue walks past an entry that will not
+  open at open, at a boundary and on a *next*; the playlist remembers a refusal so the log says
+  it once; and a run that finds nothing to play from where it started stops with the playlist's
+  own sentence, which the shell shows in place of the picture.
+
+Measured, on the desk: `play` on the three samples stops with *3 entries would not open; the
+last, SDRSample.mkv: no audio track in it*, each named once in the log; the same three with a
+three-second WAV in the middle skips the first, plays the song as *2 of 3*, skips the third at
+the boundary and stops, 0 underruns and no error. At the queue's level a list of
+`{null, a, null, null, c, null}` plays `a` then `c` byte for byte, and a *next* from inside `a`
+lands on `c`.
+
 
 #### Built, and the palette needed a fourth verb
 
@@ -5806,7 +5848,7 @@ HDR state.
 | M6.8 | The video graph: decode, pace, present | **done.** VideoDecoder and Presenter behind their vtables -- mp::Sink for pictures -- and VideoGraph, which holds one frame, asks §8's pacer and presents. One frame and no queue, because a decoded frame is valid until the next call on the codec that produced it and a queue would have to copy what §9.8.1 went to some trouble not to copy; the lookahead is inside the decoder, which reorders B-frames and since M6.6 uses every core. No thread of its own either: the audio graphs own one because the device's event paces them, and video's pace is the display's, which belongs to the head. A drop does not cost a refresh -- one pump lets go of every frame whose time has passed, because letting one go per refresh would never catch the clock. After the first frame the decoder is asked what it actually produced and the presenter reconfigured where the bitstream disagrees with the container, except for the timescale and the frame rate, which a decoder never re-times. Packets arrive through IPacketFeed rather than from a demuxer, which is a hole with a name: §4 says one file has one position, so audio and video must share one demuxer, and the router that would do that is what comes next. Checked on demux_mp4 + codec_dav1d + video_d3d11 with a clock somebody chose: 24 shown and none dropped at the right speed with nothing more than a millisecond late, twelve dropped and twelve shown half a second behind with the picture still right at the end, and five hundred polls of a stopped clock holding it |
 | M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse. **Measured, and met at the default**: 3840x2160 HEVC with an audio track, 0 underruns and 0 silent frames while 1 to 4 frames of 71 were dropped. It was first met at `--ring-periods 32` against a default of 8 that underran; the default is 128 now, and the sections above are the measurements that moved it and what they do and do not say. Getting there took worker threads in `codec_de265` (one thread was a comment rather than a decision) and the ring. DirectComposition is still §9.7.1's shell case and unbuilt; hardware decode is `codec_mft` where the machine has a transform |
 | M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled. **All six steps of §9.7.2 are built**: the SDR white level, the output the window is on, PQ, HLG, BT.2390 in the shader, and the ABI append that carries what the content was graded on, filled from Matroska, from MP4's `mdcv`/`clli`, and from an HEVC prefix SEI where the container says nothing. Steps 3, 4 and 5 are formulas and are tested against them off-screen on WARP, so they run in CI on a machine with no display. **What is left is the half that is not a formula**: steps 1, 2 and 6 on real HDR hardware, written into [devices.md](devices.md) -- there is no HDR display here, and asserting they work without one is the exact failure §9.2 is the record of |
-| M8 | WinUI 3 shell | **most of it.** The project builds and its own reader decodes §10's wire against a running engine -- `MediaPerch.Shell.exe --check` prints the status and the graph, which is how the two descriptions of one format are held together. The canvas is drawn, the composition surface is composited, and the transport, playlist, module palette and settings screens are there -- every key the engine will take, per node and for the player and the engine, as something to type into, with the module's own refusal shown when it will not take it. Killing it mid-track changes nothing audible. **C#, WinUI 3, Native AOT**, `net10.0-windows10.0.26100.0` with a minimum of 22000, to Fluent 2, dependencies at their newest. Its settings screen is a **node canvas** in the shape of ComfyUI's and Fusion's: the chain as a topology, dragged to reorder, with a settings button per node. §10 says what that asks of the engine -- three verbs and no more -- and why the canvas is Fusion's look over a chain's semantics rather than a free-form DAG. The engine half of §9.7.1 is standing: the composition surface handle, the compositor's clock (not the swap chain's waitable, which was a black window until it was measured), the size message and the display message. The shell's half is done through WinUI's own compositor rather than DirectComposition, and *a shell that dies holding the picture* is a test rather than a claim. The picture survives a track boundary as the audio device does, and both it and `status` follow what is being heard rather than what is being decoded. The window is three pages behind a navigation pane, acrylic into the title bar, the picture filling the first with a Fluent transport and a scrubber under it; a click on a track is `play_at`. The canvas edits the chain -- drag to reorder, a bin to remove, a palette to add -- and the system picker opens files; the chain's grammar had to grow an unambiguous separator first, because it could not round-trip a stage with two settings. The scrubber moves between samples, the keys every player answers are answered, the queue can be dragged (the engine allows what its decoder has not reached), and a mixed-format playlist plays through -- it had stopped at its first boundary. **Done, polish included** |
+| M8 | WinUI 3 shell | **most of it.** The project builds and its own reader decodes §10's wire against a running engine -- `MediaPerch.Shell.exe --check` prints the status and the graph, which is how the two descriptions of one format are held together. The canvas is drawn, the composition surface is composited, and the transport, playlist, module palette and settings screens are there -- every key the engine will take, per node and for the player and the engine, as something to type into, with the module's own refusal shown when it will not take it. Killing it mid-track changes nothing audible. **C#, WinUI 3, Native AOT**, `net10.0-windows10.0.26100.0` with a minimum of 22000, to Fluent 2, dependencies at their newest. Its settings screen is a **node canvas** in the shape of ComfyUI's and Fusion's: the chain as a topology, dragged to reorder, with a settings button per node. §10 says what that asks of the engine -- three verbs and no more -- and why the canvas is Fusion's look over a chain's semantics rather than a free-form DAG. The engine half of §9.7.1 is standing: the composition surface handle, the compositor's clock (not the swap chain's waitable, which was a black window until it was measured), the size message and the display message. The shell's half is done through WinUI's own compositor rather than DirectComposition, and *a shell that dies holding the picture* is a test rather than a claim. The picture survives a track boundary as the audio device does, and both it and `status` follow what is being heard rather than what is being decoded. The window is three pages behind a navigation pane, acrylic into the title bar, the picture filling the first with a Fluent transport and a scrubber under it; a click on a track is `play_at`. The canvas edits the chain -- drag to reorder, a bin to remove, a palette to add -- and the system picker opens files; the chain's grammar had to grow an unambiguous separator first, because it could not round-trip a stage with two settings. The scrubber moves between samples, the keys every player answers are answered, the queue can be dragged (the engine allows what its decoder has not reached), and a mixed-format playlist plays through -- it had stopped at its first boundary. Files can be dropped on the window and the picker is the App SDK's (the WinRT one shows nothing in an unpackaged app); an entry that will not open is walked past, and the refusing module's own reason is what the shell shows -- three video-only WebMs had produced *nothing at 0* and a log line that was wrong. **Done, polish included** |
 | M9 | Linux head | ALSA or PipeWire in an exclusive-equivalent mode, proving the core was actually portable |
 
 M1 and M2 are the ones that de-risk the project. If exclusive-mode negotiation and the
@@ -6224,6 +6266,15 @@ real time.
   handles passed in are `WAIT_OBJECT_0 + i`, and the compositor tick is `WAIT_OBJECT_0 +
   count`, one past the end. Read the usual way round, every tick looks like the first handle
   and the loop stops on its first turn. Measured as `wait -> 0x1` with one handle passed.
+- **A nullptr that means two things means neither.** `IPlaylist::at` answered nullptr for an
+  entry that would not open and for the end of the list, and every reader took it for the end:
+  the queue finished a playlist at its first unreadable entry, and the enum value written for
+  the other meaning was never set. The second question needed its own answer, `size`, not a
+  second reading of the first.
+- **Keep the verdict of whoever read the thing.** Among ranked candidates the last refusal is
+  the least informed one, and it was the one kept. A module that opened the container and
+  refused the contents has said something about the file; a module that would not open the
+  container has said something about itself.
 - **To the graph draining it, a queue that stopped for the next track's format looks exactly
   like a playlist that ended.** Both are a read that returns nothing followed by the drain, and
   the run reports *finished* for both. Whoever decides what to do next has to ask the queue why

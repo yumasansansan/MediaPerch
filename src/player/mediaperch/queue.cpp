@@ -12,9 +12,21 @@ Queue::Queue(IPlaylist& playlist, std::size_t first) : playlist_(&playlist), ind
 
 bool Queue::open(std::string& why)
 {
-    current_ = playlist_->at(index_);
-    if (current_ == nullptr) {
+    const std::size_t count = playlist_->size();
+    if (index_ >= count) {
         why = "the playlist has nothing at " + std::to_string(index_);
+        return false;
+    }
+    const std::size_t from = index_;
+    current_ = first_from(index_);
+    if (current_ == nullptr) {
+        // The playlist knows why, entry by entry; this is the count. A host
+        // that holds the playlist puts its words here instead.
+        index_ = from;
+        why = count - from == 1
+                  ? "the entry at " + std::to_string(from) + " would not open"
+                  : "none of the " + std::to_string(count - from) + " entries from " +
+                        std::to_string(from) + " would open";
         return false;
     }
     format_ = current_->format();
@@ -32,7 +44,7 @@ bool Queue::open(std::string& why)
 
 bool Queue::jump(std::size_t index, std::uint64_t at)
 {
-    ISource* item = playlist_->at(index);
+    ISource* item = first_from(index);
     if (item == nullptr) {
         // "Next" on the last track is the end -- which is what it was when the
         // decoder was asked to skip instead -- and it is the end *here*, not
@@ -72,7 +84,8 @@ bool Queue::jump(std::size_t index, std::uint64_t at)
 
 bool Queue::advance()
 {
-    ISource* next = playlist_->at(index_ + 1);
+    std::size_t index = index_ + 1;
+    ISource* next = first_from(index);
     if (next == nullptr) {
         stopped_ = QueueStop::end;
         return false;
@@ -87,7 +100,7 @@ bool Queue::advance()
         stopped_ = QueueStop::format_change;
         return false;
     }
-    ++index_;
+    index_ = index;
     current_ = next;
     // The boundary, now that it is behind us. Anything recorded at or after
     // this point was recorded on a pass that a seek has since undone.
@@ -96,6 +109,21 @@ bool Queue::advance()
     }
     marks_.push_back(Mark{position_, index_, 0});
     return true;
+}
+
+ISource* Queue::first_from(std::size_t& index)
+{
+    // **An entry that will not open is walked past, not stopped at.** `at`
+    // answers nullptr for one and for the end alike, and `size` is what tells
+    // them apart. Nothing is silent about it: the playlist is what tried to
+    // open the entry, and it says which and why.
+    const std::size_t count = playlist_->size();
+    for (; index < count; ++index) {
+        if (ISource* item = playlist_->at(index)) {
+            return item;
+        }
+    }
+    return nullptr;
 }
 
 std::size_t Queue::read(void* dst, std::size_t bytes)

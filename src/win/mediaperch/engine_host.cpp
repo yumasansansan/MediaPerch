@@ -254,13 +254,17 @@ std::unique_ptr<IMedia> EngineHost::open_media(const std::string& path,
                              std::uint32_t config_bytes) {
         return registry_->codec_for(codec, config, config_bytes);
     };
+    // Whether `why` is already a module's verdict on the *contents*, which no
+    // later module's verdict on the container may overwrite.
+    bool judged = false;
     for (const auto& candidate : ranked) {
         // Which of the two shapes this file is, asked of the file rather than
         // of the module's name: a demuxer that decodes for itself hands over
         // frames, and there is nothing for a router to route.
         Demux probe;
         bool self_decodes = false;
-        if (probe.open(*candidate.vtbl, path.c_str()) == MP_OK) {
+        const bool readable = probe.open(*candidate.vtbl, path.c_str()) == MP_OK;
+        if (readable) {
             self_decodes = RoutedMedia::self_decoding_audio(probe);
         }
         probe.close();
@@ -280,9 +284,18 @@ std::unique_ptr<IMedia> EngineHost::open_media(const std::string& path,
             }
         }
         // A container that would not open and a codec nobody has are different
-        // failures, and the message says which. Keep the last one in case
-        // nothing else does better.
-        why = trouble;
+        // failures, and the message says which. **The module that read the
+        // container is the one to believe.** `demux_mkv` opens a video-only
+        // WebM and says *no audio track in it*; `demux_ffmpeg`, ranked level
+        // with it and tried next, will not open a file with no audio stream at
+        // all; and its *the container would not open* used to be the last
+        // word, which is what the log said about three valid files. A verdict
+        // from a module that read the file stands; until there is one, the
+        // latest refusal is kept in case nothing does better.
+        if (!judged) {
+            why = trouble;
+            judged = readable;
+        }
     }
 
     if (why.empty()) {

@@ -13,7 +13,8 @@
         <DesktopAcrylicBackdrop />
     </Window.SystemBackdrop>
 
-    <Grid x:Name="Root" RowDefinitions="Auto,*" PreviewKeyDown="OnKey">
+    <Grid x:Name="Root" RowDefinitions="Auto,*" PreviewKeyDown="OnKey"
+          AllowDrop="True" DragOver="OnDragOver" Drop="OnDrop">
 
         <!-- The title bar, extended into. Everything in it is drag region; the
              caption buttons are the system's and sit on top. -->

@@ -125,6 +125,15 @@ public sealed partial class NowPlayingPage : Page
         Status status = Session.Current.Status;
         bool nothing = status.State == PlayState.Stopped || status.Track.Length == 0;
         TrackLine.Text = nothing ? "Nothing is playing" : Session.Leaf(status.Track);
+        // **The engine's reason for stopping, in its own words.** `play` is
+        // answered `ok` the moment it is asked; a device that then takes none
+        // of the file's formats is a run that fails a moment later and is
+        // reported in `status`, and a shell that did not show it was a shell
+        // that opened a file and did nothing.
+        if (nothing)
+        {
+            PictureLine.Text = status.Error;
+        }
         ToolTipService.SetToolTip(TrackLine, nothing ? null : status.Track);
         FormatLine.Text = status.Wire.SampleRate == 0
             ? string.Empty

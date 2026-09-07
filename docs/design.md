@@ -811,6 +811,24 @@ next       …96000 Hz / 2 ch / S24_PACKED…, which this device cannot take wit
            being reopened. That is the gap, and it is not ours.
 ```
 
+**An entry that will not open is walked past.** `IPlaylist::at` answers nullptr for one and
+for the end alike, so the queue asks `size` as well and goes on to the next entry that opens
+— at open, at a boundary, and on a *next*. The playlist is what tried, and it writes
+*skipping `path`: why* to the log, once. A run that finds nothing to play from where it was
+asked to start stops with the playlist's own sentence — the last entry refused, by name, and
+how many there were — because that is the one a shell should show:
+
+```
+last error 3 entries would not open; the last, SDRSample.mkv: no audio track in it
+```
+
+And the reason is **the module that read the container's**, not the last module's tried.
+Those three are Windows' own HDR samples, VP9 with no audio track, which §8 rules out — the
+audio device is the clock, and a file with no audio has nothing to be played against.
+`demux_mkv` opened them and said so; `demux_ffmpeg`, ranked level with it and tried next,
+will not open a file with no audio stream, and its *the container would not open* was, for a
+while, the last word.
+
 It also does not remove the encoder's padding. That is the *container's*, and `demux_mpa`
 reads the LAME tag for exactly this reason -- the edit is a fact about the file, which is
 why `MpStreamInfo` carries it and a codec never sees it.

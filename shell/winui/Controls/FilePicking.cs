@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-using Windows.Storage.Pickers;
+using Microsoft.Windows.Storage.Pickers;
 
 namespace MediaPerch.Shell.Controls;
 
@@ -8,39 +8,54 @@ namespace MediaPerch.Shell.Controls;
 /// The system's file picker, owned by this window.
 /// </summary>
 /// <remarks>
-/// <b>Told about the window, because an unpackaged app is not.</b> A packaged
-/// app's picker knows which window opened it; this one has to be handed the
-/// HWND through <c>IInitializeWithWindow</c>, and without that the call
-/// fails with an HRESULT and no picker. Every file type is offered: what a
-/// file is, is the demuxer's decision, not a suffix's.
+/// <para>
+/// <b>The Windows App SDK's own picker, not <c>Windows.Storage</c>'s.</b> The
+/// older one needs to be handed an HWND through <c>IInitializeWithWindow</c>
+/// and, in this app, showed nothing and never returned -- no dialog, no
+/// exception, and a shell that seemed to ignore the button. The App SDK's
+/// picker takes the window's id in its constructor and is the one made for
+/// an unpackaged desktop app.
+/// </para>
+/// <para>
+/// Every file type is offered: what a file is, is the demuxer's decision, not
+/// a suffix's. Windows remembers the last folder per identifier.
+/// </para>
 /// </remarks>
 internal static class FilePicking
 {
     public static async Task<IReadOnlyList<string>> PickAsync()
     {
+        var paths = new List<string>();
         if (App.Window is null)
         {
-            return Array.Empty<string>();
+            return paths;
         }
-        var picker = new FileOpenPicker
+        Ipc.Session.Log("picker: opening");
+        try
         {
-            SuggestedStartLocation = PickerLocationId.MusicLibrary,
-            // Windows remembers the last folder per identifier; without one,
-            // every open starts from the library again.
-            SettingsIdentifier = "mediaperch-open",
-        };
-        picker.FileTypeFilter.Add("*");
-        WinRT.Interop.InitializeWithWindow.Initialize(
-            picker, WinRT.Interop.WindowNative.GetWindowHandle(App.Window));
-        var picked = await picker.PickMultipleFilesAsync();
-        var paths = new List<string>();
-        foreach (var file in picked)
-        {
-            if (file.Path.Length != 0)
+            var picker = new FileOpenPicker(App.Window.AppWindow.Id)
             {
-                paths.Add(file.Path);
+                SuggestedStartLocation = PickerLocationId.MusicLibrary,
+                SettingsIdentifier = "mediaperch-open",
+            };
+            picker.FileTypeFilter.Add("*");
+            var picked = await picker.PickMultipleFilesAsync();
+            foreach (var one in picked)
+            {
+                if (!string.IsNullOrEmpty(one.Path))
+                {
+                    paths.Add(one.Path);
+                }
             }
         }
+        catch (Exception e)
+        {
+            // **Named, because this is the call that fails on a machine rather
+            // than in a build.**
+            Ipc.Session.Log("picker: failed: " + e);
+            return paths;
+        }
+        Ipc.Session.Log($"picker: {paths.Count} file(s) chosen");
         return paths;
     }
 }

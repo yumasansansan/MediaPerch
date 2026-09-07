@@ -35,15 +35,17 @@ namespace mp {
 
 /// Why a queue stopped, when it stopped before the playlist ended.
 enum class QueueStop : std::uint32_t {
-    /// It has not stopped, or it reached the end of the playlist.
+    /// It has not stopped, or it reached the end of the playlist. An entry
+    /// that would not open is not a stop: the queue walks past it to the next
+    /// one that does (`first_from`), and the playlist, which is what tried,
+    /// says which it skipped and why. There was an `unreadable` value here for
+    /// that case and nothing ever set it -- `at` answered nullptr for such an
+    /// entry exactly as for the end, and the queue called a playlist finished
+    /// at its first entry that would not open.
     end,
     /// The next item is in a different format. The host has to rebuild the
     /// graph around it, and there will be a gap because the device says so.
     format_change,
-    /// The next item would not open. Not fatal to the queue -- it is skipped --
-    /// but recorded, because a playlist that silently plays four of its five
-    /// entries is worse than one that says which.
-    unreadable,
 };
 
 class Queue final : public ISource {
@@ -152,6 +154,9 @@ private:
     /// The track at `index`, beginning at queue frame `at`. What `request_next`
     /// turns a seek into; see it for why. No track there is the end.
     [[nodiscard]] bool jump(std::size_t index, std::uint64_t at);
+    /// The first entry at or after `index` that opens, leaving `index` on it;
+    /// nullptr, with `index` at the playlist's size, when none does.
+    [[nodiscard]] ISource* first_from(std::size_t& index);
 
     /// A boundary the queue has crossed: at queue frame `run_base` item
     /// `index` began, and it began at its own frame `item_base`.

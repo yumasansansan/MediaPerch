@@ -6,6 +6,8 @@ using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Windows.ApplicationModel.DataTransfer;
+using Windows.Storage;
 using Windows.System;
 using Windows.UI.Core;
 
@@ -154,6 +156,58 @@ public sealed partial class MainWindow : Window
                 e.Handled = true;
                 await s.PlayFilesAsync(await Controls.FilePicking.PickAsync(), replace: true);
                 break;
+        }
+    }
+
+    // --- files dropped on the window ----------------------------------------
+    //
+    // **Dropped on the playlist page they are added; anywhere else they play.**
+    // Files, and the files inside a dropped folder, one level down: what a
+    // file is, is the demuxer's decision, so nothing is filtered by name here.
+
+    private bool DroppingOnPlaylist => Pages.CurrentSourcePageType == typeof(PlaylistPage);
+
+    private void OnDragOver(object sender, DragEventArgs e)
+    {
+        bool files = e.DataView.Contains(StandardDataFormats.StorageItems);
+        e.AcceptedOperation = files ? DataPackageOperation.Copy : DataPackageOperation.None;
+        if (files && e.DragUIOverride is not null)
+        {
+            e.DragUIOverride.Caption = DroppingOnPlaylist ? "Add to the playlist" : "Play";
+            e.DragUIOverride.IsCaptionVisible = true;
+        }
+    }
+
+    private async void OnDrop(object sender, DragEventArgs e)
+    {
+        if (!e.DataView.Contains(StandardDataFormats.StorageItems))
+        {
+            return;
+        }
+        var paths = new List<string>();
+        foreach (IStorageItem item in await e.DataView.GetStorageItemsAsync())
+        {
+            if (item is StorageFile file && file.Path.Length != 0)
+            {
+                paths.Add(file.Path);
+            }
+            else if (item is StorageFolder folder)
+            {
+                foreach (StorageFile inside in await folder.GetFilesAsync())
+                {
+                    if (inside.Path.Length != 0)
+                    {
+                        paths.Add(inside.Path);
+                    }
+                }
+            }
+        }
+        bool append = DroppingOnPlaylist;
+        Session.Log($"drop: {paths.Count} file(s), {(append ? "added" : "played")}");
+        string why = await Session.Current.PlayFilesAsync(paths, replace: !append);
+        if (why.Length != 0)
+        {
+            Session.Log("drop: " + why);
         }
     }
 

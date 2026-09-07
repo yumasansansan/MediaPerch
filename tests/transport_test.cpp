@@ -100,6 +100,9 @@ public:
     {
         return index < items_.size() ? items_[index] : nullptr;
     }
+    /// A null in the list is an entry that would not open: `at` says nothing
+    /// there, and `size` says the list goes on.
+    std::size_t size() const override { return items_.size(); }
 
 private:
     std::vector<mp::ISource*> items_;
@@ -186,6 +189,67 @@ TEST_CASE("a queue joins two tracks with nothing in between", "[transport][queue
         INFO("second track, byte " << i);
         REQUIRE(captured[first.size() + i] == second[i]);
     }
+}
+
+TEST_CASE("an entry that will not open is walked past, not stopped at", "[transport][queue]")
+{
+    // `at` answers nullptr for an entry that would not open and for the end
+    // alike, and `size` tells them apart. A queue that stopped at the first
+    // nullptr called a playlist finished at its first unreadable entry -- and
+    // there was a `QueueStop::unreadable` for the case that nothing ever set.
+    const auto first = pattern(1024, 5);
+    const auto third = pattern(1536, 6);
+    Tape a{cd_audio(), first};
+    Tape c{cd_audio(), third};
+    Fixed playlist{{nullptr, &a, nullptr, nullptr, &c, nullptr}};
+
+    mp::Queue queue{playlist};
+    std::string why;
+    INFO(why);
+    REQUIRE(queue.open(why));
+    CHECK(queue.index() == 1);
+
+    std::vector<std::uint8_t> got;
+    std::vector<std::uint8_t> chunk(512);
+    for (;;) {
+        const std::size_t read = queue.read(chunk.data(), chunk.size());
+        if (read == 0) {
+            break;
+        }
+        got.insert(got.end(), chunk.begin(), chunk.begin() + static_cast<std::ptrdiff_t>(read));
+    }
+    REQUIRE(got.size() == first.size() + third.size());
+    CHECK(std::equal(first.begin(), first.end(), got.begin()));
+    CHECK(std::equal(third.begin(), third.end(),
+                     got.begin() + static_cast<std::ptrdiff_t>(first.size())));
+    CHECK(queue.index() == 4);
+    CHECK(queue.completed() == 2);
+    CHECK(queue.stopped() == mp::QueueStop::end);
+
+    // A next lands past one too. Fresh tapes: a `Tape` keeps its position, and
+    // the first queue played these two out.
+    Tape a2{cd_audio(), first};
+    Tape c2{cd_audio(), third};
+    Fixed unplayed{{nullptr, &a2, nullptr, nullptr, &c2, nullptr}};
+    mp::Queue again{unplayed};
+    REQUIRE(again.open(why));
+    REQUIRE(again.read(chunk.data(), chunk.size()) == chunk.size());
+    again.request_next();
+    REQUIRE(again.seek(256));
+    CHECK(again.index() == 4);
+    CHECK(again.index_at(256) == 4);
+    CHECK(again.item_position() == 0);
+
+    // And a playlist with entries and nothing that opens says so, as distinct
+    // from one with nothing in it at all.
+    Fixed none{{nullptr, nullptr}};
+    mp::Queue empty_handed{none};
+    REQUIRE_FALSE(empty_handed.open(why));
+    CHECK(why == "none of the 2 entries from 0 would open");
+    Fixed nothing{{}};
+    mp::Queue bare{nothing};
+    REQUIRE_FALSE(bare.open(why));
+    CHECK(why == "the playlist has nothing at 0");
 }
 
 TEST_CASE("a queue will not join two formats, and says which", "[transport][queue]")
