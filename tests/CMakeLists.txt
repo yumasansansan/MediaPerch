@@ -46,6 +46,9 @@ add_executable(mediaperch_tests
     repack_test.cpp
     ring_test.cpp
     calibrate_test.cpp
+    # The Cube LUT reader, which §9.8.3's stage needs and which needs no GPU --
+    # so it runs in CI and can be fuzzed, which is where a parser belongs.
+    cube_test.cpp
     profile_test.cpp
     settings_test.cpp
     sine_test.cpp
@@ -128,6 +131,20 @@ endif()
 if(TARGET mediaperch_win)
     target_sources(mediaperch_tests PRIVATE ipc_test.cpp)
     target_link_libraries(mediaperch_tests PRIVATE MediaPerch::win)
+endif()
+
+if(TARGET mediaperch_cube)
+    target_link_libraries(mediaperch_tests PRIVATE mediaperch_cube)
+endif()
+
+# §9.8.3's first stage, rendered and read back on WARP. The identity is the one
+# assertion a lookup table gets for free, and it checks the presenter's two-pass
+# split as much as it checks the table.
+if(TARGET mp_vdsp_lut AND TARGET mp_video_d3d11)
+    target_sources(mediaperch_tests PRIVATE vdsp_lut_test.cpp)
+    target_compile_definitions(mediaperch_tests PRIVATE
+        "MEDIAPERCH_VDSP_LUT=\"$<TARGET_FILE:mp_vdsp_lut>\"")
+    add_dependencies(mediaperch_tests mp_vdsp_lut)
 endif()
 
 # The video decoder, and the bitstream conversion it needs first. Driven

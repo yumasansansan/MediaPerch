@@ -210,7 +210,16 @@ cbuffer Constants : register(b0)
     // BT.2020 primaries. So the shader stops one step short -- it still
     // decodes, and it neither maps nor moves the gamut.
     uint  emit_pq;
+    // **§9.8.3's two halves, as two flags.** With a chain in the path the
+    // shader runs twice: once stopping at linear light, which is what grading
+    // is defined on, and once starting from it. With no chain both are zero
+    // and this is the single pass it has always been.
+    uint  emit_linear;
+
+    uint  linear_in;
     float pad1;
+    float pad2;
+    float pad3;
 
     // Source primaries to the buffer's, in linear light. Identity unless they
     // differ, which is the usual case and costs three dots either way.
@@ -334,7 +343,13 @@ float3 decode(float3 c)
 /// luminances.
 float3 to_scrgb(float3 c)
 {
-    float3 light = decode(c);
+    float3 light = linear_in != 0 ? c : decode(c);
+    if (emit_linear != 0) {
+        // Linear, on the source's own primaries: the gamut move belongs with
+        // the tone mapping below, and a stage grades what the file is rather
+        // than what the display happens to be.
+        return light;
+    }
     if (emit_pq != 0) {
         // Straight back out as the display would be sent it: no roll-off,
         // because somebody else is about to do that, and no gamut move,
@@ -424,7 +439,12 @@ struct Constants {
     float hlg_peak = 1000.0f;
     float tone_peak = 0.0f;
     std::uint32_t emit_pq = 0;
+    std::uint32_t emit_linear = 0;
+
+    std::uint32_t linear_in = 0;
     float pad1 = 0.0f;
+    float pad2 = 0.0f;
+    float pad3 = 0.0f;
 
     float gamut0[4] = {1.0f, 0.0f, 0.0f, 0.0f};
     float gamut1[4] = {0.0f, 1.0f, 0.0f, 0.0f};
@@ -849,6 +869,21 @@ struct MpVideo {
     /// Said once. A provider that is not on this machine is not on it every
     /// frame, and a log line per frame is a log nobody reads.
     bool tone_map_complained = false;
+
+    /// **§9.8.3's chain.** Empty is one pass, and is the default.
+    ///
+    /// Copied, because a presenter holding a pointer into a host's vector is a
+    /// presenter that crashes when the host adds a stage. The stages themselves
+    /// belong to whoever opened them and outlive this only by agreement.
+    std::vector<MpVideoStage> chain;
+    /// The fp32 linear intermediate the chain runs on. Made only when there is
+    /// a chain: not paying for it is the whole point of the single pass.
+    Com<ID3D11Texture2D> graded_linear;
+    Com<ID3D11RenderTargetView> graded_linear_view;
+    /// A view over whatever the last stage produced. Remade when that texture
+    /// changes, which after the first frame it does not.
+    Com<ID3D11ShaderResourceView> chain_out_view;
+    void* chain_out_texture = nullptr;
     std::uint64_t frames = 0;
     /// Whether the target holds a frame **at its current size**. A resize
     /// leaves a back buffer whose contents are undefined, which is the same
@@ -949,6 +984,122 @@ bool maps_elsewhere(const MpVideo* v) noexcept
 {
     return v->plan.tone_mapping && (v->plan.tone_map == mp::video::ToneMap::driver ||
                                     v->plan.tone_map == mp::video::ToneMap::d2d);
+}
+
+/// Tells every stage what it will be given: the picture's size, RGBA at single
+/// precision, and a transfer that states linear -- because that is what the
+/// intermediate holds and a stage that thought otherwise would grade the wrong
+/// numbers.
+bool configure_chain(MpVideo* v)
+{
+    if (v->chain.empty()) {
+        return true;
+    }
+    MpVideoInfo linear{};
+    std::memcpy(&linear, &v->graded, std::min<std::size_t>(v->graded.size, sizeof(linear)));
+    linear.size = sizeof(linear);
+    linear.width = v->width;
+    linear.height = v->height;
+    linear.display_width = v->width;
+    linear.display_height = v->height;
+    // 8 is ITU-T H.273's "linear transfer characteristics". The primaries stay
+    // the source's, which is where the pass above leaves the picture.
+    linear.transfer = 8;
+
+    for (const MpVideoStage& stage : v->chain) {
+        if (stage.vtbl->configure == nullptr) {
+            continue;
+        }
+        MpVideoInfo answered{};
+        answered.size = sizeof(answered);
+        if (stage.vtbl->configure(stage.handle, &linear, &answered) != MP_OK) {
+            v->trouble = "a stage would not take this picture";
+            return false;
+        }
+        if (answered.width != linear.width || answered.height != linear.height) {
+            // **A stage that resizes is a stage this presenter cannot place.**
+            // §9.7.1 put the scaling in the first pass, beside the chroma
+            // reconstruction; a stage that moved the geometry afterwards would
+            // be a second scaler nobody asked for.
+            v->trouble = "a stage in the chain wants to change the picture's size, "
+                         "which is decided before the chain runs";
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The fp32 linear intermediate §9.8.3's chain runs on, made only when there is
+/// one.
+///
+/// **Single precision and not half**, whatever the swap chain is: this is where
+/// a grade happens, and §9.10's argument about precision before the last step
+/// applies most exactly to the step that has arithmetic in it.
+bool make_graded_linear(MpVideo* v, std::string& why)
+{
+    v->graded_linear_view.reset();
+    v->graded_linear.reset();
+    v->chain_out_view.reset();
+    v->chain_out_texture = nullptr;
+    if (v->chain.empty()) {
+        return true;
+    }
+
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = v->width;
+    desc.Height = v->height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(v->device->CreateTexture2D(&desc, nullptr, v->graded_linear.put()))) {
+        why = "no linear intermediate, so there is nowhere for a stage to read from";
+        return false;
+    }
+    if (FAILED(v->device->CreateRenderTargetView(v->graded_linear.get(), nullptr,
+                                                 v->graded_linear_view.put()))) {
+        why = "the linear intermediate would take no render target view";
+        return false;
+    }
+    return true;
+}
+
+/// Every stage in turn, and the texture the last one produced.
+///
+/// **The presenter drives this** (§9.8.3) rather than something between it and
+/// the decoder, because a decoder's frame is Y'CbCr in the container's transfer
+/// and a stage that converted it would be the second implementation of §9's
+/// colour pipeline. Here the conversion has already happened, once, in the pass
+/// above.
+bool run_chain(MpVideo* v, const MpVideoFrame& source, MpVideoFrame& out)
+{
+    out = source;
+    for (const MpVideoStage& stage : v->chain) {
+        if (stage.vtbl == nullptr || stage.handle == nullptr ||
+            stage.vtbl->size < sizeof(MpVideoDspVtbl) || stage.vtbl->process == nullptr) {
+            continue;
+        }
+        MpVideoFrame next{};
+        next.size = sizeof(next);
+        const MpVideoFrame given = out;
+        if (stage.vtbl->process(stage.handle, &given, &next) != MP_OK ||
+            next.texture == nullptr) {
+            // **A stage that refuses does not stop the picture.** The frame it
+            // was given goes on to the next one, and the run says so once --
+            // §9.1's argument again: a picture that stops is worse than a
+            // picture that is not graded.
+            if (!v->tone_map_complained) {
+                v->tone_map_complained = true;
+                v->trouble = "a stage in the chain refused a frame; showing it ungraded";
+                log_line(MP_LOG_WARN, ("video_d3d11: " + v->trouble).c_str());
+            }
+            continue;
+        }
+        out = next;
+    }
+    return out.texture != nullptr;
 }
 
 /// The HDR10 texture the second pass reads, made only when there is one.
@@ -2132,6 +2283,9 @@ try {
     if (!make_graded_target(v, v->trouble)) {
         return MP_ERR_UNSUPPORTED;
     }
+    if (!make_graded_linear(v, v->trouble) || !configure_chain(v)) {
+        return MP_ERR_UNSUPPORTED;
+    }
     if (maps_elsewhere(v) && v->plan.tone_map == mp::video::ToneMap::d2d &&
         !make_d2d(v, v->trouble)) {
         return MP_ERR_UNSUPPORTED;
@@ -2263,6 +2417,12 @@ try {
         constants.sample_scale = m.sample_scale;
     }
 
+    // Decided before the buffer is written, because the flag is in it.
+    const bool grading_now = !v->chain.empty() && v->graded_linear_view;
+    if (grading_now) {
+        constants.emit_linear = 1;
+    }
+
     D3D11_MAPPED_SUBRESOURCE mapped{};
     if (SUCCEEDED(v->context->Map(v->constants.get(), 0, D3D11_MAP_WRITE_DISCARD, 0,
                                   &mapped))) {
@@ -2276,12 +2436,16 @@ try {
                                   static_cast<float>(v->height),
                                   0.0f,
                                   1.0f};
-    // **Where the first pass lands.** With a provider that is not ours the
-    // shader writes HDR10 into the intermediate and the provider maps that into
-    // the real target; otherwise it writes the target directly.
+    // **Where the first pass lands.** Three answers, and they do not overlap:
+    // a chain sends it to the linear intermediate §9.8.3 runs on; a provider
+    // that is not ours sends it to the HDR10 one it will map from; otherwise it
+    // is the target and there is one pass.
+    const bool grading = !v->chain.empty() && v->graded_linear_view;
     const bool second_pass = maps_elsewhere(v) && v->graded_view;
-    ID3D11RenderTargetView* views[] = {second_pass ? v->graded_view.get()
-                                                   : v->target_view.get()};
+    ID3D11RenderTargetView* views[] = {
+        grading        ? v->graded_linear_view.get()
+        : second_pass  ? v->graded_view.get()
+                       : v->target_view.get()};
     // Five slots, of which a frame uses one, two or three. Binding all five
     // each time keeps a stale view from a previous frame's shape out of the one
     // being drawn -- and an unused slot is a null the current shader does not
@@ -2303,6 +2467,83 @@ try {
     v->context->PSSetSamplers(0, 1, samplers);
     v->context->PSSetConstantBuffers(0, 1, buffers);
     v->context->Draw(3, 0);
+
+    if (grading) {
+        // **§9.8.3's chain, between the two halves.** The picture is linear
+        // light on the source's own primaries now, which is what a grade is
+        // defined on and the only place a lookup table means what its author
+        // meant.
+        ID3D11RenderTargetView* none[] = {nullptr};
+        v->context->OMSetRenderTargets(1, none, nullptr);
+
+        MpVideoFrame linear{};
+        linear.size = sizeof(linear);
+        linear.width = v->width;
+        linear.height = v->height;
+        linear.layout = MP_LAYOUT_RGBA32F;
+        linear.pts = frame->pts;
+        linear.texture = v->graded_linear.get();
+
+        MpVideoFrame graded{};
+        if (!run_chain(v, linear, graded) || graded.texture == nullptr) {
+            graded = linear;
+        }
+        // Named, so that what is about to be viewed is a pointer the reader --
+        // and the analyser -- can see cannot be null.
+        auto* produced = static_cast<ID3D11Resource*>(graded.texture);
+        if (produced == nullptr) {
+            v->trouble = "the chain produced no texture and neither did the pass before it";
+            return MP_ERR_INTERNAL;
+        }
+
+        if (v->chain_out_texture != graded.texture) {
+            v->chain_out_view.reset();
+            if (FAILED(v->device->CreateShaderResourceView(produced, nullptr,
+                                                           v->chain_out_view.put()))) {
+                v->trouble = "what the chain produced would take no view";
+                return MP_ERR_UNSUPPORTED;
+            }
+            v->chain_out_texture = graded.texture;
+        }
+
+        // **The second half, starting from linear.** Tone mapping, the gamut
+        // and the output encoding, exactly as they would have run in one pass
+        // -- `linear_in` is the only thing that differs, and it is there because
+        // decoding a signal that has no transfer would apply one twice.
+        constants.emit_linear = 0;
+        constants.linear_in = 1;
+        D3D11_MAPPED_SUBRESOURCE again{};
+        if (SUCCEEDED(v->context->Map(v->constants.get(), 0, D3D11_MAP_WRITE_DISCARD, 0,
+                                      &again))) {
+            std::memcpy(again.pData, &constants, sizeof(constants));
+            v->context->Unmap(v->constants.get(), 0);
+        }
+
+        ID3D11RenderTargetView* onward[] = {second_pass ? v->graded_view.get()
+                                                        : v->target_view.get()};
+        ID3D11ShaderResourceView* graded_source[] = {v->chain_out_view.get(), nullptr,
+                                                     nullptr, nullptr, nullptr};
+        // **Everything, because a stage is a program too.** A stage draws with
+        // its own vertex shader, its own sampler and its own constant buffer at
+        // the same slots this one uses; whatever ran last left them bound. The
+        // first version of this rebound only the pixel shader and the texture,
+        // so the second pass read the *stage's* constants as though they were
+        // the presenter's -- and `linear_in` landed on a field that meant
+        // something else, which came out as a black picture with nothing
+        // reporting an error anywhere.
+        ID3D11SamplerState* our_samplers[] = {v->sampler.get()};
+        ID3D11Buffer* our_buffers[] = {v->constants.get()};
+        v->context->OMSetRenderTargets(1, onward, nullptr);
+        v->context->RSSetViewports(1, &viewport);
+        v->context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        v->context->IASetInputLayout(nullptr);
+        v->context->VSSetShader(v->vertex_shader.get(), nullptr, 0);
+        v->context->PSSetShader(v->pixel_rgba.get(), nullptr, 0);
+        v->context->PSSetShaderResources(0, 5, graded_source);
+        v->context->PSSetSamplers(0, 1, our_samplers);
+        v->context->PSSetConstantBuffers(0, 1, our_buffers);
+        v->context->Draw(3, 0);
+    }
 
     if (second_pass) {
         // **Unbound first.** The intermediate is about to be read by the video
@@ -2625,6 +2866,45 @@ try {
     return MP_ERR_NO_MEMORY;
 }
 
+MpResult MP_CALL video_stages(MpVideo* v, const MpVideoStage* stages,
+                              std::uint32_t count) noexcept
+try {
+    if (v == nullptr || (count != 0 && stages == nullptr)) {
+        return MP_ERR_INVALID;
+    }
+
+    std::vector<MpVideoStage> taken;
+    taken.reserve(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        // Read no further than the caller says its struct goes, which is what
+        // the size prefix is for.
+        MpVideoStage one{};
+        std::memcpy(&one, &stages[i],
+                    std::min<std::size_t>(stages[i].size, sizeof(one)));
+        if (one.vtbl == nullptr || one.handle == nullptr ||
+            one.vtbl->size < sizeof(MpVideoDspVtbl)) {
+            v->trouble = "a stage with no vtable, or one older than this presenter reads";
+            return MP_ERR_INVALID;
+        }
+        taken.push_back(one);
+    }
+    v->chain = std::move(taken);
+
+    if (!v->configured) {
+        return MP_OK; // `configure` will make what the chain needs
+    }
+    // The intermediate is the only thing a chain changes. The target, the swap
+    // chain and the colour plan are all about the display, and a chain does not
+    // move the display.
+    if (!make_graded_linear(v, v->trouble)) {
+        return MP_ERR_UNSUPPORTED;
+    }
+    return configure_chain(v) ? MP_OK : MP_ERR_UNSUPPORTED;
+}
+catch (...) {
+    return MP_ERR_NO_MEMORY;
+}
+
 MpResult MP_CALL video_describe(MpVideo* v, std::uint32_t index, char* out,
                                 std::uint32_t out_bytes) noexcept
 try {
@@ -2734,6 +3014,17 @@ try {
                       "(read only)",
                       v->picture_width, v->picture_height);
         return MP_OK;
+    case 15:
+        // **§9.8.3's chain, and whether it is actually in the path.** A stage
+        // that was handed over and an intermediate that was made are two
+        // things, and a run that says one without the other is a run drawing
+        // one pass while somebody believes it is grading.
+        std::snprintf(out, out_bytes,
+                      "chain	%zu stage%s, %s	what runs in linear light (read only)",
+                      v->chain.size(), v->chain.size() == 1 ? "" : "s",
+                      v->graded_linear_view ? "with an intermediate"
+                                            : "so there is one pass");
+        return MP_OK;
     case 14:
         // **Who said what the display is**, which is the difference between a
         // decision and a guess. A windowless engine that fell back to the first
@@ -2762,6 +3053,7 @@ const MpVideoVtbl g_vtbl = {
     /* describe   */ &video_describe,
     /* get_device */ &video_get_device,
     /* read_back  */ &video_read_back,
+    /* stages     */ &video_stages,
 };
 
 MpResult MP_CALL module_init(const MpHost* host) noexcept

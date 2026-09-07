@@ -1149,6 +1149,94 @@ typedef struct MpVideoCodecVtbl {
     MpResult(MP_CALL *set)(MpVideoCodec *c, const char *key, const char *value);
 } MpVideoCodecVtbl;
 
+/* ------------------------------------------------------------------ */
+/* Video DSP                                                           */
+/* ------------------------------------------------------------------ */
+
+typedef struct MpVideoDsp MpVideoDsp; /* opaque, module-owned */
+
+/* A stage between the presenter's two halves, and that is the whole design.
+ *
+ * **The video side has no Path A** (docs/plan.md §9.8.3). Audio has two graphs
+ * because a `memcpy` to the device is a real option and there has to be a path
+ * that promises one; no frame ever reaches a display untouched, so there is one
+ * video path and it is the processed one. A video stage therefore inherits none
+ * of §5's apparatus: no fidelity, no negotiation, no "a stage forces the other
+ * graph". What replaces it is *where* rather than *whether* -- on the device, or
+ * dragged back through system memory, which is what `probe` is for.
+ *
+ * **The presenter drives the chain.** A stage does not sit between the decoder
+ * and the presenter, because a decoder's frame is Y'CbCr in the container's
+ * transfer and a stage that converted it would be the second implementation of
+ * §9's colour pipeline. So the presenter linearises as it already does, runs the
+ * chain, and encodes for the display as it already does. With no chain there is
+ * one pass and nothing changes; with one there is an fp32 linear intermediate,
+ * which is what grading costs and is paid only when it is asked for.
+ *
+ * **The chain runs in linear light**, on the source's own primaries, at fp32.
+ * That is where grading is defined and it is the only place a lookup table
+ * means what its author meant. A stage that wanted the *coded* signal -- AV1
+ * film grain is the one that will -- would make the position a choice, and that
+ * is an append for the day something needs it rather than an enumerator with
+ * nothing behind it today (§4 made that mistake once with MP_ENCODING_DSD). */
+typedef struct MpVideoDspVtbl {
+    uint32_t size;
+    uint32_t reserved;
+
+    /* MP_ANY. Whether this stage runs on `api`, and how well. **`api` is the
+     * question**, the same one MpVideoCodecVtbl::probe asks: a stage written
+     * against D3D12 scores 0 for a D3D11 device, and MP_GRAPHICS_NONE is a
+     * stage that works in system memory and will cost a round trip.
+     * Score 0 means no. */
+    MpResult(MP_CALL *probe)(MpGraphicsApi api, uint32_t *out_score);
+
+    /* MP_IO. `device` is the presenter's, never one of the stage's own making
+     * -- §9.8.1's texture-adoption argument applies here exactly as it does to
+     * a decoder. NULL asks for system memory. */
+    MpResult(MP_CALL *open)(const MpGraphicsDevice *device, MpVideoDsp **out);
+    void(MP_CALL *close)(MpVideoDsp *d);
+
+    /* MP_ANY. What it will be given and what it will produce.
+     *
+     * `in` is the intermediate: the picture's size, MP_LAYOUT_RGBA32F, and the
+     * primaries the presenter is working on with `transfer` stating linear. A
+     * stage answers with what comes out, which may differ in nothing at all --
+     * and usually does not, because a grader is a function of colour and not of
+     * geometry. `out->size` is set by the caller. */
+    MpResult(MP_CALL *configure)(MpVideoDsp *d, const MpVideoInfo *in, MpVideoInfo *out);
+
+    /* MP_IO. One frame in, one out.
+     *
+     * The output is valid until the next call on this stage, which is the same
+     * promise a decoder makes and for the same reason: the frame is a slice of
+     * a pool the stage owns. A stage that has nothing to do may hand `in` back
+     * unchanged, and an identity lookup table does exactly that. */
+    MpResult(MP_CALL *process)(MpVideoDsp *d, const MpVideoFrame *in, MpVideoFrame *out);
+
+    /* MP_ANY. Something moved the position; forget anything carried across
+     * frames. A stateless stage answers MP_OK and does nothing. */
+    MpResult(MP_CALL *reset)(MpVideoDsp *d);
+
+    /* MP_ANY. `key=value`, as MpDspVtbl means it, and the same `trouble`
+     * convention for a stage that knows why it refused. */
+    MpResult(MP_CALL *set)(MpVideoDsp *d, const char *key, const char *value);
+    /* MP_ANY. One `key\tcurrent\tdescription` per index, MP_END past the last. */
+    MpResult(MP_CALL *describe)(MpVideoDsp *d, uint32_t index, char *out,
+                                uint32_t out_bytes);
+} MpVideoDspVtbl;
+
+/* One stage, as a presenter is handed it: somebody else's vtable and somebody
+ * else's handle, because the presenter calls it and does not own it.
+ *
+ * Size-prefixed like every other struct that crosses, so that a presenter built
+ * against an older header reads no further than it knows about. */
+typedef struct MpVideoStage {
+    uint32_t size;
+    uint32_t reserved;
+    const MpVideoDspVtbl *vtbl;
+    MpVideoDsp *handle;
+} MpVideoStage;
+
 typedef struct MpVideoVtbl {
     uint32_t size;
     uint32_t reserved;
@@ -1205,6 +1293,21 @@ typedef struct MpVideoVtbl {
     MpResult(MP_CALL *read_back)(MpVideo *v, void *dst, size_t dst_bytes,
                                  uint32_t *out_width, uint32_t *out_height,
                                  MpPixelLayout *out_layout);
+
+    /* MP_ANY. The chain to run in linear light, between this presenter's
+     * decode and its encode (§9.8.3). `count` zero clears it, which is the
+     * default and is one pass.
+     *
+     * **The array is the caller's and is copied**, because a presenter that
+     * held a pointer into a host's vector would be a presenter that crashed
+     * when the host added a stage. The stages themselves are not copied and
+     * outlive nothing: whoever opened them closes them, and must not do so
+     * while this presenter holds them.
+     *
+     * Asked before `configure` or after it. After it, the presenter rebuilds
+     * whatever the chain changed -- which is the intermediate, and nothing
+     * else, because a chain does not move the display. */
+    MpResult(MP_CALL *stages)(MpVideo *v, const MpVideoStage *stages, uint32_t count);
 } MpVideoVtbl;
 
 /* ------------------------------------------------------------------ */
@@ -1443,7 +1546,8 @@ enum {
     MP_KIND_META = 5u,  /* reserved */
     MP_KIND_DEMUX = 6u, /* MpDemuxVtbl */
     MP_KIND_CODEC = 7u, /* MpCodecVtbl -- audio */
-    MP_KIND_VCODEC = 8u /* MpVideoCodecVtbl */
+    MP_KIND_VCODEC = 8u, /* MpVideoCodecVtbl */
+    MP_KIND_VDSP = 9u   /* MpVideoDspVtbl -- video, between a presenter's halves */
 };
 
 enum {

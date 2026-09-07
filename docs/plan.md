@@ -4661,6 +4661,19 @@ is where that goes.
     audio:  demux -> codec -> DSP -> sink
     video:  demux -> vcodec ->  ?  -> video
 
+**And the video side has no Path A, which is the asymmetry that decides the shape.** §5's two
+graphs exist because audio *can* reach a device untouched: a `memcpy` is a real option, so
+there has to be a path that promises one and a path that admits it is processing. No frame ever
+reaches a display untouched. Chroma is reconstructed, a matrix is applied, a transfer function
+is undone and another is applied, and §9.10 says all of it is fp32 until DXGI's fp16 at the very
+end. There is one video path and it is the processed one.
+
+So a video DSP inherits none of §5's apparatus: no `use_processed`, no `Fidelity`, no
+negotiation between exact and repacked, no *a stage forces Path B* because there is no other
+path to be forced off. What replaces the question is **where** rather than **whether**: a stage
+either runs on the presenter's device or drags the frame back through system memory, which is
+what `probe` taking an `MpGraphicsApi` is for.
+
 `MP_KIND_DSP` sits between a codec and a sink, and §5 is built on what that
 separation buys: Path A has no DSP in it at all and is bit-exact by
 construction, Path B has whatever a person put there and **says so**. Neither
@@ -4706,13 +4719,83 @@ goes out, because a stage may change the layout -- a grader that works in
 next call, which is the promise a decoder already makes. `set` and `describe`
 are the same pair every other kind has.
 
-**Not added yet, and that is the rule rather than laziness.** §15 says not to
-add an interface until the second implementation of it exists, and §4 records
-that a kind number with no vtable and no module is the mistake this tree made
-once with `MP_ENCODING_DSD` and reverted. Nothing here processes video between
-the decoder and the presenter today. The first stage that wants to -- film
-grain moved off dav1d, or a lookup table, or a scaler -- is what should bring
-the interface with it.
+**Held back until something wanted it**, which is the rule rather than
+laziness: §15 says not to add an interface until there is an implementation, and
+§4 records that a kind number with no vtable and no module is the mistake this
+tree made once with `MP_ENCODING_DSD` and reverted. A lookup table is what
+wanted it, and it arrived with it.
+
+#### Built, and the presenter drives it
+
+`MP_KIND_VDSP` is appended — a kind is reachable by appending, so `MP_ABI_VERSION` stays at
+4 — with `MpVideoDspVtbl` beside it and one entry point on the presenter:
+`stages(MpVideo*, const MpVideoStage*, uint32_t)`.
+
+**The stage does not sit between the decoder and the presenter**, which is where this section
+first drew it, and the reason is the first thing writing it turned up. A decoder's frame is
+Y'CbCr in the container's transfer; a stage that graded it would have to convert first, and
+that conversion is §9's colour pipeline. A second implementation of it is the one thing this
+tree will not have. So the presenter linearises as it always did, runs the chain, and encodes
+as it always did:
+
+    decode to linear light  ->  the chain  ->  tone map, gamut, encode
+
+With no chain both halves are the same single pass they have always been and nothing is
+allocated; with one there is an fp32 linear intermediate, which is what grading costs and is
+paid only when it is asked for. The shader needed two flags for it, `emit_linear` and
+`linear_in`, because `decode` and `to_scrgb` were already separate functions.
+
+**The chain runs in linear light on the source's own primaries.** That is where a grade is
+defined and the only place a lookup table means what its author meant; the gamut move stays
+with the tone mapping, after. A stage that wanted the *coded* signal — AV1 film grain is the
+one that will — would make the position a choice, and that is an append for the day something
+needs it rather than an enumerator with nothing behind it (§4 made that mistake once).
+
+**And a stage may not change the picture's size.** §9.7.1 put the scaling in the first pass,
+beside the chroma reconstruction; a stage that resized afterwards would be a second scaler
+nobody asked for, so `configure_chain` refuses one with a sentence.
+
+#### `vdsp_lut`, and why a lookup table went first
+
+The three candidates this section named were film grain moved off dav1d, a lookup table and a
+scaler. The scaler is out because §9.7.1 decided where scaling happens. Film grain needs a
+*second* ABI append to carry the grain parameters and only ever applies to two codecs. A cube
+LUT needs neither: every grading tool writes one, it works on any stream, and **it is the one
+colour transform that can be held to a number with no reference at all** — an identity table
+must give the picture back.
+
+Two decisions in the module, and both are about being measurable:
+
+- **The interpolation is in the shader, not in a sampler.** A `Texture3D` with a linear filter
+  is interpolated by fixed-function hardware whose subtexel precision the specification does
+  not state; it is commonly eight bits and it differs between vendors. A colour transform that
+  comes out differently on two GPUs is not a colour transform, so the corners are point-fetched
+  and combined in fp32 arithmetic the file can be read against.
+- **Tetrahedral rather than trilinear**, for a property rather than a preference: on the
+  neutral axis, where R = G = B, a tetrahedral combination lands exactly on the cell's diagonal
+  and a trilinear one does not. **Greys stay grey.** It is also four fetches instead of eight.
+
+The reader is `modules/shared/cube`, portable and with no Direct3D in it, for the reason
+`modules/shared/h264` is: a parser is where the bugs are and a parser that needs a GPU is a
+parser nobody fuzzes. It refuses a 1D LUT by name (three curves are not a cube), bounds
+`LUT_3D_SIZE` **before** allocating (`LUT_3D_SIZE 4000000000` in a two-line file is otherwise
+sixty-four gigabytes), and refuses a short table rather than padding it — a table with its
+last plane missing is a table whose brightest colours are black, and a reader that filled them
+in would be inventing a transform.
+
+**What the tests are.** The identity, at 1e-6, which is what a correct fp32 path gives and
+which a path that quantised to eight bits anywhere would fail; and a table that exchanges red
+and blue, which also catches the axis order — the format varies red fastest and so does a
+Direct3D 3D texture, and getting that backwards is a picture no identity test can see is
+wrong. Both run on WARP with no display.
+
+**And one bug worth keeping.** The first version of the second pass rebound the pixel shader
+and the texture and nothing else. A stage is a *program*: it draws with its own vertex shader,
+its own sampler and its own constant buffer, at the same slots the presenter uses. So the
+second pass read the stage's constants as the presenter's, `linear_in` landed on a field that
+meant something else, and the picture came back black with every `trouble` row in the process
+saying *nothing*. Everything the chain could have touched is rebound now.
+
 
 ### 9.8.4 AV2, and a decoder that is the only one
 
@@ -4932,6 +5015,88 @@ A/V graph a calibration measures. An engine that does not know a kind answers `e
 this section already says is what a shell from the future should be told, so the two halves can
 be built in either order.
 
+#### The shell, and what a node canvas asks of this surface
+
+**What it is.** C#, WinUI 3, Native AOT (§2), targeting `net10.0-windows10.0.26100.0` with a
+minimum of 22000, to Fluent 2, with every dependency at its newest. It stays optional: an
+install with no shell is the tray menu and is usable.
+
+**Newest, and as few as possible, and those two pull against each other in one place.**
+`Microsoft.WindowsAppSDK` is a meta-package: taking it takes everything the Windows App SDK
+has, and what it has now includes the AI feature area — ONNX Runtime and DirectML arrive
+behind a reference nobody typed. A media player does not want a machine-learning runtime in
+its installer. So the shell references the **feature packages** rather than the meta-package:
+`Microsoft.WindowsAppSDK.Foundation` and `Microsoft.WindowsAppSDK.WinUI`, and nothing else
+from that family unless something needs it and says why. **`Microsoft.WindowsAppSDK.ML` is
+named here so that adding it is a decision somebody makes rather than a default they inherit.**
+
+The same rule downwards. The node canvas is tens of nodes, not thousands, so it is XAML
+`Canvas` and shapes and costs no package at all; Win2D is the escape hatch if that stops
+holding up, taken when it does and not before. **The Community Toolkit does not
+support the Windows App SDK this targets**, so it is not a menu to take controls from either:
+what the canvas needs is written here. The wire is §10's versioned struct stream, hand-written
+on both sides, so there is no serialiser here.
+
+**The settings screen is a node canvas** — ComfyUI's and Fusion's shape. The whole processing
+chain as a topology seen at once, modules combined by dragging, module priority set in the GUI,
+and a settings button on each node that opens that module's own parameters. The engine is built
+to be configured finely; all of it should be reachable without typing a key name.
+
+**This does not break "the shell cannot reach into the graph".** That sentence forbids holding
+a pointer and driving a stage, and none of what follows does: the shell asks the engine *what
+shape it is* and asks the engine *to change shape*. It is the distinction `settings` already
+makes — a shell that could set `dsp` could already reorder the chain; what it could not do was
+**see** it.
+
+Three things are missing, and they are the whole of it:
+
+| what a canvas needs | today | new? |
+|---|---|---|
+| the topology: nodes and what connects them | nothing — `settings` is a flat list | **yes**, `graph` / `graph_reply` |
+| one node's own parameters | only by rewriting the whole `dsp` string | **yes**, `node_settings` / `node_setting_set` |
+| the palette: every module, its kind and its priority | `mediaperch-probe modules` prints it; §10 has no verb | **yes**, `modules` / `modules_reply` |
+| what is playing, the playlist, the log, calibration | §10, already there | no |
+
+**1. The topology, as a description and not a second model.** Nodes carry an id, a kind, the
+module they are, a display name and whether they can be removed; edges carry which output feeds
+which input. Derived from the graph that is actually built, every time it is asked for — two
+models of one graph are two things to keep in step, and the one that drifts is the one nobody
+plays through.
+
+**2. A node's own parameters.** `MpDspVtbl::describe` already answers `key`, `value`,
+`description` per stage, and `MpVideoVtbl::describe` does the same for a presenter; none of it
+is on the wire *per node*. Today the only way to change a stage's parameter is to rewrite the
+whole `dsp` spec string, which a GUI would have to reassemble from what it thinks the chain is
+and which loses the difference between *set this* and *rebuild the chain*. Keyed by node id,
+this is the settings button.
+
+**3. The palette, and priority.** Every module loaded, its kind, its id, its priority and
+whether the allow-list admits it. Priority ordering is `[engine] decoders` (a reordering, not a
+veto — §7) and `allow`, and **both are `[engine]` rather than `[player]`**, which §11 decided
+for a reason: they are needed before there is a player. So a GUI that edits them is editing the
+file, not calling `Player::set`, and that is either a new pair of verbs or `save` growing an
+engine half. Worth deciding before it is built rather than after.
+
+**And one thing the canvas has to know about the engine.** Its graph is **not a free-form DAG**.
+§5 is two graphs: Path A is a memcpy or a container repack with nothing insertable at all, and
+Path B is one f64 bus with a *linear* chain on it. What is actually variable is the membership
+and order of that chain, the path policy, and each stage's parameters. A canvas that let a
+person draw an edge from anywhere to anywhere would be offering something the engine will
+refuse. So it should be **Fusion's look over a chain's semantics**: nodes in a row, dragged to
+reorder, with sockets that accept the one connection that exists. That is not the GUI being
+limited — it is what §5 decided, and it is why Path A can promise a `memcpy`.
+
+Two consequences that are easier to see now than later:
+
+- **The video path now has a stage to insert**, which it did not when this was written: §9.8.3
+  is built, `MP_KIND_VDSP` exists and `vdsp_lut` is the first one. The video half of the canvas
+  is feed — decoder — *chain* — presenter, and the chain runs inside the presenter's two
+  halves rather than beside it, which is a thing the canvas has to draw honestly.
+- **Some settings belong to no node.** `device`, `share`, `ring_periods`, `prefill_periods`,
+  `recover` are the run rather than a stage in it. They are the canvas's background or a panel
+  beside it; a node called *the engine* would be a node nobody can move, which is a node that is
+  lying about being one.
+
 ---
 
 ## 11. Configuration
@@ -5010,7 +5175,7 @@ HDR state.
 | M6.8 | The video graph: decode, pace, present | **done.** VideoDecoder and Presenter behind their vtables -- mp::Sink for pictures -- and VideoGraph, which holds one frame, asks §8's pacer and presents. One frame and no queue, because a decoded frame is valid until the next call on the codec that produced it and a queue would have to copy what §9.8.1 went to some trouble not to copy; the lookahead is inside the decoder, which reorders B-frames and since M6.6 uses every core. No thread of its own either: the audio graphs own one because the device's event paces them, and video's pace is the display's, which belongs to the head. A drop does not cost a refresh -- one pump lets go of every frame whose time has passed, because letting one go per refresh would never catch the clock. After the first frame the decoder is asked what it actually produced and the presenter reconfigured where the bitstream disagrees with the container, except for the timescale and the frame rate, which a decoder never re-times. Packets arrive through IPacketFeed rather than from a demuxer, which is a hole with a name: §4 says one file has one position, so audio and video must share one demuxer, and the router that would do that is what comes next. Checked on demux_mp4 + codec_dav1d + video_d3d11 with a clock somebody chose: 24 shown and none dropped at the right speed with nothing more than a millisecond late, twelve dropped and twelve shown half a second behind with the picture still right at the end, and five hundred polls of a stopped clock holding it |
 | M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse. **Measured, and met at the default**: 3840x2160 HEVC with an audio track, 0 underruns and 0 silent frames while 1 to 4 frames of 71 were dropped. It was first met at `--ring-periods 32` against a default of 8 that underran; the default is 128 now, and the sections above are the measurements that moved it and what they do and do not say. Getting there took worker threads in `codec_de265` (one thread was a comment rather than a decision) and the ring. DirectComposition is still §9.7.1's shell case and unbuilt; hardware decode is `codec_mft` where the machine has a transform |
 | M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled. **All six steps of §9.7.2 are built**: the SDR white level, the output the window is on, PQ, HLG, BT.2390 in the shader, and the ABI append that carries what the content was graded on, filled from Matroska, from MP4's `mdcv`/`clli`, and from an HEVC prefix SEI where the container says nothing. Steps 3, 4 and 5 are formulas and are tested against them off-screen on WARP, so they run in CI on a machine with no display. **What is left is the half that is not a formula**: steps 1, 2 and 6 on real HDR hardware, written into [devices.md](devices.md) -- there is no HDR display here, and asserting they work without one is the exact failure §9.2 is the record of |
-| M8 | WinUI 3 shell | killing it mid-track changes nothing audible |
+| M8 | WinUI 3 shell | killing it mid-track changes nothing audible. **C#, WinUI 3, Native AOT**, `net10.0-windows10.0.26100.0` with a minimum of 22000, to Fluent 2, dependencies at their newest. Its settings screen is a **node canvas** in the shape of ComfyUI's and Fusion's: the chain as a topology, dragged to reorder, with a settings button per node. §10 says what that asks of the engine -- three verbs and no more -- and why the canvas is Fusion's look over a chain's semantics rather than a free-form DAG. The engine half of §9.7.1 is standing: the composition surface handle, the frame clock, the size message and the display message. What is left on this side is `CreateSurfaceFromHandle`, a visual, a target on an `HWND` and a `Commit` -- which is also the only consumer that turns *the shell can die mid-frame* into a test |
 | M9 | Linux head | ALSA or PipeWire in an exclusive-equivalent mode, proving the core was actually portable |
 
 M1 and M2 are the ones that de-risk the project. If exclusive-mode negotiation and the
