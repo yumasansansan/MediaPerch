@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <mutex>
 #include <new>
 #include <string_view>
 #include <utility>
@@ -161,6 +162,32 @@ public:
         return media != nullptr ? &media->audio() : nullptr;
     }
 
+    /// **Moves an entry the queue has not reached.** The decode thread opens
+    /// entries lazily through `at`, so an entry past the decoder's index is a
+    /// path and a null slot and can change places freely; whether an entry is
+    /// past it is `Player::move_entry`'s to decide, since only it sees the
+    /// queue. The lock is against `at`, which is the decode thread's.
+    void move(std::size_t from, std::size_t to)
+    {
+        const std::lock_guard lock{lock_};
+        if (from >= files_.size() || to >= files_.size() || from == to) {
+            return;
+        }
+        const auto shift = [](auto& items, std::size_t a, std::size_t b) {
+            if (a < b) {
+                std::rotate(items.begin() + static_cast<std::ptrdiff_t>(a),
+                            items.begin() + static_cast<std::ptrdiff_t>(a) + 1,
+                            items.begin() + static_cast<std::ptrdiff_t>(b) + 1);
+            } else {
+                std::rotate(items.begin() + static_cast<std::ptrdiff_t>(b),
+                            items.begin() + static_cast<std::ptrdiff_t>(a),
+                            items.begin() + static_cast<std::ptrdiff_t>(a) + 1);
+            }
+        };
+        shift(files_, from, to);
+        shift(opened_, from, to);
+    }
+
     /// The whole file, for the caller that wants the picture too.
     ///
     /// `at` is `IPlaylist`'s and hands back the audio because that is what a
@@ -168,6 +195,7 @@ public:
     /// attached, and both point into one demuxer with one position (§4).
     IMedia* at_media(std::size_t index)
     {
+        const std::lock_guard lock{lock_};
         if (index >= files_.size()) {
             return nullptr;
         }
@@ -186,19 +214,23 @@ public:
         return opened_[index].get();
     }
 
-    [[nodiscard]] const std::string& decoder_name(std::size_t index) const
+    // By value, both: a reference into a vector that `move` can shift is a
+    // reference that may not survive the call it was returned from.
+    [[nodiscard]] std::string decoder_name(std::size_t index) const
     {
-        static const std::string none;
-        return index < opened_.size() && opened_[index] ? opened_[index]->decoder() : none;
+        const std::lock_guard lock{lock_};
+        return index < opened_.size() && opened_[index] ? opened_[index]->decoder()
+                                                        : std::string{};
     }
-    [[nodiscard]] const std::string& path(std::size_t index) const
+    [[nodiscard]] std::string path(std::size_t index) const
     {
-        static const std::string none;
-        return index < files_.size() ? files_[index] : none;
+        const std::lock_guard lock{lock_};
+        return index < files_.size() ? files_[index] : std::string{};
     }
 
 private:
     IEngineHost* host_;
+    mutable std::mutex lock_;
     std::vector<std::string> files_;
     std::vector<std::unique_ptr<IMedia>> opened_;
 };
@@ -266,6 +298,38 @@ bool Player::play_at(std::size_t index, std::string& why)
     }
     // The same request `play` makes, with a first item that is not the first.
     play(std::move(files), index);
+    return true;
+}
+
+bool Player::move_entry(std::size_t from, std::size_t to, std::string& why)
+{
+    const std::lock_guard lock{mutex_};
+    if (from >= files_.size() || to >= files_.size()) {
+        why = "the playlist has " + std::to_string(files_.size()) + " entries";
+        return false;
+    }
+    if (from == to) {
+        return true;
+    }
+    if (queue_ != nullptr) {
+        // **Only what the decoder has not reached.** A queue records where each
+        // track began as it goes past it, and the ring holds what it read
+        // ahead; an entry at or before the decoder's index is either playing,
+        // already in the ring, or already marked, and moving it would move the
+        // ground the run stands on. Past it, an entry is a path in a list.
+        const std::size_t read = queue_->index();
+        if (from <= read || to <= read) {
+            why = "the engine has already read up to entry " + std::to_string(read + 1) +
+                  "; entries it has passed cannot be moved while they play";
+            return false;
+        }
+    }
+    const std::string moved = files_[from];
+    files_.erase(files_.begin() + static_cast<std::ptrdiff_t>(from));
+    files_.insert(files_.begin() + static_cast<std::ptrdiff_t>(to), moved);
+    if (playlist_ != nullptr) {
+        playlist_->move(from, to);
+    }
     return true;
 }
 
@@ -1465,10 +1529,19 @@ void Player::play_request(const Request& request)
                     continue;
                 }
             }
-            if (end == RunEnd::format_change) {
+            if (end == RunEnd::finished && queue.stopped() == QueueStop::format_change) {
                 // The one join a queue will not make, and it is the device's
                 // gap rather than the player's: exclusive mode cannot change
                 // format without stopping.
+                //
+                // **Read off the queue, because the graph cannot tell.** A
+                // queue that stops for the next track's format looks, to the
+                // graph draining it, exactly like a playlist that ended: the
+                // read returns nothing and the run finishes. This branch used
+                // to test for a `RunEnd` nothing produced, so a playlist whose
+                // second track had a different rate stopped at the first
+                // boundary and said nothing -- found with a 44.1 kHz file
+                // followed by a 48 kHz one, and the fixture in the test.
                 first = queue.index() + 1;
                 note("the next track needs the device reopened: " +
                      describe(queue.next_format()));
@@ -1588,6 +1661,7 @@ Player::RunEnd Player::play_run(Queue& queue, Playlist& playlist, std::uint64_t&
         applied_ = config;
         error_.clear();
         queue_ = &queue;
+        playlist_ = &playlist;
         track_ = playlist.path(queue.index());
         decoder_ = playlist.decoder_name(queue.index());
         device_ = device;
@@ -1700,6 +1774,7 @@ Player::RunEnd Player::play_run(Queue& queue, Playlist& playlist, std::uint64_t&
     {
         const std::lock_guard lock{mutex_};
         queue_ = nullptr;
+        playlist_ = nullptr;
     }
     return end;
 }

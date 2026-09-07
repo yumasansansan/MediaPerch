@@ -36,6 +36,8 @@ usage: mediaperch-cli [--pipe NAME] COMMAND [arguments]
   play FILE...      replace the playlist and start
   add FILE...       append, without disturbing what is playing
   goto N            play track N of the playlist, as `playlist` numbers them
+  move A B          move track A to position B; only tracks the engine has not
+                    reached yet can move while something plays
   clear             empty the playlist and stop
   pause | resume | stop
   next | prev
@@ -214,6 +216,21 @@ int main(int argc, char** argv)
         mp::ipc::write_strings(w, files);
         if (!client.call(command == "play" ? mp::ipc::Kind::play : mp::ipc::Kind::enqueue,
                          w, reply, body, why)) {
+            return fail(why);
+        }
+        if (static_cast<mp::ipc::Kind>(reply.kind) != mp::ipc::Kind::ok) {
+            return fail(mp::win::error_text(reply, body));
+        }
+        return 0;
+    }
+    if (command == "move") {
+        // One-based, as `playlist` prints them.
+        if (rest.size() < 2 || std::atoi(rest[0].c_str()) < 1 || std::atoi(rest[1].c_str()) < 1) {
+            return fail("move needs two track numbers, as `playlist` shows them: from and to");
+        }
+        w.u32(static_cast<std::uint32_t>(std::atoi(rest[0].c_str()) - 1));
+        w.u32(static_cast<std::uint32_t>(std::atoi(rest[1].c_str()) - 1));
+        if (!client.call(mp::ipc::Kind::move_entry, w, reply, body, why)) {
             return fail(why);
         }
         if (static_cast<mp::ipc::Kind>(reply.kind) != mp::ipc::Kind::ok) {

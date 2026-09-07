@@ -93,6 +93,8 @@ const char* kind_name(Kind k) noexcept
         return "surface";
     case Kind::play_at:
         return "play_at";
+    case Kind::move_entry:
+        return "move_entry";
     case Kind::surface_reply:
         return "surface_reply";
     case Kind::profile_reply:

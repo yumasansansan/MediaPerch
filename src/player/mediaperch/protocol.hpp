@@ -177,6 +177,9 @@ enum class Kind : std::uint16_t {
     /// them is atomic. Answered with `ok`, or `error` for an index the playlist
     /// does not have.
     play_at = 29,
+    /// `u32` from, `u32` to: moves a playlist entry. Refused for an entry the
+    /// running queue has already reached; the reason says how far that is.
+    move_entry = 30,
 
     // --- replies, engine to shell ---
     ok = 128,

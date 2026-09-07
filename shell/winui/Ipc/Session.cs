@@ -460,6 +460,21 @@ internal sealed class Session
         return why;
     }
 
+    /// <summary>
+    /// Moves playlist entry <paramref name="from"/> to <paramref name="to"/>.
+    /// The engine refuses an entry its queue has already reached, in a
+    /// sentence that says how far that is.
+    /// </summary>
+    public async Task<string> MoveAsync(uint from, uint to)
+    {
+        var payload = new Writer();
+        payload.U32(from);
+        payload.U32(to);
+        string why = await TakenAsync(Kind.MoveEntry, payload);
+        await RefreshAsync();
+        return why;
+    }
+
     public async Task<string> ClearAsync()
     {
         string why = await TakenAsync(Kind.Clear);

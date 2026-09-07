@@ -22,7 +22,13 @@ internal static class FilePicking
         {
             return Array.Empty<string>();
         }
-        var picker = new FileOpenPicker { SuggestedStartLocation = PickerLocationId.MusicLibrary };
+        var picker = new FileOpenPicker
+        {
+            SuggestedStartLocation = PickerLocationId.MusicLibrary,
+            // Windows remembers the last folder per identifier; without one,
+            // every open starts from the library again.
+            SettingsIdentifier = "mediaperch-open",
+        };
         picker.FileTypeFilter.Add("*");
         WinRT.Interop.InitializeWithWindow.Initialize(
             picker, WinRT.Interop.WindowNative.GetWindowHandle(App.Window));

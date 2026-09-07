@@ -5640,9 +5640,41 @@ rebuilding, and a value read in one unit and drawn in another.
   while the decode thread may still perform it later. `Player::seek` has the same shape;
   neither has been seen to happen and a five-second stall inside a seek is its own problem first.
 
-**M8 is done to the plan.** What would come next is polish rather than mechanism: keyboard
-shortcuts, a queue that can be reordered by drag as the chain can, and the picker remembering
-where it was.
+#### The polish, and a playlist that stopped at its second format
+
+**The scrubber moves between samples.** Status arrives once a second, and a thumb that jumped
+once a second read as a broken one; on a one-second file it did not visibly move at all. Between
+samples the position is the last one plus the time since, at the source's rate, clamped to the
+track, and the next sample corrects whatever that drifted by. Ten times a second, on the page's
+own timer, and marked as the page's own update so the clamp on a new maximum does not read as a
+drag.
+
+**The keys every player answers**, on every page: space plays or pauses, left and right go ten
+seconds, with Ctrl they go a track, Ctrl+O opens files, and the keyboard's media keys do what
+they say. Tunnelled from the window's root, and stepped around where a control owns the key: a
+box being typed in keeps its letters, a focused button keeps its space, the scrubber keeps its
+arrows. The picker remembers where it was, by the identifier Windows keeps per app.
+
+**The queue can be dragged, and the engine says what may move.** `move_entry` reorders the
+playlist while something plays, for entries the decoder has not reached: an entry at or before
+the decoder's index is playing, in the ring, or already marked, and moving it would move the
+ground the run stands on; past it, an entry is a path in a list, opened lazily by the decode
+thread. The run's `Playlist` grew a lock for that (its `at` is the decode thread's) and hands out
+its strings by value now, since a reference into a vector `move` can shift is a reference that
+may not survive the call. Measured: `move 5 3` on a five-entry list playing its first, and `move
+1 4` refused with *the engine has already read up to entry 1*.
+
+**A playlist whose second track had another rate stopped at the first boundary, and said
+nothing.** Found by the five-entry list above, which alternated a 44.1 kHz file with a 48 kHz
+one. The queue stops at such a boundary and says which format the next track wants; the run was
+meant to end, reopen the device for that format and start the next run there — the branch was
+written, with that comment. It tested for a `RunEnd` nothing produced: to the graph draining the
+ring, a queue that has stopped for a format looks exactly like a playlist that has ended, and
+`pump` said *finished*. The branch reads the queue's own reason now. Measured, the same list:
+five tracks, four reopenings, `44100` to `48000` and back each time, 0 underruns. No test at the
+player's level had two formats in one playlist; there is one now.
+
+**M8 is done, polish included.**
 
 
 #### Built, and the palette needed a fourth verb
@@ -5774,7 +5806,7 @@ HDR state.
 | M6.8 | The video graph: decode, pace, present | **done.** VideoDecoder and Presenter behind their vtables -- mp::Sink for pictures -- and VideoGraph, which holds one frame, asks §8's pacer and presents. One frame and no queue, because a decoded frame is valid until the next call on the codec that produced it and a queue would have to copy what §9.8.1 went to some trouble not to copy; the lookahead is inside the decoder, which reorders B-frames and since M6.6 uses every core. No thread of its own either: the audio graphs own one because the device's event paces them, and video's pace is the display's, which belongs to the head. A drop does not cost a refresh -- one pump lets go of every frame whose time has passed, because letting one go per refresh would never catch the clock. After the first frame the decoder is asked what it actually produced and the presenter reconfigured where the bitstream disagrees with the container, except for the timescale and the frame rate, which a decoder never re-times. Packets arrive through IPacketFeed rather than from a demuxer, which is a hole with a name: §4 says one file has one position, so audio and video must share one demuxer, and the router that would do that is what comes next. Checked on demux_mp4 + codec_dav1d + video_d3d11 with a clock somebody chose: 24 shown and none dropped at the right speed with nothing more than a millisecond late, twelve dropped and twelve shown half a second behind with the picture still right at the end, and five hundred polls of a stopped clock holding it |
 | M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse. **Measured, and met at the default**: 3840x2160 HEVC with an audio track, 0 underruns and 0 silent frames while 1 to 4 frames of 71 were dropped. It was first met at `--ring-periods 32` against a default of 8 that underran; the default is 128 now, and the sections above are the measurements that moved it and what they do and do not say. Getting there took worker threads in `codec_de265` (one thread was a comment rather than a decision) and the ring. DirectComposition is still §9.7.1's shell case and unbuilt; hardware decode is `codec_mft` where the machine has a transform |
 | M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled. **All six steps of §9.7.2 are built**: the SDR white level, the output the window is on, PQ, HLG, BT.2390 in the shader, and the ABI append that carries what the content was graded on, filled from Matroska, from MP4's `mdcv`/`clli`, and from an HEVC prefix SEI where the container says nothing. Steps 3, 4 and 5 are formulas and are tested against them off-screen on WARP, so they run in CI on a machine with no display. **What is left is the half that is not a formula**: steps 1, 2 and 6 on real HDR hardware, written into [devices.md](devices.md) -- there is no HDR display here, and asserting they work without one is the exact failure §9.2 is the record of |
-| M8 | WinUI 3 shell | **most of it.** The project builds and its own reader decodes §10's wire against a running engine -- `MediaPerch.Shell.exe --check` prints the status and the graph, which is how the two descriptions of one format are held together. The canvas is drawn, the composition surface is composited, and the transport, playlist, module palette and settings screens are there -- every key the engine will take, per node and for the player and the engine, as something to type into, with the module's own refusal shown when it will not take it. Killing it mid-track changes nothing audible. **C#, WinUI 3, Native AOT**, `net10.0-windows10.0.26100.0` with a minimum of 22000, to Fluent 2, dependencies at their newest. Its settings screen is a **node canvas** in the shape of ComfyUI's and Fusion's: the chain as a topology, dragged to reorder, with a settings button per node. §10 says what that asks of the engine -- three verbs and no more -- and why the canvas is Fusion's look over a chain's semantics rather than a free-form DAG. The engine half of §9.7.1 is standing: the composition surface handle, the compositor's clock (not the swap chain's waitable, which was a black window until it was measured), the size message and the display message. The shell's half is done through WinUI's own compositor rather than DirectComposition, and *a shell that dies holding the picture* is a test rather than a claim. The picture survives a track boundary as the audio device does, and both it and `status` follow what is being heard rather than what is being decoded. The window is three pages behind a navigation pane, acrylic into the title bar, the picture filling the first with a Fluent transport and a scrubber under it; a click on a track is `play_at`. The canvas edits the chain -- drag to reorder, a bin to remove, a palette to add -- and the system picker opens files; the chain's grammar had to grow an unambiguous separator first, because it could not round-trip a stage with two settings. **Done to the plan**; what remains is polish |
+| M8 | WinUI 3 shell | **most of it.** The project builds and its own reader decodes §10's wire against a running engine -- `MediaPerch.Shell.exe --check` prints the status and the graph, which is how the two descriptions of one format are held together. The canvas is drawn, the composition surface is composited, and the transport, playlist, module palette and settings screens are there -- every key the engine will take, per node and for the player and the engine, as something to type into, with the module's own refusal shown when it will not take it. Killing it mid-track changes nothing audible. **C#, WinUI 3, Native AOT**, `net10.0-windows10.0.26100.0` with a minimum of 22000, to Fluent 2, dependencies at their newest. Its settings screen is a **node canvas** in the shape of ComfyUI's and Fusion's: the chain as a topology, dragged to reorder, with a settings button per node. §10 says what that asks of the engine -- three verbs and no more -- and why the canvas is Fusion's look over a chain's semantics rather than a free-form DAG. The engine half of §9.7.1 is standing: the composition surface handle, the compositor's clock (not the swap chain's waitable, which was a black window until it was measured), the size message and the display message. The shell's half is done through WinUI's own compositor rather than DirectComposition, and *a shell that dies holding the picture* is a test rather than a claim. The picture survives a track boundary as the audio device does, and both it and `status` follow what is being heard rather than what is being decoded. The window is three pages behind a navigation pane, acrylic into the title bar, the picture filling the first with a Fluent transport and a scrubber under it; a click on a track is `play_at`. The canvas edits the chain -- drag to reorder, a bin to remove, a palette to add -- and the system picker opens files; the chain's grammar had to grow an unambiguous separator first, because it could not round-trip a stage with two settings. The scrubber moves between samples, the keys every player answers are answered, the queue can be dragged (the engine allows what its decoder has not reached), and a mixed-format playlist plays through -- it had stopped at its first boundary. **Done, polish included** |
 | M9 | Linux head | ALSA or PipeWire in an exclusive-equivalent mode, proving the core was actually portable |
 
 M1 and M2 are the ones that de-risk the project. If exclusive-mode negotiation and the
@@ -6192,6 +6224,11 @@ real time.
   handles passed in are `WAIT_OBJECT_0 + i`, and the compositor tick is `WAIT_OBJECT_0 +
   count`, one past the end. Read the usual way round, every tick looks like the first handle
   and the loop stops on its first turn. Measured as `wait -> 0x1` with one handle passed.
+- **To the graph draining it, a queue that stopped for the next track's format looks exactly
+  like a playlist that ended.** Both are a read that returns nothing followed by the drain, and
+  the run reports *finished* for both. Whoever decides what to do next has to ask the queue why
+  it stopped, not the graph what happened; a branch that waited for the graph to say *format
+  change* waited for ever, and a mixed-rate playlist stopped at its first boundary in silence.
 - **A gapless queue's position and a track's timestamps are different coordinates, and the
   decoder is not where the listener is.** The device's position counts straight through every
   boundary, because not noticing one is what gapless is; a file's frames are stamped from its

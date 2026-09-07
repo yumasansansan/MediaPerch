@@ -60,6 +60,7 @@ public enum Kind : ushort
     EngineSettingSet = 27,
     Surface = 28,
     PlayAt = 29,
+    MoveEntry = 30,
 
     // replies, engine to shell
     Ok = 128,

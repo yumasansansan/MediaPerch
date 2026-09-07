@@ -217,6 +217,10 @@ public:
     /// The playlist as it is, from `index`: the click on a track. False, and
     /// why, for an index the playlist does not have.
     bool play_at(std::size_t index, std::string& why);
+    /// Moves playlist entry `from` to `to`, while something plays or not.
+    /// Refused, with the reason, for an entry the running queue has already
+    /// reached: only what the decoder has not read can change places.
+    bool move_entry(std::size_t from, std::size_t to, std::string& why);
     void clear();
 
     void pause();
@@ -424,6 +428,10 @@ private:
     /// before it is destroyed. Everything a shell asks about what is playing
     /// goes through these two, which is why they are not owned here.
     Queue* queue_ = nullptr;
+    /// The run's own playlist, for as long as the run: what `move_entry`
+    /// reorders beside `files_`, so the queue opens the entry that is now
+    /// there and not the one that was.
+    Playlist* playlist_ = nullptr;
     PassthroughGraph* graph_a_ = nullptr;
     ProcessedGraph* graph_b_ = nullptr;
 

@@ -26,10 +26,17 @@
         <!-- A click plays that track: the run starts again there, which is a
              real gap and is what a person who clicked asked for. The arrow
              marks what is being heard, not what the decoder is on. -->
+        <!-- Dragged to reorder as the chain is; the engine allows only what
+             its queue has not reached and says so otherwise. -->
         <ListView x:Name="Rows" Grid.Row="3"
                   IsItemClickEnabled="True"
                   SelectionMode="None"
-                  ItemClick="OnItemClick">
+                  ItemClick="OnItemClick"
+                  CanReorderItems="True"
+                  CanDragItems="True"
+                  AllowDrop="True"
+                  DragItemsStarting="OnDragStarting"
+                  DragItemsCompleted="OnDragCompleted">
             <ListView.ItemTemplate>
                 <DataTemplate>
                     <TextBlock Text="{Binding}" TextTrimming="CharacterEllipsis"

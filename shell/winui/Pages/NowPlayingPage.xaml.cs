@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using MediaPerch.Shell.Canvas;
 using MediaPerch.Shell.Ipc;
@@ -64,6 +65,21 @@ public sealed partial class NowPlayingPage : Page
     /// every boundary.
     private bool _syncing;
 
+    /// <summary>
+    /// The last position the engine reported, and when. **The scrubber moves
+    /// between samples.** Status arrives once a second, and a thumb that
+    /// jumped once a second read as a broken one; on a one-second file it did
+    /// not visibly move at all. Between samples the position is the last one
+    /// plus the time since, at the source's rate, clamped to the track -- and
+    /// the next sample corrects whatever that drifted by.
+    /// </summary>
+    private long _sampledAt;
+    private ulong _sampledItemPosition;
+    private bool _sampledPlaying;
+    private uint _rate;
+    private ulong _length;
+    private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _smooth;
+
     public NowPlayingPage()
     {
         InitializeComponent();
@@ -78,8 +94,28 @@ public sealed partial class NowPlayingPage : Page
 
         Session.Current.Changed += ShowStatus;
         Session.Current.Tick += () => _ = RefreshPictureAsync();
+        _smooth = DispatcherQueue.CreateTimer();
+        _smooth.Interval = TimeSpan.FromMilliseconds(100);
+        _smooth.Tick += (_, _) => Smooth();
+        _smooth.Start();
         ShowStatus();
         _ = RefreshPictureAsync();
+    }
+
+    /// <summary>Puts the interpolated position on the slider and the clock.</summary>
+    private void Smooth()
+    {
+        if (_scrubbing || _rate == 0 || _length == 0)
+        {
+            return;
+        }
+        double elapsed = _sampledPlaying ? Stopwatch.GetElapsedTime(_sampledAt).TotalSeconds : 0.0;
+        double frames = Math.Min(_sampledItemPosition + elapsed * _rate, (double)_length);
+        _syncing = true;
+        _shown = frames;
+        Scrub.Value = frames;
+        _syncing = false;
+        PositionNow.Text = Session.Clock((ulong)frames, _rate);
     }
 
     // --- what is playing ------------------------------------------------------
@@ -101,6 +137,7 @@ public sealed partial class NowPlayingPage : Page
         uint rate = status.Source.SampleRate;
         if (nothing || rate == 0)
         {
+            _rate = 0;
             PositionNow.Text = string.Empty;
             PositionEnd.Text = string.Empty;
             Scrub.IsEnabled = false;
@@ -108,18 +145,21 @@ public sealed partial class NowPlayingPage : Page
         }
         // **Into this track, against this track's length** -- the engine
         // answers the offset between the queue's coordinate and the track's.
-        PositionNow.Text = Session.Clock(status.ItemPosition, rate);
         PositionEnd.Text = status.Length == 0 ? string.Empty
                                               : Session.Clock(status.Length, rate);
         Scrub.IsEnabled = status.Length != 0;
+        _sampledAt = Stopwatch.GetTimestamp();
+        _sampledItemPosition = status.ItemPosition;
+        _sampledPlaying = status.State == PlayState.Playing;
+        _rate = rate;
+        _length = status.Length;
         if (status.Length != 0 && !_scrubbing)
         {
             _syncing = true;
             Scrub.Maximum = status.Length;
-            _shown = Math.Min((double)status.ItemPosition, Scrub.Maximum);
-            Scrub.Value = _shown;
             _syncing = false;
         }
+        Smooth();
     }
 
     private void OnScrubPressed(object sender, PointerRoutedEventArgs e)

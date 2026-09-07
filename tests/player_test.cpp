@@ -1048,6 +1048,74 @@ TEST_CASE("next starts the following track now, from where the listener is", "[p
     player.shutdown();
 }
 
+TEST_CASE("a track in another format reopens the device and plays on", "[player]")
+{
+    // **The one join a queue will not make, made by the player instead.** The
+    // queue stops at a boundary whose next track has a different format and
+    // says which; the run ends, the device is reopened for that format, and
+    // the next run starts on that track. It did not: the run's end looked like
+    // the playlist's, and the player said stopped.
+    mp::Format other = cd_audio();
+    other.sample_rate = 48000;
+    Host host;
+    host.add("one", pattern(64 * 4 * 200, 4));
+    host.add("two", pattern(64 * 4 * 4000, 5), other);
+    mp::Player player{host};
+    player.start();
+    player.play({"one", "two"});
+    REQUIRE(wait_for_state(player, mp::ipc::State::playing));
+    REQUIRE(player.status().source.sample_rate == 44100u);
+
+    // The second track, in its own format, without anybody pressing anything.
+    REQUIRE(wait_for([&] {
+        const auto s = player.status();
+        return s.index == 1 && s.state == mp::ipc::State::playing;
+    }, 8000));
+    CHECK(player.status().source.sample_rate == 48000u);
+    CHECK(player.status().track == "two");
+    CHECK(player.status().underruns == 0);
+    player.shutdown();
+}
+
+TEST_CASE("an entry the engine has not reached can move while the rest plays", "[player]")
+{
+    // **What a drag in the playlist means.** The run's playlist is a list of
+    // paths opened lazily by the decode thread, so an entry past the decoder is
+    // free to change places; one at or before it is playing, in the ring, or
+    // already marked, and moving it would move the ground the run stands on.
+    Host host;
+    host.add("a", pattern(64 * 4 * 4000, 4));
+    host.add("b", pattern(64 * 4 * 4000, 5));
+    host.add("c", pattern(64 * 4 * 4000, 6));
+    host.add("d", pattern(64 * 4 * 4000, 7));
+    mp::Player player{host};
+    std::string why;
+
+    // Nothing playing: any order.
+    player.play({"a", "b", "c", "d"});
+    player.start();
+    REQUIRE(wait_for_state(player, mp::ipc::State::playing));
+    REQUIRE(player.status().index == 0);
+
+    // Playing "a": "c" and "d" may swap; "a" may not go anywhere.
+    REQUIRE(player.move_entry(2, 3, why));
+    CHECK(player.playlist() == std::vector<std::string>{"a", "b", "d", "c"});
+    CHECK_FALSE(player.move_entry(0, 3, why));
+    CHECK(why.find("already read") != std::string::npos);
+    CHECK_FALSE(player.move_entry(3, 0, why));
+    CHECK(player.playlist() == std::vector<std::string>{"a", "b", "d", "c"});
+    CHECK_FALSE(player.move_entry(1, 9, why));
+
+    // And the queue plays the new order: skip to what is now third.
+    player.next();
+    REQUIRE(wait_for([&] { return player.status().index == 1; }));
+    player.next();
+    REQUIRE(wait_for([&] { return player.status().index == 2; }));
+    CHECK(player.status().track == "d");
+    CHECK(player.status().underruns == 0);
+    player.shutdown();
+}
+
 TEST_CASE("a click on a track starts the run there", "[player]")
 {
     // **Not a seek and not a string of nexts.** A queue records where a track

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+using System.Collections.ObjectModel;
 using MediaPerch.Shell.Ipc;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
@@ -11,11 +12,18 @@ namespace MediaPerch.Shell.Pages;
 /// </summary>
 public sealed partial class PlaylistPage : Page
 {
-    private readonly List<string> _rows = new();
+    /// Observable, because a list that reorders its own items needs a
+    /// collection that says so; bound once and changed in place.
+    private readonly ObservableCollection<string> _rows = new();
+    /// Where a drag began, and whether one is under way -- the tick must not
+    /// redraw the list from under a person's pointer.
+    private int _dragFrom = -1;
+    private bool _dragging;
 
     public PlaylistPage()
     {
         InitializeComponent();
+        Rows.ItemsSource = _rows;
     }
 
     protected override void OnNavigatedTo(NavigationEventArgs e)
@@ -41,17 +49,38 @@ public sealed partial class PlaylistPage : Page
             drawn.Add($"{mark}  {i + 1,3}.  {Session.Leaf(files[i])}");
         }
         Heading.Text = files.Count == 0 ? "Playlist" : $"Playlist  ({files.Count})";
-        if (drawn.SequenceEqual(_rows))
+        if (_dragging || drawn.SequenceEqual(_rows))
         {
             return;
         }
         _rows.Clear();
-        _rows.AddRange(drawn);
-        // Rebinding rather than mutating: `List<T>` says nothing when it
-        // changes, and a list that quietly did not update would be worse than
-        // one that flickers.
-        Rows.ItemsSource = null;
-        Rows.ItemsSource = _rows;
+        foreach (string row in drawn)
+        {
+            _rows.Add(row);
+        }
+    }
+
+    private void OnDragStarting(object sender, DragItemsStartingEventArgs e)
+    {
+        _dragging = true;
+        _dragFrom = e.Items.Count == 1 && e.Items[0] is string row ? _rows.IndexOf(row) : -1;
+    }
+
+    private async void OnDragCompleted(ListViewBase sender, DragItemsCompletedEventArgs args)
+    {
+        _dragging = false;
+        int from = _dragFrom;
+        _dragFrom = -1;
+        int to = args.Items.Count == 1 && args.Items[0] is string row ? _rows.IndexOf(row) : -1;
+        if (from < 0 || to < 0 || from == to)
+        {
+            Show();
+            return;
+        }
+        // The list has already moved on the screen; the engine is asked to do
+        // the same, and what it says goes -- a refusal puts the list back.
+        Tell(await Session.Current.MoveAsync((uint)from, (uint)to));
+        Show();
     }
 
     private async void OnOpen(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
