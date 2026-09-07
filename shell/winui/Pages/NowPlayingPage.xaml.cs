@@ -323,6 +323,13 @@ public sealed partial class NowPlayingPage : Page
             width = Math.Max(1u, (uint)Math.Round(_pictureWidth * fit));
             height = Math.Max(1u, (uint)Math.Round(_pictureHeight * fit));
         }
+        // **The visual is that box, centred**, in the host's own units. Placed
+        // before the message rather than after, so a resize the engine has not
+        // answered yet already shows the picture where it is going to be.
+        double boxWidth = width / scale;
+        double boxHeight = height / scale;
+        _picture.Place((Picture.ActualWidth - boxWidth) / 2.0,
+                       (Picture.ActualHeight - boxHeight) / 2.0, boxWidth, boxHeight);
         if (width == _toldWidth && height == _toldHeight)
         {
             return;

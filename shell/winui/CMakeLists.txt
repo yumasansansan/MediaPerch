@@ -25,4 +25,24 @@ add_custom_target(mediaperch_shell ALL
     WORKING_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
     COMMENT "Building the WinUI shell"
     VERBATIM)
+
+# **Where the engine is, for a shell that was not installed beside it.** The
+# shell starts `mediaperchd.exe` when nothing is listening and stops the one
+# it started when its window closes, and it looks for the engine beside its
+# own executable, which is where an install puts it. In this tree the two are
+# built into different directories, and building the shell into the engine's
+# was tried and is not an option: `dotnet build -o` leaves a WinUI app that
+# cannot find its own XAML (`Cannot locate resource from ms-appx:///`). So
+# the build writes the engine's path into a file beside the shell instead,
+# and the shell reads it when it is there. An install does not ship it.
+#
+# The shell has two configurations where this tree has three, so the file for
+# a RelWithDebInfo build names the Release engine -- `file(GENERATE)` refuses
+# to write one path with two contents, and that is the honest mapping anyway:
+# the shell built for RelWithDebInfo *is* the Release shell.
+set(shell_config "$<IF:$<CONFIG:Debug>,Debug,Release>")
+set(shell_out
+    "${CMAKE_CURRENT_LIST_DIR}/bin/x64/${shell_config}/net10.0-windows10.0.26100.0/win-x64")
+file(GENERATE OUTPUT "${shell_out}/mediaperch.engine"
+    CONTENT "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/${shell_config}/mediaperchd.exe")
 set_target_properties(mediaperch_shell PROPERTIES FOLDER "shell")

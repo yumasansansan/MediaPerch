@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+using System.Diagnostics;
 using Microsoft.UI.Dispatching;
 
 namespace MediaPerch.Shell.Ipc;
@@ -31,6 +32,26 @@ namespace MediaPerch.Shell.Ipc;
 /// </remarks>
 internal sealed class Session
 {
+    /// <summary>
+    /// Writes one line to <c>%TEMP%\mediaperch-shell.log</c> and to the error
+    /// stream. A window has no console, and the failures worth writing down --
+    /// an engine that would not start, an exception nothing observed -- are
+    /// the ones a person cannot see on the window.
+    /// </summary>
+    public static void Log(string line)
+    {
+        try
+        {
+            File.AppendAllText(Path.Combine(Path.GetTempPath(), "mediaperch-shell.log"),
+                               $"{DateTime.Now:HH:mm:ss.fff} {line}{Environment.NewLine}");
+        }
+        catch (IOException)
+        {
+            // A log that cannot be written is not worth a second failure.
+        }
+        Console.Error.WriteLine(line);
+    }
+
     /// <summary>The process's one session.</summary>
     public static Session Current { get; } = new();
 
@@ -63,6 +84,146 @@ internal sealed class Session
     private bool _ticking;
     private bool _wasConnected;
 
+    /// <summary>
+    /// The engine this shell started, or null for one that was already there.
+    /// </summary>
+    /// <remarks>
+    /// <b>The shell owns what it started, and nothing else.</b> An engine that
+    /// was running before the window opened -- started from the CLI, or by a
+    /// previous shell that is still playing -- is a service somebody else is
+    /// using, and closing a window is not a reason to stop their music. One
+    /// this window brought up to have something to talk to goes when the
+    /// window goes, asked politely first.
+    /// </remarks>
+    private Process? _started;
+
+    /// <summary>What the last attempt to find or start an engine said, for the title bar.</summary>
+    public string EngineNote { get; private set; } = string.Empty;
+
+    /// <summary>
+    /// Connects, and when nothing is listening, starts <c>mediaperchd</c> from
+    /// beside this executable and connects to that.
+    /// </summary>
+    /// <remarks>
+    /// Beside, because that is where it ships (§10: an install is the engine,
+    /// the CLI and, optionally, this) and because a shell that went looking
+    /// anywhere else would be a shell that started the wrong engine.
+    /// <c>MEDIAPERCH_ENGINE</c> names another one, for a machine that keeps
+    /// them apart.
+    /// </remarks>
+    public async Task EnsureEngineAsync()
+    {
+        if (Engine.Connected || await Engine.ConnectAsync(1000, CancellationToken.None))
+        {
+            EngineNote = string.Empty;
+            return;
+        }
+        string path = EnginePath();
+        if (!File.Exists(path))
+        {
+            EngineNote = $"no engine: {path} is not there";
+            return;
+        }
+        try
+        {
+            _started = Process.Start(new ProcessStartInfo(path)
+            {
+                // Its own console would be a second window; its tray icon is
+                // for an engine with no shell, and this one has one.
+                Arguments = "--no-tray",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WorkingDirectory = Path.GetDirectoryName(path) ?? AppContext.BaseDirectory,
+            });
+        }
+        catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            EngineNote = $"the engine would not start: {e.Message}";
+            return;
+        }
+        // It opens its pipe within a moment of starting; a machine under load
+        // gets a few seconds before this gives up on it.
+        for (int i = 0; i < 50 && _started is { HasExited: false }; ++i)
+        {
+            if (await Engine.ConnectAsync(100, CancellationToken.None))
+            {
+                EngineNote = string.Empty;
+                return;
+            }
+        }
+        EngineNote = _started is { HasExited: true }
+            ? $"the engine started and exited with code {_started.ExitCode}"
+            : "the engine started but is not answering on its pipe";
+    }
+
+    /// <summary>
+    /// Where <c>mediaperchd.exe</c> is: beside this executable, which is where
+    /// an install puts it; or where <c>MEDIAPERCH_ENGINE</c> says; or where the
+    /// file <c>mediaperch.engine</c> beside this executable says, which the
+    /// tree's own build writes and an install does not ship.
+    /// </summary>
+    private static string EnginePath()
+    {
+        string beside = Path.Combine(AppContext.BaseDirectory, "mediaperchd.exe");
+        if (File.Exists(beside))
+        {
+            return beside;
+        }
+        string? named = Environment.GetEnvironmentVariable("MEDIAPERCH_ENGINE");
+        if (!string.IsNullOrWhiteSpace(named))
+        {
+            return named;
+        }
+        string pointer = Path.Combine(AppContext.BaseDirectory, "mediaperch.engine");
+        if (File.Exists(pointer))
+        {
+            try
+            {
+                string written = File.ReadAllText(pointer).Trim();
+                if (written.Length != 0)
+                {
+                    return written;
+                }
+            }
+            catch (IOException)
+            {
+                // Then it is as good as absent.
+            }
+        }
+        return beside;
+    }
+
+    /// <summary>
+    /// Asks the engine this shell started to quit, and waits for it; one that
+    /// will not go in a couple of seconds is stopped. An engine that was
+    /// already running is left running.
+    /// </summary>
+    public void Stop()
+    {
+        _timer?.Stop();
+        if (_started is null || _started.HasExited)
+        {
+            return;
+        }
+        try
+        {
+            // Off the UI thread, and bounded: a window closing must not hang
+            // on a pipe.
+            Task.Run(() => Engine.CallAsync(Kind.Quit)).Wait(1000);
+            if (!_started.WaitForExit(2000))
+            {
+                _started.Kill();
+            }
+        }
+        catch (Exception e) when (e is AggregateException or InvalidOperationException
+                                         or System.ComponentModel.Win32Exception)
+        {
+            // Already gone, or would not be asked; either way there is nothing
+            // left to stop.
+            _ = e;
+        }
+    }
+
     /// <summary>Starts the tick on the UI thread's queue. Once.</summary>
     public void Start(DispatcherQueue queue)
     {
@@ -74,7 +235,35 @@ internal sealed class Session
         _timer.Interval = TimeSpan.FromSeconds(1);
         _timer.Tick += async (_, _) => await OnTickAsync();
         _timer.Start();
-        _ = ReconnectAsync();
+        _ = FirstConnectAsync();
+    }
+
+    private async Task FirstConnectAsync()
+    {
+        try
+        {
+            await EnsureEngineAsync();
+        }
+        catch (Exception e)
+        {
+            // **Everything, because this is the edge of a fire-and-forget.**
+            // An exception past here has nobody to observe it, and a shell that
+            // silently never connected is the worst version of this failure.
+            EngineNote = "the engine could not be reached: " + e.Message;
+            Log("engine: " + e);
+        }
+        Announce();
+        if (Engine.Connected)
+        {
+            await RefreshAsync();
+            return;
+        }
+        // **On the error stream as well as in the title bar.** Somebody running
+        // this from a terminal to find out why there is no engine gets the
+        // sentence there, which is where they are looking.
+        Log("engine: " + (EngineNote.Length == 0 ? "not connected, and no reason recorded"
+                                                  : EngineNote));
+        ConnectionChanged?.Invoke(); // so the note is drawn even when nothing changed
     }
 
     private async Task OnTickAsync()

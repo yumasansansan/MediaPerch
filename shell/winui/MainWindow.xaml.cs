@@ -40,15 +40,24 @@ public sealed partial class MainWindow : Window
         Session.Current.ConnectionChanged += ShowConnection;
         Session.Current.Start(DispatcherQueue);
         ShowConnection();
+        // **The engine this window started goes with it.** One that was
+        // already running is somebody else's and stays; `Session.Stop` says.
+        Closed += (_, _) => Session.Current.Stop();
 
         Nav.SelectedItem = NowItem;
     }
 
     private void ShowConnection()
     {
-        ConnectionLine.Text = Session.Current.Connected
-            ? string.Empty
-            : "not connected: mediaperchd is not running, or is listening somewhere else";
+        if (Session.Current.Connected)
+        {
+            ConnectionLine.Text = string.Empty;
+            return;
+        }
+        string note = Session.Current.EngineNote;
+        ConnectionLine.Text = note.Length == 0
+            ? "not connected: mediaperchd is not running, or is listening somewhere else"
+            : note;
     }
 
     private void OnNavigate(NavigationView sender, NavigationViewSelectionChangedEventArgs args)

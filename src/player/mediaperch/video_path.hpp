@@ -42,6 +42,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <mutex>
 #include <thread>
 
 namespace mp {
@@ -177,6 +178,18 @@ public:
     /// with one fewer process in it.
     [[nodiscard]] std::uint64_t surface() noexcept;
 
+    /// The presenter's own `describe` rows, as raw `key\tvalue\tdescription`
+    /// lines. Gated (see `gate_`); no loop hold, because the presenter's
+    /// describe reads status and touches no graphics context.
+    [[nodiscard]] std::vector<std::string> presenter_describe();
+
+    /// The graph's counters and the loop's, copied out under the gate. Zeroed
+    /// when there is no graph or the loop is not turning. **What a shell reads
+    /// to tell a connected picture from a drawn one**, and it has to be gated
+    /// because a track boundary resets both underneath it.
+    [[nodiscard]] VideoGraph::Stats graph_stats() const;
+    [[nodiscard]] DisplayLoop::Stats loop_stats() const;
+
     /// Cancels the frame clock and joins. Safe twice, and safe unopened.
     void stop() noexcept;
 
@@ -296,6 +309,27 @@ private:
     IFrameClock* frames_ = nullptr;
     std::thread thread_;
     std::atomic<bool> ended_{false};
+
+    /// **One thread at a time inside the presenter.** The picture is rebuilt on
+    /// the engine thread -- `open`, `retrack`, `start`, `stop` at a track
+    /// boundary -- and reached on IPC threads that resize it, name a display,
+    /// set a stage or ask what it is doing. `Player::picture()` hands out a
+    /// `shared_ptr`, which keeps the object alive across such a call but does
+    /// nothing to stop the two threads being inside the *same D3D11 immediate
+    /// context* at once, which is neither thread-safe nor forgiving: a resize
+    /// arriving while a boundary rebuilt the decoder corrupted the heap and
+    /// took the engine with it (`0xc0000374`), reproducible on the second
+    /// resize of a running queue.
+    ///
+    /// So every entry that reads or rebuilds the presenter, the graph or the
+    /// chain takes this first. **The display loop does not**: it runs on
+    /// `thread_` from references handed to it at `start`, calls back into
+    /// nothing here, and is excluded from a rebuild by `stop` joining it and
+    /// from a setting by the loop's own hold. So the gate serialises only the
+    /// engine thread against the IPC threads, and never the per-frame path.
+    ///
+    /// Recursive because a rebuild nests: `open` and `retrack` call `stop`.
+    mutable std::recursive_mutex gate_;
 };
 
 } // namespace mp

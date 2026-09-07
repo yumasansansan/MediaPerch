@@ -5548,6 +5548,50 @@ that made a seek's silence as long as the ring was large; the floor is why a rin
 as the worst stall deserves without every seek paying for it. Zero is a real answer (start on
 whatever the first acquire can be given), and so is a number past the end (all of it).
 
+#### The picture was left-of-centre, the resize crashed the engine, and the shell owns its engine
+
+Three things the eye and the debugger found once there was a window to look at.
+
+**Left of centre, and not scaling.** The visual was given the host's size *and* a
+`RelativeSizeAdjustment` of one; those add, so the visual was twice the host and the picture
+fitted into it showed its top-left quarter. It is placed now -- `SurfaceHost.Place` sets the
+visual's `Size` and `Offset` to the box the engine was asked to render at, converted back to the
+host's own units and centred -- so the surface maps onto the visual one to one, the compositor
+scales nothing, and a live window resize is a `SizeChanged` that recomputes the box and tells the
+engine. Measured, dragging the window: 1000x700 to a 615x461 render, 1400x850 to 815x611, all 4:3.
+
+**A resize crashed the engine -- heap corruption, `0xc0000374` -- reproducibly on the second
+one.** `Player::picture()` hands an IPC thread a `shared_ptr` to the `VideoPath`, which keeps the
+object alive but not exclusive: a resize on that thread and a track boundary on the engine thread
+(`retrack`, which reopens the decoder) were inside the same D3D11 immediate context at once, which
+is neither thread-safe nor forgiving. It did not reproduce under a debugger, which is what a
+timing race looks like. `VideoPath` now has one recursive gate that every entry rebuilding or
+reading the presenter, graph or chain takes -- `open`, `retrack`, `start`, `stop`, the settings
+and the status reads -- and **the display loop does not take it**: it runs from references handed
+over at `start`, is joined before a rebuild and held before a setting, so the gate serialises the
+engine thread against the IPC threads and never the per-frame path. The same hammer that died on
+the second resize now survives sixty-four across track boundaries, 0 underruns.
+
+`resize_target` also had a real bug waiting for the first video DSP stage: it rebuilt the target
+and the HDR10 intermediate but not `graded_linear`, the RGBA32F the chain reads, so a resize with
+a stage in the chain would render into a texture of the old size. It rebuilds it now, next to the
+others.
+
+**The shell starts the engine, and stops the one it started.** Nothing was listening was the
+ordinary case for a double-click; now `Session.EnsureEngineAsync` starts `mediaperchd --no-tray`
+from beside the shell and connects to it, and closing the window asks that engine to quit and
+waits. **Only the one it started**: an engine that was already running -- from the CLI, or a
+previous shell still playing -- is a service somebody else is using, and a closing window is not a
+reason to stop their music. Where the engine is: beside the executable, which is where an install
+puts the three of them; in this tree the two build into different directories, so the build writes
+the engine's path into `mediaperch.engine` beside the shell and the shell reads it. Building the
+shell *into* the engine's directory was tried first and is not an option -- `dotnet build -o`
+leaves a WinUI app that cannot find its own XAML.
+
+A window has no console, so the failures worth seeing -- an engine that would not start, a XAML
+exception that ends the process before anything draws -- are written to `%TEMP%\mediaperch-shell.log`
+as well as the error stream. That is how the `-o` XAML fault above was found rather than guessed.
+
 **What is left of M8**: dragging nodes to reorder a chain and adding one from the palette
 (`modules` already answers what there is to add), and opening files from the shell rather than
 from the CLI.

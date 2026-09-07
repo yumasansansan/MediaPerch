@@ -47,6 +47,31 @@ internal sealed unsafe class SurfaceHost
     private SpriteVisual? _visual;
     private CompositionSurfaceBrush? _brush;
     private ICompositionSurface? _surface;
+    private Vector2 _placed;
+    private Vector3 _offset;
+
+    /// <summary>
+    /// Puts the visual at (<paramref name="x"/>, <paramref name="y"/>) in the
+    /// host, <paramref name="width"/> by <paramref name="height"/>, in the
+    /// host's own units.
+    /// </summary>
+    /// <remarks>
+    /// This is the box the engine was asked to render at, converted back to
+    /// device-independent pixels, and centred by the caller: the surface then
+    /// maps onto the visual one to one and the compositor scales nothing,
+    /// which is the whole point of §9.7.1's size message. Remembered, so an
+    /// attach that comes after a resize lands in the right place too.
+    /// </remarks>
+    public void Place(double x, double y, double width, double height)
+    {
+        _placed = new Vector2((float)width, (float)height);
+        _offset = new Vector3((float)x, (float)y, 0f);
+        if (_visual is not null)
+        {
+            _visual.Size = _placed;
+            _visual.Offset = _offset;
+        }
+    }
 
     /// <summary>
     /// <c>Microsoft.UI.Composition.Interop.h</c>'s <c>ICompositorSwapChainInterop</c>,
@@ -145,8 +170,15 @@ internal sealed unsafe class SurfaceHost
 
             SpriteVisual visual = compositor.CreateSpriteVisual();
             visual.Brush = brush;
-            visual.Size = new Vector2((float)host.ActualWidth, (float)host.ActualHeight);
-            visual.RelativeSizeAdjustment = Vector2.One;
+            // **Sized by `Place`, and by nothing else.** `Size` and
+            // `RelativeSizeAdjustment` add: a visual given the host's size *and*
+            // a relative adjustment of one is twice the host, and a picture
+            // fitted into that shows its top-left quarter, off to one side --
+            // which is what this looked like until it was measured. The box the
+            // engine renders at is what this visual is, exactly, and the caller
+            // says where it goes.
+            visual.Size = _placed;
+            visual.Offset = _offset;
             ElementCompositionPreview.SetElementChildVisual(host, visual);
             _brush = brush;
             _visual = visual;

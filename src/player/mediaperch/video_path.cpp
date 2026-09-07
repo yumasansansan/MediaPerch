@@ -120,6 +120,7 @@ bool VideoPath::hand_over(std::string& why)
 std::vector<std::string> VideoPath::stage_describe(std::size_t index,
                                                    std::chrono::milliseconds deadline)
 {
+    const std::lock_guard lock{gate_};
     std::vector<std::string> out;
     if (index >= stages_.size()) {
         return out;
@@ -152,6 +153,7 @@ bool VideoPath::set_stage(std::size_t index, const std::string& key,
                           const std::string& value, std::string& why,
                           std::chrono::milliseconds deadline)
 {
+    const std::lock_guard lock{gate_};
     if (index >= stages_.size()) {
         why = "there is no such stage in the chain";
         return false;
@@ -180,6 +182,7 @@ bool VideoPath::set_stage(std::size_t index, const std::string& key,
 
 std::uint64_t VideoPath::surface() noexcept
 {
+    const std::lock_guard lock{gate_};
     if (presenter_ == nullptr) {
         return 0;
     }
@@ -201,6 +204,36 @@ std::uint64_t VideoPath::surface() noexcept
     return 0;
 }
 
+std::vector<std::string> VideoPath::presenter_describe()
+{
+    const std::lock_guard lock{gate_};
+    std::vector<std::string> out;
+    if (presenter_ == nullptr) {
+        return out;
+    }
+    char line[256];
+    for (std::uint32_t row = 0;; ++row) {
+        line[0] = '\0';
+        if (presenter_->describe(row, line, sizeof line) != MP_OK) {
+            break;
+        }
+        out.emplace_back(line);
+    }
+    return out;
+}
+
+VideoGraph::Stats VideoPath::graph_stats() const
+{
+    const std::lock_guard lock{gate_};
+    return graph_ != nullptr ? graph_->stats() : VideoGraph::Stats{};
+}
+
+DisplayLoop::Stats VideoPath::loop_stats() const
+{
+    const std::lock_guard lock{gate_};
+    return thread_.joinable() && loop_ != nullptr ? loop_->stats() : DisplayLoop::Stats{};
+}
+
 VideoPath::~VideoPath()
 {
     stop();
@@ -211,6 +244,7 @@ bool VideoPath::open(IEngineHost& host, void* window, IPacketFeed& feed,
                      const std::uint8_t* config, std::uint32_t config_bytes,
                      const Config& want, std::string& why)
 {
+    const std::lock_guard lock{gate_};
     stop();
     graph_.reset();
     own_frames_.reset();
@@ -293,6 +327,7 @@ bool VideoPath::retrack(IEngineHost& host, IPacketFeed& feed, const MpVideoInfo&
                         MpCodec codec, const std::uint8_t* config,
                         std::uint32_t config_bytes, const Config& want, std::string& why)
 {
+    const std::lock_guard lock{gate_};
     if (presenter_ == nullptr) {
         why = "there is no presenter to put the next track on";
         return false;
@@ -346,6 +381,7 @@ bool VideoPath::start(IAudioClockSource& audio, std::string& why, double origin_
 bool VideoPath::start(IAudioClockSource& audio, IFrameClock& frames, std::string& why,
                       double origin_seconds)
 {
+    const std::lock_guard lock{gate_};
     if (graph_ == nullptr) {
         why = "there is no video graph to run";
         return false;
@@ -366,6 +402,7 @@ bool VideoPath::start(IAudioClockSource& audio, IFrameClock& frames, std::string
 
 void VideoPath::stop() noexcept
 {
+    const std::lock_guard lock{gate_};
     if (!thread_.joinable()) {
         frames_ = nullptr;
         return;
@@ -384,6 +421,7 @@ void VideoPath::stop() noexcept
 bool VideoPath::tell(const char* key, const char* value, std::string& why,
                      std::chrono::milliseconds deadline)
 {
+    const std::lock_guard lock{gate_};
     if (presenter_ == nullptr) {
         why = "there is no presenter to tell";
         return false;

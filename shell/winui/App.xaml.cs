@@ -19,11 +19,24 @@ public partial class App : Application
     public App()
     {
         InitializeComponent();
+        // **Written down, whatever it was.** A XAML exception ends the process
+        // as a stowed exception with no message anywhere a person looks; this
+        // is the one place it can still be named.
+        UnhandledException += (_, e) =>
+        {
+            Ipc.Session.Log("unhandled: " + e.Message + Environment.NewLine + e.Exception);
+        };
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            Ipc.Session.Log("unobserved: " + e.Exception);
+        };
     }
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
+        Ipc.Session.Log("shell: launched");
         _window = new MainWindow();
         _window.Activate();
+        Ipc.Session.Log("shell: window up");
     }
 }

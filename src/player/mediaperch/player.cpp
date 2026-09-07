@@ -811,12 +811,7 @@ std::vector<ipc::Setting> Player::node_settings(const std::string& node) const
             return {};
         }
         std::vector<ipc::Setting> out;
-        char line[256];
-        for (std::uint32_t row = 0;; ++row) {
-            line[0] = '\0';
-            if (video->presenter().describe(row, line, sizeof line) != MP_OK) {
-                break;
-            }
+        for (const std::string& line : video->presenter_describe()) {
             ipc::Setting row_out;
             if (describe_row(line, row_out)) {
                 out.push_back(std::move(row_out));
@@ -841,7 +836,7 @@ std::vector<ipc::Setting> Player::node_settings(const std::string& node) const
                             const char* what) {
             return ipc::Setting{key, value, std::string{what} + " (read only)", true};
         };
-        const VideoGraph::Stats frames = video->graph().stats();
+        const VideoGraph::Stats frames = video->graph_stats();
         std::vector<ipc::Setting> out;
         out.push_back(row("module", video->modules().decoder, "what decodes it"));
         out.push_back(row("decoded", std::to_string(frames.decoded),
@@ -851,7 +846,7 @@ std::vector<ipc::Setting> Player::node_settings(const std::string& node) const
         out.push_back(row("dropped", std::to_string(frames.dropped),
                           "frames let go because their time had passed"));
         if (video->running()) {
-            const DisplayLoop::Stats loop = video->loop().stats();
+            const DisplayLoop::Stats loop = video->loop_stats();
             out.push_back(row("turns", std::to_string(loop.turns),
                               "times the display said a frame could be drawn"));
             out.push_back(row("no_clock", std::to_string(loop.without_clock),
@@ -1264,7 +1259,7 @@ void Player::measure(Graph& graph, const CalibrationRun& run, RunResult& result)
     result.low_water_bytes = stats.low_water_bytes;
     result.ring_bytes = stats.ring_bytes;
     if (video_) {
-        result.frames_dropped = video_->graph().stats().dropped;
+        result.frames_dropped = video_->graph_stats().dropped;
     }
 }
 
