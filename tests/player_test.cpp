@@ -463,6 +463,54 @@ TEST_CASE("a size the presenter refuses is not remembered", "[player][video]")
     player.shutdown();
 }
 
+TEST_CASE("a chain round-trips through the settings surface, settings and all",
+          "[player][settings]")
+{
+    // **One separator was doing two jobs.** Stages were joined with the comma
+    // that also separates a stage's own settings, so a stage with two keys
+    // came back through `set dsp` as two stages. The canvas rewrites the whole
+    // string, so this is the grammar it relies on: `|` between stages, and the
+    // old comma form still read for the settings files that have it.
+    Host host;
+    host.add_dsp("dsp_test", &mp::test::fake_dsp_vtbl());
+    mp::Player player{host};
+    std::string why;
+
+    // Two stages, the new way; what comes back is what was said.
+    REQUIRE(player.set("dsp", "test:amount=2|test:amount=3", why));
+    REQUIRE(player.node_settings("dsp.0")[0].value == "2");
+    REQUIRE(player.node_settings("dsp.1")[0].value == "3");
+    const auto row_of = [&](const char* key) {
+        for (const mp::ipc::Setting& s : player.settings()) {
+            if (s.key == key) {
+                return s.value;
+            }
+        }
+        return std::string{};
+    };
+    CHECK(row_of("dsp") == "test:amount=2|test:amount=3");
+
+    // A stage's second setting stays with its stage, and comes back joined the
+    // unambiguous way -- which is what `save` writes and `set` reads again.
+    REQUIRE(player.set("dsp", "test:amount=2,amount=5", why));
+    CHECK(player.node_settings("dsp.0")[0].value == "5");
+    CHECK(player.node_settings("dsp.1").empty());
+    REQUIRE(player.set("dsp", row_of("dsp"), why));
+    CHECK(player.node_settings("dsp.0")[0].value == "5");
+    CHECK(player.node_settings("dsp.1").empty());
+
+    // The old form: two stages separated by a comma, each with a key.
+    REQUIRE(player.set("dsp", "test:amount=7,test:amount=8", why));
+    CHECK(player.node_settings("dsp.0")[0].value == "7");
+    CHECK(player.node_settings("dsp.1")[0].value == "8");
+    CHECK(row_of("dsp") == "test:amount=7|test:amount=8");
+
+    // And a set through the node, then the whole string read back.
+    REQUIRE(player.set_node("dsp.1", "amount", "9", why));
+    REQUIRE(player.set("dsp", row_of("dsp"), why));
+    CHECK(player.node_settings("dsp.1")[0].value == "9");
+}
+
 TEST_CASE("a measurement crosses as one, not as two English words",
           "[player][settings]")
 {

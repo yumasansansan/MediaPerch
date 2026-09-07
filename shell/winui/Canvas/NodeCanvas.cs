@@ -58,6 +58,52 @@ public sealed partial class NodeCanvas : UserControl
     /// <summary>Which node's settings button was pressed.</summary>
     public event Action<Node>? SettingsWanted;
 
+    /// <summary>
+    /// A removable node was dragged to a new place in its chain: the node, and
+    /// the index it should now have among that chain's stages.
+    /// </summary>
+    /// <remarks>
+    /// <b>Only the order is decided here.</b> What the drag means is a new
+    /// <c>dsp</c> or <c>video_dsp</c> value, and writing that is the page's:
+    /// the canvas draws what the engine said and asks for a change, it does
+    /// not keep a second copy of the chain to edit.
+    /// </remarks>
+    public event Action<Node, int>? ReorderWanted;
+
+    /// <summary>The bin on a removable node was pressed.</summary>
+    public event Action<Node>? RemoveWanted;
+
+    /// <summary>A stage's own index, from its id: <c>dsp.2</c> is 2.</summary>
+    public static int IndexOf(Node node)
+    {
+        int dot = node.Id.LastIndexOf('.');
+        return dot >= 0 && int.TryParse(node.Id[(dot + 1)..], out int n) ? n : -1;
+    }
+
+    /// <summary>
+    /// Where a stage whose centre is at <paramref name="centreX"/> belongs
+    /// among the other stages of its kind: how many of them it is now to the
+    /// right of.
+    /// </summary>
+    private int SlotFor(Node moved, double centreX)
+    {
+        int slot = 0;
+        foreach (Node other in _graph.Nodes)
+        {
+            if (other.Id == moved.Id || other.Kind != moved.Kind ||
+                (other.Flags & NodeFlags.Removable) == 0 ||
+                !_placed.TryGetValue(other.Id, out Rect at))
+            {
+                continue;
+            }
+            if (at.X + at.Width / 2 < centreX)
+            {
+                ++slot;
+            }
+        }
+        return slot;
+    }
+
     public void Show(Graph graph)
     {
         _graph = graph;
@@ -147,6 +193,17 @@ public sealed partial class NodeCanvas : UserControl
 
     private UIElement Box(Node node, Rect where)
     {
+        bool removable = (node.Flags & NodeFlags.Removable) != 0;
+        var border = new Border
+        {
+            Width = where.Width,
+            Height = where.Height,
+            CornerRadius = new CornerRadius(8),
+            BorderThickness = new Thickness(1),
+            BorderBrush = (Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"],
+            Background = (Brush)Application.Current.Resources["CardBackgroundFillColorDefaultBrush"],
+        };
+
         var title = new TextBlock
         {
             Text = node.Name.Length == 0 ? node.Id : node.Name,
@@ -164,15 +221,82 @@ public sealed partial class NodeCanvas : UserControl
             Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
         };
 
-        var text = new StackPanel { Spacing = 2 };
+        // Hit-testable, so a drag can start on the words as well as the gaps.
+        var text = new StackPanel { Spacing = 2, Background = new SolidColorBrush(Colors.Transparent) };
         text.Children.Add(title);
         text.Children.Add(subtitle);
 
         var row = new Grid { ColumnSpacing = 8, Padding = new Thickness(12, 10, 8, 10) };
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         Grid.SetColumn(text, 0);
         row.Children.Add(text);
+
+        if (removable)
+        {
+            // **Dragged to reorder, and the drag is the words.** The buttons
+            // beside them keep their own pointer, so pressing one does not
+            // start a drag. The box follows the pointer sideways; on release
+            // its centre says which slot it is in now, and the page is asked.
+            double startX = 0;
+            bool dragging = false;
+            text.PointerPressed += (_, e) =>
+            {
+                startX = e.GetCurrentPoint(_surface).Position.X;
+                dragging = text.CapturePointer(e.Pointer);
+                if (dragging)
+                {
+                    Microsoft.UI.Xaml.Controls.Canvas.SetZIndex(border, 1);
+                    e.Handled = true;
+                }
+            };
+            text.PointerMoved += (_, e) =>
+            {
+                if (dragging)
+                {
+                    border.RenderTransform = new TranslateTransform
+                    {
+                        X = e.GetCurrentPoint(_surface).Position.X - startX,
+                    };
+                }
+            };
+            text.PointerReleased += (_, e) =>
+            {
+                if (!dragging)
+                {
+                    return;
+                }
+                dragging = false;
+                text.ReleasePointerCapture(e.Pointer);
+                double dx = e.GetCurrentPoint(_surface).Position.X - startX;
+                border.RenderTransform = null;
+                Microsoft.UI.Xaml.Controls.Canvas.SetZIndex(border, 0);
+                int to = SlotFor(node, where.X + where.Width / 2 + dx);
+                if (to != IndexOf(node))
+                {
+                    ReorderWanted?.Invoke(node, to);
+                }
+            };
+            text.PointerCaptureLost += (_, _) =>
+            {
+                dragging = false;
+                border.RenderTransform = null;
+                Microsoft.UI.Xaml.Controls.Canvas.SetZIndex(border, 0);
+            };
+            ToolTipService.SetToolTip(text, "Drag to reorder");
+
+            var bin = new Button
+            {
+                Content = new FontIcon { Glyph = "\uE74D", FontSize = 14 },
+                VerticalAlignment = VerticalAlignment.Top,
+                Padding = new Thickness(6),
+            };
+            ToolTipService.SetToolTip(bin, "Remove from the chain");
+            bin.Click += (_, _) => RemoveWanted?.Invoke(node);
+            Grid.SetColumn(bin, 2);
+            row.Children.Add(bin);
+        }
 
         // **The settings button, and only where there is something to set.**
         // `graph` says which nodes have settings; a button on one that does not
@@ -191,16 +315,7 @@ public sealed partial class NodeCanvas : UserControl
             row.Children.Add(button);
         }
 
-        var border = new Border
-        {
-            Width = where.Width,
-            Height = where.Height,
-            CornerRadius = new CornerRadius(8),
-            BorderThickness = new Thickness(1),
-            BorderBrush = (Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"],
-            Background = (Brush)Application.Current.Resources["CardBackgroundFillColorDefaultBrush"],
-            Child = row,
-        };
+        border.Child = row;
         Microsoft.UI.Xaml.Controls.Canvas.SetLeft(border, where.X);
         Microsoft.UI.Xaml.Controls.Canvas.SetTop(border, where.Y);
         return border;

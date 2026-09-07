@@ -54,6 +54,21 @@ public sealed partial class PlaylistPage : Page
         Rows.ItemsSource = _rows;
     }
 
+    private async void OnOpen(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
+        Tell(await Session.Current.PlayFilesAsync(await Controls.FilePicking.PickAsync(), true));
+
+    private async void OnAdd(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
+        Tell(await Session.Current.PlayFilesAsync(await Controls.FilePicking.PickAsync(), false));
+
+    private async void OnClear(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) =>
+        Tell(await Session.Current.ClearAsync());
+
+    private void Tell(string why)
+    {
+        Note.IsOpen = why.Length != 0;
+        Note.Message = why;
+    }
+
     private async void OnItemClick(object sender, ItemClickEventArgs e)
     {
         int index = _rows.IndexOf((string)e.ClickedItem);

@@ -83,6 +83,10 @@ internal sealed class Session
     private DispatcherQueueTimer? _timer;
     private bool _ticking;
     private bool _wasConnected;
+    /// Whether the first connect -- which may be starting an engine -- is still
+    /// under way, so the tick does not open a second pipe beside it: two
+    /// connects landing at once would each keep a stream and one would be leaked.
+    private bool _connecting;
 
     /// <summary>
     /// The engine this shell started, or null for one that was already there.
@@ -240,6 +244,7 @@ internal sealed class Session
 
     private async Task FirstConnectAsync()
     {
+        _connecting = true;
         try
         {
             await EnsureEngineAsync();
@@ -251,6 +256,10 @@ internal sealed class Session
             // silently never connected is the worst version of this failure.
             EngineNote = "the engine could not be reached: " + e.Message;
             Log("engine: " + e);
+        }
+        finally
+        {
+            _connecting = false;
         }
         Announce();
         if (Engine.Connected)
@@ -268,9 +277,9 @@ internal sealed class Session
 
     private async Task OnTickAsync()
     {
-        if (_ticking)
+        if (_ticking || _connecting)
         {
-            return; // a slow answer does not stack
+            return; // a slow answer does not stack, and a first connect is not raced
         }
         _ticking = true;
         try
@@ -430,6 +439,30 @@ internal sealed class Session
         var payload = new Writer();
         payload.U32(index);
         string why = await TakenAsync(Kind.PlayAt, payload);
+        await RefreshAsync();
+        return why;
+    }
+
+    /// <summary>
+    /// Plays <paramref name="files"/> -- replacing the playlist, or appended to
+    /// it -- and answers why not, or empty.
+    /// </summary>
+    public async Task<string> PlayFilesAsync(IReadOnlyList<string> files, bool replace)
+    {
+        if (files.Count == 0)
+        {
+            return string.Empty;
+        }
+        var payload = new Writer();
+        payload.Strings(files);
+        string why = await TakenAsync(replace ? Kind.Play : Kind.Enqueue, payload);
+        await RefreshAsync();
+        return why;
+    }
+
+    public async Task<string> ClearAsync()
+    {
+        string why = await TakenAsync(Kind.Clear);
         await RefreshAsync();
         return why;
     }

@@ -62,6 +62,16 @@ public sealed class Writer
         _out.AddRange(utf8);
     }
 
+    /// <summary>A count and then each string: what <c>play</c> and <c>enqueue</c> take.</summary>
+    public void Strings(IReadOnlyList<string> items)
+    {
+        U32((uint)items.Count);
+        foreach (string item in items)
+        {
+            Str(item);
+        }
+    }
+
     public byte[] Bytes() => _out.ToArray();
 }
 

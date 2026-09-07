@@ -70,7 +70,23 @@ internal sealed unsafe class SurfaceHost
         {
             _visual.Size = _placed;
             _visual.Offset = _offset;
+            Round(_visual);
         }
+    }
+
+    /// <summary>
+    /// Rounds the picture's corners, so that a box sitting on acrylic with
+    /// nothing framing it reads as a card rather than a hole. The clip is a
+    /// composition clip on the visual: the host's own CornerRadius would not
+    /// reach a child visual.
+    /// </summary>
+    private static void Round(SpriteVisual visual)
+    {
+        CompositionRoundedRectangleGeometry geometry =
+            visual.Compositor.CreateRoundedRectangleGeometry();
+        geometry.Size = visual.Size;
+        geometry.CornerRadius = new Vector2(8f, 8f);
+        visual.Clip = visual.Compositor.CreateGeometricClip(geometry);
     }
 
     /// <summary>
@@ -179,6 +195,7 @@ internal sealed unsafe class SurfaceHost
             // says where it goes.
             visual.Size = _placed;
             visual.Offset = _offset;
+            Round(visual);
             ElementCompositionPreview.SetElementChildVisual(host, visual);
             _brush = brush;
             _visual = visual;

@@ -1990,8 +1990,13 @@ bool resize_target(MpVideo* v)
     v->height = height;
     v->drawn = false;
 
+    // **And the chain's texture and the chain itself**, which `configure`
+    // makes at the target's size and this used to leave at the old one: a
+    // stage handed a picture of the new size would have written into the
+    // linear intermediate of the old, and the second pass read it back.
     if (!v->swap_chain) {
-        return make_target(v, v->trouble) && make_graded_target(v, v->trouble);
+        return make_target(v, v->trouble) && make_graded_target(v, v->trouble) &&
+               make_graded_linear(v, v->trouble) && configure_chain(v);
     }
 
     // **Every reference to the back buffer, gone first.** `ResizeBuffers`
@@ -2023,7 +2028,8 @@ bool resize_target(MpVideo* v)
         v->trouble = "no back buffer after the resize";
         return false;
     }
-    return make_target_views(v, v->trouble) && make_graded_target(v, v->trouble);
+    return make_target_views(v, v->trouble) && make_graded_target(v, v->trouble) &&
+           make_graded_linear(v, v->trouble) && configure_chain(v);
 }
 
 /// A dynamic texture and a view over it, made once and reused while the

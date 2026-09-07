@@ -14,7 +14,9 @@ namespace MediaPerch.Shell;
 /// </remarks>
 public partial class App : Application
 {
-    private Window? _window;
+    /// <summary>The window, for the things that need one to be told about it -- a
+    /// file picker in an unpackaged app has no owner unless it is given one.</summary>
+    public static Window? Window { get; private set; }
 
     public App()
     {
@@ -35,8 +37,8 @@ public partial class App : Application
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
         Ipc.Session.Log("shell: launched");
-        _window = new MainWindow();
-        _window.Activate();
+        Window = new MainWindow();
+        Window.Activate();
         Ipc.Session.Log("shell: window up");
     }
 }

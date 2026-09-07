@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+using MediaPerch.Shell.Canvas;
 using MediaPerch.Shell.Ipc;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -27,6 +28,8 @@ namespace MediaPerch.Shell.Pages;
 public sealed partial class GraphPage : Page
 {
     private readonly List<string> _modules = new();
+    /// The player's settings as last read; the chain strings are rewritten from these.
+    private List<Setting> _playerRows = new();
 
     public GraphPage()
     {
@@ -36,6 +39,103 @@ public sealed partial class GraphPage : Page
         // adds and removes nodes.
         PlayerSettings.Applied += () => _ = RefreshGraphAsync();
         Shape.SettingsWanted += node => _ = ShowNodeAsync(node);
+        Shape.ReorderWanted += (node, to) => _ = ReorderAsync(node, to);
+        Shape.RemoveWanted += node => _ = RemoveAsync(node);
+    }
+
+    // --- the chain, as the string the engine reads ---------------------------
+    //
+    // **The canvas asks; this page rewrites.** A chain is one setting -- `dsp`
+    // or `video_dsp`, stages separated by `|` -- and the engine derives the
+    // nodes from it. So a drag, a bin and a palette pick all end the same way:
+    // the current value is split, edited, joined and set, and the graph is
+    // asked for again. The page keeps no chain of its own to drift.
+
+    private static string? ChainOf(Node node) => node.Kind switch
+    {
+        NodeKind.Dsp => "dsp",
+        NodeKind.VideoStage => "video_dsp",
+        _ => null,
+    };
+
+    private string ChainValue(string key)
+    {
+        foreach (Setting row in _playerRows)
+        {
+            if (row.Key == key)
+            {
+                return row.Value;
+            }
+        }
+        return string.Empty;
+    }
+
+    private static List<string> Stages(string value) =>
+        value.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+             .ToList();
+
+    private async Task RewriteChainAsync(string key, List<string> stages)
+    {
+        string why = await OneAsync(Kind.SettingSet, key, string.Join("|", stages));
+        if (why.Length != 0)
+        {
+            Say(InfoBarSeverity.Warning, why);
+        }
+        await RefreshPlayerSettingsAsync();
+        await RefreshGraphAsync();
+    }
+
+    private async Task ReorderAsync(Node node, int to)
+    {
+        string? key = ChainOf(node);
+        int from = NodeCanvas.IndexOf(node);
+        if (key is null || from < 0)
+        {
+            return;
+        }
+        List<string> stages = Stages(ChainValue(key));
+        if (from >= stages.Count)
+        {
+            return;
+        }
+        string moved = stages[from];
+        stages.RemoveAt(from);
+        stages.Insert(Math.Clamp(to, 0, stages.Count), moved);
+        await RewriteChainAsync(key, stages);
+    }
+
+    private async Task RemoveAsync(Node node)
+    {
+        string? key = ChainOf(node);
+        int at = NodeCanvas.IndexOf(node);
+        if (key is null || at < 0)
+        {
+            return;
+        }
+        List<string> stages = Stages(ChainValue(key));
+        if (at >= stages.Count)
+        {
+            return;
+        }
+        stages.RemoveAt(at);
+        await RewriteChainAsync(key, stages);
+    }
+
+    private async void OnAddAudio(object sender, RoutedEventArgs e) =>
+        await AddAsync("dsp", AudioPalette.SelectedItem as string);
+
+    private async void OnAddVideo(object sender, RoutedEventArgs e) =>
+        await AddAsync("video_dsp", VideoPalette.SelectedItem as string);
+
+    private async Task AddAsync(string key, string? module)
+    {
+        if (string.IsNullOrEmpty(module))
+        {
+            return;
+        }
+        List<string> stages = Stages(ChainValue(key));
+        stages.Add(module);
+        await RewriteChainAsync(key, stages);
     }
 
     protected override async void OnNavigatedTo(NavigationEventArgs e)
@@ -116,8 +216,8 @@ public sealed partial class GraphPage : Page
                                               : Session.ErrorText(answer.Value));
             return;
         }
-        PlayerSettings.Show(Decode.ReadSettings(answer.Value.Reader()),
-                            (key, value) => OneAsync(Kind.SettingSet, key, value));
+        _playerRows = Decode.ReadSettings(answer.Value.Reader());
+        PlayerSettings.Show(_playerRows, (key, value) => OneAsync(Kind.SettingSet, key, value));
     }
 
     private async Task RefreshEngineSettingsAsync()
@@ -158,8 +258,19 @@ public sealed partial class GraphPage : Page
             return;
         }
         _modules.Clear();
+        var audio = new List<string>();
+        var video = new List<string>();
         foreach (ModuleRow row in rows)
         {
+            // Kinds 3 and 9 are the two chains' stages; see module.h.
+            if (row.Allowed && row.Kind == 3)
+            {
+                audio.Add(row.Id);
+            }
+            else if (row.Allowed && row.Kind == 9)
+            {
+                video.Add(row.Id);
+            }
             // §10's palette: what is loaded, what kind it is, where it sits in
             // the order, and whether the allow-list admits it.
             _modules.Add($"{row.Id,-18} kind {row.Kind,2}  priority {row.Priority,3}"
@@ -168,6 +279,8 @@ public sealed partial class GraphPage : Page
         ModulePanel.Header = $"Modules  ({_modules.Count})";
         ModuleRows.ItemsSource = null;
         ModuleRows.ItemsSource = _modules;
+        AudioPalette.ItemsSource = audio;
+        VideoPalette.ItemsSource = video;
     }
 
     private void Say(InfoBarSeverity severity, string what)

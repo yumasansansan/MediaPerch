@@ -5592,9 +5592,57 @@ A window has no console, so the failures worth seeing -- an engine that would no
 exception that ends the process before anything draws -- are written to `%TEMP%\mediaperch-shell.log`
 as well as the error stream. That is how the `-o` XAML fault above was found rather than guessed.
 
-**What is left of M8**: dragging nodes to reorder a chain and adding one from the palette
-(`modules` already answers what there is to add), and opening files from the shell rather than
-from the CLI.
+#### The canvas edits the chain, and the chain's grammar could not say what it edited
+
+**Drag a stage sideways to reorder it; the bin on it removes it; the palette adds one; a picker
+opens files.** All four end the same way, because §10 made the chain one setting: the page reads
+the current `dsp` (or `video_dsp`) value, splits it into stages, moves or removes or appends one,
+joins it and sets it, and asks for the graph again. The canvas decides nothing but *which slot* a
+dragged box's centre landed in among the other stages of its kind; it keeps no chain of its own
+to drift. The picker is the system's, told which window owns it — an unpackaged app is not told
+that for free — and it offers every file type, because what a file is, is the demuxer's decision
+and not a suffix's.
+
+**And the first thing that rewrote the whole string found that the string could not be
+written.** Stages were joined with a comma, and a stage's own settings are separated by commas,
+so `mix:channels=2,normalise=energy` came back through `set dsp` — and through the settings file
+`save` writes — as a stage called `mix` and a second called `normalise=energy`. Nobody had hit it:
+the CLI takes one `--dsp` per stage and never joins, and `set_node` writes a stage's keys into
+its own element of the vector where nothing splits them. Stages are separated by `|` now, which
+cannot be in a Windows path (a `file=` value is one) and is not a comment character in the
+settings file (`;` and `#` are); the old comma form is still read, since a piece with an `=`
+before any `:` is a setting and belongs to the stage before it, and a stage name never contains
+`=`. Measured: `dsp_mix:channels=2,normalise=energy|dsp_gain` is two nodes, `node dsp.0`
+answers both keys, and the row comes back as it went in.
+
+**`resize_target` rebuilt the target and the HDR10 intermediate and not the chain's.**
+`configure` makes `graded_linear` and configures every stage at the target's size; a resize left
+both at the old one, so the first video DSP stage would have written a picture of the new size
+into a texture of the old. It rebuilds and reconfigures now, and six resizes with `vdsp_lut` in
+the chain drew on, 0 underruns.
+
+##### What a review of the day's code found
+
+Read for the two things that had already bitten: a thread inside an object another thread was
+rebuilding, and a value read in one unit and drawn in another.
+
+- **The scrubber would have seeked to the end of a shorter track at every boundary.** Setting a
+  slider's `Maximum` clamps its `Value`, and a clamp raises the same event a drag does; the page
+  now marks its own updates and ignores the event they raise.
+- **Two connects at once.** The tick reconnected every second while the first connect was still
+  starting an engine, and two successful connects on one client would each keep a stream and leak
+  one. The tick stands aside while the first connect is under way.
+- **`Queue::request_next` and a seek that never happens.** A request is consumed by the seek that
+  performs it; a seek refused before that point would leave it set for the next ordinary seek.
+  `Player::next` cancels it on that path, and it is written down here because the shape invites
+  the mistake.
+- **Pre-existing and left as is**: a graph seek that times out after five seconds returns false
+  while the decode thread may still perform it later. `Player::seek` has the same shape;
+  neither has been seen to happen and a five-second stall inside a seek is its own problem first.
+
+**M8 is done to the plan.** What would come next is polish rather than mechanism: keyboard
+shortcuts, a queue that can be reordered by drag as the chain can, and the picker remembering
+where it was.
 
 
 #### Built, and the palette needed a fourth verb
@@ -5726,7 +5774,7 @@ HDR state.
 | M6.8 | The video graph: decode, pace, present | **done.** VideoDecoder and Presenter behind their vtables -- mp::Sink for pictures -- and VideoGraph, which holds one frame, asks §8's pacer and presents. One frame and no queue, because a decoded frame is valid until the next call on the codec that produced it and a queue would have to copy what §9.8.1 went to some trouble not to copy; the lookahead is inside the decoder, which reorders B-frames and since M6.6 uses every core. No thread of its own either: the audio graphs own one because the device's event paces them, and video's pace is the display's, which belongs to the head. A drop does not cost a refresh -- one pump lets go of every frame whose time has passed, because letting one go per refresh would never catch the clock. After the first frame the decoder is asked what it actually produced and the presenter reconfigured where the bitstream disagrees with the container, except for the timescale and the frame rate, which a decoder never re-times. Packets arrive through IPacketFeed rather than from a demuxer, which is a hole with a name: §4 says one file has one position, so audio and video must share one demuxer, and the router that would do that is what comes next. Checked on demux_mp4 + codec_dav1d + video_d3d11 with a clock somebody chose: 24 shown and none dropped at the right speed with nothing more than a millisecond late, twelve dropped and twelve shown half a second behind with the picture still right at the end, and five hundred polls of a stopped clock holding it |
 | M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse. **Measured, and met at the default**: 3840x2160 HEVC with an audio track, 0 underruns and 0 silent frames while 1 to 4 frames of 71 were dropped. It was first met at `--ring-periods 32` against a default of 8 that underran; the default is 128 now, and the sections above are the measurements that moved it and what they do and do not say. Getting there took worker threads in `codec_de265` (one thread was a comment rather than a decision) and the ring. DirectComposition is still §9.7.1's shell case and unbuilt; hardware decode is `codec_mft` where the machine has a transform |
 | M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled. **All six steps of §9.7.2 are built**: the SDR white level, the output the window is on, PQ, HLG, BT.2390 in the shader, and the ABI append that carries what the content was graded on, filled from Matroska, from MP4's `mdcv`/`clli`, and from an HEVC prefix SEI where the container says nothing. Steps 3, 4 and 5 are formulas and are tested against them off-screen on WARP, so they run in CI on a machine with no display. **What is left is the half that is not a formula**: steps 1, 2 and 6 on real HDR hardware, written into [devices.md](devices.md) -- there is no HDR display here, and asserting they work without one is the exact failure §9.2 is the record of |
-| M8 | WinUI 3 shell | **most of it.** The project builds and its own reader decodes §10's wire against a running engine -- `MediaPerch.Shell.exe --check` prints the status and the graph, which is how the two descriptions of one format are held together. The canvas is drawn, the composition surface is composited, and the transport, playlist, module palette and settings screens are there -- every key the engine will take, per node and for the player and the engine, as something to type into, with the module's own refusal shown when it will not take it. Killing it mid-track changes nothing audible. **C#, WinUI 3, Native AOT**, `net10.0-windows10.0.26100.0` with a minimum of 22000, to Fluent 2, dependencies at their newest. Its settings screen is a **node canvas** in the shape of ComfyUI's and Fusion's: the chain as a topology, dragged to reorder, with a settings button per node. §10 says what that asks of the engine -- three verbs and no more -- and why the canvas is Fusion's look over a chain's semantics rather than a free-form DAG. The engine half of §9.7.1 is standing: the composition surface handle, the compositor's clock (not the swap chain's waitable, which was a black window until it was measured), the size message and the display message. The shell's half is done through WinUI's own compositor rather than DirectComposition, and *a shell that dies holding the picture* is a test rather than a claim. The picture survives a track boundary as the audio device does, and both it and `status` follow what is being heard rather than what is being decoded. The window is three pages behind a navigation pane, acrylic into the title bar, the picture filling the first with a Fluent transport and a scrubber under it; a click on a track is `play_at`. What is left is dragging nodes to reorder, adding a stage from the palette, and opening files from the shell |
+| M8 | WinUI 3 shell | **most of it.** The project builds and its own reader decodes §10's wire against a running engine -- `MediaPerch.Shell.exe --check` prints the status and the graph, which is how the two descriptions of one format are held together. The canvas is drawn, the composition surface is composited, and the transport, playlist, module palette and settings screens are there -- every key the engine will take, per node and for the player and the engine, as something to type into, with the module's own refusal shown when it will not take it. Killing it mid-track changes nothing audible. **C#, WinUI 3, Native AOT**, `net10.0-windows10.0.26100.0` with a minimum of 22000, to Fluent 2, dependencies at their newest. Its settings screen is a **node canvas** in the shape of ComfyUI's and Fusion's: the chain as a topology, dragged to reorder, with a settings button per node. §10 says what that asks of the engine -- three verbs and no more -- and why the canvas is Fusion's look over a chain's semantics rather than a free-form DAG. The engine half of §9.7.1 is standing: the composition surface handle, the compositor's clock (not the swap chain's waitable, which was a black window until it was measured), the size message and the display message. The shell's half is done through WinUI's own compositor rather than DirectComposition, and *a shell that dies holding the picture* is a test rather than a claim. The picture survives a track boundary as the audio device does, and both it and `status` follow what is being heard rather than what is being decoded. The window is three pages behind a navigation pane, acrylic into the title bar, the picture filling the first with a Fluent transport and a scrubber under it; a click on a track is `play_at`. The canvas edits the chain -- drag to reorder, a bin to remove, a palette to add -- and the system picker opens files; the chain's grammar had to grow an unambiguous separator first, because it could not round-trip a stage with two settings. **Done to the plan**; what remains is polish |
 | M9 | Linux head | ALSA or PipeWire in an exclusive-equivalent mode, proving the core was actually portable |
 
 M1 and M2 are the ones that de-risk the project. If exclusive-mode negotiation and the

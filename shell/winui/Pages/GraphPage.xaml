@@ -38,6 +38,23 @@
                               VerticalScrollBarVisibility="Disabled">
                     <canvas:NodeCanvas x:Name="Shape" />
                 </ScrollViewer>
+                <TextBlock Text="Drag a stage sideways to reorder it; the bin on a stage removes it."
+                           Style="{StaticResource CaptionTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+
+                <!-- §10's palette: every module loaded, and a way to put one in
+                     a chain. Adding is appending to the dsp or video_dsp value;
+                     where it then sits is the drag above. -->
+                <Grid ColumnDefinitions="Auto,*,Auto,*,Auto" ColumnSpacing="8">
+                    <TextBlock Grid.Column="0" Text="Add a stage" VerticalAlignment="Center"
+                               Style="{StaticResource BodyStrongTextBlockStyle}" />
+                    <ComboBox x:Name="AudioPalette" Grid.Column="1" PlaceholderText="audio (dsp)"
+                              HorizontalAlignment="Stretch" />
+                    <Button Grid.Column="2" Content="Add to audio chain" Click="OnAddAudio" />
+                    <ComboBox x:Name="VideoPalette" Grid.Column="3" PlaceholderText="picture (vdsp)"
+                              HorizontalAlignment="Stretch" />
+                    <Button Grid.Column="4" Content="Add to picture chain" Click="OnAddVideo" />
+                </Grid>
 
                 <!-- One node's settings, opened by the button on it. -->
                 <Expander x:Name="NodePanel" Visibility="Collapsed"

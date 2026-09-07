@@ -63,6 +63,8 @@ std::string trimmed(std::string_view s)
     return std::string{s.substr(begin, end - begin)};
 }
 
+std::vector<std::string> split_stages(const std::string& value);
+
 std::vector<std::string> split(const std::string& s, char by)
 {
     std::vector<std::string> out;
@@ -469,9 +471,10 @@ std::vector<ipc::Setting> Player::settings() const
         "exclusive takes the device and nothing else can make a sound on it");
     row("path", path_policy_name(config_.path),
         "bitexact, exactonly, auto or processed -- what may happen to the samples");
-    row("dsp", joined(config_.dsp, ','),
-        "stages in the order they run, `name` or `name:key=value,key=value`");
-    row("video_dsp", joined(config_.video_dsp, ','),
+    row("dsp", joined(config_.dsp, '|'),
+        "stages in the order they run, separated by |; each `name` or "
+        "`name:key=value,key=value`");
+    row("video_dsp", joined(config_.video_dsp, '|'),
         "the same for the picture: stages in linear light inside the presenter");
     row("gain", std::to_string(config_.conversion.gain),
         "linear, not decibels. Only on the processed path");
@@ -528,14 +531,14 @@ bool Player::set(const std::string& key, const std::string& value, std::string& 
             }
             rebuild = true;
         } else if (key == "dsp") {
-            config_.dsp = split(value, ',');
+            config_.dsp = split_stages(value);
             rebuild = true;
         } else if (key == "video_dsp") {
             // **A rebuild for the same reason the audio chain is one.** The
             // chain is opened when the picture is, on the presenter's device,
             // and a stage inserted underneath a display loop that is inside
             // `process` is a data race rather than a setting.
-            config_.video_dsp = split(value, ',');
+            config_.video_dsp = split_stages(value);
             rebuild = true;
         } else if (key == "gain") {
             // Linear and unbounded. Above unity clips, below zero inverts,
@@ -645,6 +648,41 @@ struct StageSpec {
     std::string id;                                        // with the dsp_ prefix
     std::vector<std::pair<std::string, std::string>> settings;
 };
+
+/// A chain, as one string: stages separated by `|`, each `name` or
+/// `name:key=value,key=value`.
+///
+/// **One separator was doing two jobs.** Stages were joined with a comma and
+/// a stage's own settings are separated by commas, so `mix:channels=2,
+/// normalise=energy` came back through `set dsp` -- and through the settings
+/// file `save` writes -- as a stage called `mix` and a second one called
+/// `normalise=energy`. Nobody had hit it: the CLI takes one `--dsp` per stage
+/// and never joins, and `set_node` writes a stage's keys into its own element
+/// of `config_.dsp` where no split happens. The shell's canvas is the first
+/// thing that rewrites the whole string, and it would have hit it at once.
+///
+/// `|`, because it cannot be in a Windows path (a `file=` value is a path) and
+/// because `;` and `#` start a comment in the settings file. The old form is
+/// still read: a comma-separated piece with an `=` before any `:` is a setting
+/// and belongs to the stage before it, and a stage name never contains `=`.
+std::vector<std::string> split_stages(const std::string& value)
+{
+    std::vector<std::string> out;
+    for (const std::string& group : split(value, '|')) {
+        for (const std::string& piece : split(group, ',')) {
+            const std::size_t equals = piece.find('=');
+            const std::size_t colon = piece.find(':');
+            const bool setting = equals != std::string::npos &&
+                                 (colon == std::string::npos || equals < colon);
+            if (setting && !out.empty()) {
+                out.back() += "," + piece;
+            } else {
+                out.push_back(piece);
+            }
+        }
+    }
+    return out;
+}
 
 StageSpec parse_stage(const std::string& spec)
 {

@@ -58,6 +58,11 @@ public sealed partial class NowPlayingPage : Page
     private bool _scrubbing;
     /// The value this page last put on the slider itself.
     private double _shown;
+    /// Whether this page is the one changing the slider. **A new maximum clamps
+    /// the value**, and a clamp raises the same event a person's drag does; a
+    /// shorter track after a longer one would otherwise seek to its own end at
+    /// every boundary.
+    private bool _syncing;
 
     public NowPlayingPage()
     {
@@ -109,9 +114,11 @@ public sealed partial class NowPlayingPage : Page
         Scrub.IsEnabled = status.Length != 0;
         if (status.Length != 0 && !_scrubbing)
         {
+            _syncing = true;
             Scrub.Maximum = status.Length;
             _shown = Math.Min((double)status.ItemPosition, Scrub.Maximum);
             Scrub.Value = _shown;
+            _syncing = false;
         }
     }
 
@@ -134,7 +141,7 @@ public sealed partial class NowPlayingPage : Page
     {
         // A pointer's drag seeks on release; this is the keyboard, or a value
         // that is not the one this page put there.
-        if (_scrubbing || Math.Abs(e.NewValue - _shown) < 1.0)
+        if (_syncing || _scrubbing || Math.Abs(e.NewValue - _shown) < 1.0)
         {
             return;
         }
@@ -151,6 +158,16 @@ public sealed partial class NowPlayingPage : Page
         ulong began = status.Position - Math.Min(status.Position, status.ItemPosition);
         _shown = intoTrack;
         await Session.Current.SeekAsync((long)(began + (ulong)Math.Max(0.0, intoTrack)), false);
+    }
+
+    private async void OnOpen(object sender, RoutedEventArgs e)
+    {
+        IReadOnlyList<string> files = await Controls.FilePicking.PickAsync();
+        string why = await Session.Current.PlayFilesAsync(files, replace: true);
+        if (why.Length != 0)
+        {
+            PictureLine.Text = why;
+        }
     }
 
     private async void OnPlayPause(object sender, RoutedEventArgs e)

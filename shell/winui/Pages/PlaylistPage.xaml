@@ -6,15 +6,27 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <Grid RowDefinitions="Auto,Auto,*" Padding="24,8,24,16" RowSpacing="8">
+    <Grid RowDefinitions="Auto,Auto,Auto,*" Padding="24,8,24,16" RowSpacing="8">
         <TextBlock x:Name="Heading" Grid.Row="0" Text="Playlist"
                    Style="{StaticResource TitleTextBlockStyle}" />
-        <InfoBar x:Name="Note" Grid.Row="1" IsOpen="False" Severity="Warning" />
+        <CommandBar Grid.Row="1" DefaultLabelPosition="Right" Background="Transparent"
+                    HorizontalAlignment="Left">
+            <AppBarButton Label="Open" Click="OnOpen" ToolTipService.ToolTip="Play these instead">
+                <AppBarButton.Icon><FontIcon Glyph="&#xE8E5;" /></AppBarButton.Icon>
+            </AppBarButton>
+            <AppBarButton Label="Add" Click="OnAdd" ToolTipService.ToolTip="Append to the playlist">
+                <AppBarButton.Icon><FontIcon Glyph="&#xE710;" /></AppBarButton.Icon>
+            </AppBarButton>
+            <AppBarButton Label="Clear" Click="OnClear">
+                <AppBarButton.Icon><FontIcon Glyph="&#xE74D;" /></AppBarButton.Icon>
+            </AppBarButton>
+        </CommandBar>
+        <InfoBar x:Name="Note" Grid.Row="2" IsOpen="False" Severity="Warning" />
 
         <!-- A click plays that track: the run starts again there, which is a
              real gap and is what a person who clicked asked for. The arrow
              marks what is being heard, not what the decoder is on. -->
-        <ListView x:Name="Rows" Grid.Row="2"
+        <ListView x:Name="Rows" Grid.Row="3"
                   IsItemClickEnabled="True"
                   SelectionMode="None"
                   ItemClick="OnItemClick">

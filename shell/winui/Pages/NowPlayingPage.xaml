@@ -11,18 +11,17 @@
 
         <!-- The picture, and nothing else in its way. §9.7.1: the engine draws
              into a composition surface it never shows, the handle crosses once,
-             and this is where it becomes something the window composites. Black
-             because that is what a picture sits on, and the letterbox is the
-             black around the box this page asks the engine for. -->
+             and this is where it becomes something the window composites. The
+             host is transparent on purpose: the picture is the box this page
+             asks the engine for, placed and centred by SurfaceHost, and around
+             it is the window's own acrylic rather than a letterbox. -->
         <Border x:Name="Picture" Grid.Row="0"
                 Margin="16,8,16,0"
-                CornerRadius="8"
-                Background="Black"
                 SizeChanged="OnPictureResized" />
         <TextBlock x:Name="PictureLine" Grid.Row="0"
                    HorizontalAlignment="Center" VerticalAlignment="Center"
                    Style="{StaticResource BodyTextBlockStyle}"
-                   Foreground="#A0FFFFFF"
+                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                    TextWrapping="Wrap" TextAlignment="Center" MaxWidth="480" />
 
         <!-- The transport, in the shape every player's takes: what is playing,
@@ -61,6 +60,10 @@
 
             <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8"
                         HorizontalAlignment="Center">
+                <Button Click="OnOpen" Width="40" Height="40" Padding="0" Margin="0,0,16,0"
+                        ToolTipService.ToolTip="Open files">
+                    <FontIcon Glyph="&#xE8E5;" FontSize="16" />
+                </Button>
                 <Button Click="OnPrevious" Width="40" Height="40" Padding="0"
                         ToolTipService.ToolTip="Previous">
                     <FontIcon Glyph="&#xE892;" FontSize="16" />
