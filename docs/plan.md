@@ -5106,6 +5106,48 @@ whether the allow-list admits it. Priority ordering is `[engine] decoders` (a re
 veto — §7) and `allow`, and **both are `[engine]` rather than `[player]`**, which §11 decided
 for a reason: they are needed before there is a player.
 
+#### The shell, begun
+
+`shell/winui` builds: C#, WinUI 3, `net10.0-windows10.0.26100.0`, a minimum of 22000,
+unpackaged, warnings as errors. `cmake --build` builds it when `dotnet` is on the machine and
+skips it with a line when it is not — an install with no shell is the tray menu and is
+usable, and a machine with no .NET SDK still builds and tests everything else.
+
+**The dependency rule held.** `Microsoft.WindowsAppSDK.Foundation` and
+`Microsoft.WindowsAppSDK.WinUI`, and nothing else. The concern was real and is now checked:
+`Microsoft.WindowsAppSDK.AI` and `Microsoft.WindowsAppSDK.ML` exist as their own feature
+packages and the meta-package pulls them in, so a media player that took the meta-package would
+ship ONNX Runtime. There is no Community Toolkit either — it does not support this Windows
+App SDK, so the canvas's controls are written here.
+
+**The wire is hand-written on this side too**, which is a cost taken deliberately: a serialiser
+would be a third description of the same bytes, after the header and the reader. What keeps the
+two in step is that the format is versioned and the engine answers `error` to a kind it does not
+know, so a shell ahead of its engine is told rather than reading a field that moved.
+
+**And there is one way to see the drift without looking at a window.** `MediaPerch.Shell.exe
+--check` attaches to the console it was started from, connects, asks `status` and `graph`, and
+prints what came back — checking `Complete` rather than merely `Ok`, because a reply this
+build read *most* of is a reply whose fields have moved, which is exactly the failure two
+descriptions of a wire produce. Measured against a running `mediaperchd`:
+
+    connected   mediaperch
+    state       Stopped
+    node        source       Source       the file
+    node        dsp.0        Dsp          dsp_gain  [dsp_gain]
+    node        convert      Convert      the f64 bus: gain, dither and noise shaping
+    node        sink         Sink         the device
+    edge        source -> dsp.0
+
+That is §10's three verbs answering over the real pipe, decoded by the shell's own reader. A
+person whose shell shows nothing can run it and find out whether the engine is not there or the
+shell cannot read it.
+
+**What is left of M8**, in order: the node canvas over the list that stands in for it; the
+composition surface (`CreateSurfaceFromHandle`, a visual, a target on the `HWND`, a `Commit`),
+which is the only consumer that turns *the shell can die mid-frame* into a test; and the
+transport, playlist and settings screens.
+
 #### Built, and the palette needed a fourth verb
 
 `graph`, `node_settings` / `node_setting_set` and `modules` are on the wire, and
@@ -5235,7 +5277,7 @@ HDR state.
 | M6.8 | The video graph: decode, pace, present | **done.** VideoDecoder and Presenter behind their vtables -- mp::Sink for pictures -- and VideoGraph, which holds one frame, asks §8's pacer and presents. One frame and no queue, because a decoded frame is valid until the next call on the codec that produced it and a queue would have to copy what §9.8.1 went to some trouble not to copy; the lookahead is inside the decoder, which reorders B-frames and since M6.6 uses every core. No thread of its own either: the audio graphs own one because the device's event paces them, and video's pace is the display's, which belongs to the head. A drop does not cost a refresh -- one pump lets go of every frame whose time has passed, because letting one go per refresh would never catch the clock. After the first frame the decoder is asked what it actually produced and the presenter reconfigured where the bitstream disagrees with the container, except for the timescale and the frame rate, which a decoder never re-times. Packets arrive through IPacketFeed rather than from a demuxer, which is a hole with a name: §4 says one file has one position, so audio and video must share one demuxer, and the router that would do that is what comes next. Checked on demux_mp4 + codec_dav1d + video_d3d11 with a clock somebody chose: 24 shown and none dropped at the right speed with nothing more than a millisecond late, twelve dropped and twelve shown half a second behind with the picture still right at the end, and five hundred polls of a stopped clock holding it |
 | M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse. **Measured, and met at the default**: 3840x2160 HEVC with an audio track, 0 underruns and 0 silent frames while 1 to 4 frames of 71 were dropped. It was first met at `--ring-periods 32` against a default of 8 that underran; the default is 128 now, and the sections above are the measurements that moved it and what they do and do not say. Getting there took worker threads in `codec_de265` (one thread was a comment rather than a decision) and the ring. DirectComposition is still §9.7.1's shell case and unbuilt; hardware decode is `codec_mft` where the machine has a transform |
 | M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled. **All six steps of §9.7.2 are built**: the SDR white level, the output the window is on, PQ, HLG, BT.2390 in the shader, and the ABI append that carries what the content was graded on, filled from Matroska, from MP4's `mdcv`/`clli`, and from an HEVC prefix SEI where the container says nothing. Steps 3, 4 and 5 are formulas and are tested against them off-screen on WARP, so they run in CI on a machine with no display. **What is left is the half that is not a formula**: steps 1, 2 and 6 on real HDR hardware, written into [devices.md](devices.md) -- there is no HDR display here, and asserting they work without one is the exact failure §9.2 is the record of |
-| M8 | WinUI 3 shell | killing it mid-track changes nothing audible. **C#, WinUI 3, Native AOT**, `net10.0-windows10.0.26100.0` with a minimum of 22000, to Fluent 2, dependencies at their newest. Its settings screen is a **node canvas** in the shape of ComfyUI's and Fusion's: the chain as a topology, dragged to reorder, with a settings button per node. §10 says what that asks of the engine -- three verbs and no more -- and why the canvas is Fusion's look over a chain's semantics rather than a free-form DAG. The engine half of §9.7.1 is standing: the composition surface handle, the frame clock, the size message and the display message. What is left on this side is `CreateSurfaceFromHandle`, a visual, a target on an `HWND` and a `Commit` -- which is also the only consumer that turns *the shell can die mid-frame* into a test |
+| M8 | WinUI 3 shell | **begun.** The project builds and its own reader decodes §10's wire against a running engine -- `MediaPerch.Shell.exe --check` prints the status and the graph, which is how the two descriptions of one format are held together. What is left is the canvas, the composition surface and the screens. Killing it mid-track changes nothing audible. **C#, WinUI 3, Native AOT**, `net10.0-windows10.0.26100.0` with a minimum of 22000, to Fluent 2, dependencies at their newest. Its settings screen is a **node canvas** in the shape of ComfyUI's and Fusion's: the chain as a topology, dragged to reorder, with a settings button per node. §10 says what that asks of the engine -- three verbs and no more -- and why the canvas is Fusion's look over a chain's semantics rather than a free-form DAG. The engine half of §9.7.1 is standing: the composition surface handle, the frame clock, the size message and the display message. What is left on this side is `CreateSurfaceFromHandle`, a visual, a target on an `HWND` and a `Commit` -- which is also the only consumer that turns *the shell can die mid-frame* into a test |
 | M9 | Linux head | ALSA or PipeWire in an exclusive-equivalent mode, proving the core was actually portable |
 
 M1 and M2 are the ones that de-risk the project. If exclusive-mode negotiation and the

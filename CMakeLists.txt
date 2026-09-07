@@ -206,6 +206,7 @@ if(MEDIAPERCH_BUILD_PLATFORM AND WIN32)
     add_subdirectory(modules/sink/wasapi)
     add_subdirectory(modules/sink/asio)
     add_subdirectory(src/win)
+    add_subdirectory(shell/winui)
 endif()
 
 if(MEDIAPERCH_BUILD_TESTS)

@@ -1,0 +1,59 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The shell (M8). §2 decided the language and §10 decided the surface: this is
+    a separate process behind an IPC boundary, so nothing here is linked into
+    the engine and killing it must not be audible.
+
+    **Feature packages, not the meta-package.** `Microsoft.WindowsAppSDK` pulls
+    in everything the Windows App SDK has, and what it has now includes
+    `Microsoft.WindowsAppSDK.AI` and `Microsoft.WindowsAppSDK.ML` — ONNX Runtime
+    and DirectML arriving behind a reference nobody typed. A media player does
+    not want a machine-learning runtime in its installer. So: Foundation and
+    WinUI, and anything else from that family is a decision somebody makes.
+
+    There is no Community Toolkit either, and not by preference: it does not
+    support the Windows App SDK this targets. What the canvas needs is written
+    here.
+  -->
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <!-- Windows 11 21H2. Below it there is no Mica, no rounded geometry and no
+         Fluent 2 to speak of, and a shell that pretended otherwise would look
+         broken rather than plain. -->
+    <SupportedOSPlatformVersion>10.0.22000.0</SupportedOSPlatformVersion>
+    <RootNamespace>MediaPerch.Shell</RootNamespace>
+    <AssemblyName>MediaPerch.Shell</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x64;ARM64</Platforms>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <UseWinUI>true</UseWinUI>
+    <!-- Unpackaged: this ships beside `mediaperchd` in the same directory, the
+         way `mediaperch-cli` does, and an install with no shell is still a
+         working install. -->
+    <WindowsPackageType>None</WindowsPackageType>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <!-- Warnings are errors here for the reason they are in the C++ tree. -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- §2's Native AOT. It applies on `dotnet publish`; `dotnet build` is a
+         normal managed build, which is what the tree's own build does so that a
+         machine without the AOT toolchain can still compile the shell. -->
+    <PublishAot>true</PublishAot>
+    <SelfContained>true</SelfContained>
+    <!-- The entry point is written out in Program.cs, so that the check
+         argument can answer from a terminal as well as open a window. -->
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK.Foundation" Version="2.3.9" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="2.3.6" />
+  </ItemGroup>
+
+</Project>

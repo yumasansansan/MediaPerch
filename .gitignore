@@ -46,3 +46,7 @@ __pycache__/
 hm_cross_*.log
 hm_cross_*.yuv
 hm_cross_*.265
+
+# The shell's managed build output. `dotnet` puts it beside the project.
+shell/winui/bin/
+shell/winui/obj/

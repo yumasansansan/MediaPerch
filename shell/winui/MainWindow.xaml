@@ -1,0 +1,56 @@
+<Window
+    x:Class="MediaPerch.Shell.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Grid x:Name="Root" RowDefinitions="Auto,*,Auto" Padding="16" RowSpacing="12">
+
+        <!-- The connection, first and plainly, because a shell that cannot say
+             whether the engine is running is a shell that looks broken when it
+             is the engine that is not there. -->
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="12">
+            <InfoBar x:Name="Connection"
+                     IsOpen="True"
+                     IsClosable="False"
+                     Severity="Informational"
+                     Title="Not connected"
+                     Message="mediaperchd is not running, or is listening somewhere else."
+                     HorizontalAlignment="Stretch" />
+        </StackPanel>
+
+        <ScrollViewer Grid.Row="1">
+            <StackPanel Spacing="12">
+                <TextBlock x:Name="TrackLine" Style="{StaticResource TitleTextBlockStyle}"
+                           Text="Nothing is playing" TextWrapping="Wrap" />
+                <TextBlock x:Name="FormatLine"
+                           Style="{StaticResource BodyTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                           TextWrapping="Wrap" />
+
+                <TextBlock Text="The shape it is in"
+                           Style="{StaticResource SubtitleTextBlockStyle}" />
+                <!-- The node canvas goes here. Until it is drawn, the same
+                     answer as text: what `graph` says, in the order it says it,
+                     so the wire is checkable before there is anything to look
+                     at. -->
+                <ItemsControl x:Name="Nodes">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <TextBlock Text="{Binding}" FontFamily="Consolas"
+                                       Style="{StaticResource BodyTextBlockStyle}" />
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </StackPanel>
+        </ScrollViewer>
+
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8">
+            <Button x:Name="Refresh" Content="Refresh" Click="OnRefresh" />
+            <Button x:Name="PlayPause" Content="Pause" Click="OnPlayPause" />
+            <Button x:Name="StopButton" Content="Stop" Click="OnStop" />
+        </StackPanel>
+    </Grid>
+</Window>
