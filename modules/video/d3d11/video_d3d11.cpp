@@ -837,6 +837,14 @@ struct MpVideo {
 
 namespace {
 
+/// The largest texture Direct3D 11 will make at feature level 11, which is
+/// `D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION`.
+///
+/// Spelled out rather than taken from the SDK macro so that the number a person
+/// sees in an error message and the number this refuses are one thing. §9.8.2
+/// measured it: it is also the ceiling the 16K tests stop at.
+constexpr unsigned long k_max_dimension = 16384;
+
 /// **The flags every shader here is compiled with**, named so that the
 /// assertion below can be about them rather than about a comment.
 constexpr UINT k_compile_flags =
@@ -2438,16 +2446,23 @@ try {
             }
             const char* rest = end + 1;
             const unsigned long asked_height = std::strtoul(rest, &end, 10);
-            // **No ceiling here, on purpose.** An earlier version refused
-            // anything over 16384 because that is what Direct3D 11 will make a
-            // texture of -- but the device refuses it too, in its own words and
-            // at the moment it actually cannot, and a limit written here is a
-            // limit that has to be right about every device this module will
-            // ever open. The same argument retired thirteen ranges from the
-            // DSP settings. What is left is what a size cannot be: not a
-            // number, or zero, which is not a target anything can draw into.
-            if (end == rest || *end != '\0' || asked_width == 0 || asked_height == 0) {
-                v->trouble = "a size is WxH, in pixels, and neither of them zero";
+            // **`k_max_dimension` is Direct3D's number, and this is Direct3D's
+            // module.** `D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION` is 16384 at
+            // feature level 11, so a size past it is one this presenter cannot
+            // ever satisfy -- not a taste, and not a guess about somebody
+            // else's hardware. Refusing it by name here is better than a
+            // `CreateTexture2D` that fails with an HRESULT and no number in
+            // it.
+            //
+            // What would be wrong is putting it anywhere above this file. §3
+            // keeps the core and the player portable, `mp::VideoPath` forwards
+            // a size without an opinion about it, and a Metal or a Vulkan
+            // presenter has its own limit and a different one. A cross-platform
+            // layer that knew 16384 would be a layer that had learned DXGI.
+            if (end == rest || *end != '\0' || asked_width == 0 || asked_height == 0 ||
+                asked_width > k_max_dimension || asked_height > k_max_dimension) {
+                v->trouble = "a size is WxH, in pixels, neither zero nor over 16384, "
+                             "which is what Direct3D 11 will make a texture of";
                 return MP_ERR_INVALID;
             }
             width = static_cast<std::uint32_t>(asked_width);
