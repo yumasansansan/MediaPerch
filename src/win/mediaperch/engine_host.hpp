@@ -57,6 +57,7 @@ public:
     [[nodiscard]] std::unique_ptr<IFrameClock> frame_clock(Presenter& presenter,
                                                            void* window) override;
     [[nodiscard]] const MpDspVtbl* dsp(const std::string& id) override;
+    [[nodiscard]] std::vector<ipc::ModuleRow> modules() override;
     [[nodiscard]] bool device_ready(const std::string& want, bool shared) override;
     void log(const std::string& line) override;
 

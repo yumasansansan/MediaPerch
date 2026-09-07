@@ -542,6 +542,273 @@ bool Player::set(const std::string& key, const std::string& value, std::string& 
 // The engine thread
 // --------------------------------------------------------------------------
 
+// --------------------------------------------------------------------------
+// The shape, for a shell that draws it (§10)
+// --------------------------------------------------------------------------
+
+namespace {
+
+/// A `--dsp` spec split into the module and its settings: `resample:rate=48000`
+/// is `dsp_resample` and one pair. **One place**, because `build_chain` reads
+/// the same text and two readers of one grammar are two grammars.
+struct StageSpec {
+    std::string id;                                        // with the dsp_ prefix
+    std::vector<std::pair<std::string, std::string>> settings;
+};
+
+StageSpec parse_stage(const std::string& spec)
+{
+    StageSpec out;
+    const std::size_t colon = spec.find(':');
+    out.id = spec.substr(0, colon);
+    if (out.id.rfind("dsp_", 0) != 0) {
+        out.id = "dsp_" + out.id;
+    }
+    if (colon == std::string::npos) {
+        return out;
+    }
+    for (const std::string& one : split(spec.substr(colon + 1), ',')) {
+        const std::size_t equals = one.find('=');
+        if (equals != std::string::npos) {
+            out.settings.emplace_back(one.substr(0, equals), one.substr(equals + 1));
+        }
+    }
+    return out;
+}
+
+/// The spec a stage's settings make, in the form `config_.dsp` holds.
+std::string write_stage(const StageSpec& stage)
+{
+    std::string out = stage.id;
+    for (std::size_t i = 0; i < stage.settings.size(); ++i) {
+        out += (i == 0 ? ':' : ',');
+        out += stage.settings[i].first + "=" + stage.settings[i].second;
+    }
+    return out;
+}
+
+} // namespace
+
+ipc::Graph Player::graph() const
+{
+    PlayerConfig config;
+    bool processing = false;
+    std::string decoder;
+    std::string device;
+    std::string track;
+    {
+        const std::lock_guard lock{mutex_};
+        config = config_;
+        processing = processed_;
+        decoder = decoder_;
+        device = device_;
+        track = track_;
+    }
+
+    ipc::Graph out;
+    const auto node = [&out](const char* id, ipc::NodeKind kind, std::string module,
+                             std::string name, std::uint32_t flags) {
+        out.nodes.push_back(ipc::Node{id, static_cast<std::uint32_t>(kind),
+                                      std::move(module), std::move(name), flags});
+    };
+    const auto edge = [&out](std::string from, std::string to) {
+        out.edges.push_back(ipc::Edge{std::move(from), std::move(to)});
+    };
+
+    node("source", ipc::NodeKind::source, decoder,
+         track.empty() ? "the file" : track, 0);
+
+    // **The chain is what a person assembled**, so it is what a canvas may
+    // rearrange. Everything else on this line is decided by §5 and §6 and is
+    // there whether anybody wants it or not.
+    std::string previous = "source";
+    std::vector<std::string> ids;
+    for (std::size_t i = 0; i < config.dsp.size(); ++i) {
+        const StageSpec stage = parse_stage(config.dsp[i]);
+        const std::string id = "dsp." + std::to_string(i);
+        node(id.c_str(), ipc::NodeKind::dsp, stage.id, stage.id,
+             ipc::MP_NODE_REMOVABLE | ipc::MP_NODE_SETTABLE);
+        edge(previous, id);
+        previous = id;
+        ids.push_back(id);
+    }
+
+    // **Path B's converter, and only on Path B.** §5: Path A is a `memcpy` or a
+    // container repack with nothing insertable in it, and drawing a node there
+    // would be drawing a stage that does not exist. A chain forces Path B, so a
+    // canvas with stages on it always has this.
+    const bool converting =
+        processing || !config.dsp.empty() || config.path == PathPolicy::processed;
+    if (converting) {
+        node("convert", ipc::NodeKind::convert, {},
+             "the f64 bus: gain, dither and noise shaping", ipc::MP_NODE_SETTABLE);
+        edge(previous, "convert");
+        previous = "convert";
+    }
+
+    node("sink", ipc::NodeKind::sink, {},
+         device.empty() ? "the device" : device, ipc::MP_NODE_SETTABLE);
+    edge(previous, "sink");
+
+    // **The picture, and it is a second line rather than a branch.** §4 gives
+    // the file one position and §8 gives the run one clock, but the frames and
+    // the samples never meet: what joins them is the clock, which is not an
+    // edge a canvas should draw as though data flowed along it.
+    if (video_ && video_->opened()) {
+        node("vsource", ipc::NodeKind::video_source, video_->modules().decoder,
+             "the video decoder", 0);
+        node("presenter", ipc::NodeKind::presenter, video_->modules().presenter,
+             "the colour pipeline and the display", ipc::MP_NODE_SETTABLE);
+        edge("vsource", "presenter");
+    }
+    return out;
+}
+
+std::vector<ipc::Setting> Player::node_settings(const std::string& node) const
+{
+    PlayerConfig config;
+    {
+        const std::lock_guard lock{mutex_};
+        config = config_;
+    }
+
+    if (node == "convert" || node == "sink" || node == "source") {
+        // **The run's own settings, filtered to the node they belong to.** They
+        // are `Player::set` keys either way, so a shell that sets one through a
+        // node and a shell that sets it through the settings tree are doing the
+        // same thing -- which is what stops the two drifting.
+        static const char* const of_convert[] = {"gain", "dither", "shaping",
+                                                 "dither_seed", "path"};
+        static const char* const of_sink[] = {"device", "share", "ring_periods",
+                                              "prefill_periods", "wait_timeout",
+                                              "recover", "recover_timeout"};
+        const auto wanted = [&](const std::string& key) {
+            if (node == "convert") {
+                return std::any_of(std::begin(of_convert), std::end(of_convert),
+                                   [&](const char* k) { return key == k; });
+            }
+            if (node == "sink") {
+                return std::any_of(std::begin(of_sink), std::end(of_sink),
+                                   [&](const char* k) { return key == k; });
+            }
+            return false;
+        };
+        std::vector<ipc::Setting> out;
+        for (const ipc::Setting& row : settings()) {
+            if (wanted(row.key)) {
+                out.push_back(row);
+            }
+        }
+        return out;
+    }
+
+    if (node.rfind("dsp.", 0) != 0) {
+        return {};
+    }
+    const std::size_t index = static_cast<std::size_t>(std::atoi(node.c_str() + 4));
+    if (index >= config.dsp.size()) {
+        return {};
+    }
+
+    // **Asked of a stage opened for the question, not of the one that is
+    // playing.** A `describe` on the live stage would be an IPC thread calling
+    // into a module the render thread is inside; a fresh one with the same
+    // settings resolves the same way and answers with every key it has rather
+    // than only the ones somebody has already set.
+    const StageSpec spec = parse_stage(config.dsp[index]);
+    const MpDspVtbl* vtbl = host_->dsp(spec.id);
+    if (vtbl == nullptr) {
+        return {};
+    }
+    DspChain asking;
+    asking.add(*vtbl, spec.id);
+    DspStage& stage = asking.at(0);
+    if (!stage.open()) {
+        return {};
+    }
+    for (const auto& [key, value] : spec.settings) {
+        (void)stage.set(key, value);
+    }
+
+    std::vector<ipc::Setting> out;
+    for (const std::string& line : stage.describe()) {
+        // `key\tvalue\tdescription`, which is what every `describe` in this
+        // tree answers and what `ipc::Setting` is shaped like.
+        const std::size_t first = line.find('\t');
+        if (first == std::string::npos) {
+            continue;
+        }
+        const std::size_t second = line.find('\t', first + 1);
+        out.push_back(ipc::Setting{
+            line.substr(0, first), line.substr(first + 1, second - first - 1),
+            second == std::string::npos ? std::string{} : line.substr(second + 1)});
+    }
+    return out;
+}
+
+bool Player::set_node(const std::string& node, const std::string& key,
+                      const std::string& value, std::string& why)
+{
+    if (node == "convert" || node == "sink" || node == "source") {
+        // The same keys under a different name, so `set` decides what they mean
+        // and there is one place that does.
+        return set(key, value, why);
+    }
+    if (node.rfind("dsp.", 0) != 0) {
+        why = "there is no node called `" + node + "`";
+        return false;
+    }
+
+    std::string spec;
+    {
+        const std::lock_guard lock{mutex_};
+        const std::size_t index = static_cast<std::size_t>(std::atoi(node.c_str() + 4));
+        if (index >= config_.dsp.size()) {
+            why = "there is no node called `" + node + "`";
+            return false;
+        }
+        StageSpec stage = parse_stage(config_.dsp[index]);
+        bool replaced = false;
+        for (auto& pair : stage.settings) {
+            if (pair.first == key) {
+                pair.second = value;
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced) {
+            stage.settings.emplace_back(key, value);
+        }
+        config_.dsp[index] = write_stage(stage);
+        spec = config_.dsp[index];
+    }
+
+    // **Checked by building it**, which is the only honest check: a stage
+    // decides what its own settings mean, and asking it is asking the thing
+    // that knows. A refusal puts the chain back before anything is rebuilt.
+    DspChain trying;
+    if (!build_chain(trying, why)) {
+        const std::lock_guard lock{mutex_};
+        StageSpec stage = parse_stage(spec);
+        stage.settings.erase(std::remove_if(stage.settings.begin(), stage.settings.end(),
+                                            [&](const auto& p) { return p.first == key; }),
+                             stage.settings.end());
+        const std::size_t index = static_cast<std::size_t>(std::atoi(node.c_str() + 4));
+        if (index < config_.dsp.size()) {
+            config_.dsp[index] = write_stage(stage);
+        }
+        return false;
+    }
+
+    rebuild_wanted_.store(true, std::memory_order_release);
+    return true;
+}
+
+std::vector<ipc::ModuleRow> Player::modules() const
+{
+    return host_->modules();
+}
+
 void Player::use_profile(Profile profile)
 {
     const std::lock_guard lock{mutex_};

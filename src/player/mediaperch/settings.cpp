@@ -16,6 +16,54 @@ std::string say(std::string_view name, std::size_t line, const std::string& what
 
 } // namespace
 
+std::vector<ipc::Setting> engine_settings(const Settings& settings)
+{
+    const auto joined = [](const std::vector<std::string>& items) {
+        std::string out;
+        for (const std::string& one : items) {
+            if (!out.empty()) {
+                out += ',';
+            }
+            out += one;
+        }
+        return out;
+    };
+    return {
+        ipc::Setting{"pipe", settings.pipe,
+                     "where the engine listens; empty is this platform's usual name"},
+        ipc::Setting{"modules", settings.modules,
+                     "where modules are loaded from; empty is beside the executable"},
+        ipc::Setting{"allow", joined(settings.allow),
+                     "module ids that may load; empty is all of them"},
+        ipc::Setting{"decoders", joined(settings.decoders),
+                     "container readers to try before the scores decide, in this order. "
+                     "A reordering and not a veto (\u00a77)"},
+        ipc::Setting{"profile", settings.profile,
+                     "this machine's buffering profile; empty is profile.ini beside the "
+                     "settings file"},
+    };
+}
+
+bool set_engine(Settings& settings, const std::string& key, const std::string& value,
+                std::string& why)
+{
+    if (key == "pipe") {
+        settings.pipe = value;
+    } else if (key == "modules") {
+        settings.modules = value;
+    } else if (key == "allow") {
+        settings.allow = split_list(value);
+    } else if (key == "decoders") {
+        settings.decoders = split_list(value);
+    } else if (key == "profile") {
+        settings.profile = value;
+    } else {
+        why = "there is no engine setting called `" + key + "`";
+        return false;
+    }
+    return true;
+}
+
 std::vector<std::string> split_list(std::string_view text)
 {
     std::vector<std::string> out;

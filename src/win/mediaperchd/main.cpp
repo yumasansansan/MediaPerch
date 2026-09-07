@@ -335,6 +335,21 @@ int main(int argc, char** argv)
     player.start();
 
     mp::win::IpcServer server{player, log, settings.pipe};
+    // **The engine half, from the run that read it.** These are not
+    // `Player::set` keys and must not look like them: everything here is read
+    // before there is a player, so what a shell changes takes effect at the
+    // next start. Saying so is the honest behaviour -- a knob that silently did
+    // nothing until a restart would be worse than one that says it will.
+    server.on_engine_settings([&settings] { return mp::engine_settings(settings); });
+    server.on_engine_set([&settings, &log](const std::string& key,
+                                           const std::string& value, std::string& why) {
+        if (!mp::set_engine(settings, key, value, why)) {
+            return false;
+        }
+        log.add("engine setting `" + key + "` is now `" + value +
+                "`, and takes effect at the next start");
+        return true;
+    });
     if (!config.empty()) {
         // What `mediaperch-cli save` does. The engine rows are what this run was
         // told; the player rows come from the player, which is the only thing

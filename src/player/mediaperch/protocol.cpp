@@ -69,6 +69,26 @@ const char* kind_name(Kind k) noexcept
         return "profile";
     case Kind::display:
         return "display";
+    case Kind::graph:
+        return "graph";
+    case Kind::node_settings:
+        return "node_settings";
+    case Kind::node_setting_set:
+        return "node_setting_set";
+    case Kind::modules:
+        return "modules";
+    case Kind::graph_reply:
+        return "graph_reply";
+    case Kind::node_settings_reply:
+        return "node_settings_reply";
+    case Kind::modules_reply:
+        return "modules_reply";
+    case Kind::engine_settings:
+        return "engine_settings";
+    case Kind::engine_setting_set:
+        return "engine_setting_set";
+    case Kind::engine_settings_reply:
+        return "engine_settings_reply";
     case Kind::profile_reply:
         return "profile_reply";
     case Kind::subscribe:
@@ -355,6 +375,96 @@ bool read(Reader& r, Calibration& c)
     c.start_ring = r.u32();
     c.lowest_ring = r.u32();
     c.highest_ring = r.u32();
+    return r.ok();
+}
+
+void write(Writer& w, const Graph& g)
+{
+    w.u32(static_cast<std::uint32_t>(g.nodes.size()));
+    for (const Node& n : g.nodes) {
+        w.str(n.id);
+        w.u32(n.kind);
+        w.str(n.module);
+        w.str(n.name);
+        w.u32(n.flags);
+    }
+    w.u32(static_cast<std::uint32_t>(g.edges.size()));
+    for (const Edge& e : g.edges) {
+        w.str(e.from);
+        w.str(e.to);
+    }
+}
+
+bool read(Reader& r, Graph& g)
+{
+    g.nodes.clear();
+    g.edges.clear();
+    const std::uint32_t nodes = r.u32();
+    if (!r.ok() || nodes > k_max_items) {
+        return false;
+    }
+    g.nodes.reserve(nodes);
+    for (std::uint32_t i = 0; i < nodes; ++i) {
+        Node n;
+        n.id = r.str();
+        n.kind = r.u32();
+        n.module = r.str();
+        n.name = r.str();
+        n.flags = r.u32();
+        if (!r.ok()) {
+            return false;
+        }
+        g.nodes.push_back(std::move(n));
+    }
+    const std::uint32_t edges = r.u32();
+    if (!r.ok() || edges > k_max_items) {
+        return false;
+    }
+    g.edges.reserve(edges);
+    for (std::uint32_t i = 0; i < edges; ++i) {
+        Edge e;
+        e.from = r.str();
+        e.to = r.str();
+        if (!r.ok()) {
+            return false;
+        }
+        g.edges.push_back(std::move(e));
+    }
+    return r.ok();
+}
+
+void write(Writer& w, const std::vector<ModuleRow>& modules)
+{
+    w.u32(static_cast<std::uint32_t>(modules.size()));
+    for (const ModuleRow& m : modules) {
+        w.u32(m.kind);
+        w.str(m.id);
+        w.str(m.name);
+        w.u32(m.priority);
+        w.u8(m.allowed ? 1u : 0u);
+    }
+}
+
+bool read(Reader& r, std::vector<ModuleRow>& modules)
+{
+    modules.clear();
+    const std::uint32_t n = r.u32();
+    if (!r.ok() || n > k_max_items) {
+        return false;
+    }
+    modules.reserve(n);
+    for (std::uint32_t i = 0; i < n; ++i) {
+        ModuleRow m;
+        m.kind = r.u32();
+        m.id = r.str();
+        m.name = r.str();
+        m.priority = r.u32();
+        m.allowed = r.u8() != 0;
+        if (!r.ok()) {
+            return false;
+        }
+        modules.push_back(std::move(m));
+    }
     return r.ok();
 }
 

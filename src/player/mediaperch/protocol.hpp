@@ -122,6 +122,35 @@ enum class Kind : std::uint16_t {
     /// is *work it out yourself*, which is what a shell sends when it stops
     /// knowing -- minimised, or moved to a display it cannot describe.
     display = 21,
+    /// **The shape the engine is in**, for a shell that draws it (§10's node
+    /// canvas). Nodes and what connects them, derived from the graph that is
+    /// actually built rather than from a model kept beside it -- two models of
+    /// one graph are two things to keep in step, and the one that drifts is the
+    /// one nobody plays through.
+    graph = 22,
+    /// One node's own settings, keyed by the id `graph` gave it. The settings
+    /// button on a node.
+    node_settings = 23,
+    /// And changing one. A key a node does not have comes back as `error`.
+    node_setting_set = 24,
+    /// **Every module that could be a node**: its kind, its id, its priority
+    /// and whether the allow-list admits it. The canvas's palette.
+    modules = 25,
+    /// **§11's `[engine]` half**: where to listen, where the modules are, which
+    /// of them may load, which readers to prefer, and where the profile is.
+    ///
+    /// A separate verb from `settings` because they are a different kind of
+    /// thing, and §11 drew that line for a reason: the keys under `[player]` are
+    /// arguments to `Player::set` and change what is playing *now*, while these
+    /// are read before there is a player and take effect at the next start. A
+    /// shell that offered them in one list would be offering a knob that does
+    /// nothing until a restart beside one that does something immediately.
+    ///
+    /// **The canvas needs them** all the same: module priority is `decoders`
+    /// and the allow-list is `allow`, and a person reordering a palette is
+    /// editing exactly those.
+    engine_settings = 26,
+    engine_setting_set = 27,
 
     // --- replies, engine to shell ---
     ok = 128,
@@ -132,6 +161,10 @@ enum class Kind : std::uint16_t {
     settings_reply = 133,
     log_reply = 134,
     profile_reply = 135,
+    graph_reply = 136,
+    node_settings_reply = 137,
+    modules_reply = 138,
+    engine_settings_reply = 139,
 
     // --- events, engine to shell, unasked ---
     event_state = 200,
@@ -208,6 +241,79 @@ struct Setting {
     std::string key;
     std::string value;
     std::string description;
+};
+
+/// What a node is, on the wire. **Numbers rather than words**, for the reason
+/// `Dimension` and `Sweep` go on as numbers: a word is a second spelling to
+/// keep in step, and a shell that does not know a kind can still draw the node
+/// and say so.
+enum class NodeKind : std::uint32_t {
+    /// The file, decoded. Where the audio comes from.
+    source = 0,
+    /// Path B's converter: the f64 bus, the gain, the dither and the shaping.
+    /// Present only when the run is processed (§5).
+    convert = 1,
+    /// One `MP_KIND_DSP` stage, in the order it runs.
+    dsp = 2,
+    /// The device.
+    sink = 3,
+    /// The video decoder.
+    video_source = 4,
+    /// One `MP_KIND_VDSP` stage, in linear light inside the presenter (§9.8.3).
+    video_stage = 5,
+    /// The presenter, which is where the colour pipeline and the display are.
+    presenter = 6,
+};
+
+enum : std::uint32_t {
+    /// A person may take this node out. False for the ends of the chain: a run
+    /// with no source or no sink is not a run.
+    MP_NODE_REMOVABLE = 1u << 0,
+    /// `node_settings` will answer for it.
+    MP_NODE_SETTABLE = 1u << 1,
+};
+
+/// One node.
+struct Node {
+    /// Stable for as long as the shape is: `dsp.0`, `vdsp.1`, `sink`. A shell
+    /// asks about a node by this and nothing else.
+    std::string id;
+    /// `NodeKind` as its number.
+    std::uint32_t kind = 0;
+    /// The module behind it, or empty for a node that is not one -- the
+    /// converter is arithmetic in the core and has no module id.
+    std::string module;
+    /// For people. What a canvas writes on the box.
+    std::string name;
+    std::uint32_t flags = 0;
+};
+
+/// Which output feeds which input, by node id. **A line, not a graph**: §5's
+/// Path B is one f64 bus with a linear chain on it, so every node has at most
+/// one of each. A canvas that let a person draw an edge from anywhere to
+/// anywhere would be offering something the engine will refuse.
+struct Edge {
+    std::string from;
+    std::string to;
+};
+
+struct Graph {
+    std::vector<Node> nodes;
+    std::vector<Edge> edges;
+};
+
+/// One module that is loaded, for the canvas's palette.
+struct ModuleRow {
+    /// `MpKind` as its number, so a shell that does not know one can still list
+    /// it rather than dropping it.
+    std::uint32_t kind = 0;
+    std::string id;
+    std::string name;
+    std::uint32_t priority = 0;
+    /// Whether §11's `[engine] allow` admits it. A module that is loaded is
+    /// admitted by definition; this says whether the list names it, which is
+    /// what a person editing that list needs to see.
+    bool allowed = true;
 };
 
 // --------------------------------------------------------------------------
@@ -296,6 +402,12 @@ void write(Writer& w, const std::vector<Setting>& settings);
 
 void write(Writer& w, const Calibration& c);
 [[nodiscard]] bool read(Reader& r, Calibration& c);
+
+void write(Writer& w, const Graph& g);
+[[nodiscard]] bool read(Reader& r, Graph& g);
+
+void write(Writer& w, const std::vector<ModuleRow>& modules);
+[[nodiscard]] bool read(Reader& r, std::vector<ModuleRow>& modules);
 
 void write_strings(Writer& w, const std::vector<std::string>& items);
 [[nodiscard]] bool read_strings(Reader& r, std::vector<std::string>& items);

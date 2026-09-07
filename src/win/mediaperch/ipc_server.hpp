@@ -50,6 +50,23 @@ public:
     /// has nowhere to write one, and inventing a path would be worse.
     void on_save(std::function<bool(std::string&)> saver) { saver_ = std::move(saver); }
 
+    /// **§11's `[engine]` half, which belongs to whoever read the file.**
+    ///
+    /// `Player` does not have these and should not: the pipe is bound, the
+    /// modules are scanned and the profile is read before there is a player, so
+    /// they are the daemon's and it is the daemon that hands them over. Two
+    /// hooks rather than one, because reading them is not changing them and a
+    /// shell that could only read would still want to.
+    void on_engine_settings(std::function<std::vector<ipc::Setting>()> rows)
+    {
+        engine_rows_ = std::move(rows);
+    }
+    void on_engine_set(std::function<bool(const std::string&, const std::string&,
+                                          std::string&)> setter)
+    {
+        engine_set_ = std::move(setter);
+    }
+
     /// Starts listening. False and a reason when the pipe cannot be created --
     /// almost always because another engine already has it.
     [[nodiscard]] bool start(std::string& why);
@@ -82,6 +99,8 @@ private:
     Player* player_;
     LogRing* log_;
     std::function<bool(std::string&)> saver_;
+    std::function<std::vector<ipc::Setting>()> engine_rows_;
+    std::function<bool(const std::string&, const std::string&, std::string&)> engine_set_;
     std::string name_;
 
     /// The instance `start` opened, handed to the listener for its first turn.

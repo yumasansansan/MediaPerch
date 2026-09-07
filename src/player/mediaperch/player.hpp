@@ -87,6 +87,15 @@ public:
     /// A DSP stage by module id, or nullptr.
     [[nodiscard]] virtual const MpDspVtbl* dsp(const std::string& id) = 0;
 
+    /// **Every module that is loaded**, for §10's palette: which kind, which
+    /// id, what priority it declared, and whether §11's allow-list names it.
+    ///
+    /// A door because a registry is a `LoadLibrary` away from being portable,
+    /// and no more than that: what a shell does with the list -- draws it,
+    /// reorders it, filters it -- is not this interface's business. A host with
+    /// no registry answers with nothing, which is what a test does.
+    [[nodiscard]] virtual std::vector<ipc::ModuleRow> modules() { return {}; }
+
     /// Whether an endpoint is there at all. Asked while waiting for one that
     /// was pulled out, so it must be cheap and must not disturb anything.
     [[nodiscard]] virtual bool device_ready(const std::string& want, bool shared) = 0;
@@ -208,6 +217,39 @@ public:
     // --- settings -----------------------------------------------------------
 
     [[nodiscard]] std::vector<ipc::Setting> settings() const;
+
+    // --- the shape, for a shell that draws it (§10) --------------------------
+
+    /// **What the engine is, as nodes and edges.**
+    ///
+    /// Derived every time it is asked for, from the configuration and from what
+    /// is playing -- never from a model kept beside the graph, because two
+    /// models of one graph are two things to keep in step and the one that
+    /// drifts is the one nobody plays through.
+    ///
+    /// The shape depends on the path: Path A is source to sink with a repack
+    /// nobody can insert into, and Path B has the converter and whatever
+    /// stages a person named. A run that is not playing answers with the shape
+    /// the *settings* would build, because a canvas has to be drawable before
+    /// anything is playing.
+    [[nodiscard]] ipc::Graph graph() const;
+
+    /// One node's own settings, by the id `graph` gave it. Empty for a node
+    /// that has none -- a sink or a source is a fact rather than a stage.
+    [[nodiscard]] std::vector<ipc::Setting> node_settings(const std::string& node) const;
+
+    /// Changes one. False and a reason for a node that has no such key.
+    ///
+    /// **A stage's setting is a rebuild**, exactly as `set("dsp", ...)` is: the
+    /// chain is built when a graph is, and a key changed underneath a render
+    /// thread that is inside `process` is a data race rather than a setting.
+    /// The device stops and starts and the audio carries on from the frame it
+    /// stopped on, which is the machinery a lost device already uses.
+    bool set_node(const std::string& node, const std::string& key,
+                  const std::string& value, std::string& why);
+
+    /// Every module that could be a node, from the host.
+    [[nodiscard]] std::vector<ipc::ModuleRow> modules() const;
     /// The buffering profile to consult (§9.8.2). Takes effect on the next
     /// track, because the ring is decided when a graph is built.
     void use_profile(Profile profile);

@@ -5073,9 +5073,38 @@ this is the settings button.
 **3. The palette, and priority.** Every module loaded, its kind, its id, its priority and
 whether the allow-list admits it. Priority ordering is `[engine] decoders` (a reordering, not a
 veto — §7) and `allow`, and **both are `[engine]` rather than `[player]`**, which §11 decided
-for a reason: they are needed before there is a player. So a GUI that edits them is editing the
-file, not calling `Player::set`, and that is either a new pair of verbs or `save` growing an
-engine half. Worth deciding before it is built rather than after.
+for a reason: they are needed before there is a player.
+
+#### Built, and the palette needed a fourth verb
+
+`graph`, `node_settings` / `node_setting_set` and `modules` are on the wire, and
+`mediaperch-cli graph`, `node` and `modules` drive them so the shape can be read before a
+canvas exists to draw it.
+
+**The shape is derived every time it is asked for.** From the configuration and from what is
+playing — never from a model kept beside the graph, because two models of one graph are two
+things to keep in step and the one that drifts is the one nobody plays through. It also means a
+canvas is drawable *before* anything plays, which it has to be: `path = processed` puts the
+converter node in whether or not a device is open.
+
+**A node's settings are asked of a stage opened for the question**, not of the one that is
+playing. A `describe` on the live stage would be an IPC thread calling into a module the render
+thread is inside; a fresh instance with the same settings resolves the same way, and it answers
+with **every key the module has** rather than only the ones somebody already set — which is
+what a settings button needs and what the `dsp` spec string could never give.
+`node_setting_set` edits that stage's entry in the spec and rebuilds, which is exactly what
+`set("dsp", ...)` already does: a key changed underneath a render thread inside `process` is a
+data race rather than a setting.
+
+**And the palette turned out to need a fourth verb.** `modules` lists what is loaded, but the
+two things a person reorders — `decoders` and `allow` — live in `[engine]`, which `Player` does
+not have and should not: the pipe is bound, the modules are scanned and the profile is read
+before there is a player. So `engine_settings` / `engine_setting_set` are the daemon's, handed
+to the IPC server as hooks by whoever read the file. They are a **separate verb from
+`settings`, deliberately**: everything under `[player]` changes what is playing now, and
+everything here takes effect at the next start. A shell that offered them in one list would be
+offering a knob that does nothing until a restart beside one that does something immediately,
+and the CLI says so when it sets one.
 
 **And one thing the canvas has to know about the engine.** Its graph is **not a free-form DAG**.
 §5 is two graphs: Path A is a memcpy or a container repack with nothing insertable at all, and

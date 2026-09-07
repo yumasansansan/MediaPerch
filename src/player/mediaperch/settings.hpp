@@ -27,6 +27,8 @@
 #define MEDIAPERCH_SETTINGS_HPP
 
 #include <cstddef>
+#include "mediaperch/protocol.hpp"
+
 #include <string>
 #include <string_view>
 #include <vector>
@@ -72,6 +74,24 @@ struct SettingsFile {
     /// Lines that could not be used, already worded for a log. Never fatal.
     std::vector<std::string> complaints;
 };
+
+/// The `[engine]` half as rows a shell shows, in the same shape `[player]`'s
+/// take -- key, value, and what it means.
+///
+/// **Listed here rather than assembled by a shell**, for the reason §11 gives
+/// about the file: what a setting means belongs in one place, and a second
+/// list of these would be a second place to keep in step.
+[[nodiscard]] std::vector<ipc::Setting> engine_settings(const Settings& settings);
+
+/// Applies one. False and a reason when the key is not one of them, or the
+/// value is not one it takes.
+///
+/// **Every one of these takes effect at the next start**, which is why they are
+/// not `Player::set` keys: the pipe is bound, the modules are scanned and the
+/// profile is read before there is a player, and a setting that silently did
+/// nothing until a restart would be worse than one that says so.
+[[nodiscard]] bool set_engine(Settings& settings, const std::string& key,
+                              const std::string& value, std::string& why);
 
 /// Reads settings from the text of a file. `name` appears in complaints.
 [[nodiscard]] SettingsFile read_settings(std::string_view text,

@@ -439,6 +439,32 @@ std::unique_ptr<VideoDecoder> EngineHost::open_video_decoder(
     return nullptr;
 }
 
+std::vector<ipc::ModuleRow> EngineHost::modules()
+{
+    // **Every kind, not the ones a canvas happens to draw today.** A shell that
+    // does not know a kind number can still list it and say so; one that never
+    // saw it could not. `MpKind` goes on the wire as its number for the reason
+    // `Dimension` does -- a word is a second spelling to keep in step.
+    std::vector<ipc::ModuleRow> out;
+    for (const MpModuleDesc* found : registry_->all()) {
+        if (found == nullptr) {
+            continue;
+        }
+        const MpModuleDesc& desc = *found;
+        ipc::ModuleRow row;
+        row.kind = static_cast<std::uint32_t>(desc.kind);
+        row.id = desc.id != nullptr ? desc.id : "";
+        row.name = desc.name != nullptr ? desc.name : "";
+        row.priority = desc.priority;
+        // Loaded means admitted: §11's allow-list is applied at `scan`, so a
+        // module that is here passed it. A shell editing that list is editing
+        // the file, which §10 says is its own decision to make.
+        row.allowed = true;
+        out.push_back(std::move(row));
+    }
+    return out;
+}
+
 const MpDspVtbl* EngineHost::dsp(const std::string& id)
 {
     return registry_->dsp(id);

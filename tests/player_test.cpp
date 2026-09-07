@@ -8,6 +8,7 @@
 // the Windows head adds -- opening a file with a decoder module, opening an
 // endpoint -- is `IEngineHost`, and here it is twenty lines.
 
+#include "fake_dsp.hpp"
 #include "fake_host.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -403,6 +404,163 @@ TEST_CASE("a file with no picture in it is skipped, not failed",
     CHECK(host.said("no video in it"));
     CHECK(player.profile_text().find("[measurement]") == std::string::npos);
     player.shutdown();
+}
+
+namespace {
+
+/// The node with this id, or null. A canvas asks by id and so does a test.
+const mp::ipc::Node* node_of(const mp::ipc::Graph& graph, const std::string& id)
+{
+    for (const mp::ipc::Node& node : graph.nodes) {
+        if (node.id == id) {
+            return &node;
+        }
+    }
+    return nullptr;
+}
+
+bool joined(const mp::ipc::Graph& graph, const std::string& from, const std::string& to)
+{
+    for (const mp::ipc::Edge& edge : graph.edges) {
+        if (edge.from == from && edge.to == to) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+TEST_CASE("the engine says what shape it is in", "[player][graph]")
+{
+    // **§10's node canvas, from the engine's side.** The shape is derived every
+    // time it is asked for rather than kept beside the graph, so what a shell
+    // draws is what would be built and not a model of it that has drifted.
+    Host host;
+    host.add("one", pattern(4096, 20));
+    mp::Player player{host};
+
+    // **Path A: source to sink, and nothing insertable between them.** §5 is
+    // why -- a `memcpy` or a container repack has no stage in it, and a canvas
+    // that drew a converter there would be drawing something that is not there.
+    {
+        const mp::ipc::Graph shape = player.graph();
+        CHECK(node_of(shape, "source") != nullptr);
+        CHECK(node_of(shape, "sink") != nullptr);
+        CHECK(node_of(shape, "convert") == nullptr);
+        CHECK(joined(shape, "source", "sink"));
+    }
+
+    // Asking for Path B puts the converter in, before anything is playing:
+    // a canvas has to be drawable before there is a run to draw.
+    std::string why;
+    REQUIRE(player.set("path", "processed", why));
+    {
+        const mp::ipc::Graph shape = player.graph();
+        const mp::ipc::Node* convert = node_of(shape, "convert");
+        REQUIRE(convert != nullptr);
+        CHECK(convert->kind == static_cast<std::uint32_t>(mp::ipc::NodeKind::convert));
+        // It is not a module, and says so by having no module id: the f64 bus,
+        // the dither and the shaping are arithmetic in the core.
+        CHECK(convert->module.empty());
+        CHECK(joined(shape, "source", "convert"));
+        CHECK(joined(shape, "convert", "sink"));
+    }
+}
+
+TEST_CASE("a stage is a node a person may move, and the rest are not",
+          "[player][graph]")
+{
+    // What a canvas may rearrange is what a person assembled. Everything else
+    // on the line is decided by §5 and §6 and is there whether anybody wants it
+    // or not, so it is not removable and dragging it should not be offered.
+    Host host;
+    host.add_dsp("dsp_test", &mp::test::fake_dsp_vtbl());
+    mp::Player player{host};
+
+    std::string why;
+    REQUIRE(player.set("dsp", "test,test:amount=3", why));
+
+    const mp::ipc::Graph shape = player.graph();
+    const mp::ipc::Node* first = node_of(shape, "dsp.0");
+    const mp::ipc::Node* second = node_of(shape, "dsp.1");
+    REQUIRE(first != nullptr);
+    REQUIRE(second != nullptr);
+    CHECK(first->module == "dsp_test");
+    CHECK((first->flags & mp::ipc::MP_NODE_REMOVABLE) != 0u);
+    CHECK((first->flags & mp::ipc::MP_NODE_SETTABLE) != 0u);
+
+    // **In the order they run**, which is the one thing a chain has that a set
+    // does not, and the reason the canvas is a line rather than a cloud.
+    CHECK(joined(shape, "source", "dsp.0"));
+    CHECK(joined(shape, "dsp.0", "dsp.1"));
+    // A chain forces Path B, so the converter is there without anybody asking.
+    CHECK(joined(shape, "dsp.1", "convert"));
+    CHECK(joined(shape, "convert", "sink"));
+
+    const mp::ipc::Node* sink = node_of(shape, "sink");
+    REQUIRE(sink != nullptr);
+    CHECK((sink->flags & mp::ipc::MP_NODE_REMOVABLE) == 0u);
+}
+
+TEST_CASE("a node answers with its own settings, and takes one", "[player][graph]")
+{
+    // **The settings button.** Today the only way to change a stage's parameter
+    // is to rewrite the whole `dsp` spec string, which a GUI would have to
+    // reassemble from what it thinks the chain is. This is that, keyed by node.
+    Host host;
+    host.add_dsp("dsp_test", &mp::test::fake_dsp_vtbl());
+    mp::Player player{host};
+
+    std::string why;
+    REQUIRE(player.set("dsp", "test", why));
+
+    // **Every key the module has, not only the ones somebody set.** Asked of a
+    // stage opened for the question rather than of one that is playing, which
+    // is also why this works before anything plays.
+    const std::vector<mp::ipc::Setting> rows = player.node_settings("dsp.0");
+    REQUIRE_FALSE(rows.empty());
+    const auto has = [&rows](const std::string& key, const std::string& value) {
+        return std::any_of(rows.begin(), rows.end(), [&](const mp::ipc::Setting& row) {
+            return row.key == key && row.value == value;
+        });
+    };
+    CHECK(has("amount", "1"));
+
+    REQUIRE(player.set_node("dsp.0", "amount", "7", why));
+    CHECK(player.node_settings("dsp.0")[0].value == "7");
+    // And the spec string that a settings file round-trips through moved with
+    // it, because there is one place the chain is written down.
+    const std::vector<mp::ipc::Setting> all = player.settings();
+    CHECK(std::any_of(all.begin(), all.end(), [](const mp::ipc::Setting& row) {
+        return row.key == "dsp" && row.value.find("amount=7") != std::string::npos;
+    }));
+
+    // A key the stage does not have is refused, and the chain is put back --
+    // a canvas that half-applied a setting would be a canvas showing a chain
+    // the engine does not have.
+    CHECK_FALSE(player.set_node("dsp.0", "nonsense", "1", why));
+    CHECK_FALSE(why.empty());
+    CHECK(player.node_settings("dsp.0")[0].value == "7");
+
+    // And a node that is not there says so rather than doing nothing.
+    CHECK_FALSE(player.set_node("dsp.9", "amount", "1", why));
+    CHECK(player.node_settings("dsp.9").empty());
+}
+
+TEST_CASE("the palette is every module the host loaded", "[player][graph]")
+{
+    Host host;
+    host.add_module(mp::ipc::ModuleRow{3u, "dsp_gain", "Gain", 100u, true});
+    host.add_module(mp::ipc::ModuleRow{9u, "vdsp_lut", "Lookup table", 100u, true});
+    mp::Player player{host};
+
+    const std::vector<mp::ipc::ModuleRow> rows = player.modules();
+    REQUIRE(rows.size() == 2u);
+    CHECK(rows[0].id == "dsp_gain");
+    // **The kind goes as its number**, so a shell that has never heard of
+    // MP_KIND_VDSP still lists it rather than dropping it.
+    CHECK(rows[1].kind == 9u);
 }
 
 TEST_CASE("an engine plays what it is told to", "[player]")

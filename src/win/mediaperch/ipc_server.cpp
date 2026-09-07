@@ -550,6 +550,66 @@ bool IpcServer::handle(const std::shared_ptr<Client>& client, const ipc::Header&
         w.str(player_->profile_text());
         return client->send(ipc::frame(ipc::Kind::profile_reply, id, w));
     }
+    case ipc::Kind::engine_settings: {
+        if (!r.complete()) {
+            return malformed();
+        }
+        if (!engine_rows_) {
+            return fail("this engine was not started from a settings file");
+        }
+        write(w, engine_rows_());
+        return client->send(ipc::frame(ipc::Kind::engine_settings_reply, id, w));
+    }
+    case ipc::Kind::engine_setting_set: {
+        const std::string key = r.str();
+        const std::string value = r.str();
+        if (!r.complete()) {
+            return malformed();
+        }
+        if (!engine_set_) {
+            return fail("this engine was not started from a settings file");
+        }
+        std::string why;
+        if (!engine_set_(key, value, why)) {
+            return fail(why);
+        }
+        return ok();
+    }
+    case ipc::Kind::graph: {
+        if (!r.complete()) {
+            return malformed();
+        }
+        write(w, player_->graph());
+        return client->send(ipc::frame(ipc::Kind::graph_reply, id, w));
+    }
+    case ipc::Kind::node_settings: {
+        const std::string node = r.str();
+        if (!r.complete()) {
+            return malformed();
+        }
+        write(w, player_->node_settings(node));
+        return client->send(ipc::frame(ipc::Kind::node_settings_reply, id, w));
+    }
+    case ipc::Kind::node_setting_set: {
+        const std::string node = r.str();
+        const std::string key = r.str();
+        const std::string value = r.str();
+        if (!r.complete()) {
+            return malformed();
+        }
+        std::string why;
+        if (!player_->set_node(node, key, value, why)) {
+            return fail(why);
+        }
+        return ok();
+    }
+    case ipc::Kind::modules: {
+        if (!r.complete()) {
+            return malformed();
+        }
+        write(w, player_->modules());
+        return client->send(ipc::frame(ipc::Kind::modules_reply, id, w));
+    }
     case ipc::Kind::display: {
         const std::uint8_t known = r.u8();
         const std::uint8_t hdr = r.u8();
