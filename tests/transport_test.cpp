@@ -449,6 +449,56 @@ TEST_CASE("a queue seeks in its own frames, across a boundary", "[transport][que
     }
 }
 
+TEST_CASE("a queue says which track a frame somebody else counted belongs to",
+          "[transport][queue]")
+{
+    // **What is being heard, as opposed to what is being decoded.** A gapless
+    // queue reads ahead by the ring's depth -- 128 periods by default since M6
+    // -- so `index()` is the track the decoder is on and can be several past
+    // the one coming out of the device. Anything deciding *what is playing*
+    // wants the second answer, and only the queue can give it: it records where
+    // each track began as it goes past, because the length of a track nobody
+    // has played is a guess.
+    //
+    // The picture is the case this was written for. Rebuilt on `index()`, it
+    // ran the ring's depth ahead of its own sound, and against a one-second
+    // file that is the whole track: measured as a picture that decoded one
+    // frame and waited out the entire file before its time came.
+    const auto first = pattern(2048, 6);
+    const auto second = pattern(4096, 7);
+    Tape a{cd_audio(), first};
+    Tape b{cd_audio(), second};
+    Fixed playlist{{&a, &b}};
+
+    mp::Queue queue{playlist};
+    std::string why;
+    REQUIRE(queue.open(why));
+
+    const std::size_t stride = mp::frame_bytes(cd_audio());
+    const std::uint64_t boundary = first.size() / stride;
+
+    // Read well past the join: the decoder is on the second track now.
+    std::vector<std::uint8_t> got(first.size() + 1024);
+    REQUIRE(queue.read(got.data(), got.size()) == got.size());
+    REQUIRE(queue.index() == 1);
+
+    // And a frame from before it still answers the first.
+    CHECK(queue.index_at(0) == 0);
+    CHECK(queue.start_at(0) == 0);
+    CHECK(queue.index_at(boundary - 1) == 0);
+    CHECK(queue.start_at(boundary - 1) == 0);
+
+    // The first frame of the second track is the second track.
+    CHECK(queue.index_at(boundary) == 1);
+    CHECK(queue.start_at(boundary) == boundary);
+    CHECK(queue.index_at(queue.position() - 1) == 1);
+    CHECK(queue.start_at(queue.position() - 1) == boundary);
+
+    // Which is the offset the picture needs: a frame stamped from the start of
+    // its own file is `start_at` frames later on the queue's clock.
+    CHECK(queue.item_start() == boundary);
+}
+
 TEST_CASE("a device that is pulled out is reported as one", "[transport][device]")
 {
     // Somebody unplugged the DAC. WASAPI answers `AUDCLNT_E_DEVICE_INVALIDATED`,

@@ -30,28 +30,10 @@ using mp::test::wait_for_state;
 
 namespace {
 
-/// A display that never runs out, so the picture ends when the track does
-/// rather than when the clock does.
-class Endless final : public mp::IFrameClock {
-public:
-    bool wait() override
-    {
-        if (cancelled_.load(std::memory_order_acquire)) {
-            return false;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds{1});
-        now_ += 166'667;
-        return !cancelled_.load(std::memory_order_acquire);
-    }
-    [[nodiscard]] double nominal_interval() const override { return 1.0 / 60.0; }
-    [[nodiscard]] std::uint64_t now() const override { return now_; }
-    [[nodiscard]] std::uint64_t rate() const override { return 10'000'000; }
-    void cancel() noexcept override { cancelled_.store(true, std::memory_order_release); }
-
-private:
-    std::uint64_t now_ = 0;
-    std::atomic<bool> cancelled_{false};
-};
+/// It lives with the other fakes now, because ipc_test.cpp needs one too:
+/// the picture surviving a shell is a claim about the door as much as about
+/// the player.
+using Endless = mp::test::EndlessClock;
 
 } // namespace
 
@@ -314,6 +296,203 @@ TEST_CASE("the shell says which display, and the engine tells the presenter",
     CHECK(mp::test::presenter_log().setting("display") == "probe");
 
     player.shutdown();
+}
+
+TEST_CASE("a track boundary does not rebuild the picture", "[player][video]")
+{
+    // **§8 does not rebuild the audio device at a boundary -- not rebuilding
+    // it is what gapless is -- and the picture now follows the same rule.**
+    //
+    // It did not, and nothing looked wrong until there was a shell. The
+    // presenter is where the composition surface lives, so a new presenter is
+    // a new handle: a shell had to detach and attach at every boundary, which
+    // on a playlist of one-second files is a black frame and then an empty one,
+    // once a second. What changes at a boundary is the file, not the display.
+    mp::test::presenter_log().reset();
+    mp::test::decoder_log().reset();
+
+    Host host;
+    host.add("one", pattern(1024 * 1024, 6));
+    host.add_video("one");
+    host.add("two", pattern(1024 * 1024, 7));
+    host.add_video("two");
+    host.pace_with([] { return std::make_unique<Endless>(); });
+
+    mp::Player player{host};
+    player.start();
+    player.play({"one", "two"});
+    REQUIRE(wait_for_state(player, mp::ipc::State::playing));
+    REQUIRE(wait_for([] {
+        const std::lock_guard lock{mp::test::presenter_log().mutex};
+        return mp::test::presenter_log().configured;
+    }));
+
+    std::string why;
+    REQUIRE(player.set_node("presenter", "size", "640x360", why));
+    CHECK(mp::test::presenter_log().setting("size") == "640x360");
+
+    // **What a shell compares.** The surface handle is duplicated afresh into
+    // the asking process on every ask, so it is a different number each time
+    // and cannot answer *is this the one I already have*. This can.
+    const std::uint64_t first = player.picture_generation();
+    CHECK(first != 0u);
+
+    // **The boundary asked for rather than waited for.** `next` is the same
+    // path a track ending takes -- the queue is asked and the picture follows
+    // it -- and it happens when the test says so instead of when a fake device
+    // has drained a megabyte.
+    player.next();
+    REQUIRE(wait_for([&] { return player.status().index == 1; }));
+    // The decoder is opened again, because the codec may have changed. That is
+    // how this test knows the boundary has actually been crossed.
+    REQUIRE(wait_for([] {
+        const std::lock_guard lock{mp::test::decoder_log().mutex};
+        return mp::test::decoder_log().opens >= 2u;
+    }));
+
+    // And the presenter was not.
+    {
+        const std::lock_guard lock{mp::test::presenter_log().mutex};
+        CHECK(mp::test::presenter_log().opens == 1u);
+        CHECK(mp::test::presenter_log().open);
+    }
+    CHECK(player.picture_generation() == first);
+    // Which is why the size is still what it was: nothing had to remember it.
+    CHECK(mp::test::presenter_log().setting("size") == "640x360");
+
+    // And `native` puts it back, rather than being a size nothing can express.
+    REQUIRE(player.set_node("presenter", "size", "native", why));
+    CHECK(mp::test::presenter_log().setting("size") == "native");
+
+    player.shutdown();
+}
+
+TEST_CASE("a track with no picture ends it, and the next one gets its size back",
+          "[player][video]")
+{
+    // **The boundary that does rebuild.** A file with no video ends the
+    // picture -- there is nothing to draw and a stale last frame would be a
+    // lie -- so the presenter closes and the next file that has one opens a
+    // new presenter, which knows nothing. That is the case `Player` remembers
+    // the shell's size for, and it is the one it was found by: a queue of
+    // one-second files and `node presenter` answering `native`.
+    mp::test::presenter_log().reset();
+    mp::test::decoder_log().reset();
+
+    Host host;
+    host.add("seen", pattern(1024 * 1024, 6));
+    host.add_video("seen");
+    host.add("heard", pattern(64 * 4 * 40, 7)); // no picture
+    host.add("seen again", pattern(1024 * 1024, 8));
+    host.add_video("seen again");
+    host.pace_with([] { return std::make_unique<Endless>(); });
+
+    mp::Player player{host};
+    player.start();
+    player.play({"seen", "heard", "seen again"});
+    REQUIRE(wait_for_state(player, mp::ipc::State::playing));
+    REQUIRE(wait_for([] {
+        const std::lock_guard lock{mp::test::presenter_log().mutex};
+        return mp::test::presenter_log().configured;
+    }));
+
+    std::string why;
+    REQUIRE(player.set_node("presenter", "size", "640x360", why));
+    const std::uint64_t first = player.picture_generation();
+
+    player.next();
+    REQUIRE(wait_for([&] { return player.status().index == 1; }));
+    // No picture at all, which a shell draws as one.
+    REQUIRE(wait_for([&] { return player.surface() == 0; }));
+    // The presenter closes a moment later: `surface` answers zero as soon as
+    // the engine thread has let go of the path, and the path is destroyed by
+    // whoever drops the last reference to it.
+    REQUIRE(wait_for([] {
+        const std::lock_guard lock{mp::test::presenter_log().mutex};
+        return !mp::test::presenter_log().open;
+    }));
+
+    player.next();
+    REQUIRE(wait_for([&] { return player.status().index == 2; }));
+    REQUIRE(wait_for([] {
+        const std::lock_guard lock{mp::test::presenter_log().mutex};
+        return mp::test::presenter_log().opens >= 2u;
+    }));
+    REQUIRE(wait_for([] {
+        return !mp::test::presenter_log().setting("size").empty();
+    }));
+    // A different picture, and the size the shell asked for is on it.
+    CHECK(player.picture_generation() > first);
+    CHECK(mp::test::presenter_log().setting("size") == "640x360");
+
+    player.shutdown();
+}
+
+TEST_CASE("a size the presenter refuses is not remembered", "[player][video]")
+{
+    // **trust the user, up to what the hardware can hold.** A shell may ask
+    // for anything; what a shell must not do is have a refusal quietly become
+    // the size every later track opens at.
+    mp::test::presenter_log().reset();
+    mp::test::decoder_log().reset();
+
+    Host host;
+    host.add("one", pattern(1024 * 1024, 6));
+    host.add_video("one");
+    host.pace_with([] { return std::make_unique<Endless>(); });
+
+    mp::Player player{host};
+    player.start();
+    player.play({"one"});
+    REQUIRE(wait_for_state(player, mp::ipc::State::playing));
+    REQUIRE(wait_for([] {
+        const std::lock_guard lock{mp::test::presenter_log().mutex};
+        return mp::test::presenter_log().configured;
+    }));
+    {
+        const std::lock_guard lock{mp::test::presenter_log().mutex};
+        mp::test::presenter_log().refuse_size = true;
+    }
+
+    std::string why;
+    CHECK_FALSE(player.set_node("presenter", "size", "999999x999999", why));
+    CHECK_FALSE(why.empty());
+
+    player.shutdown();
+}
+
+TEST_CASE("a measurement crosses as one, not as two English words",
+          "[player][settings]")
+{
+    // **§10 carries the difference, so no shell has to parse a description.**
+    // A module marks a row it will not take back by ending its description
+    // with `(read only)`; that is read once, where the rows are parsed, and
+    // what a shell gets is a boolean. A shell that looked for the words would
+    // be a second reader of a convention, and the one that drifted.
+    Host host;
+    host.add_dsp("dsp_test", &mp::test::fake_dsp_vtbl());
+
+    mp::Player player{host};
+    std::string why;
+    REQUIRE(player.set("dsp", "test:amount=2", why));
+
+    const std::vector<mp::ipc::Setting> rows = player.node_settings("dsp.0");
+    REQUIRE(rows.size() == 2);
+    CHECK(rows[0].key == "amount");
+    CHECK_FALSE(rows[0].read_only);
+    CHECK(rows[1].key == "peak");
+    CHECK(rows[1].read_only);
+
+    // And it survives the wire, which is the half a shell actually sees.
+    mp::ipc::Writer w;
+    write(w, rows);
+    mp::ipc::Reader r{w.bytes().data(), w.bytes().size()};
+    std::vector<mp::ipc::Setting> back;
+    REQUIRE(read(r, back));
+    REQUIRE(r.complete());
+    REQUIRE(back.size() == 2);
+    CHECK_FALSE(back[0].read_only);
+    CHECK(back[1].read_only);
 }
 
 TEST_CASE("a display message with no picture to apply it to is still taken",

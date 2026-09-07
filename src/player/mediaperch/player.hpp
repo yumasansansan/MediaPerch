@@ -273,6 +273,19 @@ public:
     /// duplicating one is not something the core can do -- so this hands over
     /// the value and says nothing about who may have it.
     [[nodiscard]] std::uint64_t surface() const;
+
+    /// **Which picture this is**, counting from one; zero when there is none.
+    ///
+    /// A shell asks for the surface and gets a handle duplicated into it, and a
+    /// duplicate is a different number every time -- so the handle cannot tell
+    /// a shell whether this is the picture it already has. This can: it goes up
+    /// once per picture opened and never comes back down, so *unchanged* means
+    /// *the same surface* and a shell re-attaches only when it must.
+    [[nodiscard]] std::uint64_t picture_generation() const
+    {
+        const std::lock_guard lock{mutex_};
+        return generation_;
+    }
     /// The buffering profile to consult (§9.8.2). Takes effect on the next
     /// track, because the ring is decided when a graph is built.
     void use_profile(Profile profile);
@@ -367,11 +380,18 @@ private:
     /// The same, for a file that is not in a playlist -- which is what a
     /// calibration run is.
     void open_video(IMedia* media, std::uint32_t decoder_threads);
+    /// The next track on the picture that is already open, or false when it
+    /// will not go there. See `VideoPath::retrack`.
+    [[nodiscard]] bool retrack_video(IMedia& media, const VideoPath::Config& want);
     /// Starts it against the clock the audio graph is now running on (§8).
     /// Non-template so that `pump` can call it -- `GraphClock<Graph>` is an
     /// `IAudioClockSource` and that is all this needs to know.
-    void start_video(IAudioClockSource& audio);
+    /// `origin_seconds` is where the track being *heard* began on the audio
+    /// clock. See `DisplayLoop`'s constructor and `Queue::index_at`.
+    void start_video(IAudioClockSource& audio, double origin_seconds = 0.0);
     void stop_video() noexcept;
+    /// Drops the engine thread's reference, under the mutex.
+    void forget_video();
 
     // `ICalibrationHost`. Called from the engine thread, by `mp::calibrate`.
     bool inspect(const std::string& file, StreamShape& shape, double& duration,
@@ -407,16 +427,43 @@ private:
     /// The picture, when the current track has one. Null for most files, which
     /// is not an error and is why nothing above tests it before playing.
     ///
-    /// **Owned by the engine thread**, built in `play_run` and destroyed there,
-    /// so nothing takes the mutex to reach it. A rebuild -- a lost device, a
-    /// changed setting -- opens it again, which costs a decoder and a presenter
-    /// and is the price of the audio graph being the thing a rebuild is about.
-    std::unique_ptr<VideoPath> video_;
+    /// **Built and replaced by the engine thread; read by any thread.** §10's
+    /// surface lets a shell ask about the picture, resize it and set its
+    /// stages, and those arrive on IPC threads -- while the engine thread is
+    /// crossing a track boundary and replacing this. A raw pointer copied out
+    /// under the mutex would still be a pointer the engine thread could free
+    /// while the other one was inside it, which is a crash this had and this is
+    /// the fix: a caller takes a `shared_ptr` under the mutex and the object
+    /// outlives the call whatever the engine thread does with its own
+    /// reference. Whoever drops the last one destroys it, which is a join and
+    /// some module closes and is safe on either thread.
+    std::shared_ptr<VideoPath> video_;
+
+    /// The picture, for a thread that is not the engine's. Null when there is
+    /// none, and safe to use for as long as the caller holds it.
+    [[nodiscard]] std::shared_ptr<VideoPath> picture() const
+    {
+        const std::lock_guard lock{mutex_};
+        return video_;
+    }
     /// What the shell last said the display is, applied to every picture this
     /// engine opens until it says otherwise. Under the mutex: it arrives on an
     /// IPC thread and is read by the engine thread.
     bool display_known_ = false;
     VideoPath::DisplayIs display_{};
+    /// **The size a shell asked the picture to be rendered at** (§9.7.1), or
+    /// zero for the picture's own.
+    ///
+    /// Remembered for the same reason the display is: a picture is built again
+    /// at every track boundary, and a size that lived only in the presenter
+    /// would be forgotten a second into a playlist of one-second files -- which
+    /// is exactly how this was found.
+    std::uint32_t asked_width_ = 0;
+    std::uint32_t asked_height_ = 0;
+
+    /// How many pictures have been opened in this run. See
+    /// `picture_generation`.
+    std::uint64_t generation_ = 0;
 
     PlayerConfig config_;
     /// The config the current run was actually built from. A setting that turns

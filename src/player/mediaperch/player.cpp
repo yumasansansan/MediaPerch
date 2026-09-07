@@ -12,10 +12,39 @@
 #include <cmath>
 #include <cstdlib>
 #include <new>
+#include <string_view>
 #include <utility>
 
 namespace mp {
 namespace {
+
+/// One `describe` row, turned into a settings row, or `false` for a line that
+/// is not one.
+///
+/// **Written once because it was written three times** -- for the presenter,
+/// for a video stage and for an audio stage -- and the third copy is where a
+/// difference would have gone unnoticed. Every `describe` in this tree answers
+/// `key<tab>value<tab>description`, and every module that answers with a
+/// measurement rather than a setting ends the description with `(read only)`.
+/// That marker is read here, so that what crosses §10 is a boolean and no shell
+/// has to look for two English words to decide whether to draw a box.
+bool describe_row(const std::string& line, ipc::Setting& out)
+{
+    const std::size_t first = line.find('\t');
+    if (first == std::string::npos) {
+        return false;
+    }
+    const std::size_t second = line.find('\t', first + 1);
+    out.key = line.substr(0, first);
+    out.value = line.substr(first + 1, second - first - 1);
+    out.description = second == std::string::npos ? std::string{} : line.substr(second + 1);
+    static constexpr std::string_view k_marker = "(read only)";
+    out.read_only = out.description.size() >= k_marker.size() &&
+                    out.description.compare(out.description.size() - k_marker.size(),
+                                            k_marker.size(), k_marker) == 0;
+    return true;
+}
+
 
 /// How often the engine thread looks up from the graph. Short enough that
 /// "stop" is not noticeably late, long enough that this is not a spin.
@@ -340,17 +369,12 @@ ipc::Status Player::status() const
     s.fidelity = fidelity_;
     s.processed = processed_;
     s.error = error_;
+    // **The device's position first, because everything below is asked at
+    // it.** Which track is playing and how far into it are questions about
+    // what is coming out of the endpoint, not about what the decoder has read:
+    // a gapless queue reads ahead by the ring's depth, so the two answers can
+    // be several tracks apart.
     s.position = position_;
-    if (queue_ != nullptr) {
-        s.length = queue_->length_frames();
-        s.index = static_cast<std::uint32_t>(queue_->index());
-        // From the playlist rather than from what the run started with: a queue
-        // crosses track boundaries without telling the graph, which is the
-        // point of it, so the name has to be looked up and not remembered.
-        if (s.index < files_.size()) {
-            s.track = files_[s.index];
-        }
-    }
     s.frames_rendered = total_frames_;
     s.underruns = total_underruns_;
     if (graph_a_ != nullptr) {
@@ -361,6 +385,17 @@ ipc::Status Player::status() const
         s.position = graph_b_->position_frames();
         s.frames_rendered += graph_b_->stats().frames_rendered;
         s.underruns += graph_b_->stats().underruns;
+    }
+    if (queue_ != nullptr) {
+        s.length = queue_->length_frames();
+        s.index = static_cast<std::uint32_t>(queue_->index_at(s.position));
+        s.item_position = s.position - queue_->start_at(s.position);
+        // From the playlist rather than from what the run started with: a queue
+        // crosses track boundaries without telling the graph, which is the
+        // point of it, so the name has to be looked up and not remembered.
+        if (s.index < files_.size()) {
+            s.track = files_[s.index];
+        }
     }
     return s;
 }
@@ -663,19 +698,20 @@ ipc::Graph Player::graph() const
     // the file one position and §8 gives the run one clock, but the frames and
     // the samples never meet: what joins them is the clock, which is not an
     // edge a canvas should draw as though data flowed along it.
-    if (video_ && video_->opened()) {
-        node("vsource", ipc::NodeKind::video_source, video_->modules().decoder,
-             "the video decoder", 0);
+    const std::shared_ptr<VideoPath> video = picture();
+    if (video && video->opened()) {
+        node("vsource", ipc::NodeKind::video_source, video->modules().decoder,
+             "the video decoder", ipc::MP_NODE_SETTABLE);
         std::string before = "vsource";
-        for (std::size_t i = 0; i < video_->stage_count(); ++i) {
+        for (std::size_t i = 0; i < video->stage_count(); ++i) {
             const std::string id = "vdsp." + std::to_string(i);
-            const std::string module = video_->stage_module(i);
+            const std::string module = video->stage_module(i);
             node(id.c_str(), ipc::NodeKind::video_stage, module, module,
                  ipc::MP_NODE_REMOVABLE | ipc::MP_NODE_SETTABLE);
             edge(before, id);
             before = id;
         }
-        node("presenter", ipc::NodeKind::presenter, video_->modules().presenter,
+        node("presenter", ipc::NodeKind::presenter, video->modules().presenter,
              "the colour pipeline and the display", ipc::MP_NODE_SETTABLE);
         edge(before, "presenter");
     }
@@ -724,25 +760,62 @@ std::vector<ipc::Setting> Player::node_settings(const std::string& node) const
         // The colour pipeline's own answers (§9), which is what a shell shows
         // beside the picture: what the display turned out to be, what the
         // buffer holds, which tone mapper is in the path.
-        if (video_ == nullptr) {
+        const std::shared_ptr<VideoPath> video = picture();
+        if (video == nullptr) {
             return {};
         }
         std::vector<ipc::Setting> out;
         char line[256];
         for (std::uint32_t row = 0;; ++row) {
             line[0] = '\0';
-            if (video_->presenter().describe(row, line, sizeof line) != MP_OK) {
+            if (video->presenter().describe(row, line, sizeof line) != MP_OK) {
                 break;
             }
-            const std::string text{line};
-            const std::size_t first = text.find('\t');
-            if (first == std::string::npos) {
-                continue;
+            ipc::Setting row_out;
+            if (describe_row(line, row_out)) {
+                out.push_back(std::move(row_out));
             }
-            const std::size_t second = text.find('\t', first + 1);
-            out.push_back(ipc::Setting{
-                text.substr(0, first), text.substr(first + 1, second - first - 1),
-                second == std::string::npos ? std::string{} : text.substr(second + 1)});
+        }
+        return out;
+    }
+    if (node == "vsource") {
+        // **What the picture is actually doing.** Every one of these is a
+        // measurement rather than a setting, and until there was a shell there
+        // was nowhere to read them from a running engine at all: `show` prints
+        // them when its window closes, which is a tool with a window, and the
+        // engine that draws into a composition surface had no equivalent. It
+        // is the difference between *the picture is connected* and *the
+        // picture is being drawn*, and that difference is exactly what a black
+        // window does not tell you.
+        const std::shared_ptr<VideoPath> video = picture();
+        if (video == nullptr || !video->opened()) {
+            return {};
+        }
+        const auto row = [](const char* key, const std::string& value,
+                            const char* what) {
+            return ipc::Setting{key, value, std::string{what} + " (read only)", true};
+        };
+        const VideoGraph::Stats frames = video->graph().stats();
+        std::vector<ipc::Setting> out;
+        out.push_back(row("module", video->modules().decoder, "what decodes it"));
+        out.push_back(row("decoded", std::to_string(frames.decoded),
+                          "frames the decoder produced"));
+        out.push_back(row("shown", std::to_string(frames.shown),
+                          "frames the presenter was given"));
+        out.push_back(row("dropped", std::to_string(frames.dropped),
+                          "frames let go because their time had passed"));
+        if (video->running()) {
+            const DisplayLoop::Stats loop = video->loop().stats();
+            out.push_back(row("turns", std::to_string(loop.turns),
+                              "times the display said a frame could be drawn"));
+            out.push_back(row("no_clock", std::to_string(loop.without_clock),
+                              "of those, turns with no clock to read"));
+            char measured[64];
+            std::snprintf(measured, sizeof measured, "%.3f ms",
+                          loop.refresh_seconds * 1000.0);
+            out.push_back(row("refresh", measured, "the display's, as measured here"));
+        } else {
+            out.push_back(row("turns", "0", "the display loop is not running"));
         }
         return out;
     }
@@ -751,20 +824,17 @@ std::vector<ipc::Setting> Player::node_settings(const std::string& node) const
         // audio stage there is no opening one for the question: a video stage
         // opens on the presenter's device (§9.8.1) and there is exactly one of
         // those. The hold is `set_size`'s, for the same reason.
-        if (video_ == nullptr) {
+        const std::shared_ptr<VideoPath> video = picture();
+        if (video == nullptr) {
             return {};
         }
         const auto index = static_cast<std::size_t>(std::atoi(node.c_str() + 5));
         std::vector<ipc::Setting> out;
-        for (const std::string& line : video_->stage_describe(index)) {
-            const std::size_t first = line.find('\t');
-            if (first == std::string::npos) {
-                continue;
+        for (const std::string& line : video->stage_describe(index)) {
+            ipc::Setting row_out;
+            if (describe_row(line, row_out)) {
+                out.push_back(std::move(row_out));
             }
-            const std::size_t second = line.find('\t', first + 1);
-            out.push_back(ipc::Setting{
-                line.substr(0, first), line.substr(first + 1, second - first - 1),
-                second == std::string::npos ? std::string{} : line.substr(second + 1)});
         }
         return out;
     }
@@ -798,16 +868,10 @@ std::vector<ipc::Setting> Player::node_settings(const std::string& node) const
 
     std::vector<ipc::Setting> out;
     for (const std::string& line : stage.describe()) {
-        // `key\tvalue\tdescription`, which is what every `describe` in this
-        // tree answers and what `ipc::Setting` is shaped like.
-        const std::size_t first = line.find('\t');
-        if (first == std::string::npos) {
-            continue;
+        ipc::Setting row_out;
+        if (describe_row(line, row_out)) {
+            out.push_back(std::move(row_out));
         }
-        const std::size_t second = line.find('\t', first + 1);
-        out.push_back(ipc::Setting{
-            line.substr(0, first), line.substr(first + 1, second - first - 1),
-            second == std::string::npos ? std::string{} : line.substr(second + 1)});
     }
     return out;
 }
@@ -820,18 +884,65 @@ bool Player::set_node(const std::string& node, const std::string& key,
         // and there is one place that does.
         return set(key, value, why);
     }
+    if (node == "presenter") {
+        // The presenter's own keys, under the display loop's hold -- the same
+        // route a resize takes, and for the same reason: one graphics context
+        // is not two threads' to share.
+        const std::shared_ptr<VideoPath> video = picture();
+        if (video == nullptr) {
+            why = "nothing is showing a picture, so there is no presenter to set";
+            return false;
+        }
+        // **Remembered before it is applied, and put back if the apply
+        // fails.** The picture is built again at every track boundary, so a
+        // size that lived only in the presenter would be forgotten a second
+        // into a playlist of one-second files -- and the apply below takes the
+        // display loop's hold, which can wait, so a boundary crossed *during*
+        // it would open the next picture from a value not written yet. That is
+        // the order this is in: write, apply, put back.
+        std::uint32_t was_width = 0;
+        std::uint32_t was_height = 0;
+        if (key == "size") {
+            const std::lock_guard lock{mutex_};
+            was_width = asked_width_;
+            was_height = asked_height_;
+            asked_width_ = 0;
+            asked_height_ = 0;
+            if (value != "native") {
+                char* end = nullptr;
+                const unsigned long w = std::strtoul(value.c_str(), &end, 10);
+                if (end != nullptr && (*end == 'x' || *end == 'X')) {
+                    const unsigned long h = std::strtoul(end + 1, &end, 10);
+                    if (end != nullptr && *end == '\0') {
+                        asked_width_ = static_cast<std::uint32_t>(w);
+                        asked_height_ = static_cast<std::uint32_t>(h);
+                    }
+                }
+            }
+        }
+        if (!video->set_presenter(key, value, why)) {
+            if (key == "size") {
+                const std::lock_guard lock{mutex_};
+                asked_width_ = was_width;
+                asked_height_ = was_height;
+            }
+            return false;
+        }
+        return true;
+    }
     if (node.rfind("vdsp.", 0) == 0) {
         // **Applied to the stage rather than rebuilt into it**, which is the
         // one place the two chains differ: a video stage's `set` happens under
         // the loop's hold and costs a held frame, where an audio stage's would
         // have to reach a render thread with a 3 ms deadline and so rebuilds.
         // The spec is updated too, so `save` writes down what is running.
-        if (video_ == nullptr) {
+        const std::shared_ptr<VideoPath> video = picture();
+        if (video == nullptr) {
             why = "nothing is showing a picture, so there is no chain to set";
             return false;
         }
         const auto index = static_cast<std::size_t>(std::atoi(node.c_str() + 5));
-        if (!video_->set_stage(index, key, value, why)) {
+        if (!video->set_stage(index, key, value, why)) {
             return false;
         }
         const std::lock_guard lock{mutex_};
@@ -910,11 +1021,8 @@ std::vector<ipc::ModuleRow> Player::modules() const
 
 std::uint64_t Player::surface() const
 {
-    // `video_` is the engine thread's, and this is an IPC thread. The race is
-    // the one `set_display` documents and is benign in the same direction: a
-    // picture opened between these two lines is one this answer does not know
-    // about yet, and a shell asks again.
-    return video_ ? video_->surface() : 0;
+    const std::shared_ptr<VideoPath> video = picture();
+    return video ? video->surface() : 0;
 }
 
 void Player::use_profile(Profile profile)
@@ -934,17 +1042,14 @@ bool Player::set_display(bool known, const VideoPath::DisplayIs& display, std::s
     // did so while something was playing, and a message that only took effect
     // on the next track would leave the picture graded for the display it left.
     //
-    // Read without the mutex because `video_` is the engine thread's -- built
-    // and destroyed in `play_run` -- and this is an IPC thread. The race is
-    // real and it is benign in one direction only: a picture opened between
-    // these two lines picks up the value stored above, and one destroyed picks
-    // up nothing. What must not happen is this thread holding a pointer while
-    // that one frees it, which is why the picture stops with the run and not
-    // with a message.
-    if (!video_ || !video_->opened()) {
+    // The reference is taken under the mutex and held for the call, so the
+    // engine thread crossing a track boundary replaces its own and does not
+    // destroy this one.
+    const std::shared_ptr<VideoPath> video = picture();
+    if (!video || !video->opened()) {
         return true;
     }
-    return known ? video_->set_display(display, why) : video_->probe_display(why);
+    return known ? video->set_display(display, why) : video->probe_display(why);
 }
 
 void Player::set_state(ipc::State state)
@@ -1198,10 +1303,10 @@ bool Player::play(const CalibrationRun& run, RunResult& result, std::string& why
         // process that ended. The sweep reads that as *do not go larger*.
         why = "not enough memory for a ring of " + std::to_string(ring.ring_periods) +
               " periods";
-        video_.reset();
+        forget_video();
         return false;
     }
-    video_.reset();
+    forget_video();
 
     // The device's own numbers, because milliseconds is what a profile stores
     // and periods do not survive being written down.
@@ -1512,7 +1617,7 @@ Player::RunEnd Player::play_run(Queue& queue, Playlist& playlist, std::uint64_t&
         end = RunEnd::failed;
     }
     stop_video();
-    video_.reset();
+    forget_video();
     {
         const std::lock_guard lock{mutex_};
         queue_ = nullptr;
@@ -1528,10 +1633,12 @@ void Player::open_video(Playlist& playlist, std::size_t index)
 
 void Player::open_video(IMedia* media, std::uint32_t decoder_threads)
 {
-    video_.reset();
-
     if (media == nullptr || media->video() == nullptr) {
-        return; // most files, and not an error
+        // Most files, and not an error. A track with no picture after one that
+        // had ends the picture, which is what closing it here means; the shell
+        // is told by the surface going to zero.
+        forget_video();
+        return;
     }
 
     // **§9.7.1's headless case**: no window, so the presenter draws into a
@@ -1545,8 +1652,23 @@ void Player::open_video(IMedia* media, std::uint32_t decoder_threads)
     {
         const std::lock_guard lock{mutex_};
         want.stages = config_.video_dsp;
+        // What a shell last asked for, carried across the boundary.
+        want.width = asked_width_;
+        want.height = asked_height_;
     }
-    auto path = std::make_unique<VideoPath>();
+    // **The picture that is already open takes the next track, if it can.**
+    // §8 does not rebuild the audio device at a boundary -- not rebuilding it
+    // is what gapless is -- and this is the same rule for the picture. It also
+    // keeps the composition surface, which is what a shell attached to: a new
+    // presenter is a new handle, so a shell would have to detach and attach,
+    // and on a playlist of one-second files that is a black frame and then an
+    // empty one, every second.
+    if (retrack_video(*media, want)) {
+        return;
+    }
+
+    forget_video();
+    auto path = std::make_shared<VideoPath>();
     std::string why;
     bool known = false;
     VideoPath::DisplayIs display;
@@ -1571,10 +1693,34 @@ void Player::open_video(IMedia* media, std::uint32_t decoder_threads)
     if (known && !path->set_display(display, why)) {
         note("the display the shell named was refused: " + why);
     }
+    const std::lock_guard lock{mutex_};
     video_ = std::move(path);
+    ++generation_;
 }
 
-void Player::start_video(IAudioClockSource& audio)
+bool Player::retrack_video(IMedia& media, const VideoPath::Config& want)
+{
+    // The engine thread's own reference: nothing else may be inside the path
+    // while the decoder under it is replaced, and `stop_video` has already
+    // stopped the loop.
+    const std::shared_ptr<VideoPath> keeping = picture();
+    if (keeping == nullptr || !keeping->opened()) {
+        return false;
+    }
+    const IMedia::Picture picture_is = media.picture();
+    std::string why;
+    if (keeping->retrack(*host_, *media.video(), picture_is.info, picture_is.codec,
+                         picture_is.config, picture_is.config_bytes, want, why)) {
+        return true;
+    }
+    // **Not an error yet.** A codec this presenter's device will not decode, or
+    // a picture it will not take, is a reason to build the whole path again --
+    // which may well succeed, because a fresh presenter may choose differently.
+    note("the picture is being built again: " + why);
+    return false;
+}
+
+void Player::start_video(IAudioClockSource& audio, double origin_seconds)
 {
     if (!video_ || !video_->opened()) {
         return;
@@ -1583,8 +1729,21 @@ void Player::start_video(IAudioClockSource& audio)
     // the master clock and a picture paced against a clock that is not running
     // is a picture paced against a guess.
     std::string why;
-    if (!video_->start(audio, why)) {
+    if (!video_->start(audio, why, origin_seconds)) {
         note("the picture will not be shown: " + why);
+        forget_video();
+    }
+}
+
+void Player::forget_video()
+{
+    // **Under the mutex, and the last reference may not be this one.** A shell
+    // asking about the picture holds one for the length of its call, so what
+    // this drops is the engine thread's; whoever drops the last destroys it.
+    std::shared_ptr<VideoPath> letting_go;
+    {
+        const std::lock_guard lock{mutex_};
+        letting_go = std::move(video_);
         video_.reset();
     }
 }
@@ -1616,12 +1775,29 @@ Player::RunEnd Player::pump(Graph& graph, Playlist& playlist)
         // stopped and its thread joined before this goes -- the display loop
         // reads this every turn.
         GraphClock<Graph> audible{graph};
-        start_video(audible);
 
-        // **The track the picture belongs to.** A queue plays a playlist
-        // gaplessly inside one run, so the audio moves to the next file while
-        // the video graph is still reading the last one's feed.
-        std::size_t showing = queue_ != nullptr ? queue_->index() : 0;
+        // **The track the picture belongs to, and it is the one being
+        // heard.** A queue plays a playlist gaplessly inside one run and reads
+        // ahead by the ring's depth, so `index()` -- what the decoder is on --
+        // can be several tracks past what is coming out of the device. A
+        // picture that followed it would be that far ahead of its own sound,
+        // and with the ring's default depth against a short track that is the
+        // whole track: measured as a picture that decoded a frame and waited
+        // out the entire file before its time came.
+        const auto heard = [this, &graph]() -> std::size_t {
+            const std::lock_guard lock{mutex_};
+            return queue_ != nullptr ? queue_->index_at(graph.position_frames()) : 0;
+        };
+        const auto began = [this, &graph]() -> double {
+            const std::lock_guard lock{mutex_};
+            if (queue_ == nullptr || source_.sample_rate == 0) {
+                return 0.0;
+            }
+            return static_cast<double>(queue_->start_at(graph.position_frames())) /
+                   static_cast<double>(source_.sample_rate);
+        };
+        std::size_t showing = heard();
+        start_video(audible, began());
 
         while (graph.running()) {
             if (quit_.load(std::memory_order_acquire) ||
@@ -1633,7 +1809,7 @@ Player::RunEnd Player::pump(Graph& graph, Playlist& playlist)
                 end = RunEnd::rebuild;
                 break;
             }
-            if (queue_ != nullptr && queue_->index() != showing) {
+            if (queue_ != nullptr && heard() != showing) {
                 // **A track boundary, and the picture follows it.** The audio
                 // does not stop -- that is what gapless is -- so the picture is
                 // torn down and built again against the new file's feed while
@@ -1644,10 +1820,10 @@ Player::RunEnd Player::pump(Graph& graph, Playlist& playlist)
                 // A file with no picture after one that had is a picture that
                 // ends, and the other way round is one that begins: `open_video`
                 // answers both by doing nothing when there is no video.
-                showing = queue_->index();
+                showing = heard();
                 stop_video();
                 open_video(playlist, showing);
-                start_video(audible);
+                start_video(audible, began());
             }
             std::this_thread::sleep_for(k_poll);
         }

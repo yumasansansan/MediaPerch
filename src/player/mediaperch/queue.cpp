@@ -114,6 +114,16 @@ std::size_t Queue::mark_for(std::uint64_t run) const noexcept
     return m == 0 ? 0 : m - 1;
 }
 
+std::size_t Queue::index_at(std::uint64_t run) const noexcept
+{
+    return marks_.empty() ? index_ : marks_[mark_for(run)].index;
+}
+
+std::uint64_t Queue::start_at(std::uint64_t run) const noexcept
+{
+    return marks_.empty() ? 0 : marks_[mark_for(run)].run_base;
+}
+
 std::uint64_t Queue::item_start() const noexcept
 {
     return marks_.empty() ? 0 : marks_[mark_for(position_)].run_base;

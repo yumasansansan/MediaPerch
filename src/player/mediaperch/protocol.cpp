@@ -323,6 +323,7 @@ void write(Writer& w, const Status& s)
     w.u32(s.count);
     w.u64(s.position);
     w.u64(s.length);
+    w.u64(s.item_position);
     w.str(s.track);
     w.str(s.decoder);
     w.str(s.device);
@@ -342,6 +343,7 @@ bool read(Reader& r, Status& s)
     s.count = r.u32();
     s.position = r.u64();
     s.length = r.u64();
+    s.item_position = r.u64();
     s.track = r.str();
     s.decoder = r.str();
     s.device = r.str();
@@ -479,6 +481,7 @@ void write(Writer& w, const std::vector<Setting>& settings)
         w.str(s.key);
         w.str(s.value);
         w.str(s.description);
+        w.u8(s.read_only ? 1u : 0u);
     }
 }
 
@@ -495,6 +498,7 @@ bool read(Reader& r, std::vector<Setting>& settings)
         s.key = r.str();
         s.value = r.str();
         s.description = r.str();
+        s.read_only = r.u8() != 0;
         if (!r.ok()) {
             return false;
         }

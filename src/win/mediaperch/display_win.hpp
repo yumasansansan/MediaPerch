@@ -145,6 +145,63 @@ private:
 /// **The handle is the presenter's and is not closed here.** It is made once
 /// with the swap chain and closed with it; a clock that closed it would leave
 /// the module reporting a handle that is not one.
+/// **The compositor's own tick**, for §9.7.1's engine, which has no window and
+/// so no vertical blank of its own to wait on.
+///
+/// `DCompositionWaitForCompositorClock` returns once per compositor frame,
+/// whether or not this process presented anything. That distinction is the
+/// whole reason this class exists, and getting it wrong cost a black window:
+/// the swap chain's frame-latency waitable object looks like the same thing and
+/// is not. **It is a throttle, not a heartbeat.** A waitable chain starts with
+/// as many credits as its maximum frame latency, a wait takes one and a
+/// `Present` gives one back -- so a loop that waits every turn and presents
+/// only when a frame is due spends its credits on the turns that drew nothing
+/// and then stops being signalled at all. Measured: one turn, one frame
+/// decoded, nothing shown, and after that only the wait's own timeout, which is
+/// a picture at one frame per second and looks exactly like no picture.
+///
+/// The frame-latency object still belongs where it always belonged: in front of
+/// `Present`, which is the operation it throttles.
+///
+/// Resolved at run time rather than linked, for two reasons that point the same
+/// way: `dcomp.h` does not compile under this tree's warning set without a
+/// suppression, and the entry point is Windows 10 1809 and later, so a machine
+/// without it should fall back rather than fail to start.
+class CompositorClock final : public mp::IFrameClock {
+public:
+    /// Null when this Windows has no compositor clock to wait on. The caller
+    /// then falls back, which is what `EngineHost::frame_clock` does.
+    [[nodiscard]] static std::unique_ptr<CompositorClock> open();
+
+    CompositorClock() = default;
+    ~CompositorClock() override;
+
+    CompositorClock(const CompositorClock&) = delete;
+    CompositorClock& operator=(const CompositorClock&) = delete;
+    CompositorClock(CompositorClock&&) = delete;
+    CompositorClock& operator=(CompositorClock&&) = delete;
+
+    bool wait() override;
+    [[nodiscard]] std::uint64_t now() const override;
+    [[nodiscard]] std::uint64_t rate() const override;
+    void cancel() noexcept override;
+
+    /// Zero: the compositor does not say what interval it will take frames at,
+    /// and `DisplayLoop` measures the real one anyway.
+    [[nodiscard]] double nominal_interval() const override { return 0.0; }
+
+private:
+    /// Passed to the wait alongside the compositor clock, so a stop is taken
+    /// now rather than at the end of a refresh.
+    void* stopping_ = nullptr;
+    std::atomic<bool> cancelled_{false};
+};
+
+/// **The swap chain's frame-latency object, as a clock.** Kept as the fallback
+/// for a Windows with no compositor clock, and it is a poor one for the reason
+/// `CompositorClock` documents: it is signalled by presenting, so a loop that
+/// skips a present waits out its own timeout. Better than nothing, which is
+/// what the alternative is.
 class WaitableClock final : public mp::IFrameClock {
 public:
     explicit WaitableClock(void* waitable) noexcept : waitable_(waitable) {}

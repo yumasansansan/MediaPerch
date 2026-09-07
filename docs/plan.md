@@ -3046,19 +3046,26 @@ stating before the messages, because the messages are what is left over once it 
 
 | | crosses | when |
 |---|---|---|
-| the composition surface handle | engine — shell | once, when a graph is built |
+| the composition surface handle | engine — shell | once, when a picture is opened — which a track boundary no longer does |
 | the display: which monitor, HDR or not, its white and its peak | shell — engine | when the window moves or the mode changes. **Built**: `ipc::Kind::display` |
 | the size to render at | shell — engine | when the window resizes |
 | transport, playlist, settings, log | both | §10, already there |
 
 **The engine paces itself, and needs no window to do it.** `show` waits on `WaitForVBlank`
-against the output its window is on; an engine has neither a window nor an output. A
-composition swap chain asked for `DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT` hands
-back an event the compositor sets — measured: `composition 0x1e0, waitable 0x2a4`, and the
-presenter reports both. That is `WaitForVBlank`'s question, *when may I draw the next one*,
-answered by the thing that will actually show the frame, and it makes `IFrameClock` a third
-implementation beside the vblank and the tick rather than an IPC round trip in the render
-loop. **A shell that stops answering does not stop the video.**
+against the output its window is on; an engine has neither a window nor an output. What it
+has is the compositor, and `DCompositionWaitForCompositorClock` returns once per compositor
+frame whether or not this process presented anything — that is `WaitForVBlank`'s question,
+*when may I draw the next one*, answered by the thing that will actually show the frame, and
+it makes `IFrameClock` a third implementation beside the vblank and the tick rather than an
+IPC round trip in the render loop. **A shell that stops answering does not stop the video.**
+
+This paragraph first named the swap chain's frame-latency waitable object as that clock, and
+measured it being handed out (`composition 0x1e0, waitable 0x2a4`). It was the wrong object:
+the waitable is a *throttle* — a wait takes a credit and only a `Present` returns one — so a
+loop that waits every turn and presents only when a frame is due stops being signalled on the
+first turn that draws nothing. The picture was black for exactly that reason; *A black window,
+and the four things behind it*, under M8, has the measurement. The waitable still exists, the
+presenter still reports it, and it still belongs where it always did: in front of `Present`.
 
 **The display is the one thing the engine cannot work out for itself.** `probe_display` takes
 a window and, given none, falls back to the first output — which is how a test measuring
@@ -5180,11 +5187,299 @@ nothing behind it would open an empty panel and teach a person not to press it.
 It is written rather than taken from a toolkit, and not by preference: the Community Toolkit
 does not support this Windows App SDK.
 
-**What is left of M8**: the shell's half of the surface — turning that handle into something a
-window composites — and then the transport, playlist and settings screens. The handle now
-arrives; what to do with it in WinUI 3 is `ICompositorInterop::CreateCompositionSurfaceForHandle`
-against the XAML compositor, or DirectComposition on a child window, and that choice is the next
-thing to make rather than the next thing to guess at.
+#### The picture, composited
+
+**Through WinUI's own compositor, not DirectComposition.** Both were open. Raw DComp wants a
+target on an `HWND`, and WinUI 3 already owns this window's, so it would mean a child window and
+a second composition tree kept in step with the first — two trees, two sets of hit testing,
+two things to resize. WinUI's compositor takes the same handle and gives back a visual like any
+other, which is one tree.
+
+The interface is the one the Windows App SDK's own header declares, and reading it rather than
+remembering it mattered: `Microsoft.UI.Composition.Interop.h` has `ICompositorInterop`
+`{FAB19398-…}` with a single method, and **`ICompositorSwapChainInterop` `{FC084699-…}`** deriving
+from it with `CreateCompositionSurfaceForHandle` at **vtable slot 4**. The `Windows.UI.Composition`
+interface of nearly the same name has a different id and a different vtable, and getting that
+wrong is a call through the wrong slot rather than an error. It is called by function pointer:
+two calls on one vtable is less machinery than a source generator, and Native AOT stays a build
+setting rather than a thing to work around.
+
+Measured, engine and shell running as two processes:
+
+    engine   surface    composition 0x7c0, waitable 0x3a8
+    cli      surface    0x1c8, duplicated into this process
+    shell    picture: attached 0xB84
+
+Three different numbers for one surface, which is what a duplicated handle looks like and is the
+whole point of the engine doing the duplicating.
+
+##### Two bugs, both found by running it rather than by reading it
+
+**A picture an IPC thread is inside must not be destroyed under it.** `mediaperchd` died when
+the shell attached while a 90-entry queue of one-second files was playing. `Player::video_` was
+documented as *the engine thread's*, built and destroyed in `play_run`, and that was true right
+up until §10 grew `surface`, `graph`, `node_settings` and `node_setting_set` — four verbs that
+reach the picture from an IPC thread. Copying the pointer out under the mutex would not have
+helped: the engine thread can free it in the window between the copy and the call. It is a
+`std::shared_ptr` now, and every thread that is not the engine's takes a reference through one
+`picture()` accessor and holds it for the call. Whoever drops the last one destroys it, which is
+a join and some module closes and is safe on either thread.
+
+**A size that lived only in the presenter lasted exactly one track.** The shell told the engine
+`1392x270`, the engine answered `Ok`, and `node presenter` reported `native` a second later. The
+picture is built again at every track boundary — a decoder for that file's codec and the
+presenter with it — so the size went with the old presenter. The display was already
+remembered on `Player` and reapplied in `open_video` for exactly this reason; the size now is
+too. **What a shell said is the engine's to keep, because the shell is the thing that is allowed
+to disappear.**
+
+The test that covers it needed one change to the fake presenter: the log outlives any one
+presenter, so a setting from the previous track was answering for the current one. `video_open`
+clears it, which is also what the real thing does by being a different object.
+
+The write is now *before* the apply, with the old value put back if the apply fails. The apply
+takes the display loop's hold, which can wait up to half a second, and a boundary crossed inside
+that wait would open the next picture from a value not yet written — which is what the first
+attempt did, visibly: the size took effect two tracks later rather than one.
+
+**And a duplicated handle is a new number on every ask.** `surface` duplicates into the asking
+process each time it is called, so three asks give three values for one surface:
+
+    surface    0x148, duplicated into this process
+    surface    0x1dc, duplicated into this process
+    surface    0x1c4, duplicated into this process
+
+That is correct — each is a real handle in a different process, and each is that process's to
+close — and it means the handle cannot answer *is this the picture I already have*. A shell
+asking on a timer, which is what a shell must do because the engine has no idea it exists, would
+detach and re-attach once a second and leak a handle on every tick it decided to ignore. So the
+reply carries a **generation** as well: it counts pictures opened, never goes down, and is what
+the shell compares. Zero means there is none.
+
+**A tick, in the shell.** One second: the slowest a transport may be wrong by, and cheap — two
+messages on a pipe against a compositor already waking at the display's rate. `RefreshPictureAsync`
+returns at its first comparison on every tick but the rare one, and closes the handle it did not
+keep.
+
+**And what a re-attach replaces is closed.** On a playlist of one-second files every tick *is* a
+new picture, so the attach path is the hot one rather than the rare one, and the shell's handle
+count was the way to see whether it gave anything back. It did not: 943 to 961 over twenty
+attaches, and flat with nothing playing, which says the growth was the attach and not the pipe.
+Closing the visual and the brush took it to about 0.8 handles per attach; the one that was left
+was the `ICompositionSurface` itself, a projected interface whose wrapper holds the surface until
+a collection nobody was going to trigger. Closed as well — asked of the object, since the type
+does not promise it — it is flat: **938 to 930 across ninety-odd re-attaches**, with the engine
+97 tracks in and 0 underruns and the size still the one the shell said.
+
+That last number is the §10 claim measured from the other side. Ninety-seven track boundaries,
+a shell attaching and detaching at every one of them, and the audio never noticed.
+
+#### Everything it will take, as something to type into
+
+**One editor, three verbs.** §10 answers settings in three places — a node's own
+(`node_settings`), the player's (`settings`) and the engine's (`engine_settings`) — and all three
+answer the same shape. So the shell has one control that takes rows and a delegate that applies
+one, and the caller decides which verb that is. A second and third editor would be two more
+places for the same bug.
+
+**The engine validates; the shell does not.** A box takes any text and the sentence that comes
+back is the module's own, shown unedited. That is the program's rule about its user — offer the
+choice, say what happened — and it is also the only way it could be right: a copy of a
+resampler's rules in a shell is a copy that goes stale. What the shell *does* decide is whether
+to draw a box at all, and for that it needed something it did not have.
+
+**A measurement is not a setting, and it was only ever said in English.** Every `describe` in
+this tree ends such a row's description with `(read only)`: `peak`, `cost`, `latency`, `built`,
+the surface handle. That was fine while the only reader was a person reading `mediaperch-cli
+node dsp.0`. A shell has to decide whether to draw a box, and a shell that decided by looking
+for those two words would be parsing English over a wire — and would be the second
+reader of a convention, which is the one that drifts. So it is read once, where the rows are
+parsed, and crosses as a boolean.
+
+Reading it once meant having one place to read it in, and there were three: the presenter's
+rows, a video stage's and an audio stage's, each with its own copy of the same eight lines.
+**The third copy is where a difference would have gone unnoticed.** They are one function now.
+
+#### The transport, and a coordinate that is missing
+
+Play, pause, stop, previous, next and ten seconds either way — every verb §10 has, and
+no more. Two absences are worth writing down rather than working around.
+
+**There is no "play this one".** The playlist marks the current track and does not offer a
+selection, because a queue records where each track began *as it goes past it* — deliberately,
+since the length of a track nobody has played yet is a guess and a stream has none at all. A
+queue therefore cannot place a track it has not reached, and a shell that let you click one
+would be promising something the engine will refuse.
+
+**And `status` answers two coordinates without the offset between them.** `position` is in the
+queue's frames, counted straight through every boundary, because that is what a seek speaks;
+`length` is the current track's. They agree only while the playlist has one entry. Past that:
+
+    $ mediaperch-cli status
+    track      16 of 120  av.mp4
+    position   0:14 / 0:01  (634260 frames)
+
+Fourteen seconds into a one-second track. The CLI has printed that all along and nobody looked;
+it surfaced here because a shell wanted to draw a progress bar and could not. The missing number
+is **where the current item began**, which only the queue can answer — it has the marks. Until
+it is on the wire the shell shows elapsed alone once there is more than one track, and seeks
+relatively, which needs no coordinate it has not been given. **Two numbers in different units in
+one message is a bug whether or not anything has drawn them yet.**
+
+#### A shell that dies holding the picture
+
+`ipc_test.cpp` existed for one claim — killing every shell mid-track changes nothing audible —
+and now covers the other half of it. A shell asks for the surface, is given a handle duplicated
+into it, and dies without a word. What is checked afterwards is that the engine did not notice:
+the audio position advanced, the underruns stayed at zero, **the same picture is still open**
+(`opens == 1`, so the presenter was not torn down and rebuilt when its one viewer went away),
+the generation is unchanged, and the next shell to knock gets a fresh duplicate of that same
+surface. It also pins the thing the generation exists for: two asks on one picture give two
+different handle values and one generation.
+
+**It does not count frames, and that is a gap in the fakes rather than a choice.** The display
+loop paces against the audio device's clock (§8), and the fake device does not move a clock the
+way a real one does, so no turn ever decides a frame is due — the fake presenter has never had
+a frame pushed through it, in any test. Frames are counted where there is a real presenter
+(`video_d3d11_test.cpp`, the codec tests, `mediaperch-probe show`). Making the fake chain
+actually present would be worth doing; it is a separate piece of work and it is written down
+here rather than left as an assumption.
+
+#### The picture was rebuilt at every track boundary, and it flashed
+
+Reported by looking at it: **the picture went black, then white, once a second.**
+
+`play_run` crossed a boundary by calling `stop_video()` and `open_video()`, which built the whole
+path again — decoder *and presenter*. Its own comment said so and thought the cost was
+milliseconds. It was, until there was a shell, because **the presenter is where the composition
+surface lives**. A new presenter is a new handle, so the shell had to detach (showing its own
+black) and attach (showing an empty brush until the first present, which is the window's own
+light ground). On a playlist of one-second files that is twice a second, and it is exactly what
+was on the screen.
+
+**§8 does not rebuild the audio device at a boundary — not rebuilding it is what gapless
+is.** The picture had no equivalent and now has one. `VideoPath::retrack` keeps the presenter,
+its surface, its chain, the size a shell asked for and the display it named; it opens the decoder
+again, because the codec may have changed, rebuilds the graph around the new feed, and configures
+the presenter for the new picture. The frame clock is asked for again, because `configure` may
+replace the swap chain and the waitable object belongs to the chain rather than to the presenter.
+
+Measured, over one queue of the same one-second file:
+
+    track 4 of 60    surface 0x1c4   picture #1 of this run
+    track 7 of 60    surface 0x1bc   picture #1 of this run
+    track 12 of 60   surface 0x1bc   picture #1 of this run
+
+One picture, twelve tracks. With a shell attached: 40 boundaries, its handle count flat, nothing
+on its error stream, and the size it asked for still on the presenter.
+
+Two smaller things fell out of it.
+
+**`make_target` now keeps the chain when it is already the chain it would build.** `configure`
+rebuilt the swap chain unconditionally, which for a second track from the same camera decides
+everything the same way and throws the buffers away anyway — a visible frame, and the frame
+clock with it. It compares the size, the format and the colour space, and the colour space has to
+be remembered because a chain will not say: DXGI has `SetColorSpace1` and no `GetColorSpace1`.
+The HDR metadata is re-applied on the keep path, because that *is* the part that changes between
+two tracks graded on different displays.
+
+**And the shell attaches before it lets go.** Even when a re-attach is genuinely needed — a
+file with no picture, and then one that has — detaching first shows the window's own black for
+as long as building a visual takes. The old visual is replaced by `SetElementChildVisual` and
+closed after, and the handle it was built on is closed after that.
+
+#### A black window, and the four things behind it
+
+Reported by looking at it, after the flashing was fixed: **the picture was black.** Everything
+said it should not be. The surface was attached, the size had been taken, the audio was playing
+with no underruns, and `mediaperch-probe show` rendered the same file perfectly. What was
+missing was any way to ask *is it being drawn*, which is the difference between the picture
+being connected and the picture being a picture.
+
+**So `node vsource` answers now.** Frames decoded, shown and dropped; turns the display took;
+turns with no clock to read; and the refresh it measured. Every one is a measurement rather than
+a setting, and until there was a shell there was nowhere to read them from a running engine at
+all: `show` prints them when its window closes, which is a tool with a window. Everything below
+was found with it in about the time it takes to read this paragraph.
+
+##### 1. The frame-latency waitable is a throttle, not a heartbeat
+
+`turns 1`. The display loop took exactly one turn and then waited out its own one-second timeout,
+for ever. **§9.7.1 had read `GetFrameLatencyWaitableObject` as answering `WaitForVBlank`'s
+question, *when may I draw the next one*. It does not.** A waitable swap chain starts with as
+many credits as its maximum frame latency; a wait takes one and a `Present` gives one back. A
+loop that waits every turn and presents only when a frame is due spends its credits on the turns
+that drew nothing, and then nothing signals it again. `show` never hit this because a window
+paces on the vertical blank, which is signalled by the display rather than by us.
+
+The heartbeat for a windowless engine is `DCompositionWaitForCompositorClock`, which returns once
+per compositor frame whether or not this process presented anything. It is resolved at run time
+rather than linked, for two reasons pointing the same way: `dcomp.h` needs a warning suppression
+to compile here, and the entry point is Windows 10 1809 and later, so a machine without it should
+fall back rather than fail to start. The waitable is still what says the chain is ready for
+another frame, and that belongs in front of `Present`.
+
+**Its return values are not `WaitForMultipleObjects`'s.** The handles are `WAIT_OBJECT_0 + i` and
+the clock is `WAIT_OBJECT_0 + count`, one past the end. Read the other way round — the extra
+thing first, which is the shape every other wait in this tree has — every tick looks like the
+stop event, and the loop ends on its first turn. Measured as `wait -> 0x1` with one handle
+passed, which is the tick.
+
+##### 2. The picture was paced against the queue's clock, not the track's
+
+`decoded 24, dropped 24, shown 0` on the twentieth one-second track. §8 makes the audio device the
+master clock, and a gapless queue is one stream to that device: its position counts straight
+through every boundary, because not noticing one is what gapless *is*. A file's frames are
+stamped from its own start. **Two coordinates, and the offset between them was nowhere.** So
+every frame of every track after the first was late by however long the queue had been running,
+and the loop dropped all of them, correctly, one pump at a time.
+
+Only the queue can convert, because it records where each track began as it goes past. It says
+so now, and `DisplayLoop` takes the offset.
+
+##### 3. The boundary was the decoder's, not the device's
+
+With the offset subtracted the picture stopped dropping and started waiting: `decoded 1, shown 0`
+for a whole track. `play_run` watched `queue_->index()` — **what the decoder is on**, which
+with the default ring of 128 periods is up to three quarters of a second ahead of what is coming
+out of the endpoint. Against a one-second file that is most of the track: the picture for the
+next track was built while the device was still most of the way through the previous one, and
+then correctly waited for its time.
+
+`Queue::index_at` and `start_at` answer for a frame somebody else counted, which is the question
+*what is being heard*. The picture follows that now, and so does `status`: the track it names and
+the position it reports are the device's, not the decoder's.
+
+##### 4. And `status` carries the offset, so the transport is right
+
+The `0:14 / 0:01` written down two sections ago is fixed by the same number:
+
+    position   0:00 / 0:01  (346236 frames into the queue)
+
+`position` stays the queue's coordinate, because that is what a seek speaks, and it is labelled
+as such; `item_position` is how far into this track. The shell draws the second against the
+track's length.
+
+Working, end to end, on the twentieth one-second track with a shell attached:
+
+    decoded 22, shown 21, dropped 0, refresh 16.662 ms
+    size 360x270, picture 128x96
+    played 346236 frames, 0 underruns
+
+##### The shell asks for a shape, not for its own
+
+`size 360x270` for a `picture 128x96` is the last of it. §9.7.1 put the scale in the engine's own
+shader and with it the rule that the whole picture goes into the whole target — letterboxing
+there would be black pixels a shell then composites over its own background. So **the shape has
+to be in the size the shell asks for**, and it was not: the window asked for its own 1392x270 and
+got a 4:3 picture stretched across it. It computes the largest box of the picture's shape that
+fits now, and the letterbox is the space around it. The picture's own size is the `picture` row,
+which exists precisely because a window cannot work it out: anamorphic 4:3 coded in a 16:9 frame
+is 16:9 only once something has read the track header.
+
+**What is left of M8**: dragging nodes to reorder a chain and adding one from the palette
+(`modules` already answers what there is to add), and opening files from the shell rather than
+from the CLI.
 
 
 #### Built, and the palette needed a fourth verb
@@ -5316,7 +5611,7 @@ HDR state.
 | M6.8 | The video graph: decode, pace, present | **done.** VideoDecoder and Presenter behind their vtables -- mp::Sink for pictures -- and VideoGraph, which holds one frame, asks §8's pacer and presents. One frame and no queue, because a decoded frame is valid until the next call on the codec that produced it and a queue would have to copy what §9.8.1 went to some trouble not to copy; the lookahead is inside the decoder, which reorders B-frames and since M6.6 uses every core. No thread of its own either: the audio graphs own one because the device's event paces them, and video's pace is the display's, which belongs to the head. A drop does not cost a refresh -- one pump lets go of every frame whose time has passed, because letting one go per refresh would never catch the clock. After the first frame the decoder is asked what it actually produced and the presenter reconfigured where the bitstream disagrees with the container, except for the timescale and the frame rate, which a decoder never re-times. Packets arrive through IPacketFeed rather than from a demuxer, which is a hole with a name: §4 says one file has one position, so audio and video must share one demuxer, and the router that would do that is what comes next. Checked on demux_mp4 + codec_dav1d + video_d3d11 with a clock somebody chose: 24 shown and none dropped at the right speed with nothing more than a millisecond late, twelve dropped and twelve shown half a second behind with the picture still right at the end, and five hundred polls of a stopped clock holding it |
 | M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse. **Measured, and met at the default**: 3840x2160 HEVC with an audio track, 0 underruns and 0 silent frames while 1 to 4 frames of 71 were dropped. It was first met at `--ring-periods 32` against a default of 8 that underran; the default is 128 now, and the sections above are the measurements that moved it and what they do and do not say. Getting there took worker threads in `codec_de265` (one thread was a comment rather than a decision) and the ring. DirectComposition is still §9.7.1's shell case and unbuilt; hardware decode is `codec_mft` where the machine has a transform |
 | M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled. **All six steps of §9.7.2 are built**: the SDR white level, the output the window is on, PQ, HLG, BT.2390 in the shader, and the ABI append that carries what the content was graded on, filled from Matroska, from MP4's `mdcv`/`clli`, and from an HEVC prefix SEI where the container says nothing. Steps 3, 4 and 5 are formulas and are tested against them off-screen on WARP, so they run in CI on a machine with no display. **What is left is the half that is not a formula**: steps 1, 2 and 6 on real HDR hardware, written into [devices.md](devices.md) -- there is no HDR display here, and asserting they work without one is the exact failure §9.2 is the record of |
-| M8 | WinUI 3 shell | **begun.** The project builds and its own reader decodes §10's wire against a running engine -- `MediaPerch.Shell.exe --check` prints the status and the graph, which is how the two descriptions of one format are held together. What is left is the canvas, the composition surface and the screens. Killing it mid-track changes nothing audible. **C#, WinUI 3, Native AOT**, `net10.0-windows10.0.26100.0` with a minimum of 22000, to Fluent 2, dependencies at their newest. Its settings screen is a **node canvas** in the shape of ComfyUI's and Fusion's: the chain as a topology, dragged to reorder, with a settings button per node. §10 says what that asks of the engine -- three verbs and no more -- and why the canvas is Fusion's look over a chain's semantics rather than a free-form DAG. The engine half of §9.7.1 is standing: the composition surface handle, the frame clock, the size message and the display message. What is left on this side is `CreateSurfaceFromHandle`, a visual, a target on an `HWND` and a `Commit` -- which is also the only consumer that turns *the shell can die mid-frame* into a test |
+| M8 | WinUI 3 shell | **most of it.** The project builds and its own reader decodes §10's wire against a running engine -- `MediaPerch.Shell.exe --check` prints the status and the graph, which is how the two descriptions of one format are held together. The canvas is drawn, the composition surface is composited, and the transport, playlist, module palette and settings screens are there -- every key the engine will take, per node and for the player and the engine, as something to type into, with the module's own refusal shown when it will not take it. Killing it mid-track changes nothing audible. **C#, WinUI 3, Native AOT**, `net10.0-windows10.0.26100.0` with a minimum of 22000, to Fluent 2, dependencies at their newest. Its settings screen is a **node canvas** in the shape of ComfyUI's and Fusion's: the chain as a topology, dragged to reorder, with a settings button per node. §10 says what that asks of the engine -- three verbs and no more -- and why the canvas is Fusion's look over a chain's semantics rather than a free-form DAG. The engine half of §9.7.1 is standing: the composition surface handle, the compositor's clock (not the swap chain's waitable, which was a black window until it was measured), the size message and the display message. The shell's half is done through WinUI's own compositor rather than DirectComposition, and *a shell that dies holding the picture* is a test rather than a claim. The picture survives a track boundary as the audio device does, and both it and `status` follow what is being heard rather than what is being decoded. What is left is dragging nodes to reorder, adding a stage from the palette, and opening files from the shell |
 | M9 | Linux head | ALSA or PipeWire in an exclusive-equivalent mode, proving the core was actually portable |
 
 M1 and M2 are the ones that de-risk the project. If exclusive-mode negotiation and the
@@ -5723,6 +6018,25 @@ real time.
   `add_compile_options` at directory scope, applied before any subdirectory is added, and
   `/guard:ehcont` drags `/guard:cf` along with it. The MSBuild and Ninja generators do not
   agree about when this is fatal, so a green Ninja build is not evidence.
+- **A swap chain's frame-latency waitable object is a throttle, not a heartbeat.** It starts
+  with as many credits as the maximum frame latency; a wait takes one and only a `Present`
+  gives one back. A render loop that waits on it every turn and presents only when a frame is
+  due spends its credits on the turns that draw nothing, and is then never signalled again —
+  which, with a one-second timeout on the wait, is a picture at one frame per second and looks
+  exactly like no picture. The heartbeat for a process with no window is
+  `DCompositionWaitForCompositorClock` (Windows 10 1809 and later), which returns once per
+  compositor frame regardless. **Its return values are not `WaitForMultipleObjects`'s**: the
+  handles passed in are `WAIT_OBJECT_0 + i`, and the compositor tick is `WAIT_OBJECT_0 +
+  count`, one past the end. Read the usual way round, every tick looks like the first handle
+  and the loop stops on its first turn. Measured as `wait -> 0x1` with one handle passed.
+- **A gapless queue's position and a track's timestamps are different coordinates, and the
+  decoder is not where the listener is.** The device's position counts straight through every
+  boundary, because not noticing one is what gapless is; a file's frames are stamped from its
+  own start. Anything pacing a picture, drawing a progress bar or naming the current track
+  needs the offset between them, and needs it *at the device's position*, not the decoder's:
+  with a 128-period ring the decoder is up to three quarters of a second ahead, which against
+  a short track is the next track. Only the queue can answer, because it records boundaries on
+  the way past; it does, as `index_at` and `start_at`, and `status` carries `item_position`.
 
 ---
 

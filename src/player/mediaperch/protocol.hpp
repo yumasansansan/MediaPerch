@@ -182,6 +182,7 @@ enum class Kind : std::uint16_t {
     node_settings_reply = 137,
     modules_reply = 138,
     engine_settings_reply = 139,
+    /// `u64` handle, then `u64` generation. See `Kind::surface`.
     surface_reply = 140,
 
     // --- events, engine to shell, unasked ---
@@ -235,6 +236,17 @@ struct Status {
     /// The current item's length, or zero when nobody knows -- a stream, or a
     /// decoder that will not say.
     std::uint64_t length = 0;
+    /// How far into **this track**, where `position` is how far into the
+    /// queue.
+    ///
+    /// **The two are in different units and that was a bug for as long as
+    /// nobody drew them together.** A gapless queue is one stream to the
+    /// device, so `position` counts straight through every boundary -- it has
+    /// to, because that is the coordinate a seek speaks -- while `length` is
+    /// the track's. `mediaperch-cli status` printed them as `x / y` and said
+    /// `0:14 / 0:01` on the sixteenth one-second track. Only the queue can
+    /// convert, because it records where each track began as it goes past.
+    std::uint64_t item_position = 0;
     std::string track;
     std::string decoder;
     std::string device;
@@ -259,6 +271,17 @@ struct Setting {
     std::string key;
     std::string value;
     std::string description;
+    /// **A measurement rather than a setting.** `peak`, `cost`, `latency`,
+    /// `built`, the surface handle: rows a module answers with and will not
+    /// take back.
+    ///
+    /// It has always been in the text -- every `describe` in this tree ends
+    /// such a row's description with `(read only)` -- and that was fine while
+    /// the only reader was a person. A shell has to decide whether to draw a
+    /// box, and a shell that decided by looking for those two words would be
+    /// parsing English over a wire. So it is read once, where the rows are
+    /// parsed, and crosses as what it is.
+    bool read_only = false;
 };
 
 /// What a node is, on the wire. **Numbers rather than words**, for the reason

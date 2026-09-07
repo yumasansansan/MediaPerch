@@ -17,6 +17,8 @@
 #ifndef MEDIAPERCH_TESTS_FAKE_VIDEO_HPP
 #define MEDIAPERCH_TESTS_FAKE_VIDEO_HPP
 
+#include "mediaperch/display.hpp"
+
 #include <mediaperch/module.h>
 
 #include <algorithm>
@@ -26,6 +28,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -47,6 +50,17 @@ struct PresenterLog {
     std::string size;
     /// How many stages this presenter was handed (§9.8.3).
     std::uint32_t stages = 0;
+    /// How many presenters have been opened since the last `reset`. A track
+    /// boundary builds the picture again, and this is how a test sees one.
+    std::uint32_t opens = 0;
+    /// The composition surface to report, or zero for a presenter that has
+    /// none -- which is what a window or an off-screen target answers.
+    ///
+    /// **Set by the test rather than made here**, because a handle is the
+    /// platform's and this header is not: `ipc_server` duplicates whatever this
+    /// says into the process that asks, so a test that wants that path taken
+    /// puts a real handle of its own here.
+    std::uint64_t surface = 0;
     /// Made to refuse, so a caller's error path is a path something takes.
     bool refuse_size = false;
     bool refuse_configure = false;
@@ -61,6 +75,8 @@ struct PresenterLog {
         presented.store(0);
         size.clear();
         stages = 0;
+        opens = 0;
+        surface = 0;
         refuse_size = false;
         refuse_configure = false;
     }
@@ -83,6 +99,29 @@ inline PresenterLog& presenter_log()
     return log;
 }
 
+/// A display that never runs out, so the picture ends when the track does
+/// rather than when the clock does.
+class EndlessClock final : public mp::IFrameClock {
+public:
+    bool wait() override
+    {
+        if (cancelled_.load(std::memory_order_acquire)) {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        now_ += 166'667;
+        return !cancelled_.load(std::memory_order_acquire);
+    }
+    [[nodiscard]] double nominal_interval() const override { return 1.0 / 60.0; }
+    [[nodiscard]] std::uint64_t now() const override { return now_; }
+    [[nodiscard]] std::uint64_t rate() const override { return 10'000'000; }
+    void cancel() noexcept override { cancelled_.store(true, std::memory_order_release); }
+
+private:
+    std::uint64_t now_ = 0;
+    std::atomic<bool> cancelled_{false};
+};
+
 namespace detail {
 
 inline MpResult MP_CALL video_open(void* window, MpVideo** out) noexcept
@@ -91,6 +130,14 @@ inline MpResult MP_CALL video_open(void* window, MpVideo** out) noexcept
     {
         const std::lock_guard lock{log.mutex};
         log.open = true;
+        ++log.opens;
+        // **A presenter that has just been opened has been told nothing.** The
+        // log outlives any one of them, so without this a setting from the
+        // previous track would answer for the current one -- and what several
+        // tests here check is precisely that something is said again.
+        log.settings.clear();
+        log.size.clear();
+        log.stages = 0;
     }
     // The handle is never dereferenced; it only has to be distinguishable
     // from null, because that is all the ABI promises about it.
@@ -139,14 +186,22 @@ inline MpResult MP_CALL video_set(MpVideo*, const char* key, const char* value) 
 inline MpResult MP_CALL video_describe(MpVideo*, std::uint32_t index, char* out,
                                        std::uint32_t out_bytes) noexcept
 {
-    if (index != 0) {
-        return MP_END;
-    }
     PresenterLog& log = presenter_log();
     const std::lock_guard lock{log.mutex};
-    std::snprintf(out, out_bytes, "size\t%s\twhat it renders at",
-                  log.size.empty() ? "native" : log.size.c_str());
-    return MP_OK;
+    if (index == 0) {
+        std::snprintf(out, out_bytes, "size\t%s\twhat it renders at",
+                      log.size.empty() ? "native" : log.size.c_str());
+        return MP_OK;
+    }
+    // **Spelled the way the real one spells it**, because what reads this is
+    // `VideoPath::surface`, which looks for `composition 0x` and would happily
+    // pass a row that meant something else.
+    if (index == 1 && log.surface != 0) {
+        std::snprintf(out, out_bytes, "surface\tcomposition 0x%llx\twhere it draws",
+                      static_cast<unsigned long long>(log.surface));
+        return MP_OK;
+    }
+    return MP_END;
 }
 
 inline MpResult MP_CALL video_get_device(MpVideo*, MpGraphicsDevice* out) noexcept
@@ -216,6 +271,10 @@ struct DecoderLog {
     /// show looks like.
     std::uint64_t frames = 0;
     std::uint64_t produced = 0;
+    /// How many decoders have been opened since the last `reset`. A track
+    /// boundary opens one, because the codec may have changed; the presenter
+    /// is not opened again, which is what `opens` next door is for.
+    std::uint32_t opens = 0;
     /// The timescale the pts below are counted in, matching the info a test
     /// configures the graph with.
     std::uint32_t timescale = 1000;
@@ -232,6 +291,7 @@ struct DecoderLog {
         open = false;
         frames = 0;
         produced = 0;
+        opens = 0;
         timescale = 1000;
         step = 40;
         threads.clear();
@@ -257,6 +317,8 @@ inline MpResult MP_CALL codec_open(MpCodec, const MpGraphicsDevice*, const std::
         return MP_ERR_UNSUPPORTED;
     }
     log.open = true;
+    ++log.opens;
+    log.produced = 0;
     *out = reinterpret_cast<MpVideoCodec*>(&log);
     return MP_OK;
 }

@@ -285,19 +285,66 @@ bool VideoPath::open(IEngineHost& host, void* window, IPacketFeed& feed,
     // made.** Null is a real answer and not a failure: an off-screen presenter
     // has nothing that will show what it draws, so nothing that says when.
     own_frames_ = host.frame_clock(*presenter_, window);
+    window_ = window;
     return true;
 }
 
-bool VideoPath::start(IAudioClockSource& audio, std::string& why)
+bool VideoPath::retrack(IEngineHost& host, IPacketFeed& feed, const MpVideoInfo& picture,
+                        MpCodec codec, const std::uint8_t* config,
+                        std::uint32_t config_bytes, const Config& want, std::string& why)
+{
+    if (presenter_ == nullptr) {
+        why = "there is no presenter to put the next track on";
+        return false;
+    }
+    stop();
+    // **The graph before the decoder**, because it holds one.
+    graph_.reset();
+    decoder_.reset();
+    own_frames_.reset();
+
+    // The presenter keeps what it was told -- the size a shell asked for, the
+    // display it named, the chain -- and is told what the new file is.
+    if (presenter_->configure(picture) != MP_OK) {
+        why = "the presenter would not take that picture";
+        return false;
+    }
+
+    MpGraphicsDevice device{};
+    const bool have_device = presenter_->get_device(device) == MP_OK;
+    std::unique_ptr<VideoDecoder> decoder = host.open_video_decoder(
+        codec, have_device ? &device : nullptr, config, config_bytes, modules_.decoder, why);
+    if (decoder == nullptr) {
+        return false;
+    }
+    if (want.decoder_threads != 0) {
+        const std::string count = std::to_string(want.decoder_threads);
+        const MpResult told = decoder->set("threads", count.c_str());
+        if (told != MP_OK) {
+            why = modules_.decoder + " would not take " + count + " threads: " +
+                  result_name(told);
+            return false;
+        }
+    }
+    decoder_ = std::move(decoder);
+    graph_ = std::make_unique<VideoGraph>(feed, *decoder_, *presenter_, picture);
+    // **Asked for again, because `configure` may have replaced the chain** and
+    // the waitable object belongs to the chain rather than to the presenter.
+    own_frames_ = host.frame_clock(*presenter_, window_);
+    return true;
+}
+
+bool VideoPath::start(IAudioClockSource& audio, std::string& why, double origin_seconds)
 {
     if (own_frames_ == nullptr) {
         why = "this presenter has no clock to pace on";
         return false;
     }
-    return start(audio, *own_frames_, why);
+    return start(audio, *own_frames_, why, origin_seconds);
 }
 
-bool VideoPath::start(IAudioClockSource& audio, IFrameClock& frames, std::string& why)
+bool VideoPath::start(IAudioClockSource& audio, IFrameClock& frames, std::string& why,
+                      double origin_seconds)
 {
     if (graph_ == nullptr) {
         why = "there is no video graph to run";
@@ -309,7 +356,7 @@ bool VideoPath::start(IAudioClockSource& audio, IFrameClock& frames, std::string
     }
     ended_.store(false, std::memory_order_release);
     frames_ = &frames;
-    loop_ = std::make_unique<DisplayLoop>(*graph_, audio, frames);
+    loop_ = std::make_unique<DisplayLoop>(*graph_, audio, frames, origin_seconds);
     thread_ = std::thread{[this] {
         loop_->run();
         ended_.store(true, std::memory_order_release);

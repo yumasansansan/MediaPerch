@@ -58,6 +58,7 @@ public enum Kind : ushort
     Modules = 25,
     EngineSettings = 26,
     EngineSettingSet = 27,
+    Surface = 28,
 
     // replies, engine to shell
     Ok = 128,
@@ -72,6 +73,7 @@ public enum Kind : ushort
     NodeSettingsReply = 137,
     ModulesReply = 138,
     EngineSettingsReply = 139,
+    SurfaceReply = 140,
 
     // events, engine to shell, unasked
     EventState = 200,
@@ -119,7 +121,15 @@ public sealed class Graph
     public List<Edge> Edges { get; } = new();
 }
 
-public sealed record Setting(string Key, string Value, string Description);
+/// <summary>One row of a module's own settings.</summary>
+/// <param name="ReadOnly">
+/// A measurement rather than a setting -- a peak, a cost, a latency, a handle.
+/// The engine decides this, from the <c>(read only)</c> every module's
+/// <c>describe</c> ends such a row with; a shell that decided by looking for
+/// those two words would be parsing English over a wire.
+/// </param>
+public sealed record Setting(string Key, string Value, string Description,
+                               bool ReadOnly);
 
 public sealed record ModuleRow(uint Kind, string Id, string Name, uint Priority,
                                  bool Allowed);
@@ -134,6 +144,12 @@ public sealed class Status
     public uint Count { get; init; }
     public ulong Position { get; init; }
     public ulong Length { get; init; }
+    /// <summary>
+    /// How far into this track, where <see cref="Position"/> is how far into
+    /// the queue. The two are in different units: a gapless queue is one stream
+    /// to the device, so the position counts straight through boundaries.
+    /// </summary>
+    public ulong ItemPosition { get; init; }
     public string Track { get; init; } = string.Empty;
     public string Decoder { get; init; } = string.Empty;
     public string Device { get; init; } = string.Empty;
@@ -159,6 +175,7 @@ public static class Decode
         uint count = r.U32();
         ulong position = r.U64();
         ulong length = r.U64();
+        ulong itemPosition = r.U64();
         string track = r.Str();
         string decoder = r.Str();
         string device = r.Str();
@@ -176,6 +193,7 @@ public static class Decode
             Count = count,
             Position = position,
             Length = length,
+            ItemPosition = itemPosition,
             Track = track,
             Decoder = decoder,
             Device = device,
@@ -199,7 +217,7 @@ public static class Decode
         }
         for (uint i = 0; i < n; ++i)
         {
-            out_.Add(new Setting(r.Str(), r.Str(), r.Str()));
+            out_.Add(new Setting(r.Str(), r.Str(), r.Str(), r.U8() != 0));
         }
         return out_;
     }

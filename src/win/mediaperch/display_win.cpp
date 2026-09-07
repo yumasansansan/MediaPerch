@@ -6,6 +6,7 @@
 
 #include <dxgi1_2.h>
 
+#include <atomic>
 #include <thread>
 
 namespace mp::win {
@@ -261,6 +262,98 @@ bool VideoWindow::open(const std::string& title, std::uint32_t width, std::uint3
     ShowWindow(window, SW_SHOW);
     UpdateWindow(window);
     return true;
+}
+
+namespace {
+
+/// `DCompositionWaitForCompositorClock`, found rather than linked. See
+/// `CompositorClock`.
+using WaitForCompositorClock = DWORD(WINAPI*)(UINT, const HANDLE*, DWORD);
+
+WaitForCompositorClock compositor_clock()
+{
+    // Resolved once and remembered, including the failure: a machine without
+    // it will not grow one, and `LoadLibrary` on every frame would be a cost
+    // paid sixty times a second for an answer that cannot change.
+    static const WaitForCompositorClock found = [] {
+        const HMODULE dcomp = LoadLibraryW(L"dcomp.dll");
+        if (dcomp == nullptr) {
+            return static_cast<WaitForCompositorClock>(nullptr);
+        }
+        return reinterpret_cast<WaitForCompositorClock>(
+            reinterpret_cast<void*>(
+                GetProcAddress(dcomp, "DCompositionWaitForCompositorClock")));
+    }();
+    return found;
+}
+
+} // namespace
+
+std::unique_ptr<CompositorClock> CompositorClock::open()
+{
+    if (compositor_clock() == nullptr) {
+        return nullptr;
+    }
+    auto clock = std::make_unique<CompositorClock>();
+    // Manual reset: once stopped, every later wait returns at once rather than
+    // one of them consuming the event and the rest blocking.
+    clock->stopping_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (clock->stopping_ == nullptr) {
+        return nullptr;
+    }
+    return clock;
+}
+
+CompositorClock::~CompositorClock()
+{
+    if (stopping_ != nullptr) {
+        CloseHandle(static_cast<HANDLE>(stopping_));
+    }
+}
+
+bool CompositorClock::wait()
+{
+    if (cancelled_.load(std::memory_order_acquire)) {
+        return false;
+    }
+    const HANDLE handles[] = {static_cast<HANDLE>(stopping_)};
+    // A second, not INFINITE, for the reason `WaitableClock` gives: a
+    // compositor that has stopped ticking -- a session locked -- must not hold
+    // a thread nothing can join.
+    //
+    // **The handles come first and the clock comes last.** `WAIT_OBJECT_0 + i`
+    // is `handles[i]`; the tick is `WAIT_OBJECT_0 + count`, one past the end.
+    // Reading it the other way round -- the way `WaitForMultipleObjects` reads,
+    // where the extra thing would be first -- makes every tick look like a
+    // stop, which is a display loop that ends on its first turn.
+    const DWORD woke = compositor_clock()(1, handles, 1000);
+    if (woke == WAIT_OBJECT_0 + 1 || woke == WAIT_TIMEOUT) {
+        return !cancelled_.load(std::memory_order_acquire);
+    }
+    // The stopping event, or a failure. Either way this loop is over.
+    return false;
+}
+
+std::uint64_t CompositorClock::now() const
+{
+    LARGE_INTEGER counter{};
+    QueryPerformanceCounter(&counter);
+    return static_cast<std::uint64_t>(counter.QuadPart);
+}
+
+std::uint64_t CompositorClock::rate() const
+{
+    LARGE_INTEGER frequency{};
+    QueryPerformanceFrequency(&frequency);
+    return static_cast<std::uint64_t>(frequency.QuadPart);
+}
+
+void CompositorClock::cancel() noexcept
+{
+    cancelled_.store(true, std::memory_order_release);
+    if (stopping_ != nullptr) {
+        SetEvent(static_cast<HANDLE>(stopping_));
+    }
 }
 
 bool WaitableClock::wait()

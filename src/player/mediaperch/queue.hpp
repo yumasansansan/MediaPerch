@@ -95,6 +95,23 @@ public:
     /// the reading by the decode thread.
     void skip() noexcept { skip_.store(true, std::memory_order_release); }
 
+    /// Which item queue frame `run` belongs to, and where that item began.
+    ///
+    /// **What is being heard, as opposed to what is being decoded.** A gapless
+    /// queue reads ahead by the ring's depth -- generously, since M6 made the
+    /// default 128 periods -- so the item `index()` names is the one the
+    /// decoder is on and can be several ahead of the one coming out of the
+    /// device. `index()` is right for deciding what to open next and wrong for
+    /// deciding what is playing, and the picture is the second question: a
+    /// picture rebuilt when the decoder crosses a boundary is a picture running
+    /// the ring's depth ahead of its own sound.
+    ///
+    /// `run` is a frame this queue has already handed out, which is what makes
+    /// this answerable at all: boundaries are recorded on the way past, because
+    /// the length of a track nobody has played is a guess.
+    [[nodiscard]] std::size_t index_at(std::uint64_t run) const noexcept;
+    [[nodiscard]] std::uint64_t start_at(std::uint64_t run) const noexcept;
+
     /// The queue frame at which the current item began, and the one before it.
     /// What a "previous track" button needs, and it is a question only the
     /// queue can answer: a graph counts frames and has never seen a boundary.

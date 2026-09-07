@@ -795,6 +795,15 @@ struct MpVideo {
     /// an HWND chain draws into a window this process owns, which is the thing
     /// §9.7.1 decided against for an engine and is right for the probe.
     HANDLE composition = nullptr;
+
+    /// The colour space `SetColorSpace1` was actually given, or
+    /// `DXGI_COLOR_SPACE_RESERVED` when the chain took none.
+    ///
+    /// **Remembered because DXGI will not say.** A chain answers `GetDesc1`
+    /// for its size and format and has no `GetColorSpace1`, and deciding
+    /// whether the chain that exists is the chain that would be built needs
+    /// all three.
+    DXGI_COLOR_SPACE_TYPE chain_space = DXGI_COLOR_SPACE_RESERVED;
     /// **The compositor's own event, made once.** A waitable swap chain hands
     /// one back and the caller owns it -- `GetFrameLatencyWaitableObject`
     /// duplicates on every call, so asking in `describe` leaked a handle per
@@ -1571,9 +1580,23 @@ DXGI_FORMAT dxgi_format_of(const mp::video::Plan& plan) noexcept
 /// What is actually rendered into. The same as the swap chain's when there is
 /// one, because that is what a display gets; wider off-screen, because a
 /// measurement should not be quantised before it is taken.
+/// Whether this presenter draws into a texture of its own rather than into a
+/// swap chain somebody will show.
+///
+/// **No window used to mean off screen, and then §9.7.1 added a third place to
+/// draw.** A composition surface has no window either, and it has a swap
+/// chain, whose buffers are fp16 because that is the most DXGI will present.
+/// Read as off screen, it was given an fp32 staging texture against an fp16
+/// back buffer -- which `read_back`'s copy would refuse -- and a `precision`
+/// row that said fp32 for a target that was not.
+bool off_screen(const MpVideo* v) noexcept
+{
+    return v->window == nullptr && v->composition == nullptr;
+}
+
 DXGI_FORMAT target_format_of(const MpVideo* v) noexcept
 {
-    if (v->window == nullptr && v->wide_target &&
+    if (off_screen(v) && v->wide_target &&
         v->plan.encoding == mp::video::Encoding::linear) {
         return DXGI_FORMAT_R32G32B32A32_FLOAT;
     }
@@ -1733,9 +1756,50 @@ bool make_target_views(MpVideo* v, std::string& why)
     return true;
 }
 
+/// Whether what is already here is what `make_target` would build.
+///
+/// **A track boundary is `configure` again with the same answer.** The picture
+/// is reconfigured for the next file and, for a playlist of one camera's
+/// output, nothing it decides has changed. Building the chain again anyway
+/// costs a visible frame -- the surface a shell is composing loses its buffers
+/// and has nothing to show until the next present -- and costs the frame clock
+/// with it, since the waitable object belongs to the chain.
+bool target_is_current(MpVideo* v)
+{
+    if (!v->target || !v->target_view || !v->staging) {
+        return false;
+    }
+    D3D11_TEXTURE2D_DESC has{};
+    v->target->GetDesc(&has);
+    if (has.Width != v->width || has.Height != v->height) {
+        return false;
+    }
+    if (!v->swap_chain) {
+        // Off screen, where the target is a texture of this module's own and
+        // `target_format_of` is the whole of what it must match.
+        return off_screen(v) && has.Format == target_format_of(v);
+    }
+    DXGI_SWAP_CHAIN_DESC1 desc{};
+    if (FAILED(v->swap_chain->GetDesc1(&desc))) {
+        return false;
+    }
+    return desc.Width == v->width && desc.Height == v->height &&
+           desc.Format == dxgi_format_of(v->plan) &&
+           v->chain_space == colour_space_of(v->plan);
+}
+
 /// The swap chain, or the texture that stands in for one.
 bool make_target(MpVideo* v, std::string& why)
 {
+    if (target_is_current(v)) {
+        // **The metadata still, because that is the part that changes.** A new
+        // track may be graded on a different mastering display even when every
+        // pixel format is the same, and it is a call on the chain rather than a
+        // property of it.
+        set_hdr_metadata(v);
+        return true;
+    }
+    v->chain_space = DXGI_COLOR_SPACE_RESERVED;
     v->target_view.reset();
     v->target.reset();
     v->staging.reset();
@@ -1792,8 +1856,9 @@ bool make_target(MpVideo* v, std::string& why)
             const DXGI_COLOR_SPACE_TYPE space = colour_space_of(v->plan);
             UINT support = 0;
             if (SUCCEEDED(chain3->CheckColorSpaceSupport(space, &support)) &&
-                (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) != 0) {
-                chain3->SetColorSpace1(space);
+                (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) != 0 &&
+                SUCCEEDED(chain3->SetColorSpace1(space))) {
+                v->chain_space = space;
             }
         }
         set_hdr_metadata(v);
@@ -1840,8 +1905,9 @@ bool make_target(MpVideo* v, std::string& why)
             const DXGI_COLOR_SPACE_TYPE space = colour_space_of(v->plan);
             UINT support = 0;
             if (SUCCEEDED(chain3->CheckColorSpaceSupport(space, &support)) &&
-                (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) != 0) {
-                chain3->SetColorSpace1(space);
+                (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) != 0 &&
+                SUCCEEDED(chain3->SetColorSpace1(space))) {
+                v->chain_space = space;
             }
         }
         set_hdr_metadata(v);
@@ -2978,7 +3044,7 @@ try {
         std::snprintf(out, out_bytes,
                       "precision\t%s\twhat it renders into; fp16 is what a display gets "
                       "and all DXGI will present",
-                      v->window == nullptr && v->wide_target ? "fp32" : "fp16");
+                      off_screen(v) && v->wide_target ? "fp32" : "fp16");
         return MP_OK;
     case 10:
         std::snprintf(out, out_bytes,

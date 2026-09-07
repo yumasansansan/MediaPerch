@@ -93,11 +93,16 @@ void print_status(const mp::ipc::Status& s)
     std::printf("state      %s\n", mp::ipc::state_name(s.state));
     if (!s.track.empty()) {
         std::printf("track      %u of %u  %s\n", s.index + 1, s.count, s.track.c_str());
-        std::printf("position   %s", seconds_text(s.position, s.source.sample_rate).c_str());
+        // **Into this track, against this track's length.** `position` is the
+        // queue's coordinate and is what a seek speaks; printing it against a
+        // track's length is how this said `0:14 / 0:01`.
+        std::printf("position   %s",
+                    seconds_text(s.item_position, s.source.sample_rate).c_str());
         if (s.length != 0) {
             std::printf(" / %s", seconds_text(s.length, s.source.sample_rate).c_str());
         }
-        std::printf("  (%llu frames)\n", static_cast<unsigned long long>(s.position));
+        std::printf("  (%llu frames into the queue)\n",
+                    static_cast<unsigned long long>(s.position));
     }
     if (!s.decoder.empty()) {
         std::printf("decoder    %s\n", s.decoder.c_str());
@@ -383,6 +388,7 @@ int main(int argc, char** argv)
         }
         mp::ipc::Reader r{body.data(), body.size()};
         const std::uint64_t handle = r.u64();
+        const std::uint64_t generation = r.u64();
         if (!r.complete()) {
             return fail("the engine sent a surface this build cannot read");
         }
@@ -393,6 +399,10 @@ int main(int argc, char** argv)
         }
         std::printf("surface    0x%llx, duplicated into this process\n",
                     static_cast<unsigned long long>(handle));
+        // Which picture, so two of them can be told apart when the handle
+        // cannot do it -- a duplicate is a new number on every call.
+        std::printf("picture    #%llu of this run\n",
+                    static_cast<unsigned long long>(generation));
         // **Ours now, so ours to close.** A handle a shell keeps is a
         // composition surface the engine cannot let go of.
         CloseHandle(reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(handle)));

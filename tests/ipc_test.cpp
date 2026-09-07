@@ -13,9 +13,11 @@
 // process, possibly hostile, and the engine has to survive whatever it sends.
 
 #include "fake_host.hpp"
+#include "fake_video.hpp"
 
 #include "mediaperch/ipc_client.hpp"
 #include "mediaperch/ipc_server.hpp"
+#include "mediaperch/win_headers.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -269,6 +271,162 @@ TEST_CASE("killing every shell mid-track changes nothing audible", "[ipc][server
     REQUIRE(ask(engine.name, mp::ipc::Kind::status, reply, body));
     CHECK(reply.kind == static_cast<std::uint16_t>(mp::ipc::Kind::status_reply));
     CHECK(engine.player.status().underruns == 0);
+}
+
+TEST_CASE("a shell that dies holding the picture takes nothing with it",
+          "[ipc][server][video]")
+{
+    // **The other half of the test above, and the one §9.7.1 was waiting for.**
+    // A shell asks for the composition surface; the engine duplicates a handle
+    // into it; the shell dies without a word. What must not happen is the
+    // engine noticing -- not in the audio, which the test above covers, and not
+    // in the picture, which is this one: it draws into that surface whether or
+    // not anybody is composing it, because the alternative is a render loop
+    // that waits on a process it does not control.
+    mp::test::presenter_log().reset();
+    mp::test::decoder_log().reset();
+    {
+        // Enough frames that the decoder never runs out. **The picture does
+        // not actually draw here**, and that is a limit of the fakes rather
+        // than of the thing: the display loop paces against the audio device's
+        // clock (§8) and the fake one does not move the way a device's does, so
+        // no turn ever decides a frame is due. What is being tested is what
+        // happens to the picture when a shell dies, and that is asked of the
+        // picture -- is it still open, is it still the same one -- rather than
+        // of a frame counter. Real frames are counted where there is a real
+        // presenter: video_d3d11_test.cpp and the codec tests.
+        const std::lock_guard lock{mp::test::decoder_log().mutex};
+        mp::test::decoder_log().frames = 1'000'000;
+    }
+
+    // A real handle, because the duplication is the point. An event is the
+    // cheapest thing this process can own that another process could be given.
+    const HANDLE stands_in = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    REQUIRE(stands_in != nullptr);
+    {
+        const std::lock_guard lock{mp::test::presenter_log().mutex};
+        mp::test::presenter_log().surface =
+            static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(stands_in));
+    }
+
+    Engine engine{"picture"};
+    engine.host.add_video("long");
+    engine.host.pace_with([] { return std::make_unique<mp::test::EndlessClock>(); });
+    {
+        mp::win::IpcClient starter;
+        std::string why;
+        REQUIRE(starter.connect(engine.name, 2000, why));
+        mp::ipc::Writer w;
+        mp::ipc::write_strings(w, {"long"});
+        mp::ipc::Header reply{};
+        std::vector<std::uint8_t> body;
+        REQUIRE(starter.call(mp::ipc::Kind::play, w, reply, body, why));
+    }
+    REQUIRE(wait_for_state(engine.player, mp::ipc::State::playing));
+    REQUIRE(wait_for([] {
+        const std::lock_guard lock{mp::test::presenter_log().mutex};
+        return mp::test::presenter_log().open;
+    }));
+    REQUIRE(wait_for([&] { return engine.player.surface() != 0; }));
+    const std::uint64_t picture = engine.player.picture_generation();
+    REQUIRE(picture != 0);
+
+    HANDLE ours = nullptr;
+    {
+        mp::win::IpcClient shell;
+        std::string why;
+        REQUIRE(shell.connect(engine.name, 2000, why));
+        mp::ipc::Writer w;
+        w.u32(GetCurrentProcessId());
+        mp::ipc::Header reply{};
+        std::vector<std::uint8_t> body;
+        REQUIRE(shell.call(mp::ipc::Kind::surface, w, reply, body, why));
+        REQUIRE(reply.kind == static_cast<std::uint16_t>(mp::ipc::Kind::surface_reply));
+        mp::ipc::Reader r{body.data(), body.size()};
+        const std::uint64_t handle = r.u64();
+        const std::uint64_t generation = r.u64();
+        REQUIRE(r.complete());
+        REQUIRE(handle != 0);
+        // **A different number for the same thing**, which is the whole reason
+        // the generation is on the wire beside it: a duplicate is valid in the
+        // process that asked and says nothing about which picture it is.
+        CHECK(handle != static_cast<std::uint64_t>(
+                            reinterpret_cast<std::uintptr_t>(stands_in)));
+        CHECK(generation != 0);
+        ours = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(handle));
+        // Real, not merely non-zero.
+        DWORD flags = 0;
+        CHECK(GetHandleInformation(ours, &flags) != FALSE);
+
+        // Asked again on the same picture: another handle, the same generation.
+        mp::ipc::Writer again;
+        again.u32(GetCurrentProcessId());
+        REQUIRE(shell.call(mp::ipc::Kind::surface, again, reply, body, why));
+        mp::ipc::Reader second{body.data(), body.size()};
+        const std::uint64_t twice = second.u64();
+        CHECK(second.u64() == generation);
+        CHECK(twice != handle);
+        CloseHandle(reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(twice)));
+        // And no goodbye, which is what a killed process looks like from here.
+    }
+
+    const auto before = engine.player.status();
+    REQUIRE(before.state == mp::ipc::State::playing);
+
+    // **The engine did not notice.** Not in the audio, and not in the picture:
+    // the same picture is still open, which is what would have changed had the
+    // presenter been torn down and built again when its one viewer went away.
+    REQUIRE(wait_for([&] { return engine.player.status().position > before.position; }));
+    const auto after = engine.player.status();
+    CHECK(after.state == mp::ipc::State::playing);
+    CHECK(after.underruns == 0);
+    {
+        const std::lock_guard lock{mp::test::presenter_log().mutex};
+        CHECK(mp::test::presenter_log().open);
+        CHECK(mp::test::presenter_log().opens == 1u);
+    }
+    CHECK(engine.player.picture_generation() == picture);
+
+    // A dead shell's handle is still ours until we close it, and closing it is
+    // what the shell would have done. The engine keeps its own either way.
+    if (ours != nullptr) {
+        CloseHandle(ours);
+    }
+
+    // **And the next shell to knock gets the picture.** A handle of its own,
+    // duplicated afresh, for the same picture -- which is the whole reason the
+    // generation is on the wire beside the handle.
+    {
+        mp::win::IpcClient next;
+        std::string why;
+        REQUIRE(next.connect(engine.name, 2000, why));
+        mp::ipc::Writer w;
+        w.u32(GetCurrentProcessId());
+        mp::ipc::Header reply{};
+        std::vector<std::uint8_t> body;
+        REQUIRE(next.call(mp::ipc::Kind::surface, w, reply, body, why));
+        REQUIRE(reply.kind == static_cast<std::uint16_t>(mp::ipc::Kind::surface_reply));
+        mp::ipc::Reader r{body.data(), body.size()};
+        const std::uint64_t again = r.u64();
+        CHECK(r.u64() == picture);
+        REQUIRE(r.complete());
+        REQUIRE(again != 0);
+        DWORD flags = 0;
+        const HANDLE reopened = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(again));
+        CHECK(GetHandleInformation(reopened, &flags) != FALSE);
+        CloseHandle(reopened);
+    }
+    CHECK(engine.player.status().underruns == 0);
+
+    engine.player.stop();
+    REQUIRE(wait_for_state(engine.player, mp::ipc::State::stopped));
+    {
+        const std::lock_guard lock{mp::test::presenter_log().mutex};
+        mp::test::presenter_log().surface = 0;
+    }
+    if (stands_in != nullptr) {
+        CloseHandle(stands_in);
+    }
 }
 
 TEST_CASE("two engines will not share one name", "[ipc][server]")

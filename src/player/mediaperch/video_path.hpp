@@ -120,6 +120,31 @@ public:
 
     [[nodiscard]] bool opened() const noexcept { return graph_ != nullptr; }
 
+    /// **The next track, on the presenter that is already open.**
+    ///
+    /// A boundary changes the file, not the display. §8 does not rebuild the
+    /// audio device when a track ends -- not rebuilding it is what gapless
+    /// *is* -- and the picture had no equivalent: it was torn down and built
+    /// again, presenter and all, for every track. Nothing looked wrong until
+    /// there was a shell, because the presenter is where the composition
+    /// surface lives: a new presenter is a new handle, so the shell had to
+    /// detach and attach, and on a playlist of short files that is a black
+    /// frame and then an empty one, once a second.
+    ///
+    /// So the presenter stays, with its surface, its chain, its size and the
+    /// display it was told about; the decoder is opened again because the codec
+    /// may have changed, the graph is rebuilt around the new feed, and the
+    /// presenter is configured for the new picture. The frame clock is fetched
+    /// again because `configure` may replace the swap chain and the waitable
+    /// belongs to the chain.
+    ///
+    /// False and a reason when this track cannot go on this presenter -- a
+    /// codec nothing decodes, a picture it will not take. The caller then opens
+    /// the whole path afresh, which is what `open` is for.
+    bool retrack(IEngineHost& host, IPacketFeed& feed, const MpVideoInfo& picture,
+                 MpCodec codec, const std::uint8_t* config, std::uint32_t config_bytes,
+                 const Config& want, std::string& why);
+
     /// Starts the display loop on a thread of its own, on the clock the
     /// presenter brought with it.
     ///
@@ -129,11 +154,15 @@ public:
     ///
     /// False when the presenter brought none -- off-screen, or a display that
     /// would not answer. The caller then supplies one or does not draw.
-    bool start(IAudioClockSource& audio, std::string& why);
+    /// `origin_seconds` is where this track began on the audio clock, which is
+    /// zero for anything playing a file on its own and is not for a queue. See
+    /// `DisplayLoop`'s constructor for why the two coordinates differ.
+    bool start(IAudioClockSource& audio, std::string& why, double origin_seconds = 0.0);
 
     /// The same, on a clock the caller has instead. `show` uses it for the
     /// tick fallback a machine with no vertical blank gets.
-    bool start(IAudioClockSource& audio, IFrameClock& frames, std::string& why);
+    bool start(IAudioClockSource& audio, IFrameClock& frames, std::string& why,
+               double origin_seconds = 0.0);
 
     /// The clock the presenter brought, or null. Handed out so a report can
     /// say what is pacing the picture, which is a thing worth printing.
@@ -158,6 +187,18 @@ public:
     [[nodiscard]] bool ended() const noexcept
     {
         return ended_.load(std::memory_order_acquire);
+    }
+
+    /// One setting straight at the presenter, taking the display loop's hold.
+    ///
+    /// **What a shell reaches through.** `size` and `display` have their own
+    /// calls below because the engine sends them itself as well; this is every
+    /// other key the presenter has -- the tone mapper, whether anything is
+    /// composited over the video -- which only a person ever changes.
+    bool set_presenter(const std::string& key, const std::string& value, std::string& why,
+                       std::chrono::milliseconds deadline = std::chrono::milliseconds{500})
+    {
+        return tell(key.c_str(), value.c_str(), why, deadline);
     }
 
     /// **§9.7.1's message, arriving.** The size to render at; zero for the
@@ -247,6 +288,10 @@ private:
     /// here and the two go together.
     std::unique_ptr<IFrameClock> own_frames_;
     Modules modules_;
+
+    /// The head's window, or null for §9.7.1's engine. Kept because the frame
+    /// clock is asked for again at every `retrack` and the question includes it.
+    void* window_ = nullptr;
 
     IFrameClock* frames_ = nullptr;
     std::thread thread_;

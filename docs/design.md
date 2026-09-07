@@ -887,6 +887,14 @@ counts straight through, in its own frames, and records each boundary as it pass
 computed from track lengths: the length of a track nobody has played is a guess for a VBR
 file and does not exist at all for a stream, whereas where a boundary *was* is a fact.
 
+The same record answers the other question those two coordinates raise: **which track a
+frame somebody else counted belongs to, and where it began.** The queue's own index is the
+decoder's, and the decoder reads ahead by the ring's depth — against a short track, the next
+track. Anything that means *what is being heard* — the track named in `status`, the position
+drawn against its length, the picture paced beside its own sound — asks the queue at the
+device's position, and the picture is built again when *that* crosses a boundary, not when
+the decoder does.
+
 #### Switching paths is the same machinery
 
 Path A and Path B are decided when a graph is built, so the only place a stream can change
@@ -1229,8 +1237,11 @@ Paths above are relative to the repository root.
 DirectComposition surface handle and the shell composes it into its own visual tree, so the
 engine still creates no window and links no toolkit, and a shell that is killed mid-frame
 takes only its own visual tree with it -- the engine goes on rendering and the next shell
-attaches to the same handle. plan.md §9.7.1 has the mechanism and the one coupling it
-forces, which is that the presenter owns the D3D device and the decoder is handed it.
+attaches to the same surface. **To the same surface, not to the same handle**: the engine
+duplicates into the process that asks, so every asker gets a different number for one
+surface, and the reply carries a generation for the shell to compare instead. plan.md
+§9.7.1 has the mechanism and the one coupling it forces, which is that the presenter owns
+the D3D device and the decoder is handed it.
 
 The reason the shell is a separate process is the one DragonPerch measured rather than
 assumed: initialising XAML costs a process about 40 MB of private bytes permanently, and

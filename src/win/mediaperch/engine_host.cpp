@@ -404,6 +404,15 @@ std::unique_ptr<IFrameClock> EngineHost::frame_clock(Presenter& presenter, void*
     if (waitable == nullptr) {
         return nullptr;
     }
+    // **The compositor's clock, not the swap chain's waitable.** They look like
+    // the same question and are not: the waitable is signalled by presenting,
+    // so a loop that waits every turn and presents only when a frame is due
+    // runs out of credits on the turns that drew nothing. See `CompositorClock`
+    // for what that measured like. The waitable is still what says the chain is
+    // ready for another frame, and that belongs in front of `Present`.
+    if (std::unique_ptr<CompositorClock> composed = CompositorClock::open()) {
+        return composed;
+    }
     return std::make_unique<WaitableClock>(waitable);
 }
 

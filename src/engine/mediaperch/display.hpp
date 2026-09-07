@@ -108,7 +108,20 @@ struct DisplayStep {
 /// pumps it is not a detail this file can decide.
 class DisplayLoop final {
 public:
-    DisplayLoop(VideoGraph& graph, IAudioClockSource& audio, IFrameClock& frames) noexcept;
+    /// `origin_seconds` is **where this track began on the audio clock**, and
+    /// is not zero for anything but the first track of a run.
+    ///
+    /// §8 makes the audio device the master clock, and a gapless queue is one
+    /// stream to that device: the position it reports counts straight through
+    /// every track boundary, because not noticing one is what gapless *is*. A
+    /// picture's frames do not -- each file's timestamps start at zero -- so
+    /// the two are in different coordinates and only the queue knows the offset
+    /// between them. Without it, every frame of the second track is late by
+    /// however long the first one was, and the loop drops all of them: measured
+    /// as `decoded 24, dropped 24, shown 0` on the twentieth track of a
+    /// one-second file.
+    DisplayLoop(VideoGraph& graph, IAudioClockSource& audio, IFrameClock& frames,
+                double origin_seconds = 0.0) noexcept;
 
     DisplayLoop(const DisplayLoop&) = delete;
     DisplayLoop& operator=(const DisplayLoop&) = delete;
@@ -145,6 +158,9 @@ public:
     {
         return parked_.load(std::memory_order_acquire);
     }
+
+    /// Where this track began on the audio clock. See the constructor.
+    [[nodiscard]] double origin_seconds() const noexcept { return origin_seconds_; }
 
     struct Stats {
         std::uint64_t turns = 0;
@@ -207,6 +223,7 @@ private:
     VideoGraph* graph_;
     IAudioClockSource* audio_;
     IFrameClock* frames_;
+    double origin_seconds_ = 0.0;
     AvClock clock_;
     ClockSpec spec_{};
     bool configured_ = false;

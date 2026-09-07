@@ -560,6 +560,7 @@ bool IpcServer::handle(const std::shared_ptr<Client>& client, const ipc::Header&
             // Not an error: no picture in the current track, or a presenter
             // drawing into a window. A shell with no surface draws that.
             w.u64(0);
+            w.u64(0);
             return client->send(ipc::frame(ipc::Kind::surface_reply, id, w));
         }
         // **Duplicated by the engine, into the process that asked.** A `HANDLE`
@@ -581,6 +582,11 @@ bool IpcServer::handle(const std::shared_ptr<Client>& client, const ipc::Header&
             return fail("the surface handle would not duplicate");
         }
         w.u64(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(theirs)));
+        // **And which picture it is.** The handle above is a fresh duplicate on
+        // every call, so it cannot answer *is this the one I already have*.
+        // This can, and a shell that asks on a timer needs it: without it every
+        // ask is a detach, an attach and a handle to close.
+        w.u64(player_->picture_generation());
         return client->send(ipc::frame(ipc::Kind::surface_reply, id, w));
     }
     case ipc::Kind::engine_settings: {

@@ -118,12 +118,22 @@ inline MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
     if (d == nullptr || out == nullptr || out_bytes < 32) {
         return MP_ERR_INVALID;
     }
-    if (index != 0) {
-        return MP_END;
+    if (index == 0) {
+        std::snprintf(out, out_bytes, "amount\t%g\twhat every sample is multiplied by",
+                      reinterpret_cast<const FakeDsp*>(d)->amount);
+        return MP_OK;
     }
-    std::snprintf(out, out_bytes, "amount\t%g\twhat every sample is multiplied by",
-                  reinterpret_cast<const FakeDsp*>(d)->amount);
-    return MP_OK;
+    // **A measurement, spelled the way every module in this tree spells one.**
+    // A stage answers with things it will not take back -- a peak, a cost, a
+    // latency -- and marks them by ending the description with `(read only)`.
+    // Something has to read that, and it is the engine rather than each shell;
+    // this row is what makes that checkable without a real module.
+    if (index == 1) {
+        std::snprintf(out, out_bytes, "peak\t%.6f\tloudest sample seen (read only)",
+                      reinterpret_cast<const FakeDsp*>(d)->amount);
+        return MP_OK;
+    }
+    return MP_END;
 }
 
 } // namespace detail

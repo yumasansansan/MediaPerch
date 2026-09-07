@@ -53,8 +53,8 @@ bool same(const ClockSpec& a, const ClockSpec& b) noexcept
 } // namespace
 
 DisplayLoop::DisplayLoop(VideoGraph& graph, IAudioClockSource& audio,
-                         IFrameClock& frames) noexcept
-    : graph_(&graph), audio_(&audio), frames_(&frames)
+                         IFrameClock& frames, double origin_seconds) noexcept
+    : graph_(&graph), audio_(&audio), frames_(&frames), origin_seconds_(origin_seconds)
 {
 }
 
@@ -183,7 +183,11 @@ bool DisplayLoop::once(DisplayStep& out)
     }
 
     out.had_clock = true;
-    out.step = graph_->pump(clock_.audible_seconds(tick));
+    // **In this track's own seconds.** `audible_seconds` answers how far into
+    // the *queue* the audible sample is; the frames are stamped from the start
+    // of their own file. The constructor says why only the caller can subtract
+    // one from the other.
+    out.step = graph_->pump(clock_.audible_seconds(tick) - origin_seconds_);
     return out.step != VideoGraph::Step::finished &&
            out.step != VideoGraph::Step::failed;
 }
