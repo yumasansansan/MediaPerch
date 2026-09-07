@@ -720,6 +720,32 @@ std::vector<ipc::Setting> Player::node_settings(const std::string& node) const
         return out;
     }
 
+    if (node == "presenter") {
+        // The colour pipeline's own answers (§9), which is what a shell shows
+        // beside the picture: what the display turned out to be, what the
+        // buffer holds, which tone mapper is in the path.
+        if (video_ == nullptr) {
+            return {};
+        }
+        std::vector<ipc::Setting> out;
+        char line[256];
+        for (std::uint32_t row = 0;; ++row) {
+            line[0] = '\0';
+            if (video_->presenter().describe(row, line, sizeof line) != MP_OK) {
+                break;
+            }
+            const std::string text{line};
+            const std::size_t first = text.find('\t');
+            if (first == std::string::npos) {
+                continue;
+            }
+            const std::size_t second = text.find('\t', first + 1);
+            out.push_back(ipc::Setting{
+                text.substr(0, first), text.substr(first + 1, second - first - 1),
+                second == std::string::npos ? std::string{} : text.substr(second + 1)});
+        }
+        return out;
+    }
     if (node.rfind("vdsp.", 0) == 0) {
         // **Asked of the live stage, under the display loop's hold.** Unlike an
         // audio stage there is no opening one for the question: a video stage
@@ -880,6 +906,15 @@ bool Player::set_node(const std::string& node, const std::string& key,
 std::vector<ipc::ModuleRow> Player::modules() const
 {
     return host_->modules();
+}
+
+std::uint64_t Player::surface() const
+{
+    // `video_` is the engine thread's, and this is an IPC thread. The race is
+    // the one `set_display` documents and is benign in the same direction: a
+    // picture opened between these two lines is one this answer does not know
+    // about yet, and a shell asks again.
+    return video_ ? video_->surface() : 0;
 }
 
 void Player::use_profile(Profile profile)

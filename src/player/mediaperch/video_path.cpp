@@ -5,6 +5,9 @@
 #include "mediaperch/player.hpp"
 #include "mediaperch/result.hpp"
 
+#include <cstdlib>
+#include <cstring>
+
 #include <cstdio>
 
 namespace mp {
@@ -173,6 +176,29 @@ bool VideoPath::set_stage(std::size_t index, const std::string& key,
     const bool ok = say();
     loop_->release();
     return ok;
+}
+
+std::uint64_t VideoPath::surface() noexcept
+{
+    if (presenter_ == nullptr) {
+        return 0;
+    }
+    char line[256];
+    for (std::uint32_t row = 0;; ++row) {
+        line[0] = '\0';
+        if (presenter_->describe(row, line, sizeof line) != MP_OK) {
+            break;
+        }
+        if (std::strncmp(line, "surface\t", 8) != 0) {
+            continue;
+        }
+        const char* at = std::strstr(line + 8, "composition 0x");
+        if (at == nullptr) {
+            return 0; // a window, or off-screen: there is nothing to hand over
+        }
+        return std::strtoull(at + 14, nullptr, 16);
+    }
+    return 0;
 }
 
 VideoPath::~VideoPath()

@@ -5143,10 +5143,49 @@ That is §10's three verbs answering over the real pipe, decoded by the shell's 
 person whose shell shows nothing can run it and find out whether the engine is not there or the
 shell cannot read it.
 
-**What is left of M8**, in order: the node canvas over the list that stands in for it; the
-composition surface (`CreateSurfaceFromHandle`, a visual, a target on the `HWND`, a `Commit`),
-which is the only consumer that turns *the shell can die mid-frame* into a test; and the
-transport, playlist and settings screens.
+#### The handle crosses, and the canvas is drawn
+
+**`ipc::Kind::surface` is the message that gets the picture across.** The shell sends its own
+process id; the engine duplicates the composition surface handle into that process and answers
+with the value. **The engine duplicates, not the shell**, and the reason is not convenience: a
+`HANDLE` is a number in one process and nothing in another, so somebody has to make it valid on
+the far side, and the side that owns the surface is the side that should decide who gets one.
+The duplicate is the shell's to close; the original stays the engine's, which is the rule
+`video_d3d11`'s destructor already follows.
+
+Zero is a real answer and not an error — no picture in the current track, or a presenter
+drawing into a window — and a shell with no surface has to be able to draw that anyway.
+
+Measured, with `mediaperchd` playing a film and nothing else attached:
+
+    $ mediaperch-cli node presenter
+    surface    composition 0x7c0, waitable 0x3a8   where it draws and what paces it
+    $ mediaperch-cli surface
+    surface    0x1c8, duplicated into this process
+
+That is §9.7.1's whole shape working end to end: a headless engine, a composition swap chain
+with no window under it, and the handle reaching another process. `node presenter` also answers
+now, which is where a shell reads what §9 decided: the display, the encoding, the tone mapper
+in the path.
+
+**And the canvas is drawn.** `NodeCanvas` lays the nodes out in two rows and draws a curve for
+every edge `graph` gave it: the audio chain on one and the picture on the other, **because they
+never meet**. §4 gives the file one position and §8 gives the run one clock, but the samples and
+the frames do not flow into one another; what joins them is the clock, and an edge for that
+would be drawing data where there is none.
+
+The settings button appears only where `MP_NODE_SETTABLE` is set. A button on a node with
+nothing behind it would open an empty panel and teach a person not to press it.
+
+It is written rather than taken from a toolkit, and not by preference: the Community Toolkit
+does not support this Windows App SDK.
+
+**What is left of M8**: the shell's half of the surface — turning that handle into something a
+window composites — and then the transport, playlist and settings screens. The handle now
+arrives; what to do with it in WinUI 3 is `ICompositorInterop::CreateCompositionSurfaceForHandle`
+against the XAML compositor, or DirectComposition on a child window, and that choice is the next
+thing to make rather than the next thing to guess at.
+
 
 #### Built, and the palette needed a fourth verb
 

@@ -4,6 +4,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:canvas="using:MediaPerch.Shell.Canvas"
     mc:Ignorable="d">
 
     <Grid x:Name="Root" RowDefinitions="Auto,*,Auto" Padding="16" RowSpacing="12">
@@ -32,18 +33,31 @@
 
                 <TextBlock Text="The shape it is in"
                            Style="{StaticResource SubtitleTextBlockStyle}" />
-                <!-- The node canvas goes here. Until it is drawn, the same
-                     answer as text: what `graph` says, in the order it says it,
-                     so the wire is checkable before there is anything to look
-                     at. -->
-                <ItemsControl x:Name="Nodes">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate>
-                            <TextBlock Text="{Binding}" FontFamily="Consolas"
-                                       Style="{StaticResource BodyTextBlockStyle}" />
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
+                <!-- Fusion's look over a chain's semantics: §10 says why it is
+                     a row and not a cloud. `—check` prints the same answer as
+                     text, which is how the wire stays checkable without looking
+                     at anything. -->
+                <ScrollViewer HorizontalScrollMode="Auto"
+                              HorizontalScrollBarVisibility="Auto"
+                              VerticalScrollMode="Disabled"
+                              VerticalScrollBarVisibility="Disabled">
+                    <canvas:NodeCanvas x:Name="Shape" />
+                </ScrollViewer>
+
+                <!-- One node's settings, opened by the button on it. Empty
+                     until something is asked for. -->
+                <StackPanel x:Name="NodePanel" Visibility="Collapsed" Spacing="6">
+                    <TextBlock x:Name="NodeTitle"
+                               Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <ItemsControl x:Name="NodeRows">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding}" FontFamily="Consolas"
+                                           Style="{StaticResource BodyTextBlockStyle}" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
             </StackPanel>
         </ScrollViewer>
 

@@ -550,6 +550,39 @@ bool IpcServer::handle(const std::shared_ptr<Client>& client, const ipc::Header&
         w.str(player_->profile_text());
         return client->send(ipc::frame(ipc::Kind::profile_reply, id, w));
     }
+    case ipc::Kind::surface: {
+        const std::uint32_t pid = r.u32();
+        if (!r.complete()) {
+            return malformed();
+        }
+        const std::uint64_t mine = player_->surface();
+        if (mine == 0) {
+            // Not an error: no picture in the current track, or a presenter
+            // drawing into a window. A shell with no surface draws that.
+            w.u64(0);
+            return client->send(ipc::frame(ipc::Kind::surface_reply, id, w));
+        }
+        // **Duplicated by the engine, into the process that asked.** A `HANDLE`
+        // is a number in one process and nothing in another, and the side that
+        // owns the surface is the side that should decide who gets one. The
+        // duplicate is the shell's to close; this one stays ours, which is the
+        // rule `video_d3d11`'s destructor already follows.
+        HANDLE theirs = nullptr;
+        const HANDLE process = OpenProcess(PROCESS_DUP_HANDLE, FALSE, pid);
+        if (process == nullptr) {
+            return fail("that process would not take a handle");
+        }
+        const BOOL copied =
+            DuplicateHandle(GetCurrentProcess(), reinterpret_cast<HANDLE>(
+                                                     static_cast<std::uintptr_t>(mine)),
+                            process, &theirs, 0, FALSE, DUPLICATE_SAME_ACCESS);
+        CloseHandle(process);
+        if (copied == FALSE) {
+            return fail("the surface handle would not duplicate");
+        }
+        w.u64(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(theirs)));
+        return client->send(ipc::frame(ipc::Kind::surface_reply, id, w));
+    }
     case ipc::Kind::engine_settings: {
         if (!r.complete()) {
             return malformed();

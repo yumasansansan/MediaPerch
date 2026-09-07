@@ -15,6 +15,7 @@
 #include "mediaperch/negotiation.hpp"
 #include "mediaperch/platform.hpp"
 #include "mediaperch/protocol.hpp"
+#include "mediaperch/win_headers.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -53,6 +54,10 @@ usage: mediaperch-cli [--pipe NAME] COMMAND [arguments]
   node ID [KEY VAL] one node's own settings, or change one of them. `graph`
                     gives the ids
   modules           every module that is loaded, with its kind and priority
+  surface           the composition surface the picture is drawn into, duplicated
+                    into this process. Mostly a way to see whether there is one:
+                    a shell puts it in a visual, and this one prints it and
+                    closes it again
   engine [KEY VAL]  the [engine] half of the settings file: where it listens,
                     where modules are, which may load, which readers to prefer,
                     where the profile is. **These take effect at the next
@@ -366,6 +371,31 @@ int main(int argc, char** argv)
             std::printf("%-16s %-24s %s\n", row.key.c_str(), row.value.c_str(),
                         row.description.c_str());
         }
+        return 0;
+    }
+    if (command == "surface") {
+        w.u32(GetCurrentProcessId());
+        if (!client.call(mp::ipc::Kind::surface, w, reply, body, why)) {
+            return fail(why);
+        }
+        if (static_cast<mp::ipc::Kind>(reply.kind) != mp::ipc::Kind::surface_reply) {
+            return fail(mp::win::error_text(reply, body));
+        }
+        mp::ipc::Reader r{body.data(), body.size()};
+        const std::uint64_t handle = r.u64();
+        if (!r.complete()) {
+            return fail("the engine sent a surface this build cannot read");
+        }
+        if (handle == 0) {
+            std::printf("no surface: nothing is showing a picture, or the presenter "
+                        "draws into a window\n");
+            return 0;
+        }
+        std::printf("surface    0x%llx, duplicated into this process\n",
+                    static_cast<unsigned long long>(handle));
+        // **Ours now, so ours to close.** A handle a shell keeps is a
+        // composition surface the engine cannot let go of.
+        CloseHandle(reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(handle)));
         return 0;
     }
     if (command == "engine") {

@@ -139,6 +139,15 @@ public:
     /// say what is pacing the picture, which is a thing worth printing.
     [[nodiscard]] IFrameClock* clock() noexcept { return own_frames_.get(); }
 
+    /// **The composition surface, as the number §9.7.1 says it is.** Zero for a
+    /// presenter drawing into a window, or one that has not been configured.
+    ///
+    /// Read off the settings surface rather than through an entry point of its
+    /// own: the handle has to cross a process boundary and `describe` is where
+    /// a presenter prints one, so reading it back here is the same conversation
+    /// with one fewer process in it.
+    [[nodiscard]] std::uint64_t surface() noexcept;
+
     /// Cancels the frame clock and joins. Safe twice, and safe unopened.
     void stop() noexcept;
 

@@ -89,6 +89,10 @@ const char* kind_name(Kind k) noexcept
         return "engine_setting_set";
     case Kind::engine_settings_reply:
         return "engine_settings_reply";
+    case Kind::surface:
+        return "surface";
+    case Kind::surface_reply:
+        return "surface_reply";
     case Kind::profile_reply:
         return "profile_reply";
     case Kind::subscribe:

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+using MediaPerch.Shell.Canvas;
 using MediaPerch.Shell.Ipc;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -26,13 +27,13 @@ namespace MediaPerch.Shell;
 public sealed partial class MainWindow : Window
 {
     private readonly EngineClient _engine = new();
-    private readonly List<string> _nodes = new();
+    private readonly List<string> _rows = new();
 
     public MainWindow()
     {
         InitializeComponent();
         Title = "MediaPerch";
-        Nodes.ItemsSource = _nodes;
+        Shape.SettingsWanted += node => _ = ShowNodeAsync(node);
         _ = ReconnectAndRefreshAsync();
     }
 
@@ -93,27 +94,54 @@ public sealed partial class MainWindow : Window
 
     private async Task RefreshGraphAsync()
     {
-        _nodes.Clear();
         Answer? answer = await _engine.CallAsync(Kind.Graph);
-        if (answer is not null && answer.Value.Is(Kind.GraphReply))
+        if (answer is null || !answer.Value.Is(Kind.GraphReply))
         {
-            Reader r = answer.Value.Reader();
-            Graph graph = Decode.ReadGraph(r);
-            foreach (Node node in graph.Nodes)
+            Shape.Show(new Graph());
+            return;
+        }
+        Reader r = answer.Value.Reader();
+        Graph graph = Decode.ReadGraph(r);
+        if (!r.Complete)
+        {
+            Connection.Severity = InfoBarSeverity.Warning;
+            Connection.Title = "The graph has fields this shell does not know";
+            return;
+        }
+        // **Drawn from what came back, every time.** Nothing about the shape is
+        // remembered here: §10 says the engine derives it and a second model in
+        // the shell would be the one that drifted.
+        Shape.Show(graph);
+        NodePanel.Visibility = Visibility.Collapsed;
+    }
+
+    /// <summary>
+    /// One node's own settings, which is what the button on it opens.
+    /// </summary>
+    private async Task ShowNodeAsync(Node node)
+    {
+        _rows.Clear();
+        var payload = new Writer();
+        payload.Str(node.Id);
+        Answer? answer = await _engine.CallAsync(Kind.NodeSettings, payload.Bytes());
+        if (answer is not null && answer.Value.Is(Kind.NodeSettingsReply))
+        {
+            foreach (Setting row in Decode.ReadSettings(answer.Value.Reader()))
             {
-                string module = node.Module.Length == 0 ? string.Empty : $"  [{node.Module}]";
-                _nodes.Add($"{node.Id,-12} {node.Kind,-12} {node.Name}{module}");
-            }
-            foreach (Edge edge in graph.Edges)
-            {
-                _nodes.Add($"             {edge.From} → {edge.To}");
+                _rows.Add($"{row.Key,-18} {row.Value,-24} {row.Description}");
             }
         }
-        // Rebinding rather than mutating, because `List<T>` says nothing when it
-        // changes and a canvas that quietly did not update would be worse than
+        NodeTitle.Text = node.Module.Length == 0 ? node.Id : $"{node.Id}  —  {node.Module}";
+        if (_rows.Count == 0)
+        {
+            _rows.Add("(this node has no settings of its own)");
+        }
+        // Rebinding rather than mutating: `List<T>` says nothing when it
+        // changes, and a panel that quietly did not update would be worse than
         // one that flickers.
-        Nodes.ItemsSource = null;
-        Nodes.ItemsSource = _nodes;
+        NodeRows.ItemsSource = null;
+        NodeRows.ItemsSource = _rows;
+        NodePanel.Visibility = Visibility.Visible;
     }
 
     private async void OnRefresh(object sender, RoutedEventArgs e)

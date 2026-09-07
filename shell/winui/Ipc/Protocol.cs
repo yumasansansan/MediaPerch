@@ -13,7 +13,7 @@ namespace MediaPerch.Shell.Ipc;
 /// the engine answers <c>error</c> to a kind it does not know -- so a shell that
 /// is ahead of its engine is told, rather than reading a field that moved.
 /// </remarks>
-internal static class Protocol
+public static class Protocol
 {
     public const uint Magic = 0x5049504Du;
     public const ushort Version = 1;
@@ -28,7 +28,7 @@ internal static class Protocol
 /// What a message is. Numbered in three ranges so that reading a trace tells
 /// you which direction it was going without a table.
 /// </summary>
-internal enum Kind : ushort
+public enum Kind : ushort
 {
     // requests, shell to engine
     Hello = 1,
@@ -78,7 +78,7 @@ internal enum Kind : ushort
     EventLog = 201,
 }
 
-internal enum PlayState : uint
+public enum PlayState : uint
 {
     Stopped = 0,
     Playing = 1,
@@ -86,7 +86,7 @@ internal enum PlayState : uint
 }
 
 /// <summary>What a node is. Numbers rather than words, as the wire has them.</summary>
-internal enum NodeKind : uint
+public enum NodeKind : uint
 {
     Source = 0,
     Convert = 1,
@@ -98,36 +98,36 @@ internal enum NodeKind : uint
 }
 
 [Flags]
-internal enum NodeFlags : uint
+public enum NodeFlags : uint
 {
     None = 0,
     Removable = 1 << 0,
     Settable = 1 << 1,
 }
 
-internal readonly record struct Header(uint Magic, ushort Version, Kind Kind, uint Id,
+public readonly record struct Header(uint Magic, ushort Version, Kind Kind, uint Id,
                                        uint Payload);
 
-internal sealed record Node(string Id, NodeKind Kind, string Module, string Name,
+public sealed record Node(string Id, NodeKind Kind, string Module, string Name,
                             NodeFlags Flags);
 
-internal sealed record Edge(string From, string To);
+public sealed record Edge(string From, string To);
 
-internal sealed class Graph
+public sealed class Graph
 {
     public List<Node> Nodes { get; } = new();
     public List<Edge> Edges { get; } = new();
 }
 
-internal sealed record Setting(string Key, string Value, string Description);
+public sealed record Setting(string Key, string Value, string Description);
 
-internal sealed record ModuleRow(uint Kind, string Id, string Name, uint Priority,
+public sealed record ModuleRow(uint Kind, string Id, string Name, uint Priority,
                                  bool Allowed);
 
-internal sealed record Format(uint SampleRate, uint Channels, uint ChannelMask,
+public sealed record Format(uint SampleRate, uint Channels, uint ChannelMask,
                               uint SampleType, uint Encoding, uint ValidBits);
 
-internal sealed class Status
+public sealed class Status
 {
     public PlayState State { get; init; }
     public uint Index { get; init; }
@@ -147,7 +147,7 @@ internal sealed class Status
 }
 
 /// <summary>Decoding, kept beside the types it decodes.</summary>
-internal static class Decode
+public static class Decode
 {
     public static Format ReadFormat(Reader r) =>
         new(r.U32(), r.U32(), r.U32(), r.U32(), r.U32(), r.U32());

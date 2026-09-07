@@ -264,6 +264,15 @@ public:
 
     /// Every module that could be a node, from the host.
     [[nodiscard]] std::vector<ipc::ModuleRow> modules() const;
+
+    /// **The composition surface the picture is being drawn into** (§9.7.1), or
+    /// zero when there is none.
+    ///
+    /// A number, because that is what a `HANDLE` is once it has to cross a
+    /// process boundary. Making it valid in another process is the head's --
+    /// duplicating one is not something the core can do -- so this hands over
+    /// the value and says nothing about who may have it.
+    [[nodiscard]] std::uint64_t surface() const;
     /// The buffering profile to consult (§9.8.2). Takes effect on the next
     /// track, because the ring is decided when a graph is built.
     void use_profile(Profile profile);

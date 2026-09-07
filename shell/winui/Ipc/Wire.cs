@@ -19,7 +19,7 @@ namespace MediaPerch.Shell.Ipc;
 /// copying a struct, so the format is the same on a machine that is not.
 /// </para>
 /// </remarks>
-internal sealed class Writer
+public sealed class Writer
 {
     private readonly List<byte> _out = new();
 
@@ -74,7 +74,7 @@ internal sealed class Writer
 /// is false, so a caller decodes a whole message and asks once at the end. That
 /// is the only way the check actually gets written.
 /// </remarks>
-internal sealed class Reader
+public sealed class Reader
 {
     private readonly byte[] _data;
     private int _at;

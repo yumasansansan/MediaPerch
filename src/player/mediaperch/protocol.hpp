@@ -151,6 +151,23 @@ enum class Kind : std::uint16_t {
     /// editing exactly those.
     engine_settings = 26,
     engine_setting_set = 27,
+    /// **The picture, as a handle a shell can use** (§9.7.1).
+    ///
+    /// The engine draws into a composition surface it made and never shows; a
+    /// shell puts that surface in a visual and commits, and from then on the
+    /// frames it composites are frames that crossed no boundary. This is the
+    /// one message that gets the handle across.
+    ///
+    /// **The shell sends its own process id and the engine duplicates.** A
+    /// `HANDLE` is a number in one process and nothing in another, so the value
+    /// has to be made valid on the far side by somebody -- and the engine is
+    /// the side that should decide who gets one. A shell that asked for a
+    /// surface and was refused is a shell with no picture, which is a state it
+    /// has to be able to draw anyway.
+    ///
+    /// The reply is `u64`, and zero means there is nothing to show: no picture
+    /// in the current track, or a presenter that draws into a window instead.
+    surface = 28,
 
     // --- replies, engine to shell ---
     ok = 128,
@@ -165,6 +182,7 @@ enum class Kind : std::uint16_t {
     node_settings_reply = 137,
     modules_reply = 138,
     engine_settings_reply = 139,
+    surface_reply = 140,
 
     // --- events, engine to shell, unasked ---
     event_state = 200,
