@@ -117,8 +117,18 @@ internal sealed class Session
     /// </remarks>
     public async Task EnsureEngineAsync()
     {
-        if (Engine.Connected || await Engine.ConnectAsync(1000, CancellationToken.None))
+        if (Engine.Connected)
         {
+            EngineNote = string.Empty;
+            return;
+        }
+        if (await Engine.ConnectAsync(1000, CancellationToken.None))
+        {
+            // Somebody else's engine -- a terminal's, or a shell's that is
+            // still running -- and not necessarily the build this shell was
+            // built beside. Said, because *which mediaperchd is this* is the
+            // first question when the engine does something unexpected.
+            Log("engine: one was already listening; this shell did not start it");
             EngineNote = string.Empty;
             return;
         }
@@ -128,6 +138,7 @@ internal sealed class Session
             EngineNote = $"no engine: {path} is not there";
             return;
         }
+        Log($"engine: starting {path} (built {File.GetLastWriteTime(path):yyyy-MM-dd HH:mm:ss})");
         try
         {
             _started = Process.Start(new ProcessStartInfo(path)

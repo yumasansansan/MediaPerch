@@ -299,8 +299,12 @@ public sealed partial class NowPlayingPage : Page
         {
             _picture.Detach(Picture);
             CloseSurface();
+            // **The same sentence `ShowStatus` writes, not a blank.** This runs
+            // a moment after every status, and a blank here took the engine's
+            // reason for stopping off the page each second, an instant after
+            // it went up: a line that flickered and could not be read.
             PictureLine.Text = Session.Current.Status.State == PlayState.Stopped
-                ? string.Empty
+                ? Session.Current.Status.Error
                 : "No picture in this track.";
             return;
         }

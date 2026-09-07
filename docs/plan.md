@@ -5718,6 +5718,14 @@ the boundary and stops, 0 underruns and no error. At the queue's level a list of
 `{null, a, null, null, c, null}` plays `a` then `c` byte for byte, and a *next* from inside `a`
 lands on `c`.
 
+**And then the sentence flickered.** Two writers on one line: `ShowStatus` put the engine's
+reason up on every status, and the picture refresh, a moment behind it, found no surface and
+blanked the line — once a second, for as long as the file was refused, which read as something
+appearing and vanishing too fast to be read. The refresh writes the same sentence now. While at
+it the shell logs which engine it started, with the build time, or that one was already
+listening and it started none: *which mediaperchd is this* is the first question when the
+engine does something unexpected, and the log did not answer it.
+
 
 #### Built, and the palette needed a fourth verb
 
