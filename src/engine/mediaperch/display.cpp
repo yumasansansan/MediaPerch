@@ -52,15 +52,15 @@ bool same(const ClockSpec& a, const ClockSpec& b) noexcept
 
 } // namespace
 
-DisplayLoop::DisplayLoop(VideoGraph& graph, IAudioClockSource& audio,
+DisplayLoop::DisplayLoop(VideoGraph& graph, IMediaClock& follow,
                          IFrameClock& frames, double origin_seconds) noexcept
-    : graph_(&graph), audio_(&audio), frames_(&frames), origin_seconds_(origin_seconds)
+    : graph_(&graph), follow_(&follow), frames_(&frames), origin_seconds_(origin_seconds)
 {
 }
 
 void DisplayLoop::refresh_spec()
 {
-    ClockSpec spec = audio_->spec();
+    ClockSpec spec = follow_->spec();
     // The graphs leave this zero because the counter is the caller's; the frame
     // clock is the caller, and its ticks are what the readings are stamped
     // with. Filled here so the two cannot come from different counters.
@@ -169,13 +169,13 @@ bool DisplayLoop::once(DisplayStep& out)
 
     refresh_spec();
     ClockReading reading{};
-    if (audio_->read(reading)) {
+    if (follow_->read(reading)) {
         clock_.observe(reading);
     }
 
     if (!clock_.ready()) {
-        // Nothing is playing, or the sink has no clock. Either way there is no
-        // master to decide against, and §8 says a picture is not drawn against
+        // Nothing is playing, or the sink has no clock. Either way there is
+        // nothing to decide against, and §8 says a picture is not drawn against
         // a guess. The one already up stays up.
         ++stats_.without_clock;
         out.step = VideoGraph::Step::repeated;

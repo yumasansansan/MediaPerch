@@ -244,6 +244,12 @@ struct Status {
     /// Which playlist item, and how far into the queue in its own frames.
     std::uint32_t index = 0;
     std::uint32_t count = 0;
+    /// What `position`, `length` and `item_position` count in: the source's
+    /// rate while audio plays, and the video engine's own clock's -- 1000, so
+    /// milliseconds -- while a picture with no audio plays alone. **Not the
+    /// source format's rate**, which a file with no audio does not have; a
+    /// shell that divided by that showed nothing for such a file.
+    std::uint32_t clock_rate = 0;
     std::uint64_t position = 0;
     /// The current item's length, or zero when nobody knows -- a stream, or a
     /// decoder that will not say.

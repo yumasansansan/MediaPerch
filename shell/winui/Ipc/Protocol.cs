@@ -144,6 +144,13 @@ public sealed class Status
     public PlayState State { get; init; }
     public uint Index { get; init; }
     public uint Count { get; init; }
+    /// <summary>
+    /// What <see cref="Position"/>, <see cref="Length"/> and
+    /// <see cref="ItemPosition"/> count in: the source's rate while audio
+    /// plays, and the video engine's own clock's (milliseconds) while a
+    /// picture with no audio plays alone.
+    /// </summary>
+    public uint ClockRate { get; init; }
     public ulong Position { get; init; }
     public ulong Length { get; init; }
     /// <summary>
@@ -175,6 +182,7 @@ public static class Decode
         var state = (PlayState)r.U32();
         uint index = r.U32();
         uint count = r.U32();
+        uint clockRate = r.U32();
         ulong position = r.U64();
         ulong length = r.U64();
         ulong itemPosition = r.U64();
@@ -193,6 +201,7 @@ public static class Decode
             State = state,
             Index = index,
             Count = count,
+            ClockRate = clockRate,
             Position = position,
             Length = length,
             ItemPosition = itemPosition,

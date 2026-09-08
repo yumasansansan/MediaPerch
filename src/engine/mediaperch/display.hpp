@@ -7,15 +7,19 @@
 // already makes. Waiting for a display and reading a performance counter are
 // platform; deciding what to do each time round is not, and it is the part
 // worth testing. So a fake frame clock that returns immediately five hundred
-// times, and a fake audio clock that runs fast or stops, produce the same
+// times, and a fake clock to follow that runs fast or stops, produce the same
 // decisions here that a real display and a real sound card would.
 //
-// **Two clocks, and they are not the same one.** The audio device says where
-// the sound is -- §8's master -- and the display says when a picture may be
-// drawn. Neither can be derived from the other: a 60 Hz display and a 24 fps
-// film share no factor, and an audio device's crystal is not the display's.
+// **Two clocks, and they are not the same one.** The clock being followed says
+// where the presentation is -- the audio device when there is sound, the video
+// engine's own `FreeClock` when there is not -- and the display says when a
+// picture may be drawn. Neither can be derived from the other: a 60 Hz display
+// and a 24 fps film share no factor, and an audio device's crystal is not the
+// display's. Which clock is followed is the caller's policy; the loop follows
+// whatever `IMediaClock` it is handed, and the two cases are one code path.
 
 #include "mediaperch/avsync.hpp"
+#include "mediaperch/clock.hpp"
 #include "mediaperch/video.hpp"
 
 #include <atomic>
@@ -30,7 +34,7 @@ namespace mp {
 /// One object for both because they are one clock: the tick a frame is drawn
 /// at is the tick the audio clock has to be read against, and taking them from
 /// two sources would put a scheduling delay between them.
-class IFrameClock {
+class IFrameClock : public ITicks {
 public:
     IFrameClock() = default;
     IFrameClock(const IFrameClock&) = delete;
@@ -54,42 +58,8 @@ public:
     /// not say. A starting point only: `DisplayLoop` measures the real one,
     /// because a display that calls itself 60 Hz is usually 59.94.
     [[nodiscard]] virtual double nominal_interval() const { return 0.0; }
-    /// The counter `ClockReading::ticks` is stamped with.
-    [[nodiscard]] virtual std::uint64_t now() const = 0;
-    /// Its ticks per second.
-    [[nodiscard]] virtual std::uint64_t rate() const = 0;
-};
-
-/// Where §8's master clock comes from.
-///
-/// The graphs answer both of these and are the only things that know all of
-/// it; a test answers them with numbers it chose.
-class IAudioClockSource {
-public:
-    IAudioClockSource() = default;
-    IAudioClockSource(const IAudioClockSource&) = delete;
-    IAudioClockSource& operator=(const IAudioClockSource&) = delete;
-    IAudioClockSource(IAudioClockSource&&) = delete;
-    IAudioClockSource& operator=(IAudioClockSource&&) = delete;
-    virtual ~IAudioClockSource() = default;
-
-    [[nodiscard]] virtual ClockSpec spec() const = 0;
-    /// False when the device has no clock, which is a sink module that did not
-    /// implement `get_position`.
-    virtual bool read(ClockReading& out) = 0;
-};
-
-/// Either audio graph, as a clock. Both answer the same two calls.
-template <class Graph>
-class GraphClock final : public IAudioClockSource {
-public:
-    explicit GraphClock(Graph& graph) noexcept : graph_(&graph) {}
-
-    [[nodiscard]] ClockSpec spec() const override { return graph_->clock_spec(); }
-    bool read(ClockReading& out) override { return graph_->read_clock(out); }
-
-private:
-    Graph* graph_;
+    // `now` and `rate` are `ITicks`'s: the counter a frame is stamped with is
+    // the counter the readings it is decided against are stamped with.
 };
 
 /// One turn of a display loop.
@@ -108,8 +78,8 @@ struct DisplayStep {
 /// pumps it is not a detail this file can decide.
 class DisplayLoop final {
 public:
-    /// `origin_seconds` is **where this track began on the audio clock**, and
-    /// is not zero for anything but the first track of a run.
+    /// `origin_seconds` is **where this track began on the clock being
+    /// followed**, and is not zero for anything but the first track of a run.
     ///
     /// §8 makes the audio device the master clock, and a gapless queue is one
     /// stream to that device: the position it reports counts straight through
@@ -120,7 +90,7 @@ public:
     /// however long the first one was, and the loop drops all of them: measured
     /// as `decoded 24, dropped 24, shown 0` on the twentieth track of a
     /// one-second file.
-    DisplayLoop(VideoGraph& graph, IAudioClockSource& audio, IFrameClock& frames,
+    DisplayLoop(VideoGraph& graph, IMediaClock& follow, IFrameClock& frames,
                 double origin_seconds = 0.0) noexcept;
 
     DisplayLoop(const DisplayLoop&) = delete;
@@ -159,7 +129,7 @@ public:
         return parked_.load(std::memory_order_acquire);
     }
 
-    /// Where this track began on the audio clock. See the constructor.
+    /// Where this track began on the clock being followed. See the constructor.
     [[nodiscard]] double origin_seconds() const noexcept { return origin_seconds_; }
 
     struct Stats {
@@ -221,7 +191,7 @@ private:
     std::atomic<bool> parked_{false};
 
     VideoGraph* graph_;
-    IAudioClockSource* audio_;
+    IMediaClock* follow_;
     IFrameClock* frames_;
     double origin_seconds_ = 0.0;
     AvClock clock_;

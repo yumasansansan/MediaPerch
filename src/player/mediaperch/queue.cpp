@@ -18,8 +18,18 @@ bool Queue::open(std::string& why)
         return false;
     }
     const std::size_t from = index_;
-    current_ = first_from(index_);
+    bool silent = false;
+    current_ = first_from(index_, silent);
     if (current_ == nullptr) {
+        if (silent) {
+            // Not this queue's to play: an audio source cannot read a picture.
+            // The host that holds the playlist plays it on the video engine's
+            // clock, and asks for a queue again after it.
+            why = "the entry at " + std::to_string(index_) +
+                  " has no audio in it; its picture plays on the video engine's own clock";
+            stopped_ = QueueStop::silent;
+            return false;
+        }
         // The playlist knows why, entry by entry; this is the count. A host
         // that holds the playlist puts its words here instead.
         index_ = from;
@@ -44,12 +54,15 @@ bool Queue::open(std::string& why)
 
 bool Queue::jump(std::size_t index, std::uint64_t at)
 {
-    ISource* item = first_from(index);
+    bool silent = false;
+    ISource* item = first_from(index, silent);
     if (item == nullptr) {
         // "Next" on the last track is the end -- which is what it was when the
         // decoder was asked to skip instead -- and it is the end *here*, not
-        // after the rest of the track has played.
-        stopped_ = QueueStop::end;
+        // after the rest of the track has played. "Next" into a picture with
+        // no audio is the end of this queue for the same reason a format
+        // change is, and the host takes it from there.
+        stopped_ = silent ? QueueStop::silent : QueueStop::end;
         done_ = true;
         position_ = at;
         return true;
@@ -85,9 +98,10 @@ bool Queue::jump(std::size_t index, std::uint64_t at)
 bool Queue::advance()
 {
     std::size_t index = index_ + 1;
-    ISource* next = first_from(index);
+    bool silent = false;
+    ISource* next = first_from(index, silent);
     if (next == nullptr) {
-        stopped_ = QueueStop::end;
+        stopped_ = silent ? QueueStop::silent : QueueStop::end;
         return false;
     }
     // **The one thing a queue may not do.** Two tracks of different formats
@@ -111,16 +125,27 @@ bool Queue::advance()
     return true;
 }
 
-ISource* Queue::first_from(std::size_t& index)
+ISource* Queue::first_from(std::size_t& index, bool& silent)
 {
     // **An entry that will not open is walked past, not stopped at.** `at`
     // answers nullptr for one and for the end alike, and `size` is what tells
     // them apart. Nothing is silent about it: the playlist is what tried to
     // open the entry, and it says which and why.
+    //
+    // **A picture with no audio is stopped at, not walked past.** `at` answers
+    // nullptr for that too -- there is no audio to hand out -- and `silent` is
+    // what tells it from the other two. It is played, by the host, on the
+    // video engine's own clock; this queue ends in front of it exactly as it
+    // ends in front of another format, and another begins after it.
+    silent = false;
     const std::size_t count = playlist_->size();
     for (; index < count; ++index) {
         if (ISource* item = playlist_->at(index)) {
             return item;
+        }
+        if (playlist_->silent(index)) {
+            silent = true;
+            return nullptr;
         }
     }
     return nullptr;

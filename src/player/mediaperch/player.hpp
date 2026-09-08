@@ -32,11 +32,13 @@
 #include "mediaperch/processed.hpp"
 #include "mediaperch/buffering.hpp"
 #include "mediaperch/calibrate.hpp"
+#include "mediaperch/clock.hpp"
 #include "mediaperch/protocol.hpp"
 #include "mediaperch/queue.hpp"
 #include "mediaperch/sink.hpp"
 #include "mediaperch/source.hpp"
 #include "mediaperch/video.hpp"
+#include "mediaperch/video_host.hpp"
 #include "mediaperch/video_path.hpp"
 
 #include <atomic>
@@ -53,20 +55,13 @@ namespace mp {
 
 /// What the engine needs from the operating system it happens to be on.
 ///
-/// Eight things, and no more: open a file, open a device, find a filter, say
-/// something -- and, since §9.7.1's video path moved in here, open a presenter,
-/// open a video decoder, and answer when the next frame may be drawn.
-/// Everything else the engine does itself.
-///
-/// **The two new ones are doors, not policy.** Which presenter module is
-/// loaded and which decoder claims a codec is a registry's business, and a
-/// registry is a `LoadLibrary` away from being portable; what to do with what
-/// comes back -- hand the presenter's device to the decoder, build the graph,
-/// run the loop -- is `mp::VideoPath`, and that is here.
-class IEngineHost {
+/// The video engine's doors (`IVideoHost`) and four more: open a file, open a
+/// device, find a filter, and say something. Everything else the engine does
+/// itself. **The split is the video engine's independence made visible**: a
+/// product that wants the picture alone implements the base and links
+/// `MediaPerch::video`, and never sees a sink.
+class IEngineHost : public IVideoHost {
 public:
-    virtual ~IEngineHost() = default;
-
     /// Opens `path` with whichever demuxer claims it and whichever codec
     /// claims its audio. Returns nullptr and fills `why` when nothing does --
     /// which is a skipped track, not a failed playlist.
@@ -75,7 +70,8 @@ public:
     /// a host that returned a bare `ISource` and left the video to be opened
     /// separately would be returning one of two demuxers -- and a seek would
     /// then have to move both and land them on the same moment. `IMedia` is
-    /// the file, and what it hands out shares that position.
+    /// the file, and what it hands out shares that position. Either half may
+    /// be absent; see `IMedia::audio`.
     virtual std::unique_ptr<IMedia> open_media(const std::string& path,
                                                std::string& why) = 0;
 
@@ -86,15 +82,6 @@ public:
 
     /// A DSP stage by module id, or nullptr.
     [[nodiscard]] virtual const MpDspVtbl* dsp(const std::string& id) = 0;
-
-    /// The same for a video stage (§9.8.3). **A separate door because it is a
-    /// separate vtable**, not because finding a module is a different problem:
-    /// one that answered `void*` would be a door that had given up on saying
-    /// what it returns.
-    [[nodiscard]] virtual const MpVideoDspVtbl* video_dsp(const std::string&)
-    {
-        return nullptr;
-    }
 
     /// **Every module that is loaded**, for §10's palette: which kind, which
     /// id, what priority it declared, and whether §11's allow-list names it.
@@ -108,43 +95,6 @@ public:
     /// Whether an endpoint is there at all. Asked while waiting for one that
     /// was pulled out, so it must be cheap and must not disturb anything.
     [[nodiscard]] virtual bool device_ready(const std::string& want, bool shared) = 0;
-
-    /// Opens a presenter.
-    ///
-    /// `window` is the head's own and is opaque here -- an HWND on Windows.
-    /// **Null is the engine's case and not a degraded one**: §9.7.1 has a
-    /// windowless engine draw into a composition surface a shell composites,
-    /// and only a tool that owns a window passes one. `module` comes back with
-    /// which one it was, for the report.
-    virtual std::unique_ptr<Presenter> open_presenter(void* window, std::string& module,
-                                                      std::string& why) = 0;
-
-    /// When the next frame may be drawn, for a presenter that has one.
-    ///
-    /// **Asked after `configure`, and that is why it is not part of opening
-    /// one.** A composition presenter has no swap chain until it has been given
-    /// a picture, and the event the compositor sets is made with the chain;
-    /// a caller that wanted the clock at `open` would be asking before there
-    /// was one. A window presenter could answer earlier and does not, because
-    /// two ways of getting a clock is the drift this door exists to avoid.
-    ///
-    /// Null is a real answer: an off-screen presenter has nothing to pace on,
-    /// and the caller supplies its own clock or does not draw. Nothing here can
-    /// be built in the core -- a vertical blank and a waitable handle are both
-    /// an operating system's, which is what puts this behind this interface at
-    /// all.
-    [[nodiscard]] virtual std::unique_ptr<IFrameClock> frame_clock(Presenter& presenter,
-                                                                   void* window) = 0;
-
-    /// A decoder for `codec`: best first, and the next one when the best
-    /// declines -- the rule `open_source` follows, and for a case that was
-    /// measured rather than imagined (see §9.8.1's note on codec_mft).
-    ///
-    /// `device` is the presenter's, or null for a decoder that works in system
-    /// memory. §9.8.1 is why it is passed rather than made.
-    virtual std::unique_ptr<VideoDecoder> open_video_decoder(
-        MpCodec codec, const MpGraphicsDevice* device, const std::uint8_t* config,
-        std::uint32_t config_bytes, std::string& module, std::string& why) = 0;
 
     /// One line for the log tail. Called from the engine thread.
     virtual void log(const std::string& line) = 0;
@@ -350,6 +300,8 @@ private:
         format_change, ///< the next track needs the device reopened
         rebuild,       ///< a setting changed that the graph is built from
         failed,        ///< it could not start at all
+        advanced,      ///< a picture on its own was told "next"
+        retreated,     ///< ... or "previous", from near its start
     };
 
     struct Request {
@@ -373,6 +325,11 @@ private:
     void play_request(const Request& request);
     /// One device, one graph. Returns why it ended and where it was.
     RunEnd play_run(Queue& queue, Playlist& playlist, std::uint64_t& position);
+    /// One picture with no audio, on the video engine's own clock, until it
+    /// ends or something interrupts it. The other shape of a run: no device,
+    /// no graph, and the transport talks to the clock.
+    RunEnd play_alone(Playlist& playlist, std::size_t index, std::uint64_t from,
+                      std::uint64_t& position);
     template <typename Graph>
     RunEnd pump(Graph& graph, Playlist& playlist);
 
@@ -390,12 +347,13 @@ private:
     /// The next track on the picture that is already open, or false when it
     /// will not go there. See `VideoPath::retrack`.
     [[nodiscard]] bool retrack_video(IMedia& media, const VideoPath::Config& want);
-    /// Starts it against the clock the audio graph is now running on (§8).
-    /// Non-template so that `pump` can call it -- `GraphClock<Graph>` is an
-    /// `IAudioClockSource` and that is all this needs to know.
-    /// `origin_seconds` is where the track being *heard* began on the audio
-    /// clock. See `DisplayLoop`'s constructor and `Queue::index_at`.
-    void start_video(IAudioClockSource& audio, double origin_seconds = 0.0);
+    /// Starts it following `follow` -- the audio graph's clock, as `pump`
+    /// hands it -- or, when that is null, on the video engine's own clock.
+    /// Non-template so that `pump` can call it: `GraphClock<Graph>` is an
+    /// `IMediaClock` and that is all this needs to know. `origin_seconds` is
+    /// where the track being *heard* began on the clock being followed. See
+    /// `DisplayLoop`'s constructor and `Queue::index_at`.
+    void start_video(IMediaClock* follow, double origin_seconds = 0.0);
     void stop_video() noexcept;
     /// Drops the engine thread's reference, under the mutex.
     void forget_video();
@@ -434,6 +392,20 @@ private:
     Playlist* playlist_ = nullptr;
     PassthroughGraph* graph_a_ = nullptr;
     ProcessedGraph* graph_b_ = nullptr;
+    /// The picture playing on its own clock, and its file, for as long as
+    /// that run: what the transport moves when there is no graph. Set and
+    /// cleared under the mutex by the engine thread, as the graphs are.
+    VideoPath* alone_ = nullptr;
+    IMedia* alone_media_ = nullptr;
+    /// Its length in `VideoPath::k_own_rate`, from the container.
+    std::uint64_t alone_length_ = 0;
+    /// What `status.position` counts in for the current run: the source's
+    /// rate while audio plays, the video engine's clock's while a picture
+    /// plays alone.
+    std::uint32_t clock_rate_ = 0;
+    /// "Next" (+1) or "previous" (-1) asked of a picture on its own, which
+    /// ends its run: the engine thread reads it and walks.
+    std::atomic<int> step_wanted_{0};
 
     /// The picture, when the current track has one. Null for most files, which
     /// is not an error and is why nothing above tests it before playing.

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "mediaperch/display_win.hpp"
+#include "mediaperch/platform.hpp"
 
 #include "mediaperch/win_headers.hpp"
 
@@ -184,42 +185,6 @@ bool VBlankClock::wait()
 }
 
 // --------------------------------------------------------------------------
-// WallClock
-// --------------------------------------------------------------------------
-
-WallClock::WallClock(std::uint32_t rate) noexcept
-{
-    spec_.wire_rate = rate;
-    spec_.source_rate = rate;
-    // Filled by the loop from its frame clock, which is the same counter this
-    // stamps its readings with.
-    spec_.tick_rate = 0;
-}
-
-void WallClock::start() noexcept
-{
-    origin_ = qpc_now();
-    running_ = true;
-}
-
-bool WallClock::read(ClockReading& out)
-{
-    if (!running_) {
-        return false;
-    }
-    const std::uint64_t now = qpc_now();
-    const std::uint64_t elapsed = now >= origin_ ? now - origin_ : 0;
-    // Frames at the nominal rate, which is what a device would have played by
-    // now if there were one.
-    // One multiply before the divide, so a tick is not rounded away: an hour
-    // at ten megahertz times forty-eight thousand is 1.7e17, well inside
-    // sixty-four bits.
-    out.device_frames = elapsed * spec_.wire_rate / qpc_rate();
-    out.ticks = now;
-    return true;
-}
-
-// --------------------------------------------------------------------------
 // VideoWindow
 // --------------------------------------------------------------------------
 
@@ -328,10 +293,40 @@ bool CompositorClock::wait()
     // stop, which is a display loop that ends on its first turn.
     const DWORD woke = compositor_clock()(1, handles, 1000);
     if (woke == WAIT_OBJECT_0 + 1 || woke == WAIT_TIMEOUT) {
+        if (occluded_) {
+            occluded_ = false;
+            logf(MP_LOG_DEBUG, "compositor clock: ticking again");
+        }
         return !cancelled_.load(std::memory_order_acquire);
     }
-    // The stopping event, or a failure. Either way this loop is over.
-    return false;
+    if (woke == WAIT_OBJECT_0) {
+        // The stopping event: this loop is over.
+        return false;
+    }
+    // **Occluded is not stopped.** The compositor answers
+    // STATUS_GRAPHICS_PRESENT_OCCLUDED (0xC01E0006) rather than ticking while
+    // nothing of this process is on a screen -- a shell not attached yet, or
+    // one whose window is minimised -- and a loop that ended on that was a
+    // picture that ended eleven milliseconds into every file the engine played
+    // with nobody watching, which is exactly what a headless engine does most
+    // of the time. So the turn is paced by a timer instead, at about a
+    // refresh, until the compositor ticks again; the stopping event wakes the
+    // timer too, so a cancel is still heard at once. Any other answer is
+    // treated the same way, because the alternative is a picture that never
+    // comes back.
+    if (!occluded_) {
+        occluded_ = true;
+        logf(MP_LOG_DEBUG,
+             "compositor clock: the compositor answered 0x%08lX -- nothing of this process is "
+             "on a screen -- so turns are paced on a timer until it ticks again",
+             static_cast<unsigned long>(woke));
+    }
+    // Eight, which with the timer granularity a thread has by default comes
+    // out at about a refresh; sixteen measured as thirty-one.
+    if (WaitForSingleObject(handles[0], 8) == WAIT_OBJECT_0) {
+        return false;
+    }
+    return !cancelled_.load(std::memory_order_acquire);
 }
 
 std::uint64_t CompositorClock::now() const

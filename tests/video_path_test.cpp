@@ -127,9 +127,9 @@ private:
     std::atomic<bool> cancelled_{false};
 };
 
-/// An audio clock that has stopped, which is what a run with no audio looks
-/// like from here: the loop still turns, and it turns without a master.
-class NoClock final : public mp::IAudioClockSource {
+/// A clock to follow that has stopped: the loop still turns, and it turns with
+/// nothing to decide against.
+class NoClock final : public mp::IMediaClock {
 public:
     [[nodiscard]] mp::ClockSpec spec() const override { return {}; }
     bool read(mp::ClockReading&) override { return false; }
@@ -325,10 +325,12 @@ TEST_CASE("the loop runs on a thread of its own and ends when the display does",
 
     NoClock audio;
     CountedFrames frames{50};
-    REQUIRE(path.start(audio, frames, why));
+    REQUIRE(path.start(&audio, frames, why));
     CHECK(path.running());
     // Starting twice is a mistake and is refused rather than leaking a thread.
-    CHECK(!path.start(audio, frames, why));
+    CHECK(!path.start(&audio, frames, why));
+    // Following somebody else's clock, the engine's own is not made.
+    CHECK(path.own_clock() == nullptr);
 
     REQUIRE(mp::test::wait_for([&] { return path.ended(); }));
     path.stop();
@@ -337,9 +339,45 @@ TEST_CASE("the loop runs on a thread of its own and ends when the display does",
     // Fifty turns, and no more: the clock is what says when to stop, and the
     // loop asked it exactly as many times as it had answers.
     CHECK(path.loop().stats().turns == 50u);
-    // No master clock, so every one of them was a turn with nothing to decide
-    // against -- which is the audio-less case §8 describes and not an error.
+    // A stopped clock, so every one of them was a turn with nothing to decide
+    // against -- not an error, and not what a file with no audio gets either:
+    // that runs on the engine's own clock, in the test below.
     CHECK(path.loop().stats().without_clock == 50u);
+}
+
+TEST_CASE("a path with nothing to follow runs on the video engine's own clock",
+          "[video][path]")
+{
+    // **The video engine alone.** Started with no clock to follow, the path
+    // makes a `FreeClock` over its frame clock's counter and the picture goes
+    // up against that: every turn has a clock, frames are shown, and the
+    // clock's position is the frame clock's elapsed time.
+    const Fresh fresh;
+    {
+        const std::lock_guard lock{decoder_log().mutex};
+        decoder_log().frames = 10'000;
+    }
+    mp::test::Host host;
+    Endless feed;
+
+    mp::VideoPath path;
+    std::string why;
+    REQUIRE(path.open(host, nullptr, feed, picture(64, 48), MP_CODEC_AV1, nullptr, 0, {},
+                      why));
+
+    CountedFrames frames{50};
+    REQUIRE(path.start(nullptr, frames, why));
+    REQUIRE(path.own_clock() != nullptr);
+    REQUIRE(mp::test::wait_for([&] { return path.ended(); }));
+    path.stop();
+
+    CHECK(path.loop().stats().turns == 50u);
+    CHECK(path.loop().stats().without_clock == 0u);
+    CHECK(path.graph_stats().shown > 0u);
+    // Fifty turns of a sixtieth of a second, in the clock's milliseconds.
+    const std::uint64_t at = path.own_clock()->position();
+    CHECK(at >= 800u);
+    CHECK(at <= 900u);
 }
 
 TEST_CASE("stopping cancels the clock rather than waiting for it", "[video][path]")
@@ -362,7 +400,7 @@ TEST_CASE("stopping cancels the clock rather than waiting for it", "[video][path
 
     NoClock audio;
     SlowFrames frames;
-    REQUIRE(path.start(audio, frames, why));
+    REQUIRE(path.start(&audio, frames, why));
     REQUIRE(mp::test::wait_for([&] { return path.loop().stats().turns > 2u; }));
     CHECK(!path.ended());
 
@@ -397,7 +435,7 @@ TEST_CASE("a resize reaches the presenter while the loop is turning", "[video][p
 
     NoClock audio;
     SlowFrames frames;
-    REQUIRE(path.start(audio, frames, why));
+    REQUIRE(path.start(&audio, frames, why));
     REQUIRE(mp::test::wait_for([&] { return path.loop().stats().turns > 2u; }));
 
     REQUIRE(path.set_size(800, 600, why));

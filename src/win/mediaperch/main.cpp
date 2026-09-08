@@ -1466,7 +1466,7 @@ public:
         }
         opened_.resize(std::max(opened_.size(), index + 1));
         if (opened_[index]) {
-            return &opened_[index]->audio();
+            return opened_[index]->audio();
         }
         const std::string& path = options_->files[index];
         std::string why;
@@ -1479,10 +1479,14 @@ public:
             return nullptr;
         }
         opened_[index] = std::move(media);
-        return &opened_[index]->audio();
+        return opened_[index]->audio();
     }
 
     std::size_t size() const override { return options_->files.size(); }
+    bool silent(std::size_t index) const override
+    {
+        return index < opened_.size() && opened_[index] && opened_[index]->audio() == nullptr;
+    }
 
     [[nodiscard]] const std::string& decoder_name(std::size_t index) const
     {
@@ -1959,7 +1963,7 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
     /// Beside it, and hoisted for the same reason: what a ring period is a
     /// multiple of is the device's, and the report is written out here.
     std::uint32_t audio_period = 0;
-    std::unique_ptr<mp::IAudioClockSource> audio_clock;
+    std::unique_ptr<mp::IMediaClock> audio_clock;
     mp::Sink sink;
 
     if (have_audio && !options.no_audio) {
@@ -2088,18 +2092,14 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
     }
 
     if (audio_clock == nullptr) {
-        // **There is no master clock, and this says so rather than pretending.**
-        // §8's clock is the audio device: a crystal that is actually producing
-        // the sound somebody is listening to. A file with no audio track has
-        // none, and neither does a run that was told not to open one. The
-        // picture still has to go up at some rate, so the performance counter
-        // stands in -- and the line below is there because a person watching
-        // needs to know which of the two they are looking at.
-        std::printf("clock      the wall clock -- %s, so there is nothing to follow\n",
+        // **The video engine's own clock, and this says so.** A file with no
+        // audio track has no device clock to follow, and neither does a run
+        // that was told not to open one; the picture goes up on `FreeClock`,
+        // the same clock the engine plays a silent file on, and the line below
+        // is there because a person watching needs to know which of the two
+        // they are looking at.
+        std::printf("clock      the video engine's own -- %s, so there is nothing to follow\n",
                     have_audio ? "--no-audio was asked for" : "this file has no audio");
-        auto wall = std::make_unique<mp::win::WallClock>(48000);
-        wall->start();
-        audio_clock = std::move(wall);
     }
 
     // ---- the display loop
@@ -2133,7 +2133,7 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
     // that thread; what is left here is joining it before the clocks it waits
     // on stop existing, which is what the guard below is for. The
     // `std::thread` this replaced had the same requirement and no guard.
-    if (!video_path.start(*audio_clock, *frames, trouble)) {
+    if (!video_path.start(audio_clock.get(), *frames, trouble)) {
         std::fprintf(stderr, "%s\n", trouble.c_str());
         return 1;
     }
@@ -2369,7 +2369,28 @@ int play(const MpSinkVtbl& vtbl, const mp::win::ModuleRegistry& registry,
                 break;
             }
         }
-        if (run.rc != 0 || queue.stopped() != mp::QueueStop::format_change) {
+        if (run.rc != 0) {
+            return run.rc;
+        }
+        if (queue.stopped() == mp::QueueStop::silent) {
+            // A picture with no audio: `play` is the audio tool and walks past
+            // it, saying so. `show` is the command for a picture on its own.
+            start = queue.index() + 1;
+            while (start < options.files.size() && playlist.at(start) == nullptr) {
+                if (playlist.silent(start)) {
+                    std::printf("\nnext       %s has no audio in it; `show` is the command for a "
+                                "picture\n           on its own, and this one goes on to the entry "
+                                "after it.\n\n",
+                                options.files[start].c_str());
+                }
+                ++start;
+            }
+            if (start >= options.files.size()) {
+                return 0;
+            }
+            continue;
+        }
+        if (queue.stopped() != mp::QueueStop::format_change) {
             return run.rc;
         }
         // The one join a queue will not make. Saying so is the point: this is
@@ -3922,7 +3943,12 @@ int main(int argc, char** argv)
         }
         std::printf("decoder    %s%s\n", media->decoder().c_str(),
                     options.decoder_id.empty() ? "" : "  [forced]");
-        mp::ISource* source = &media->audio();
+        mp::ISource* source = media->audio();
+        if (source == nullptr) {
+            std::fprintf(stderr, "cannot %s %s: no audio in it\n", options.command.c_str(),
+                         options.file.c_str());
+            return 1;
+        }
 
         if (options.command == "decode") {
             return decode(*source, registry, options);

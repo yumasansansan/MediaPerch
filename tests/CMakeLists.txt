@@ -300,6 +300,20 @@ list(APPEND CMAKE_MODULE_PATH "${catch2_SOURCE_DIR}/extras")
 include(Catch)
 catch_discover_tests(mediaperch_tests)
 
+# **Either engine, alone.** Two programs that link one engine and not the
+# other, and use it: the link line is the proof, because a reference across
+# would be an unresolved symbol here and nowhere else. cmake/CorePurity.cmake
+# reads the includes for the same rule at the source level.
+add_executable(mediaperch_audio_alone audio_alone.cpp)
+target_link_libraries(mediaperch_audio_alone PRIVATE MediaPerch::audio mediaperch_flags)
+set_target_properties(mediaperch_audio_alone PROPERTIES FOLDER "tests")
+add_test(NAME audio_alone COMMAND mediaperch_audio_alone)
+
+add_executable(mediaperch_video_alone video_alone.cpp)
+target_link_libraries(mediaperch_video_alone PRIVATE MediaPerch::video mediaperch_flags)
+set_target_properties(mediaperch_video_alone PROPERTIES FOLDER "tests")
+add_test(NAME video_alone COMMAND mediaperch_video_alone)
+
 # Not a unit test: a rule about the tree, checked the same way and at the same
 # time as everything else.
 add_test(NAME core_purity

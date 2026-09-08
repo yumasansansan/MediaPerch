@@ -112,8 +112,9 @@ private:
     std::int64_t offset_ = 0;
 };
 
-/// An audio device whose position the test writes.
-class Dial final : public mp::IAudioClockSource {
+/// A clock to follow whose position the test writes: an audio device, as far
+/// as the loop can tell.
+class Dial final : public mp::IMediaClock {
 public:
     explicit Dial(std::uint32_t rate = 48000) noexcept
     {
@@ -699,4 +700,55 @@ TEST_CASE("a source that will not seek says so, and the picture is still sound",
     CHECK_FALSE(loop.parked());
     REQUIRE(loop.once(step));
     CHECK(standing.graph.error() == MP_OK);
+}
+
+TEST_CASE("the video engine's own clock counts, pauses and re-anchors like a device",
+          "[display][clock]")
+{
+    // **What a picture with no sound follows.** `FreeClock` counts a counter
+    // and answers `IMediaClock` exactly as an audio graph does: a pause is a
+    // count that stops, a seek is an anchor that moves while the count goes
+    // on, and a reading is stamped with the counter now even while paused --
+    // so a follower extrapolating from it does not walk off on its own.
+    CountedFrames counter{1000, 100'000}; // ten milliseconds a step, at ten megahertz
+    mp::FreeClock clock{counter, 1000};
+    mp::ClockReading reading{};
+    CHECK(!clock.read(reading)); // not started: nothing to follow yet
+
+    clock.start();
+    counter.wait();
+    counter.wait();
+    counter.wait();
+    REQUIRE(clock.read(reading));
+    CHECK(reading.device_frames == 30);
+    CHECK(reading.ticks == counter.now());
+    CHECK(clock.position() == 30);
+
+    clock.pause();
+    counter.wait();
+    counter.wait();
+    REQUIRE(clock.read(reading));
+    CHECK(reading.device_frames == 30);
+    CHECK(reading.ticks == counter.now());
+    CHECK(clock.paused());
+    clock.resume();
+    counter.wait();
+    CHECK(clock.position() == 40);
+
+    clock.seek(5000);
+    const mp::ClockSpec spec = clock.spec();
+    CHECK(spec.origin_device_frame == 40);
+    CHECK(spec.origin_source_frame == 5000);
+    counter.wait();
+    CHECK(clock.position() == 5010);
+    REQUIRE(clock.read(reading));
+    CHECK(reading.device_frames == 50); // the count went on through the seek
+
+    // Followed through the same arithmetic the audio device is followed with.
+    mp::AvClock followed;
+    mp::ClockSpec filled = clock.spec();
+    filled.tick_rate = counter.rate();
+    followed.configure(filled);
+    followed.observe(reading);
+    CHECK(followed.audible_frames(counter.now()) == Catch::Approx(5010.0));
 }

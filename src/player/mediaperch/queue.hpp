@@ -46,6 +46,10 @@ enum class QueueStop : std::uint32_t {
     /// The next item is in a different format. The host has to rebuild the
     /// graph around it, and there will be a gap because the device says so.
     format_change,
+    /// The next item has a picture and no audio. Nothing for a queue -- which
+    /// is an audio source -- to play, and not a skip either: the host plays it
+    /// on the video engine's own clock, and a queue starts again after it.
+    silent,
 };
 
 class Queue final : public ISource {
@@ -155,8 +159,9 @@ private:
     /// turns a seek into; see it for why. No track there is the end.
     [[nodiscard]] bool jump(std::size_t index, std::uint64_t at);
     /// The first entry at or after `index` that opens, leaving `index` on it;
-    /// nullptr, with `index` at the playlist's size, when none does.
-    [[nodiscard]] ISource* first_from(std::size_t& index);
+    /// nullptr when none does -- with `index` at the playlist's size, or on a
+    /// silent entry with `silent` set, which is where the walk stops.
+    [[nodiscard]] ISource* first_from(std::size_t& index, bool& silent);
 
     /// A boundary the queue has crossed: at queue frame `run_base` item
     /// `index` began, and it began at its own frame `item_base`.

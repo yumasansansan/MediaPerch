@@ -106,12 +106,17 @@ inline std::vector<std::uint8_t> pattern(std::size_t bytes, std::uint8_t seed)
 /// not that a router routes, which is packet_test.cpp's.
 class TapeMedia final : public IMedia {
 public:
-    TapeMedia(const Format& format, std::vector<std::uint8_t> data, bool with_video)
-        : audio_(format, std::move(data)), with_video_(with_video)
+    /// `with_audio` false is a file with a picture and no sound, which is a
+    /// file that plays on the video engine's own clock; `duration_ms` is what
+    /// its container would state.
+    TapeMedia(const Format& format, std::vector<std::uint8_t> data, bool with_video,
+              bool with_audio = true, std::uint64_t duration_ms = 0)
+        : audio_(format, std::move(data)), with_video_(with_video), with_audio_(with_audio),
+          duration_ms_(duration_ms)
     {
     }
 
-    [[nodiscard]] ISource& audio() noexcept override { return audio_; }
+    [[nodiscard]] ISource* audio() noexcept override { return with_audio_ ? &audio_ : nullptr; }
     [[nodiscard]] IPacketFeed* video() noexcept override
     {
         return with_video_ ? &feed_ : nullptr;
@@ -128,9 +133,20 @@ public:
         out.info.fps_num = 25;
         out.info.fps_den = 1;
         out.codec = MP_CODEC_AV1;
+        out.duration_ms = duration_ms_;
         return out;
     }
     [[nodiscard]] const std::string& decoder() const noexcept override { return by_; }
+    /// The one position, moved: the feed starts again from the frame at
+    /// `seconds`, in the picture's own ticks.
+    bool seek_picture(double seconds) override
+    {
+        if (!with_video_ || seconds < 0.0) {
+            return false;
+        }
+        feed_.rewind_to(static_cast<std::uint64_t>(seconds * 1000.0));
+        return true;
+    }
 
 private:
     /// A packet whenever asked, because what the audio does is the subject and
@@ -147,6 +163,7 @@ private:
             frame_ += 40;
             return MP_OK;
         }
+        void rewind_to(std::uint64_t frame) noexcept { frame_ = frame; }
 
     private:
         std::uint64_t frame_ = 0;
@@ -155,6 +172,8 @@ private:
     Tape audio_;
     Endless feed_;
     bool with_video_;
+    bool with_audio_;
+    std::uint64_t duration_ms_;
     std::string by_{"decode_test"};
 };
 
@@ -184,6 +203,11 @@ public:
             why = "no decoder recognised it";
             return nullptr;
         }
+        const auto silent = silent_.find(path);
+        if (silent != silent_.end()) {
+            return std::make_unique<TapeMedia>(found->second.first, found->second.second, true,
+                                               false, silent->second);
+        }
         return std::make_unique<TapeMedia>(found->second.first, found->second.second,
                                            with_video_.count(path) != 0);
     }
@@ -191,6 +215,13 @@ public:
     /// Says this file has a picture in it, so a `Player` test can watch the
     /// video path being opened, started and stopped.
     void add_video(const std::string& name) { with_video_.insert(name); }
+    /// A file with a picture and no audio at all, `duration_ms` long by its
+    /// container's account: what plays on the video engine's own clock.
+    void add_silent(const std::string& name, std::uint64_t duration_ms)
+    {
+        files_[name] = {Format{}, {}};
+        silent_[name] = duration_ms;
+    }
 
     /// §9.7.1's two doors, made of counters. **`VideoPath` cannot tell**, and
     /// that is the claim: it opens both through here, hands one's device to the
@@ -322,6 +353,7 @@ public:
 private:
     std::map<std::string, std::pair<Format, std::vector<std::uint8_t>>> files_;
     std::set<std::string> with_video_;
+    std::map<std::string, std::uint64_t> silent_;
     std::map<std::string, const MpDspVtbl*> dsp_;
     std::map<std::string, const MpVideoDspVtbl*> vdsp_;
     std::vector<ipc::ModuleRow> modules_;

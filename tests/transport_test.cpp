@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -95,17 +96,24 @@ std::vector<std::uint8_t> pattern(std::size_t bytes, std::uint8_t seed)
 /// A playlist over sources the test already holds.
 class Fixed final : public mp::IPlaylist {
 public:
-    explicit Fixed(std::vector<mp::ISource*> items) : items_(std::move(items)) {}
+    /// A null in the list is an entry that would not open -- or, when its
+    /// index is in `silent`, a picture with no audio: `at` says nothing there
+    /// either way, `size` says the list goes on, and `silent` tells the two
+    /// apart.
+    explicit Fixed(std::vector<mp::ISource*> items, std::set<std::size_t> silent = {})
+        : items_(std::move(items)), silent_(std::move(silent))
+    {
+    }
     mp::ISource* at(std::size_t index) override
     {
         return index < items_.size() ? items_[index] : nullptr;
     }
-    /// A null in the list is an entry that would not open: `at` says nothing
-    /// there, and `size` says the list goes on.
     std::size_t size() const override { return items_.size(); }
+    bool silent(std::size_t index) const override { return silent_.count(index) != 0; }
 
 private:
     std::vector<mp::ISource*> items_;
+    std::set<std::size_t> silent_;
 };
 
 /// Polls until something is true, because a fixed sleep in a test about threads
@@ -250,6 +258,54 @@ TEST_CASE("an entry that will not open is walked past, not stopped at", "[transp
     mp::Queue bare{nothing};
     REQUIRE_FALSE(bare.open(why));
     CHECK(why == "the playlist has nothing at 0");
+}
+
+TEST_CASE("a queue stops in front of a picture with no audio, as it does for a format",
+          "[transport][queue]")
+{
+    // An audio source cannot read a picture, so a queue ends in front of one
+    // and says so; the host plays it on the video engine's own clock and asks
+    // for a queue again after it. Not a skip: a skip is for what would not
+    // open, and this opened.
+    const auto first = pattern(1024, 7);
+    Tape a{cd_audio(), first};
+    Tape c{cd_audio(), pattern(1024, 8)};
+    Fixed playlist{{&a, nullptr, &c}, {1}};
+
+    mp::Queue queue{playlist};
+    std::string why;
+    REQUIRE(queue.open(why));
+
+    std::vector<std::uint8_t> got(4096);
+    std::size_t total = 0;
+    for (;;) {
+        const std::size_t read = queue.read(got.data(), got.size());
+        if (read == 0) {
+            break;
+        }
+        total += read;
+    }
+    CHECK(total == first.size()); // the first track, and not a byte of the third
+    CHECK(queue.stopped() == mp::QueueStop::silent);
+    CHECK(queue.index() == 0);
+
+    // A next into one is the same stop, from where the listener is.
+    Tape a2{cd_audio(), first};
+    Fixed again{{&a2, nullptr, &c}, {1}};
+    mp::Queue jumped{again};
+    REQUIRE(jumped.open(why));
+    REQUIRE(jumped.read(got.data(), 512) == 512);
+    jumped.request_next();
+    REQUIRE(jumped.seek(256));
+    CHECK(jumped.read(got.data(), got.size()) == 0);
+    CHECK(jumped.stopped() == mp::QueueStop::silent);
+
+    // And one that begins with a silent entry says whose it is.
+    Fixed leading{{nullptr, &c}, {0}};
+    mp::Queue front{leading};
+    REQUIRE_FALSE(front.open(why));
+    CHECK(why.find("has no audio in it") != std::string::npos);
+    CHECK(front.stopped() == mp::QueueStop::silent);
 }
 
 TEST_CASE("a queue will not join two formats, and says which", "[transport][queue]")

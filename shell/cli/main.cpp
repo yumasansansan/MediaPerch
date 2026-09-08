@@ -99,16 +99,21 @@ void print_status(const mp::ipc::Status& s)
         // **Into this track, against this track's length.** `position` is the
         // queue's coordinate and is what a seek speaks; printing it against a
         // track's length is how this said `0:14 / 0:01`.
-        std::printf("position   %s",
-                    seconds_text(s.item_position, s.source.sample_rate).c_str());
+        std::printf("position   %s", seconds_text(s.item_position, s.clock_rate).c_str());
         if (s.length != 0) {
-            std::printf(" / %s", seconds_text(s.length, s.source.sample_rate).c_str());
+            std::printf(" / %s", seconds_text(s.length, s.clock_rate).c_str());
         }
         std::printf("  (%llu frames into the queue)\n",
                     static_cast<unsigned long long>(s.position));
     }
     if (!s.decoder.empty()) {
         std::printf("decoder    %s\n", s.decoder.c_str());
+    }
+    if (s.device.empty() && s.state != mp::ipc::State::stopped && !s.track.empty()) {
+        // No device because there is no audio: the picture keeps its own
+        // clock, and the position above is in its milliseconds.
+        std::printf("audio      none in this track; the picture is on the video engine's "
+                    "own clock\n");
     }
     if (!s.device.empty()) {
         std::printf("device     %s\n", s.device.c_str());
@@ -287,18 +292,20 @@ int main(int argc, char** argv)
         if (end == text.c_str()) {
             return fail("`" + text + "` is not a number of seconds");
         }
-        // The engine counts in frames, so the conversion needs a rate, and the
-        // only honest source of one is what is playing now.
+        // The engine counts in frames of its clock -- the source's rate while
+        // audio plays, the picture's own clock's while a picture plays alone --
+        // and the only honest source of the rate is what is playing now.
         if (!client.call(mp::ipc::Kind::status, reply, body, why)) {
             return fail(why);
         }
         mp::ipc::Reader r{body.data(), body.size()};
         mp::ipc::Status status;
-        if (!read(r, status) || status.source.sample_rate == 0) {
+        if (!read(r, status) || status.clock_rate == 0 ||
+            status.state == mp::ipc::State::stopped) {
             return fail("nothing is playing, so there is nothing to seek in");
         }
         w.u8(relative ? 1u : 0u);
-        w.i64(static_cast<std::int64_t>(seconds * status.source.sample_rate));
+        w.i64(static_cast<std::int64_t>(seconds * status.clock_rate));
         if (!client.call(mp::ipc::Kind::seek, w, reply, body, why)) {
             return fail(why);
         }

@@ -1,15 +1,21 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
-// §8: the audio device is the master clock, and video is what moves.
+// §8: the picture follows a clock, and the clock is whoever leads.
 //
-// **The consequence is the opposite of the usual answer, and it is the reason
-// this file exists at all.** In exclusive passthrough there is no resampler, so
-// audio cannot be rate-matched to video: Path A hands the device the file's own
-// bytes and any adjustment would be a conversion this player did not announce.
-// So video drops or duplicates frames against the audio clock, always, and
-// nothing here can move audio in the other direction -- there is no method for
-// it, which is the strongest way to say it.
+// **Two engines, two clocks, one coupling, and this is it.** The audio engine
+// keeps the device's clock and the video engine keeps its own; when both play
+// one file the picture follows the sound, and this is the arithmetic that
+// makes it follow: a reading of the clock being followed and the tick a frame
+// would go up at go in, and where that frame stands against the clock comes
+// out. It is one-directional by policy and not by shape. In exclusive
+// passthrough there is no resampler, so audio cannot be rate-matched to
+// video: Path A hands the device the file's own bytes and any adjustment would
+// be a conversion this player did not announce. So the picture drops or
+// repeats frames against the clock it follows, and nothing here can move
+// audio -- there is no method for it, which is the strongest way to say it.
+// A picture with no sound follows the video engine's own `FreeClock` through
+// exactly this code, which is what makes the two cases one case.
 //
 // **No clock is read here.** `AvClock` is given a device reading and a
 // performance-counter tick and does arithmetic on them; it never calls
@@ -29,57 +35,14 @@
 // happens at the point of comparison, on numbers whose difference is a few
 // milliseconds.
 
+#include "mediaperch/clock.hpp"
+
 #include <cstdint>
 
 namespace mp {
 
-/// One reading of the device's clock: what it says it has played, and the
-/// performance-counter tick it said so at.
-///
-/// Both come from `MpSinkVtbl::get_position` in one call, and the pair is what
-/// makes extrapolation possible: a reading on its own is already out of date by
-/// the time anybody looks at it.
-struct ClockReading {
-    /// Device frames played since the stream started, in the *wire* format's
-    /// frames -- which is what the device counts and not always what the file
-    /// counts.
-    std::uint64_t device_frames = 0;
-    /// The performance counter when the device said so.
-    std::uint64_t ticks = 0;
-};
-
-/// The fixed facts a graph knows and a clock needs.
-///
-/// A graph is the one thing that knows all five: it owns the sink, it converted
-/// the source to the wire format, it built the DSP chain, and it remembers
-/// where the run began. See `PassthroughGraph::clock_spec`.
-struct ClockSpec {
-    /// What the device counts in.
-    std::uint32_t wire_rate = 0;
-    /// What the file counts in. The same number unless something in the chain
-    /// changed the rate, and then it is not, so the ratio is applied rather
-    /// than assumed away.
-    std::uint32_t source_rate = 0;
-    /// Ticks per second of whatever counter `ClockReading::ticks` came from.
-    std::uint64_t tick_rate = 0;
-    /// The DSP chain's, in wire frames. **What is audible is this far behind
-    /// what the device position says**: the frames coming out of the endpoint
-    /// went through the chain, and a linear-phase stage delayed them. Zero on
-    /// Path A, which has no chain in it by construction.
-    std::uint32_t latency_frames = 0;
-    /// The anchor. At device frame `origin_device_frame`, the source was at
-    /// `origin_source_frame`.
-    ///
-    /// **A seek moves it and does not stop the device.** The audio already
-    /// committed before a seek still plays, so the frame seeked to becomes
-    /// audible when the device reaches what had been *written* at that moment,
-    /// not what it had played. The graphs have kept exactly those two numbers
-    /// since gapless was written; nothing had read them against the device.
-    std::uint64_t origin_device_frame = 0;
-    std::uint64_t origin_source_frame = 0;
-};
-
-/// Where the audio leaving the speaker is, right now.
+/// Where the clock being followed is, right now: the audio leaving the
+/// speaker, or the video engine's own timeline.
 class AvClock {
 public:
     AvClock() = default;
@@ -93,9 +56,10 @@ public:
     /// crystal nobody here owns.
     void observe(const ClockReading& reading) noexcept;
 
-    /// Whether a reading has arrived. Before one has, there is no master clock
-    /// and nothing may be synchronised to it -- **not even approximately**,
-    /// which is why this is a question rather than a plausible zero.
+    /// Whether a reading has arrived. Before one has, there is nothing to
+    /// follow and nothing may be synchronised to it -- **not even
+    /// approximately**, which is why this is a question rather than a
+    /// plausible zero.
     [[nodiscard]] bool ready() const noexcept { return ready_; }
 
     [[nodiscard]] const ClockSpec& spec() const noexcept { return spec_; }

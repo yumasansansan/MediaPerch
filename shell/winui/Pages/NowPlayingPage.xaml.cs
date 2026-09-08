@@ -135,15 +135,20 @@ public sealed partial class NowPlayingPage : Page
             PictureLine.Text = status.Error;
         }
         ToolTipService.SetToolTip(TrackLine, nothing ? null : status.Track);
+        // A track with no audio has no wire format and no device: its picture
+        // is on the video engine's own clock, and the line says so rather
+        // than going blank.
         FormatLine.Text = status.Wire.SampleRate == 0
-            ? string.Empty
+            ? (nothing ? string.Empty : "No audio in this track  ·  the picture keeps its own clock")
             : $"{status.Wire.SampleRate} Hz, {status.Wire.Channels} ch"
               + (status.Processed ? ", processed" : ", bit-exact")
               + $"  ·  {status.Device}"
               + (status.Underruns == 0 ? string.Empty : $"  ·  {status.Underruns} underruns");
         PlayGlyph.Glyph = status.State == PlayState.Playing ? "" : "";
 
-        uint rate = status.Source.SampleRate;
+        // What the engine counts the position in: the source's rate, or the
+        // picture's own clock's when there is no audio to count in.
+        uint rate = status.ClockRate;
         if (nothing || rate == 0)
         {
             _rate = 0;
@@ -245,7 +250,7 @@ public sealed partial class NowPlayingPage : Page
 
     private async Task SeekBySecondsAsync(int seconds)
     {
-        uint rate = Session.Current.Status.Source.SampleRate;
+        uint rate = Session.Current.Status.ClockRate;
         if (rate != 0)
         {
             await Session.Current.SeekAsync((long)seconds * rate, true);

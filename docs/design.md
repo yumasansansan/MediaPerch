@@ -35,6 +35,36 @@ architecture than any taste question:
 - the bit-exact path and the DSP path are two separate graphs, not one graph with a
   branch, because a branch is a thing that can be wrong at 3 ms.
 
+### 3. The audio engine and the video engine are two engines, and either runs alone
+
+Neither is built on the other. `src/engine` is three libraries: `mediaperch_core`, which is
+formats, the module loaders, the interfaces a file is opened into and the clock the two
+engines hand each other; `mediaperch_audio`, which never includes a video header; and
+`mediaperch_video`, which never includes an audio one. `MediaPerch::engine` is the pair, for
+the player. A product that wants the picture and not the sound implements `IVideoHost` —
+four doors, none of them a sink — and links the video library; one that wants the sound links
+the audio library and brings its own transport. `tests/audio_alone.cpp` and
+`tests/video_alone.cpp` are each one link line and one run, and `cmake/CorePurity.cmake`
+reads the includes, so a header cannot cross over without a test going red.
+
+**Each engine keeps its own clock.** The audio engine's is the device: what it has played,
+stamped with when it said so (`IAudioClock2`, correlated with the performance counter). The
+video engine's is the display, which says when a frame may be drawn, and `FreeClock` — a
+count of the frame clock's own counter — for its timeline when there is nothing to follow.
+`IMediaClock` is the shape both answer, and `AvClock` in the video engine is the coupling:
+given readings of whichever clock leads, it says where the picture stands against it, and
+the loop shows, repeats or drops accordingly.
+
+**Which clock leads is a policy, and it is the player's.** When a file has both, the picture
+follows the sound — one-directional, because in exclusive passthrough there is no resampler
+and audio cannot be moved without becoming a conversion nobody announced; on Path B the
+reverse is possible in principle and is not built. When a file has no audio, the picture
+follows the video engine's own clock, and the player runs it without opening a device: no
+graph, no ring, and the transport talks to the clock. A file with no picture plays its sound
+as it always did. **A file with no audio is a file that plays**, and the rule this replaced —
+that the audio device was the master clock and a file without one was a skipped entry — was
+the wrong reading of the previous paragraph, made before the video engine could keep time.
+
 ## What follows from that
 
 | | Passthrough (default) | Processed |
@@ -811,23 +841,18 @@ next       …96000 Hz / 2 ch / S24_PACKED…, which this device cannot take wit
            being reopened. That is the gap, and it is not ours.
 ```
 
-**An entry that will not open is walked past.** `IPlaylist::at` answers nullptr for one and
-for the end alike, so the queue asks `size` as well and goes on to the next entry that opens
-— at open, at a boundary, and on a *next*. The playlist is what tried, and it writes
-*skipping `path`: why* to the log, once. A run that finds nothing to play from where it was
-asked to start stops with the playlist's own sentence — the last entry refused, by name, and
-how many there were — because that is the one a shell should show:
-
-```
-last error 3 entries would not open; the last, SDRSample.mkv: no audio track in it
-```
-
-And the reason is **the module that read the container's**, not the last module's tried.
-Those three are Windows' own HDR samples, VP9 with no audio track, which §8 rules out — the
-audio device is the clock, and a file with no audio has nothing to be played against.
-`demux_mkv` opened them and said so; `demux_ffmpeg`, ranked level with it and tried next,
-will not open a file with no audio stream, and its *the container would not open* was, for a
-while, the last word.
+**An entry that will not open is walked past, and a picture with no audio is stopped in
+front of.** `IPlaylist::at` answers nullptr for both and for the end alike, so the queue asks
+`size` and `silent` as well: past an entry that would not open it goes on to the next that
+does — at open, at a boundary, and on a *next* — and the playlist, which is what tried,
+writes *skipping `path`: why* to the log, once. In front of a picture with no audio it stops,
+exactly as it stops in front of another format, because an audio source cannot read a
+picture: the player runs that entry on the video engine's own clock (principle 3), with no
+device and no graph, and asks for a queue again after it. A run that finds nothing to play at
+all stops with the playlist's own sentence — the last entry refused, by name, and how many
+there were — because that is the one a shell should show, and the reason kept is **the module
+that read the container's**, not the last module's tried: a verdict on the contents outranks
+a verdict on the container from something that would not open it.
 
 It also does not remove the encoder's padding. That is the *container's*, and `demux_mpa`
 reads the LAME tag for exactly this reason -- the edit is a fact about the file, which is
@@ -1008,10 +1033,12 @@ hardware and no display: `tests/player_test.cpp` plays a playlist, pauses it, se
 a device and rebuilds, all against the same fake sink the graph tests use, and
 `tests/video_path_test.cpp` assembles the picture against a presenter made of counters.
 
-**Eight is not four, and the growth is the thing to watch.** Each of the two new doors was
-added with the rest of its work in the core — `mp::VideoPath` is the assembly and the doors
-only find modules — but an `IEngineHost` that keeps growing is a split drawn in the wrong
-place, and the count is written here so that the next addition has to argue with a number.
+**Nine is not four, and the growth is the thing to watch.** The four video doors are
+`IVideoHost`, the video engine's own, so a viewer implements those and nothing else;
+`IEngineHost` is that plus opening a file, a device, a filter, the module list and the log.
+`mp::VideoPath` is the assembly and the doors only find modules — but a host that keeps
+growing is a split drawn in the wrong place, and the count is written here so that the next
+addition has to argue with a number.
 
 **One thread owns the graph.** Commands arrive from whichever thread a shell is on and are
 either applied straight away, where the graph already promises that they are safe — pause,
@@ -1062,10 +1089,15 @@ kernel was writing into was a stack frame that had already gone.
 ## Layout
 
 ```
-src/engine/          portable, and **the half a DAW would take**. No OS headers — CI
-                     builds it alone to keep it that way. Formats, negotiation, the
-                     ring, the two graphs, the conversion, the DSP chain. It knows
-                     nothing about what to play next.
+src/engine/          portable, and **the half a DAW would take** — or a viewer would.
+                     Three libraries, built without each other: core (formats, the
+                     module loaders, the clock the two engines hand each other),
+                     audio (negotiation, the ring, the two graphs, the conversion,
+                     the DSP chain) and video (decoders, presenters, the display
+                     loop, the sync, and `VideoPath`, the assembly). No OS headers —
+                     CI builds it alone to keep it that way, and reads the includes
+                     to keep the two engines apart. It knows nothing about what to
+                     play next.
 src/player/          what decides that: the transport, the playlist, the settings
                      schema and the wire protocol a shell speaks. Portable on the
                      same terms, and it can see src/engine where src/engine cannot

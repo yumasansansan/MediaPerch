@@ -106,6 +106,136 @@ TEST_CASE("an engine opens the picture in a file and closes it with the track",
     player.shutdown();
 }
 
+TEST_CASE("a file with no audio plays its picture on the video engine's own clock",
+          "[player][video]")
+{
+    // **Two engines, two clocks, and here only one of them.** A file with a
+    // picture and no sound is not a skipped entry: the player runs it without
+    // a device or a graph, the picture paces on `VideoPath::own_clock`, the
+    // position is that clock's milliseconds, and the run ends when the
+    // picture does.
+    mp::test::presenter_log().reset();
+    mp::test::decoder_log().reset();
+    {
+        const std::lock_guard lock{mp::test::decoder_log().mutex};
+        // Thirty frames, forty milliseconds apart: 1.2 s of picture.
+        mp::test::decoder_log().frames = 30;
+    }
+    Host host;
+    host.add_silent("clip", 1200);
+    host.pace_with([] { return std::make_unique<Endless>(); });
+
+    mp::Player player{host};
+    player.start();
+    player.play({"clip"});
+    REQUIRE(wait_for_state(player, mp::ipc::State::playing));
+    CHECK(player.status().track == "clip");
+    CHECK(player.status().clock_rate == 1000u);
+    CHECK(player.status().length == 1200u);
+    CHECK(player.status().device.empty());
+    CHECK(player.status().source.sample_rate == 0u);
+    REQUIRE(wait_for([&] { return host.said("on the picture's own clock"); }));
+    REQUIRE(wait_for([&] { return player.status().item_position >= 100u; }));
+
+    // Ends when the picture does, with nothing to say.
+    REQUIRE(wait_for([&] { return player.status().state == mp::ipc::State::stopped; }, 8000));
+    CHECK(player.status().error.empty());
+    CHECK(player.status().underruns == 0u);
+    REQUIRE(wait_for([] {
+        const std::lock_guard lock{mp::test::decoder_log().mutex};
+        return !mp::test::decoder_log().open;
+    }));
+    player.shutdown();
+}
+
+TEST_CASE("a playlist walks from a song into a silent picture and out again",
+          "[player][video]")
+{
+    // The queue stops in front of the picture as it stops in front of another
+    // format; the picture plays on its own clock; a queue begins again after
+    // it. Three entries, three runs, one playlist.
+    mp::test::presenter_log().reset();
+    mp::test::decoder_log().reset();
+    {
+        const std::lock_guard lock{mp::test::decoder_log().mutex};
+        mp::test::decoder_log().frames = 20;
+    }
+    Host host;
+    host.add("song", pattern(4096, 2));
+    host.add_silent("clip", 800);
+    host.add("last", pattern(4096, 3));
+    host.pace_with([] { return std::make_unique<Endless>(); });
+
+    mp::Player player{host};
+    player.start();
+    player.play({"song", "clip", "last"});
+    REQUIRE(wait_for_state(player, mp::ipc::State::playing));
+    REQUIRE(wait_for([&] { return host.said("playing clip on the picture's own clock"); }, 8000));
+    REQUIRE(wait_for([&] { return player.status().track == "last"; }, 8000));
+    CHECK(player.status().clock_rate == 44100u);
+    REQUIRE(wait_for([&] { return player.status().state == mp::ipc::State::stopped; }, 8000));
+    CHECK(player.status().error.empty());
+    CHECK(host.said("the next entry has no audio in it"));
+    player.shutdown();
+}
+
+TEST_CASE("a picture on its own clock pauses, seeks, and steps between entries",
+          "[player][video]")
+{
+    // The transport with no graph under it: pause stops the clock, resume
+    // starts it, a seek moves the file and the anchor, and next and previous
+    // end the run and walk. The fake frame clock runs sixteen times faster
+    // than the wall, so the numbers below are the clock's and not the test's.
+    mp::test::presenter_log().reset();
+    mp::test::decoder_log().reset();
+    {
+        const std::lock_guard lock{mp::test::decoder_log().mutex};
+        mp::test::decoder_log().frames = 1'000'000;
+    }
+    Host host;
+    host.add_silent("clip", 60'000);
+    host.add_silent("second", 60'000);
+    host.pace_with([] { return std::make_unique<Endless>(); });
+
+    mp::Player player{host};
+    player.start();
+    player.play({"clip", "second"});
+    REQUIRE(wait_for_state(player, mp::ipc::State::playing));
+    REQUIRE(wait_for([&] { return player.status().item_position >= 50u; }));
+
+    player.pause();
+    REQUIRE(wait_for_state(player, mp::ipc::State::paused));
+    const std::uint64_t held = player.status().item_position;
+    std::this_thread::sleep_for(std::chrono::milliseconds{30});
+    CHECK(player.status().item_position == held);
+    player.resume();
+    REQUIRE(wait_for_state(player, mp::ipc::State::playing));
+    REQUIRE(wait_for([&] { return player.status().item_position > held; }));
+
+    // A seek lands where it was asked, in the clock's own milliseconds.
+    REQUIRE(player.seek(5000, false));
+    REQUIRE(wait_for([&] {
+        const std::uint64_t at = player.status().item_position;
+        return at >= 5000u && at < 7000u;
+    }));
+
+    // Previous from well in is the start of this one; next is the one after;
+    // previous from just after arriving is the one before.
+    player.previous();
+    REQUIRE(wait_for([&] { return player.status().item_position < 1000u; }));
+    CHECK(player.status().track == "clip");
+    player.next();
+    REQUIRE(wait_for([&] { return player.status().track == "second"; }));
+    CHECK(player.status().index == 1u);
+    player.previous();
+    REQUIRE(wait_for([&] { return player.status().track == "clip"; }));
+
+    player.stop();
+    REQUIRE(wait_for_state(player, mp::ipc::State::stopped));
+    CHECK(player.status().error.empty());
+    player.shutdown();
+}
+
 TEST_CASE("a file with no picture plays exactly as it did", "[player][video]")
 {
     // The ordinary case, and the one that must not have changed: nothing is

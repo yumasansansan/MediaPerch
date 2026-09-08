@@ -325,6 +325,7 @@ void write(Writer& w, const Status& s)
     w.u32(static_cast<std::uint32_t>(s.state));
     w.u32(s.index);
     w.u32(s.count);
+    w.u32(s.clock_rate);
     w.u64(s.position);
     w.u64(s.length);
     w.u64(s.item_position);
@@ -345,6 +346,7 @@ bool read(Reader& r, Status& s)
     s.state = static_cast<State>(r.u32());
     s.index = r.u32();
     s.count = r.u32();
+    s.clock_rate = r.u32();
     s.position = r.u64();
     s.length = r.u64();
     s.item_position = r.u64();

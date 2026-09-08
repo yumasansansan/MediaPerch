@@ -41,9 +41,11 @@ jobs:
   # head -- that is the portability claim -- and with no *player*, which is the
   # newer one: a transport, a playlist, a settings file and a wire protocol are
   # what a DAW would bring its own of, and until they were a separate library
-  # taking the engine meant taking them too. Building `mediaperch_engine` alone
-  # is what keeps that true, because the target does not have src/player on its
-  # include path and a reach across it will not compile.
+  # taking the engine meant taking them too. Building the engine's three
+  # libraries alone is what keeps that true, because none of them has
+  # src/player on its include path and a reach across it will not compile.
+  # **And a third cut**: the audio engine and the video engine are two of those
+  # three, built without each other, and the purity check reads their includes.
   core-alone:
     name: engine alone, no player and no platform head
     runs-on: windows-2025-vs2026
@@ -60,7 +62,7 @@ jobs:
         run: cmake --preset core-only
 
       - name: Build the engine, and nothing else
-        run: cmake --build --preset core-only --target mediaperch_engine
+        run: cmake --build --preset core-only --target mediaperch_core mediaperch_audio mediaperch_video
 
       - name: Build the player on top of it
         run: cmake --build --preset core-only --target mediaperch_player

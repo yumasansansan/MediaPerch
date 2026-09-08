@@ -1206,6 +1206,13 @@ try {
             out->total_frames = frames > gone ? frames - gone : 0;
         }
     }
+    if (t.kind == MP_STREAM_VIDEO && d->duration_scaled > 0.0) {
+        // **A picture's length, for a transport with no audio to count in.**
+        // The segment's Duration, in its own scale, to the millisecond -- which
+        // is what `duration_ms` is for and all that Matroska can state.
+        out->duration_ms = static_cast<std::uint64_t>(
+            d->duration_scaled * static_cast<double>(d->timestamp_scale) / 1'000'000.0);
+    }
     return MP_OK;
 } catch (...) {
     return MP_ERR_NO_MEMORY;

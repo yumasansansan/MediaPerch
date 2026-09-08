@@ -657,11 +657,15 @@ has and which it does not.
 All of them run as part of `ctest`, so they cannot be skipped by not remembering them.
 
 - **`core_purity`** greps `src/engine` and `src/player` for OS headers and platform
-  conditionals and fails the test run if either appears. `mediaperch_engine` is built alone
-  in CI as well, so the rule is enforced from two directions. That second build checks a
-  second rule for free: the engine target does not have `src/player` on its include path, so
-  an engine file reaching for the transport or the playlist is a `C1083`, not a review
-  comment.
+  conditionals and fails the test run if either appears. The engine's three libraries
+  (`mediaperch_core`, `mediaperch_audio`, `mediaperch_video`) are built alone in CI as well,
+  so the rule is enforced from two directions. That second build checks a second rule for
+  free: none of them has `src/player` on its include path, so an engine file reaching for
+  the transport or the playlist is a `C1083`, not a review comment. And the same script
+  reads every include in `src/engine` against the three lists, so the audio engine and the
+  video engine cannot come to include each other without a failed test.
+- **`audio_alone`** and **`video_alone`** each link one engine and not the other, and run
+  it: a symbol reaching across is an unresolved external there and nowhere else.
 - **`shader_precision`** greps `modules/video/d3d11` for `min16float`, `float16_t` and the
   vector spellings of `half`. RGBA16F is what a flip-model swap chain takes and is the last
   write a picture gets on Windows; everything before it is 32-bit on purpose, and this is one

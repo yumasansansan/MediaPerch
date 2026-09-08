@@ -25,29 +25,30 @@
 // and `PacketRouter` owns it, so this takes a feed and never a demuxer. It
 // does not seek: that is `mp::seek_together`, which needs the audio graph as
 // well and is one move rather than two. And it opens nothing itself -- the two
-// doors it goes through are `IEngineHost`'s, which is what keeps LoadLibrary
+// doors it goes through are `IVideoHost`'s, which is what keeps LoadLibrary
 // and D3D out of here.
 
 #ifndef MEDIAPERCH_VIDEO_PATH_HPP
 #define MEDIAPERCH_VIDEO_PATH_HPP
 
+#include "mediaperch/clock.hpp"
 #include "mediaperch/display.hpp"
 #include "mediaperch/packet.hpp"
 #include "mediaperch/video.hpp"
+#include "mediaperch/video_host.hpp"
 
 #include <mediaperch/module.h>
 
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <mutex>
 #include <thread>
 
 namespace mp {
-
-class IEngineHost;
 
 class VideoPath final {
 public:
@@ -115,7 +116,7 @@ public:
     ///
     /// False and a reason when nothing here presents, nothing decodes, or the
     /// presenter will not take the picture. Nothing is left half-open.
-    bool open(IEngineHost& host, void* window, IPacketFeed& feed,
+    bool open(IVideoHost& host, void* window, IPacketFeed& feed,
               const MpVideoInfo& picture, MpCodec codec, const std::uint8_t* config,
               std::uint32_t config_bytes, const Config& want, std::string& why);
 
@@ -142,28 +143,53 @@ public:
     /// False and a reason when this track cannot go on this presenter -- a
     /// codec nothing decodes, a picture it will not take. The caller then opens
     /// the whole path afresh, which is what `open` is for.
-    bool retrack(IEngineHost& host, IPacketFeed& feed, const MpVideoInfo& picture,
+    bool retrack(IVideoHost& host, IPacketFeed& feed, const MpVideoInfo& picture,
                  MpCodec codec, const std::uint8_t* config, std::uint32_t config_bytes,
                  const Config& want, std::string& why);
 
     /// Starts the display loop on a thread of its own, on the clock the
-    /// presenter brought with it.
+    /// presenter brought with it, following `follow`.
+    ///
+    /// **Null is a picture on its own.** With nothing to follow, the loop
+    /// runs on the video engine's own clock -- a `FreeClock` over the frame
+    /// clock's counter, started with the loop -- which is what a file with no
+    /// audio plays on, and what `own_clock()` then hands a transport. With a
+    /// clock to follow, the picture is synchronised to it and the engine's own
+    /// is not made: one clock leads, and it is the caller's to say which.
     ///
     /// **Not this thread**, because `IFrameClock::wait` blocks for a whole
     /// refresh and a head that waited in it would be a window Windows calls
     /// unresponsive.
     ///
-    /// False when the presenter brought none -- off-screen, or a display that
-    /// would not answer. The caller then supplies one or does not draw.
-    /// `origin_seconds` is where this track began on the audio clock, which is
-    /// zero for anything playing a file on its own and is not for a queue. See
-    /// `DisplayLoop`'s constructor for why the two coordinates differ.
-    bool start(IAudioClockSource& audio, std::string& why, double origin_seconds = 0.0);
+    /// False when the presenter brought no clock -- off-screen, or a display
+    /// that would not answer. The caller then supplies one or does not draw.
+    /// `origin_seconds` is where this track began on the clock being followed,
+    /// which is zero for anything playing a file on its own and is not for a
+    /// queue. See `DisplayLoop`'s constructor for why the two coordinates
+    /// differ.
+    bool start(IMediaClock* follow, std::string& why, double origin_seconds = 0.0);
 
-    /// The same, on a clock the caller has instead. `show` uses it for the
-    /// tick fallback a machine with no vertical blank gets.
-    bool start(IAudioClockSource& audio, IFrameClock& frames, std::string& why,
+    /// The same, on a frame clock the caller has instead. `show` uses it for
+    /// the tick fallback a machine with no vertical blank gets.
+    bool start(IMediaClock* follow, IFrameClock& frames, std::string& why,
                double origin_seconds = 0.0);
+
+    /// What the engine's own timeline counts in when a picture plays alone:
+    /// milliseconds. The same for every file, so a shell can count in it, and
+    /// no finer than a container's timestamps need.
+    static constexpr std::uint32_t k_own_rate = 1000;
+
+    /// The engine's own clock, while the loop runs on it; null while it
+    /// follows somebody else's, and before `start`. A transport pauses,
+    /// resumes and reads the position through this.
+    [[nodiscard]] FreeClock* own_clock() noexcept { return own_clock_.get(); }
+
+    /// A seek for a picture running on its own clock: holds the loop, moves
+    /// the file through `move` (in seconds), rewinds the graph and re-anchors
+    /// the clock. `mp::seek_together` is the same move with an audio graph in
+    /// the middle; this is what is left of it when there is none.
+    bool seek_alone(double seconds, const std::function<bool(double)>& move, std::string& why,
+                    std::chrono::milliseconds deadline = std::chrono::milliseconds{500});
 
     /// The clock the presenter brought, or null. Handed out so a report can
     /// say what is pacing the picture, which is a thing worth printing.
@@ -286,7 +312,7 @@ private:
     /// Opens the chain from `want.stages` and hands it to the presenter.
     /// Never fatal: a stage that will not open is a stage the run says it is
     /// without, and the picture is still a picture.
-    void open_stages(IEngineHost& host, const Config& want);
+    void open_stages(IVideoHost& host, const Config& want);
     /// Everything the presenter must be told again after the chain changed.
     bool hand_over(std::string& why);
 
@@ -300,6 +326,10 @@ private:
     /// chain there is an event on. Owned here because the presenter is owned
     /// here and the two go together.
     std::unique_ptr<IFrameClock> own_frames_;
+    /// The engine's own timeline, made by `start` when there is nothing to
+    /// follow. Declared after `own_frames_`, whose counter it reads, so it is
+    /// destroyed first.
+    std::unique_ptr<FreeClock> own_clock_;
     Modules modules_;
 
     /// The head's window, or null for §9.7.1's engine. Kept because the frame

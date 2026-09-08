@@ -123,6 +123,49 @@ foreach(source IN LISTS sources)
     endforeach()
 endforeach()
 
+# **The two engines do not see each other.** src/engine is three libraries --
+# core, audio and video (src/engine/CMakeLists.txt) -- and the rule that the
+# audio one never includes a video header, or the reverse, is what lets each
+# be linked without the other. A rule that is a comment is not a rule, so the
+# three lists live here as well, and a file in src/engine that is in none of
+# them is a failure: whoever adds a file says which engine it belongs to.
+set(core_names clock format log packet rational result source)
+set(audio_names buffering compare convert dither dsp shaper_tables negotiation
+    passthrough processed processor repack ring sine sink wiring)
+set(video_names avsync display framerate refresh video video_host video_path)
+foreach(source IN LISTS sources)
+    if(NOT source MATCHES "src/engine/")
+        continue()
+    endif()
+    get_filename_component(name "${source}" NAME_WE)
+    if(name IN_LIST audio_names)
+        set(forbidden ${video_names})
+        set(side "the audio engine")
+    elseif(name IN_LIST video_names)
+        set(forbidden ${audio_names})
+        set(side "the video engine")
+    elseif(name IN_LIST core_names)
+        set(forbidden ${audio_names} ${video_names})
+        set(side "the core")
+    else()
+        list(APPEND violations
+             "${source}: not assigned to core, audio or video -- add it to the lists in "
+             "src/engine/CMakeLists.txt and in cmake/CorePurity.cmake")
+        continue()
+    endif()
+    file(STRINGS "${source}" lines)
+    set(line_number 0)
+    foreach(line IN LISTS lines)
+        math(EXPR line_number "${line_number} + 1")
+        foreach(other IN LISTS forbidden)
+            if(line MATCHES "^[ \t]*#[ \t]*include[ \t]*\"mediaperch/${other}\\.hpp\"")
+                list(APPEND violations
+                     "${source}:${line_number}: ${side} reaching across -- ${line}")
+            endif()
+        endforeach()
+    endforeach()
+endforeach()
+
 list(LENGTH sources source_count)
 
 if(violations)
@@ -137,4 +180,4 @@ endif()
 
 message(STATUS
         "core purity: ${source_count} files, no OS headers, no platform conditionals, "
-        "no half precision")
+        "no half precision, and neither engine includes the other")

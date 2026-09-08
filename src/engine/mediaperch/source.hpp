@@ -59,11 +59,12 @@ public:
 /// owns the position, and this is what comes back.
 ///
 /// **The halves are not symmetrical, and that is deliberate.** The audio is an
-/// `ISource` because the graphs take one and because the audio device is §8's
-/// master clock, so it must be playing before anything else is decided. The
-/// video is a *feed* and three facts about the stream, because a video decoder
-/// is opened against a presenter's graphics device (§9.8.1) and the host has no
-/// presenter -- whoever has one opens it, which is `mp::VideoPath`.
+/// `ISource` because the audio graphs take one. The video is a *feed* and
+/// three facts about the stream, because a video decoder is opened against a
+/// presenter's graphics device (§9.8.1) and the host has no presenter --
+/// whoever has one opens it, which is `mp::VideoPath`. **Either half may be
+/// absent**: a file with no picture plays its sound, and a file with no sound
+/// shows its picture on the video engine's own clock.
 class IMedia {
 public:
     IMedia() = default;
@@ -73,11 +74,12 @@ public:
     IMedia& operator=(IMedia&&) = delete;
     virtual ~IMedia() = default;
 
-    /// The audio. A file with none is not opened at all, so this is never a
-    /// source that reads nothing -- **a video-only file is a skipped entry**,
-    /// for the reason §8 gives: the audio device is the clock, and a playlist
-    /// entry with no clock is a different kind of thing from the others.
-    [[nodiscard]] virtual ISource& audio() noexcept = 0;
+    /// The audio, or null for a file with none. **A file with no audio is a
+    /// file that plays**: its picture goes up on the video engine's own clock
+    /// (`VideoPath::start` with nothing to follow), a playlist walks into it
+    /// and out again, and a queue stops in front of it as it stops in front
+    /// of another format. What a host refuses is a file with neither half.
+    [[nodiscard]] virtual ISource* audio() noexcept = 0;
 
     /// The picture's packets, or null when there is none.
     ///
@@ -95,8 +97,22 @@ public:
         /// long as the media is; empty when the container carries none.
         const std::uint8_t* config = nullptr;
         std::uint32_t config_bytes = 0;
+        /// How long the picture runs, in milliseconds, as the container states
+        /// it -- or zero. What a transport shows as the length when there is
+        /// no audio to count in.
+        std::uint64_t duration_ms = 0;
     };
     [[nodiscard]] virtual Picture picture() const noexcept { return {}; }
+
+    /// Moves the file's one position (§4) to `seconds`, for a file whose
+    /// audio is not there to move it through. A file with audio is moved
+    /// through its audio source, which moves the same position. False when
+    /// the container cannot seek, or there is no picture to move.
+    virtual bool seek_picture(double seconds)
+    {
+        (void)seconds;
+        return false;
+    }
 
     /// Which module decoded the audio, for the report.
     [[nodiscard]] virtual const std::string& decoder() const noexcept
@@ -128,6 +144,12 @@ public:
     [[nodiscard]] virtual ISource* at(std::size_t index) = 0;
     /// How many entries there are, opened or not.
     [[nodiscard]] virtual std::size_t size() const = 0;
+    /// Whether the entry at `index` is a picture with no audio: opened, and
+    /// `at` answers nullptr for it because there is no audio to hand out. A
+    /// queue stops in front of one, as it stops in front of another format,
+    /// and the host plays it on the video engine's clock. Asked after `at`,
+    /// so an entry nobody has tried is not one.
+    [[nodiscard]] virtual bool silent(std::size_t index) const = 0;
 };
 
 /// What the render thread needs from the platform and the core cannot provide.

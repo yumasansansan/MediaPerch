@@ -95,36 +95,6 @@ private:
     volatile bool cancelled_ = false;
 };
 
-/// The clock for a picture with no sound to follow.
-///
-/// **This is not §8's clock and does not pretend to be.** §8 says the audio
-/// device is the master and everything follows it, and that is right whenever
-/// there is one -- a crystal that is actually producing the sound somebody is
-/// listening to. A file with no audio track has no such crystal, and a picture
-/// still has to go up at some rate, so this counts the performance counter and
-/// reports it as if it were a device playing at `rate`.
-///
-/// What it costs is what §8 was avoiding: the counter and a display are not the
-/// same crystal either, so a long enough run drifts against the display. It
-/// does not drift against anything a person can hear, because there is nothing
-/// to hear. Whoever uses it should say so, and `mediaperch-probe show` does.
-class WallClock final : public IAudioClockSource {
-public:
-    explicit WallClock(std::uint32_t rate = 48000) noexcept;
-
-    [[nodiscard]] ClockSpec spec() const override { return spec_; }
-    bool read(ClockReading& out) override;
-
-    /// Starts counting. Before this it reports nothing, which is what keeps a
-    /// picture from being drawn against a clock that has not begun.
-    void start() noexcept;
-
-private:
-    ClockSpec spec_{};
-    std::uint64_t origin_ = 0;
-    bool running_ = false;
-};
-
 /// A window to draw a picture in.
 ///
 /// **One process, one window** -- `MP_SURFACE_WINDOW` in §9.7.1's terms, which
@@ -194,6 +164,9 @@ private:
     /// Passed to the wait alongside the compositor clock, so a stop is taken
     /// now rather than at the end of a refresh.
     void* stopping_ = nullptr;
+    /// Whether the compositor last answered *occluded* rather than ticking;
+    /// see `wait`. The loop's thread's alone.
+    bool occluded_ = false;
     std::atomic<bool> cancelled_{false};
 };
 

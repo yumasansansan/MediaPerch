@@ -2,7 +2,7 @@
 
 #include "mediaperch/video_path.hpp"
 
-#include "mediaperch/player.hpp"
+#include "mediaperch/video_host.hpp"
 #include "mediaperch/result.hpp"
 
 #include <cstdlib>
@@ -55,7 +55,7 @@ const std::string& VideoPath::stage_module(std::size_t index) const noexcept
     return index < stage_modules_.size() ? stage_modules_[index] : none;
 }
 
-void VideoPath::open_stages(IEngineHost& host, const Config& want)
+void VideoPath::open_stages(IVideoHost& host, const Config& want)
 {
     stages_.clear();
     stage_modules_.clear();
@@ -239,7 +239,7 @@ VideoPath::~VideoPath()
     stop();
 }
 
-bool VideoPath::open(IEngineHost& host, void* window, IPacketFeed& feed,
+bool VideoPath::open(IVideoHost& host, void* window, IPacketFeed& feed,
                      const MpVideoInfo& picture, MpCodec codec,
                      const std::uint8_t* config, std::uint32_t config_bytes,
                      const Config& want, std::string& why)
@@ -247,6 +247,7 @@ bool VideoPath::open(IEngineHost& host, void* window, IPacketFeed& feed,
     const std::lock_guard lock{gate_};
     stop();
     graph_.reset();
+    own_clock_.reset();
     own_frames_.reset();
     decoder_.reset();
     // **Before the presenter**, which is holding them: a stage closed after the
@@ -323,7 +324,7 @@ bool VideoPath::open(IEngineHost& host, void* window, IPacketFeed& feed,
     return true;
 }
 
-bool VideoPath::retrack(IEngineHost& host, IPacketFeed& feed, const MpVideoInfo& picture,
+bool VideoPath::retrack(IVideoHost& host, IPacketFeed& feed, const MpVideoInfo& picture,
                         MpCodec codec, const std::uint8_t* config,
                         std::uint32_t config_bytes, const Config& want, std::string& why)
 {
@@ -365,20 +366,21 @@ bool VideoPath::retrack(IEngineHost& host, IPacketFeed& feed, const MpVideoInfo&
     graph_ = std::make_unique<VideoGraph>(feed, *decoder_, *presenter_, picture);
     // **Asked for again, because `configure` may have replaced the chain** and
     // the waitable object belongs to the chain rather than to the presenter.
+    own_clock_.reset();
     own_frames_ = host.frame_clock(*presenter_, window_);
     return true;
 }
 
-bool VideoPath::start(IAudioClockSource& audio, std::string& why, double origin_seconds)
+bool VideoPath::start(IMediaClock* follow, std::string& why, double origin_seconds)
 {
     if (own_frames_ == nullptr) {
         why = "this presenter has no clock to pace on";
         return false;
     }
-    return start(audio, *own_frames_, why, origin_seconds);
+    return start(follow, *own_frames_, why, origin_seconds);
 }
 
-bool VideoPath::start(IAudioClockSource& audio, IFrameClock& frames, std::string& why,
+bool VideoPath::start(IMediaClock* follow, IFrameClock& frames, std::string& why,
                       double origin_seconds)
 {
     const std::lock_guard lock{gate_};
@@ -392,12 +394,52 @@ bool VideoPath::start(IAudioClockSource& audio, IFrameClock& frames, std::string
     }
     ended_.store(false, std::memory_order_release);
     frames_ = &frames;
-    loop_ = std::make_unique<DisplayLoop>(*graph_, audio, frames, origin_seconds);
+    own_clock_.reset();
+    if (follow == nullptr) {
+        // **The video engine's own timeline.** Counted on the frame clock's
+        // counter, because that is what the loop stamps its turns with, and a
+        // reading stamped from another counter would be a reading from another
+        // time. Started after the loop is built and before it turns, so the
+        // first frame is not late by the time the setup took.
+        own_clock_ = std::make_unique<FreeClock>(frames, k_own_rate);
+        follow = own_clock_.get();
+    }
+    loop_ = std::make_unique<DisplayLoop>(*graph_, *follow, frames, origin_seconds);
+    if (own_clock_ != nullptr) {
+        own_clock_->start();
+    }
     thread_ = std::thread{[this] {
         loop_->run();
         ended_.store(true, std::memory_order_release);
     }};
     return true;
+}
+
+bool VideoPath::seek_alone(double seconds, const std::function<bool(double)>& move,
+                           std::string& why, std::chrono::milliseconds deadline)
+{
+    const std::lock_guard lock{gate_};
+    if (own_clock_ == nullptr || loop_ == nullptr || graph_ == nullptr) {
+        why = "the picture is not running on its own clock";
+        return false;
+    }
+    loop_->hold();
+    // The same wait `seek_together` takes, for the same reason: a turn taken
+    // while the file moves is a turn deciding about a frame from a place
+    // nobody is at any more.
+    const auto give_up_at = std::chrono::steady_clock::now() + deadline;
+    while (!loop_->parked() && !ended() && std::chrono::steady_clock::now() < give_up_at) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    const bool moved = move(seconds);
+    // Even when it did not move: see `seek_together`.
+    graph_->rewound();
+    own_clock_->seek(static_cast<std::uint64_t>(seconds * k_own_rate));
+    loop_->release();
+    if (!moved) {
+        why = "the file would not move";
+    }
+    return moved;
 }
 
 void VideoPath::stop() noexcept

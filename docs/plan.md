@@ -1402,16 +1402,23 @@ tolerance-defined codec can get.
 
 ## 8. Clock and A/V sync
 
-**The audio device is the master clock.** `IAudioClock2::GetDevicePosition` plus
-`IAudioClock::GetFrequency`, correlated with `QueryPerformanceCounter`, gives the
-presentation time everything else follows. `MpSinkVtbl::get_position` is that pair in the
-ABI, and both sinks have answered it since they were written.
+**Two engines, two clocks, and the picture follows whichever leads.** This section was first
+written as *the audio device is the master clock*, and that was the wrong reading of its own
+second paragraph: it made a file with no audio a file that could not play, and it made the
+video engine a thing that could not keep time. The rule is design.md's third principle now.
+The audio engine's clock is the device: `IAudioClock2::GetDevicePosition` plus
+`IAudioClock::GetFrequency`, correlated with `QueryPerformanceCounter`, which
+`MpSinkVtbl::get_position` is in the ABI. The video engine's is the display, and `FreeClock`
+for its timeline when there is nothing to follow. `IMediaClock` (core) is the shape both
+answer, and `AvClock` (video) is the coupling.
 
-The consequence has to be stated, because it is the opposite of the usual answer: **in
-exclusive passthrough there is no resampler, so audio cannot be rate-matched to video.**
-Video therefore drops or duplicates frames against the audio clock, always. Never adjust
-audio to keep video smooth — that is a conversion, and this player does not do conversions
-it did not announce.
+When a file has both, the picture follows the sound, and the consequence has to be stated
+because it is the opposite of the usual answer: **in exclusive passthrough there is no
+resampler, so audio cannot be rate-matched to video.** Video therefore drops or duplicates
+frames against the audio clock. Never adjust audio to keep video smooth — that is a
+conversion, and this player does not do conversions it did not announce. On Path B the
+reverse coupling is possible in principle and is not built. When a file has no audio, the
+picture follows the video engine's own clock through the same arithmetic.
 
 **Done, as arithmetic that reads no clock.** `src/engine/mediaperch/avsync.hpp` is `AvClock`
 and `VideoPacer`, and neither of them calls `QueryPerformanceCounter`, touches a sink, or
@@ -1616,7 +1623,7 @@ second lands on frame zero, because that fixture's only sync sample is its first
 #### The loop that calls it, and the window it draws into
 
 **Done, and a picture goes up.** `src/engine/mediaperch/display.hpp` is the loop --
-`IFrameClock`, `IAudioClockSource` and `DisplayLoop` -- and `src/win/mediaperch/display_win`
+`IFrameClock`, `IMediaClock` and `DisplayLoop` -- and `src/win/mediaperch/display_win`
 is the two clocks and a window.
 
 **Two clocks, and they are not the same one.** The audio device says where the sound is;
@@ -1682,7 +1689,8 @@ report.
 Reported as two numbers because it is two things, and only one of them is a pacing error:
 
 - **The first frame** carries however long the clock had been running before anything was
-  decoded. In these runs that is `--no-audio`'s doing: `WallClock` starts before the loop, so
+  decoded. In these runs that is `--no-audio`'s doing: `WallClock` started before the loop (its
+  successor, the core's `FreeClock`, starts with it), so
   the setup and the first decode happen on its time. With a real audio device it does not
   arise -- the device's position starts at zero with the stream.
 - **Everything after that** is the steady state, and the measurement is the whole answer:
@@ -2038,7 +2046,8 @@ What runs out first is elsewhere, and the numbers are worth having:
 
 
 **`--no-audio`, and what it admits.** §8's clock is the audio device, and a file with no audio
-track has none. `WallClock` counts the performance counter and reports it as though a device
+track has none. `WallClock` -- since replaced by the core's `FreeClock`, the same clock the
+engine plays a silent file on -- counts the performance counter and reports it as though a device
 were playing, the program says which of the two clocks it is using, and the header says plainly
 that it is not §8's.
 
@@ -2208,7 +2217,8 @@ ignored in `show` teaches somebody something untrue about the program.
 - **`codec_mft`'s four drain attempts** and **the 8 KB a packet buffer starts at** are facts
   rather than choices. The first is what the MFT drain protocol asks for; the second is a
   starting size for a buffer that grows on demand, so a wrong value costs one reallocation.
-- **`WallClock`'s 48000** looks like a setting and is a unit. What it produces is divided by
+- **`WallClock`'s 48000** (`FreeClock`'s 1000 in the engine, for the same reason) looks like a
+  setting and is a unit. What it produces is divided by
   the same number to get seconds, so the value cancels; all it fixes is granularity, at
   21 microseconds.
 - **The daemon's 250 ms transport tick and 256-message backlog** are policy, and have no route
@@ -3144,9 +3154,9 @@ puts one line in a status, so `wire_up` hands back the `Negotiated` and phrases 
 `decode` is the fourth and stays outside, because it has no device to negotiate with; what it
 shares is `dsp_bus_format` and the chain itself.
 
-`show` also gained a line `play` does not have: **the latency the chain adds**. §8 makes the
-audio device the master clock, so a stage that delays the audio delays what the picture is
-paced against, and a lip-sync error nobody was told about is the one kind this program must
+`show` also gained a line `play` does not have: **the latency the chain adds**. When the picture
+follows the audio (§8), a stage that delays the audio delays what the picture is paced
+against, and a lip-sync error nobody was told about is the one kind this program must
 not introduce quietly.
 
 **Where a hardware limit lives.** `set("size", …)` refuses anything over 16384, which is
@@ -3183,8 +3193,8 @@ thing to avoid. So the door is **`open_media`**, and `mp::IMedia` is §4 as a ty
 opened once, with everything a player wants coming out of it.
 
 The two halves are deliberately not symmetrical. The **audio is an `ISource`**, because that
-is what the graphs take and because §8 makes the audio device the master clock, so it has to
-be playing before anything else is decided. The **video is an `IPacketFeed`** and three facts
+is what the audio graphs take. (It may be absent: a file with no audio plays its picture on
+the video engine's own clock, and `audio()` is a pointer for that reason.) The **video is an `IPacketFeed`** and three facts
 about the stream, because a video decoder is opened against a presenter's graphics device
 (§9.8.1) and the host has no presenter — whoever has one opens it, which is `VideoPath`.
 
@@ -5726,6 +5736,73 @@ it the shell logs which engine it started, with the build time, or that one was 
 listening and it started none: *which mediaperchd is this* is the first question when the
 engine does something unexpected, and the log did not answer it.
 
+#### Two engines, two clocks, and a file with no audio plays
+
+**The rule was wrong, and it was mine.** *The audio device is the master clock, and a file
+without one is a skipped entry* was written into §8, `IMedia`, the queue and three comments,
+and it was a design decision nobody had made: the plan's owner had meant two engines that
+keep their own clocks and synchronise, each of which runs alone, and a video without sound is
+an ordinary thing. So the rule went, and the shape that replaced it is design.md's third
+principle.
+
+**Three cuts.** `src/engine` is three libraries now — `mediaperch_core`, `mediaperch_audio`,
+`mediaperch_video` — and `MediaPerch::engine` is the pair for the player. The audio library
+never includes a video header and the video library never includes an audio one; what they
+share is in the core, and the one thing that had to move there to make that true was the
+clock: `ClockSpec`, `ClockReading` and the interface both engines answer, `IMediaClock`,
+were in `avsync.hpp` on the video side and the audio graphs included it to answer them.
+`VideoPath` moved from `src/player` into the video library, and the four doors it goes through
+are `IVideoHost` now, the video engine's own; `IEngineHost` is that plus the audio half plus
+opening files. `tests/audio_alone.cpp` and `tests/video_alone.cpp` each link one engine and
+run it — 320 frames into a fake device; fifty turns, 22 frames shown on the engine's own
+clock — and `cmake/CorePurity.cmake` reads every include in `src/engine` against three lists,
+so a file that is in none of them, or reaches across, is a failed test.
+
+**The video engine keeps time.** `FreeClock` is a count of a counter — the frame clock's own,
+so the readings and the turns are stamped from one source — that answers `IMediaClock`
+exactly as a device does: a pause is a count that stops, a seek is an anchor that moves while
+the count goes on, and a reading is stamped *now* even while paused so a follower does not
+extrapolate a frozen count into motion. `VideoPath::start` with nothing to follow makes one
+and starts it with the loop; `own_clock()` is what a transport then pauses, resumes and reads.
+The probe's `WallClock` was the same idea in the Windows head and is gone.
+
+**A file with no audio is a file that plays.** `IMedia::audio` is a pointer; `RoutedMedia`
+opens a container with a picture and no sound, selects the one stream, and refuses only a
+file with neither. `IPlaylist` grew `silent`, and the queue stops in front of such an entry
+as it stops in front of another format (`QueueStop::silent`) — an audio source cannot read a
+picture, and a skip is for what would not open. The player has a second shape of run,
+`play_alone`: no device, no graph, the picture on the video engine's clock, the transport
+talking to it — pause, resume, seek through `IMedia::seek_picture` (the router's one
+position, §4), next and previous ending the run so the request loop walks. `status` carries
+`clock_rate` now, because the shell divided by the source format's rate and a file with no
+audio has none; the CLI's `seek` does the same. Matroska states a picture's length as the
+segment's Duration, which `duration_ms` carries for the transport.
+
+**And the picture had never turned with nobody watching.** The first run of a silent file
+ended after eleven milliseconds with zero turns, and so, it turned out, had every picture the
+headless engine ever played without a shell attached: `DCompositionWaitForCompositorClock`
+answers STATUS_GRAPHICS_PRESENT_OCCLUDED (0xC01E0006) rather than ticking while nothing of the
+process is on a screen, and `CompositorClock::wait` read any answer that was not a tick as
+the end of the loop. Nobody noticed because an audio run carries on without its picture and
+nobody was looking. Occluded is a turn paced by a timer now, until the compositor ticks again
+— and it does, the moment a shell composes the surface: 15.5 ms measured either way.
+
+Measured: `HDRSample.mkv`, VP9 and no audio, with nobody watching — `state playing`, *audio
+none in this track; the picture is on the video engine's own clock*, `seek 8` lands at 0:08,
+and it ends at 11853 ms with 285 of 285 frames shown and 0 dropped where the run was not
+seeked (a seek drops its pre-roll, 53 frames from the keyframe before, and catches up). A
+playlist of picture, song, picture: `next` leaves the first at 1229 ms, the song plays on the
+device, *the next entry has no audio in it*, the last picture plays to its end. With the shell
+attached: 102 shown, 0 dropped, refresh 15.475 ms, on the compositor's clock. At the queue's
+level `{a, silent, c}` reads `a` and stops with `silent`; in the fakes a picture-only entry
+plays, pauses with its position held, seeks to 5000 ms, and steps between entries. 469 tests.
+
+**What is next, from here**: the reverse coupling — audio disciplined to the display on Path B,
+where a resampler could take a varying ratio — is possible in principle and not built; the
+shell could say more about a picture-only track than one line; and a viewer that links only
+`MediaPerch::video` is a program nobody has written yet, which is the test of the split that
+matters.
+
 
 #### Built, and the palette needed a fourth verb
 
@@ -5837,7 +5914,7 @@ HDR state.
 | M5 | `decode_mf` and `decode_ffmpeg`, and the resolution table | **done.** `ctest -R format_matrix` builds one file per format, shows it to every decoder, and rewrites the matrix in the README -- and fails when the README stops matching. `mediaperch-probe claims` shows every decoder's probe score for a file, so a cell can say whether a decoder *claimed* the file or was forced to try. The lossless corpus comes from the reference encoders rather than FFmpeg, whose FLAC encoder writes 24 bits when asked for 32. Generating it found two claims in [formats.md](formats.md) that had gone stale and one real gap: nothing but Media Foundation claimed WMA |
 | M4.5 | ABI v2: the container decides (§12) | **done.** Every format this tree reads resolves container-first: eight demuxers and seven codecs, and each one decodes to the hash its v1 decoder produced. Two formats gained a first-class reader on the way -- MPEG layer II, which had gone to FFmpeg, and OggFLAC, which `demux_ogg` had been naming since step 4 with nothing to hand it to. Seeking became the host's, once, rather than each decoder's separately: a seek to an arbitrary sample lands byte-identically in WAV, native FLAC, OggFLAC and ALAC-in-MP4, which are four unrelated framings. Modules are laid out and installed by kind -- `modules/<kind>/<name>` in the tree, `bin/<config>/modules/<kind>/` out of it. Step 7 deleted `MP_KIND_DECODER`, the eight modules that used it, `mp::Decoder`, the registry's second resolution path, and one submodule that had no caller left |
 | M5.5 | Every parser is a library or is Rust | **done.** What this tree writes and what it links were both re-decided against measurement, and both moved: `demux_mp4` to Bento4, `demux_mkv` to libmatroska, `demux_flac`/`codec_flac` to libFLAC, `demux_mpa`/`codec_mpa` to libmpg123 -- and what was left, the parsers no library reads better, went to Rust: `codec_alac`, `codec_aac`, `demux_adts`. Every one of them bit-identical to the C++ it replaced, which is what made each move checkable rather than a judgement. [formats.md](formats.md) has every measurement, including the two upstream bugs a fuzzer found in Bento4 and the four things libmpg123's API did not say |
-| M5.9 | The structural cut: `src/engine` and `src/player` | **done.** The portable half was one library holding both the audio engine and the thing that decides what to play. §4 answers yes to "could this ABI carry a DAW's engine", and a DAW taking it would have taken the transport, the playlist, the INI schema and the IPC wire format with it. They are `src/player` now, and `src/engine` has no route to them: the include path is what enforces it, so reaching across is a compile error rather than a review comment. CI builds `mediaperch_engine` alone, which checks both cuts at once |
+| M5.9 | The structural cut: `src/engine` and `src/player` | **done.** The portable half was one library holding both the audio engine and the thing that decides what to play. §4 answers yes to "could this ABI carry a DAW's engine", and a DAW taking it would have taken the transport, the playlist, the INI schema and the IPC wire format with it. They are `src/player` now, and `src/engine` has no route to them: the include path is what enforces it, so reaching across is a compile error rather than a review comment. CI builds the engine's three libraries alone, which checks both cuts at once -- and a third, since the audio engine and the video engine are two of the three and are built without each other |
 | M5.75 | Path B is hashable, and a VST3 can be a stage in it | **done.** `mp::Processor` is `ProcessedGraph`'s arithmetic without the device, the ring or the threads, so `decode --path processed --gain --dsp` runs the chain and prints its SHA-256 -- the flags had been accepted and silently ignored, which is why nothing in this tree had ever compared the resampler between two builds. It found three bugs on the first run: `use_processed` could not see a gain, `Processor::reset` returned `MP_END` on success, and a seek left the noise shaper feeding back error from wherever the stream used to be. The baseline and AVX2 builds agree over 144 runs. `modules/dsp/vst3` hosts somebody else's plugin on `pluginterfaces` alone, with a VST3 written in `tests/` so the host is tested without one installed |
 | M5.95 | ABI v3: several streams from one file | **done.** `select` named one stream and `seek(frame)` meant "the selected one", which has no answer once a player wants audio and video out of one file -- and appending would have left both meaning something narrower than their names. So `select_streams`, `seek(stream, frame)`, `MpPacket::reserved` becoming `stream`, and `stream_video_info` appended for the three colour code points §9.1 turns on. Checked against `demux_mp4` reading a real MP4 with two tracks in it, which is the first test here that drives a module rather than a fake. `demux_mkv` serves several tracks too, which is what makes v3 an interface rather than one module's habit -- and clearing MP_PACKET_TIMED on a video packet that never had a position is what that second container found |
 | M6.7 | §8: the audio clock, and video against it | **done, and it reads no clock.** `AvClock` and `VideoPacer` take a device reading and a performance-counter tick and do arithmetic; neither calls QueryPerformanceCounter, touches a sink or knows what Windows is, which is what makes a device running fast, slow or stopped something a test can arrange. The rule that audio never moves is enforced by absence: there is no method that could. Three offsets sat between the file and the listener, each recorded in this tree and none of them read -- the device buffer that `position_frames` counts past (30 ms here, a frame and a half at 24 fps), the DSP chain's latency that `MpDspVtbl::get_latency` was appended for, and the anchor a seek moves, which the graphs have kept since gapless and nothing had compared against the device. Two thresholds and no third: shown when the clock reaches the timestamp, dropped when it has passed it by more than one frame interval, and repeat otherwise -- which is not an instruction, because a display given no new frame shows the old one. The interval is the container's ratio when stated and measured from timestamps when not, and nothing is dropped until two have been seen. Checked against av1.mp4 decoded rather than demuxed, because presentation order is what a decoder produces and not what the packets are in: at the right speed 24 shown and none dropped, half a second ahead twelve dropped and twelve shown, stopped a thousand polls and the picture holds |
@@ -5856,7 +5933,7 @@ HDR state.
 | M6.8 | The video graph: decode, pace, present | **done.** VideoDecoder and Presenter behind their vtables -- mp::Sink for pictures -- and VideoGraph, which holds one frame, asks §8's pacer and presents. One frame and no queue, because a decoded frame is valid until the next call on the codec that produced it and a queue would have to copy what §9.8.1 went to some trouble not to copy; the lookahead is inside the decoder, which reorders B-frames and since M6.6 uses every core. No thread of its own either: the audio graphs own one because the device's event paces them, and video's pace is the display's, which belongs to the head. A drop does not cost a refresh -- one pump lets go of every frame whose time has passed, because letting one go per refresh would never catch the clock. After the first frame the decoder is asked what it actually produced and the presenter reconfigured where the bitstream disagrees with the container, except for the timescale and the frame rate, which a decoder never re-times. Packets arrive through IPacketFeed rather than from a demuxer, which is a hole with a name: §4 says one file has one position, so audio and video must share one demuxer, and the router that would do that is what comes next. Checked on demux_mp4 + codec_dav1d + video_d3d11 with a clock somebody chose: 24 shown and none dropped at the right speed with nothing more than a millisecond late, twelve dropped and twelve shown half a second behind with the picture still right at the end, and five hundred polls of a stopped clock holding it |
 | M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse. **Measured, and met at the default**: 3840x2160 HEVC with an audio track, 0 underruns and 0 silent frames while 1 to 4 frames of 71 were dropped. It was first met at `--ring-periods 32` against a default of 8 that underran; the default is 128 now, and the sections above are the measurements that moved it and what they do and do not say. Getting there took worker threads in `codec_de265` (one thread was a comment rather than a decision) and the ring. DirectComposition is still §9.7.1's shell case and unbuilt; hardware decode is `codec_mft` where the machine has a transform |
 | M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled. **All six steps of §9.7.2 are built**: the SDR white level, the output the window is on, PQ, HLG, BT.2390 in the shader, and the ABI append that carries what the content was graded on, filled from Matroska, from MP4's `mdcv`/`clli`, and from an HEVC prefix SEI where the container says nothing. Steps 3, 4 and 5 are formulas and are tested against them off-screen on WARP, so they run in CI on a machine with no display. **What is left is the half that is not a formula**: steps 1, 2 and 6 on real HDR hardware, written into [devices.md](devices.md) -- there is no HDR display here, and asserting they work without one is the exact failure §9.2 is the record of |
-| M8 | WinUI 3 shell | **most of it.** The project builds and its own reader decodes §10's wire against a running engine -- `MediaPerch.Shell.exe --check` prints the status and the graph, which is how the two descriptions of one format are held together. The canvas is drawn, the composition surface is composited, and the transport, playlist, module palette and settings screens are there -- every key the engine will take, per node and for the player and the engine, as something to type into, with the module's own refusal shown when it will not take it. Killing it mid-track changes nothing audible. **C#, WinUI 3, Native AOT**, `net10.0-windows10.0.26100.0` with a minimum of 22000, to Fluent 2, dependencies at their newest. Its settings screen is a **node canvas** in the shape of ComfyUI's and Fusion's: the chain as a topology, dragged to reorder, with a settings button per node. §10 says what that asks of the engine -- three verbs and no more -- and why the canvas is Fusion's look over a chain's semantics rather than a free-form DAG. The engine half of §9.7.1 is standing: the composition surface handle, the compositor's clock (not the swap chain's waitable, which was a black window until it was measured), the size message and the display message. The shell's half is done through WinUI's own compositor rather than DirectComposition, and *a shell that dies holding the picture* is a test rather than a claim. The picture survives a track boundary as the audio device does, and both it and `status` follow what is being heard rather than what is being decoded. The window is three pages behind a navigation pane, acrylic into the title bar, the picture filling the first with a Fluent transport and a scrubber under it; a click on a track is `play_at`. The canvas edits the chain -- drag to reorder, a bin to remove, a palette to add -- and the system picker opens files; the chain's grammar had to grow an unambiguous separator first, because it could not round-trip a stage with two settings. The scrubber moves between samples, the keys every player answers are answered, the queue can be dragged (the engine allows what its decoder has not reached), and a mixed-format playlist plays through -- it had stopped at its first boundary. Files can be dropped on the window and the picker is the App SDK's (the WinRT one shows nothing in an unpackaged app); an entry that will not open is walked past, and the refusing module's own reason is what the shell shows -- three video-only WebMs had produced *nothing at 0* and a log line that was wrong. **Done, polish included** |
+| M8 | WinUI 3 shell | **most of it.** The project builds and its own reader decodes §10's wire against a running engine -- `MediaPerch.Shell.exe --check` prints the status and the graph, which is how the two descriptions of one format are held together. The canvas is drawn, the composition surface is composited, and the transport, playlist, module palette and settings screens are there -- every key the engine will take, per node and for the player and the engine, as something to type into, with the module's own refusal shown when it will not take it. Killing it mid-track changes nothing audible. **C#, WinUI 3, Native AOT**, `net10.0-windows10.0.26100.0` with a minimum of 22000, to Fluent 2, dependencies at their newest. Its settings screen is a **node canvas** in the shape of ComfyUI's and Fusion's: the chain as a topology, dragged to reorder, with a settings button per node. §10 says what that asks of the engine -- three verbs and no more -- and why the canvas is Fusion's look over a chain's semantics rather than a free-form DAG. The engine half of §9.7.1 is standing: the composition surface handle, the compositor's clock (not the swap chain's waitable, which was a black window until it was measured), the size message and the display message. The shell's half is done through WinUI's own compositor rather than DirectComposition, and *a shell that dies holding the picture* is a test rather than a claim. The picture survives a track boundary as the audio device does, and both it and `status` follow what is being heard rather than what is being decoded. The window is three pages behind a navigation pane, acrylic into the title bar, the picture filling the first with a Fluent transport and a scrubber under it; a click on a track is `play_at`. The canvas edits the chain -- drag to reorder, a bin to remove, a palette to add -- and the system picker opens files; the chain's grammar had to grow an unambiguous separator first, because it could not round-trip a stage with two settings. The scrubber moves between samples, the keys every player answers are answered, the queue can be dragged (the engine allows what its decoder has not reached), and a mixed-format playlist plays through -- it had stopped at its first boundary. Files can be dropped on the window and the picker is the App SDK's (the WinRT one shows nothing in an unpackaged app); an entry that will not open is walked past, and the refusing module's own reason is what the shell shows -- three video-only WebMs had produced *nothing at 0* and a log line that was wrong. Then the rule behind that was found to be nobody's: the audio engine and the video engine are two libraries that never include each other, each with its own clock, a file with no audio plays its picture on the video engine's clock with no device opened, and the shell counts in whatever the engine's clock counts in. **Done, polish included** |
 | M9 | Linux head | ALSA or PipeWire in an exclusive-equivalent mode, proving the core was actually portable |
 
 M1 and M2 are the ones that de-risk the project. If exclusive-mode negotiation and the
@@ -6274,6 +6351,15 @@ real time.
   handles passed in are `WAIT_OBJECT_0 + i`, and the compositor tick is `WAIT_OBJECT_0 +
   count`, one past the end. Read the usual way round, every tick looks like the first handle
   and the loop stops on its first turn. Measured as `wait -> 0x1` with one handle passed.
+- **A rule nobody decided is still a rule, and it hardens.** *The audio device is the master
+  clock* was a sentence about the common case that became a sentence about every case, and
+  then a comment, and then an `IMedia` that could not say *no audio*, and then a queue that
+  called such a file unreadable. The owner had meant two engines with their own clocks. Read
+  the principle back to whoever owns it before it grows teeth.
+- **A loop that ends on an answer it did not expect ends in silence.** The compositor's
+  *occluded* was read as *stop*, and every headless picture ended at once for as long as the
+  engine had a compositor clock; an audio run carried on and nobody looked. An unexpected
+  answer from a clock is a turn with nothing to do, not the end of the loop.
 - **A nullptr that means two things means neither.** `IPlaylist::at` answered nullptr for an
   entry that would not open and for the end of the list, and every reader took it for the end:
   the queue finished a playlist at its first unreadable entry, and the enum value written for

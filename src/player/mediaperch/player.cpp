@@ -160,12 +160,56 @@ public:
     ISource* at(std::size_t index) override
     {
         IMedia* media = at_media(index);
-        return media != nullptr ? &media->audio() : nullptr;
+        return media != nullptr ? media->audio() : nullptr;
     }
     std::size_t size() const override
     {
         const std::lock_guard lock{lock_};
         return files_.size();
+    }
+    bool silent(std::size_t index) const override
+    {
+        const std::lock_guard lock{lock_};
+        return index < opened_.size() && opened_[index] && opened_[index]->audio() == nullptr;
+    }
+
+    /// What an entry is, opened if it has not been.
+    enum class Kind {
+        /// A track with audio: a queue's business.
+        audio,
+        /// A picture with no audio: a run of its own, on the video engine's clock.
+        silent,
+        /// It would not open, and the log says why. Walked past.
+        unreadable,
+        /// Past the end.
+        end,
+    };
+    Kind kind_at(std::size_t index)
+    {
+        if (index >= size()) {
+            return Kind::end;
+        }
+        IMedia* media = at_media(index);
+        if (media == nullptr) {
+            return Kind::unreadable;
+        }
+        return media->audio() != nullptr ? Kind::audio : Kind::silent;
+    }
+
+    /// The entry before `index` that is not known to be unreadable, or `index`
+    /// itself when there is none. What *previous* means from a picture playing
+    /// alone near its start.
+    [[nodiscard]] std::size_t previous_from(std::size_t index) const
+    {
+        const std::lock_guard lock{lock_};
+        std::size_t at = index;
+        while (at > 0) {
+            --at;
+            if (refused_[at].empty()) {
+                return at;
+            }
+        }
+        return index;
     }
 
     /// **Moves an entry the queue has not reached.** The decode thread opens
@@ -355,13 +399,14 @@ bool Player::move_entry(std::size_t from, std::size_t to, std::string& why)
     if (from == to) {
         return true;
     }
-    if (queue_ != nullptr) {
+    if (queue_ != nullptr || alone_ != nullptr) {
         // **Only what the decoder has not reached.** A queue records where each
         // track began as it goes past it, and the ring holds what it read
         // ahead; an entry at or before the decoder's index is either playing,
         // already in the ring, or already marked, and moving it would move the
-        // ground the run stands on. Past it, an entry is a path in a list.
-        const std::size_t read = queue_->index();
+        // ground the run stands on. Past it, an entry is a path in a list. A
+        // picture on its own is the one entry it is on.
+        const std::size_t read = queue_ != nullptr ? queue_->index() : index_;
         if (from <= read || to <= read) {
             why = "the engine has already read up to entry " + std::to_string(read + 1) +
                   "; entries it has passed cannot be moved while they play";
@@ -400,6 +445,13 @@ void Player::clear()
 void Player::pause()
 {
     const std::lock_guard lock{mutex_};
+    if (alone_ != nullptr && alone_->own_clock() != nullptr) {
+        // A picture on its own clock: the clock stops, and the loop, which
+        // follows it, holds the frame it is on.
+        alone_->own_clock()->pause();
+        state_ = ipc::State::paused;
+        return;
+    }
     if (graph_a_ != nullptr) {
         graph_a_->pause();
     } else if (graph_b_ != nullptr) {
@@ -413,6 +465,11 @@ void Player::pause()
 void Player::resume()
 {
     const std::lock_guard lock{mutex_};
+    if (alone_ != nullptr && alone_->own_clock() != nullptr) {
+        alone_->own_clock()->resume();
+        state_ = ipc::State::playing;
+        return;
+    }
     if (graph_a_ != nullptr) {
         graph_a_->resume();
     } else if (graph_b_ != nullptr) {
@@ -439,6 +496,20 @@ bool Player::seek(std::int64_t frames, bool relative)
     // seek, and the engine thread clears these pointers under the same lock
     // before it destroys anything.
     const std::lock_guard lock{mutex_};
+    if (alone_ != nullptr && alone_->own_clock() != nullptr) {
+        // **The picture on its own clock.** The same clamp, then the file is
+        // moved through its own door rather than through a graph: see
+        // `VideoPath::seek_alone`, which is `seek_together` with no audio in
+        // the middle.
+        const std::uint64_t here = alone_->own_clock()->position();
+        const std::int64_t wanted = relative ? static_cast<std::int64_t>(here) + frames : frames;
+        const auto to = static_cast<std::uint64_t>(std::max<std::int64_t>(0, wanted));
+        IMedia* media = alone_media_;
+        std::string why;
+        return alone_->seek_alone(static_cast<double>(to) / VideoPath::k_own_rate,
+                                  [media](double seconds) { return media->seek_picture(seconds); },
+                                  why);
+    }
     const std::uint64_t now = graph_a_ != nullptr   ? graph_a_->position_frames()
                               : graph_b_ != nullptr ? graph_b_->position_frames()
                                                     : 0;
@@ -456,6 +527,13 @@ void Player::next()
     // destroyed underneath this, and the engine thread clears these pointers
     // under the same lock before it destroys anything.
     const std::lock_guard lock{mutex_};
+    if (alone_ != nullptr) {
+        // **A picture on its own is one entry, so next is the entry after
+        // it.** Its run ends and `play_request` walks on; there is no ring to
+        // throw away and no listener to count from.
+        step_wanted_.store(1, std::memory_order_release);
+        return;
+    }
     if (queue_ == nullptr) {
         return;
     }
@@ -488,6 +566,20 @@ void Player::next()
 void Player::previous()
 {
     const std::lock_guard lock{mutex_};
+    if (alone_ != nullptr && alone_->own_clock() != nullptr) {
+        // The rule below, for a picture on its own: its start, unless you have
+        // only just got here, in which case the entry before it.
+        const std::uint64_t here = alone_->own_clock()->position();
+        if (here > 3ull * VideoPath::k_own_rate) {
+            IMedia* media = alone_media_;
+            std::string why;
+            (void)alone_->seek_alone(
+                0.0, [media](double seconds) { return media->seek_picture(seconds); }, why);
+        } else {
+            step_wanted_.store(-1, std::memory_order_release);
+        }
+        return;
+    }
     if (queue_ == nullptr) {
         return;
     }
@@ -541,6 +633,14 @@ ipc::Status Player::status() const
         s.position = graph_b_->position_frames();
         s.frames_rendered += graph_b_->stats().frames_rendered;
         s.underruns += graph_b_->stats().underruns;
+    }
+    s.clock_rate = clock_rate_;
+    if (alone_ != nullptr && alone_->own_clock() != nullptr) {
+        // A picture on its own clock: one entry, its own timeline, counted in
+        // `VideoPath::k_own_rate`. No queue to convert through.
+        s.position = alone_->own_clock()->position();
+        s.item_position = s.position;
+        s.length = alone_length_;
     }
     if (queue_ != nullptr) {
         s.length = queue_->length_frames();
@@ -1365,9 +1465,15 @@ bool Player::inspect(const std::string& file, StreamShape& shape, double& durati
     shape = StreamShape{shot.codec, shot.info.width, shot.info.height, shot.info.fps_num,
                         shot.info.fps_den};
 
-    const Format& format = media->audio().format();
+    const ISource* audio = media->audio();
+    if (audio == nullptr) {
+        // A picture with no sound has no ring under it to measure.
+        why = "no audio in it, so there is no ring to measure";
+        return false;
+    }
+    const Format& format = audio->format();
     duration = format.sample_rate != 0
-                   ? static_cast<double>(media->audio().length_frames()) /
+                   ? static_cast<double>(audio->length_frames()) /
                          static_cast<double>(format.sample_rate)
                    : 0.0;
     return true;
@@ -1383,7 +1489,7 @@ void Player::measure(Graph& graph, const CalibrationRun& run, RunResult& result)
     // as long as its thread turns, and a temporary would be gone at the end of
     // the call that handed it over.
     GraphClock<Graph> audible{graph};
-    start_video(audible);
+    start_video(&audible);
 
     const auto until = std::chrono::steady_clock::now() +
                        std::chrono::microseconds{
@@ -1423,6 +1529,11 @@ bool Player::play(const CalibrationRun& run, RunResult& result, std::string& why
     if (!media) {
         return false;
     }
+    ISource* audio = media->audio();
+    if (audio == nullptr) {
+        why = "no audio in it, so there is no ring to measure";
+        return false;
+    }
 
     std::string device;
     Sink sink = host_->open_sink(config.device, config.shared, device, why);
@@ -1435,7 +1546,7 @@ bool Player::play(const CalibrationRun& run, RunResult& result, std::string& why
     // would write a number down that stops being true the moment it is removed.
     DspChain chain;
     Wired wired;
-    if (!wire_up(sink, media->audio().format(), chain, config.path,
+    if (!wire_up(sink, audio->format(), chain, config.path,
                  config.conversion.gain != 1.0, wired, why)) {
         if (!wired.negotiated.ok) {
             why = "the device would take none of " +
@@ -1448,10 +1559,10 @@ bool Player::play(const CalibrationRun& run, RunResult& result, std::string& why
     // **Seeked before anything is started**, so there is nothing to hold still:
     // the source is not being read yet, and moving the router now is what
     // clears the video's queue as well (§4).
-    if (run.at_seconds > 0.0 && media->audio().seekable()) {
+    if (run.at_seconds > 0.0 && audio->seekable()) {
         const auto frame = static_cast<std::uint64_t>(
-            run.at_seconds * media->audio().format().sample_rate);
-        (void)media->audio().seek(frame);
+            run.at_seconds * audio->format().sample_rate);
+        (void)audio->seek(frame);
     }
 
     PassthroughConfig ring = config.buffering;
@@ -1465,7 +1576,8 @@ bool Player::play(const CalibrationRun& run, RunResult& result, std::string& why
         track_ = run.file;
         decoder_ = media->decoder();
         device_ = device;
-        source_ = media->audio().format();
+        source_ = audio->format();
+        clock_rate_ = audio->format().sample_rate;
         wire_ = wired.negotiated.accepted;
         fidelity_ = static_cast<std::uint32_t>(wired.negotiated.fidelity);
         processed_ = wired.processed;
@@ -1475,12 +1587,12 @@ bool Player::play(const CalibrationRun& run, RunResult& result, std::string& why
 
     try {
         if (wired.processed) {
-            ProcessedGraph graph{media->audio(),       sink,    wired.negotiated.accepted,
+            ProcessedGraph graph{*audio,       sink,    wired.negotiated.accepted,
                                  wired.period_frames,  config.conversion,
                                  nullptr,              ring};
             measure(graph, run, result);
         } else {
-            PassthroughGraph graph{media->audio(),      sink, wired.negotiated.accepted,
+            PassthroughGraph graph{*audio,      sink, wired.negotiated.accepted,
                                    wired.period_frames, wired.negotiated.fidelity,
                                    nullptr,             ring};
             measure(graph, run, result);
@@ -1512,24 +1624,75 @@ void Player::play_request(const Request& request)
     Playlist playlist{*host_, request.files};
     std::size_t first = request.first;
     std::uint64_t from = request.from;
+    bool played = false;
+    step_wanted_.store(0, std::memory_order_release);
 
     while (!quit_.load(std::memory_order_acquire)) {
+        // **What is at `first`, opened if it has not been.** A track with
+        // audio is a queue's business, and the queue walks on from it; a
+        // picture with no audio is a run of its own, on the video engine's
+        // clock; an entry that would not open is walked past, and the playlist
+        // has said why; and past the end, the run is over.
+        const Playlist::Kind kind = playlist.kind_at(first);
+        if (kind == Playlist::Kind::unreadable) {
+            ++first;
+            continue;
+        }
+        if (kind == Playlist::Kind::end) {
+            std::string why;
+            if (!played) {
+                // Nothing played at all: in the playlist's words when it has
+                // any, since it is what tried each entry, and *no audio track
+                // in it* is the sentence a shell should show.
+                why = playlist.refusals();
+                if (why.empty()) {
+                    why = "the playlist has nothing at " + std::to_string(first);
+                }
+                note(why);
+            }
+            const std::lock_guard lock{mutex_};
+            if (!why.empty()) {
+                error_ = why;
+            }
+            state_ = ipc::State::stopped;
+            return;
+        }
+        if (kind == Playlist::Kind::silent) {
+            played = true;
+            std::uint64_t position = 0;
+            const RunEnd end = play_alone(playlist, first, from, position);
+            from = 0;
+            if (end == RunEnd::finished || end == RunEnd::advanced) {
+                ++first;
+                continue;
+            }
+            if (end == RunEnd::retreated) {
+                first = playlist.previous_from(first);
+                continue;
+            }
+            if (end == RunEnd::rebuild) {
+                from = position;
+                continue;
+            }
+            // Stopped, or it could not start.
+            const std::lock_guard lock{mutex_};
+            state_ = ipc::State::stopped;
+            position_ = position;
+            return;
+        }
+
         Queue queue{playlist, first};
         std::string why;
         if (!queue.open(why)) {
-            // In the playlist's words when it has any: it is what tried to
-            // open each entry, and *no audio track in it* is the sentence a
-            // shell should show, not *nothing would open*.
-            const std::string refused = playlist.refusals();
-            if (!refused.empty()) {
-                why = refused;
-            }
+            // `kind_at` just opened this entry as audio, so this is a queue
+            // refusing the format it found there. Said, rather than looped on.
             note(why);
             const std::lock_guard lock{mutex_};
             error_ = why;
             state_ = ipc::State::stopped;
             return;
         }
+        played = true;
         if (from != 0 && !queue.seek(from)) {
             note("could not resume at frame " + std::to_string(from));
         }
@@ -1598,6 +1761,14 @@ void Player::play_request(const Request& request)
                      describe(queue.next_format()));
                 break;
             }
+            if (end == RunEnd::finished && queue.stopped() == QueueStop::silent) {
+                // The entry in front of the queue has a picture and no audio:
+                // the same shape as a format change, and the run above it.
+                first = queue.index() + 1;
+                note("the next entry has no audio in it, so its picture plays on the "
+                     "video engine's own clock");
+                break;
+            }
             // finished, stopped, or it never started.
             {
                 const std::lock_guard lock{mutex_};
@@ -1606,12 +1777,131 @@ void Player::play_request(const Request& request)
             }
             return;
         }
-        if (queue.stopped() != QueueStop::format_change) {
+        if (queue.stopped() != QueueStop::format_change &&
+            queue.stopped() != QueueStop::silent) {
             const std::lock_guard lock{mutex_};
             state_ = ipc::State::stopped;
             return;
         }
     }
+}
+
+Player::RunEnd Player::play_alone(Playlist& playlist, std::size_t index, std::uint64_t from,
+                                  std::uint64_t& position)
+{
+    // **The other shape of a run: a picture, on the video engine's own
+    // clock.** No device is opened and no graph is built; the transport talks
+    // to `VideoPath::own_clock`, the position is that clock's, and the run ends
+    // when the picture does or when somebody moves on. §8's coupling is not
+    // involved because there is nothing to couple: one engine, one clock.
+    IMedia* media = playlist.at_media(index);
+    if (media == nullptr) {
+        return RunEnd::failed;
+    }
+    PlayerConfig config;
+    {
+        const std::lock_guard lock{mutex_};
+        config = config_;
+    }
+    {
+        const std::lock_guard lock{mutex_};
+        applied_ = config;
+        error_.clear();
+        queue_ = nullptr;
+        playlist_ = &playlist;
+        track_ = playlist.path(index);
+        decoder_ = playlist.decoder_name(index);
+        device_.clear();
+        source_ = Format{};
+        wire_ = Format{};
+        fidelity_ = 0;
+        processed_ = false;
+        index_ = static_cast<std::uint32_t>(index);
+        clock_rate_ = VideoPath::k_own_rate;
+        alone_length_ = media->picture().duration_ms * VideoPath::k_own_rate / 1000;
+        state_ = ipc::State::playing;
+    }
+    note("playing " + playlist.path(index) + " on the picture's own clock (no audio in it)");
+    // A flag raised for a run that has not started describes nothing, exactly
+    // as `play_run` treats it: read it fresh from here on.
+    rebuild_wanted_.store(false, std::memory_order_release);
+
+    open_video(media, 0);
+    const std::shared_ptr<VideoPath> video = picture();
+    std::string why;
+    if (!video || !video->opened()) {
+        // `open_video` has said why, once. With no audio either there is
+        // nothing left to play, which is the one case that makes it fatal.
+        why = "no audio in it, and the picture would not open";
+    } else if (!video->start(nullptr, why, 0.0)) {
+        why = "the picture will not be shown: " + why;
+    }
+    if (!why.empty()) {
+        note(why);
+        forget_video();
+        const std::lock_guard lock{mutex_};
+        error_ = why;
+        return RunEnd::failed;
+    }
+    if (from != 0) {
+        std::string moved;
+        (void)video->seek_alone(
+            static_cast<double>(from) / VideoPath::k_own_rate,
+            [media](double seconds) { return media->seek_picture(seconds); }, moved);
+    }
+    {
+        const std::lock_guard lock{mutex_};
+        alone_ = video.get();
+        alone_media_ = media;
+    }
+
+    RunEnd end = RunEnd::finished;
+    while (!video->ended()) {
+        if (quit_.load(std::memory_order_acquire) ||
+            stop_wanted_.load(std::memory_order_acquire)) {
+            end = RunEnd::stopped;
+            break;
+        }
+        if (rebuild_wanted_.exchange(false, std::memory_order_acq_rel)) {
+            end = RunEnd::rebuild;
+            break;
+        }
+        const int step = step_wanted_.exchange(0, std::memory_order_acq_rel);
+        if (step > 0) {
+            end = RunEnd::advanced;
+            break;
+        }
+        if (step < 0) {
+            end = RunEnd::retreated;
+            break;
+        }
+        std::this_thread::sleep_for(k_poll);
+    }
+    position = video->own_clock() != nullptr ? video->own_clock()->position() : 0;
+    {
+        const std::lock_guard lock{mutex_};
+        alone_ = nullptr;
+        alone_media_ = nullptr;
+        position_ = position;
+    }
+    {
+        // Said, because a picture that ends is either the file running out or
+        // something under it giving up, and the counters tell the two apart.
+        const VideoGraph::Stats shown = video->graph_stats();
+        const DisplayLoop::Stats turns = video->loop().stats();
+        note(std::string{"the picture "} +
+             (end == RunEnd::finished ? "ended" : "was left") + " at " +
+             std::to_string(position) + " ms: " + std::to_string(turns.turns) +
+             " turns, decoded " + std::to_string(shown.decoded) + ", shown " +
+             std::to_string(shown.shown) + ", dropped " + std::to_string(shown.dropped));
+    }
+    stop_video();
+    forget_video();
+    {
+        const std::lock_guard lock{mutex_};
+        playlist_ = nullptr;
+    }
+    return end;
 }
 
 bool Player::build_chain(DspChain& chain, std::string& why)
@@ -1717,6 +2007,7 @@ Player::RunEnd Player::play_run(Queue& queue, Playlist& playlist, std::uint64_t&
         decoder_ = playlist.decoder_name(queue.index());
         device_ = device;
         source_ = source_format;
+        clock_rate_ = source_format.sample_rate;
         wire_ = negotiated.accepted;
         fidelity_ = static_cast<std::uint32_t>(negotiated.fidelity);
         processed_ = processing;
@@ -1925,16 +2216,17 @@ bool Player::retrack_video(IMedia& media, const VideoPath::Config& want)
     return false;
 }
 
-void Player::start_video(IAudioClockSource& audio, double origin_seconds)
+void Player::start_video(IMediaClock* follow, double origin_seconds)
 {
     if (!video_ || !video_->opened()) {
         return;
     }
-    // **After the audio graph has started**, because §8 makes the audio device
-    // the master clock and a picture paced against a clock that is not running
-    // is a picture paced against a guess.
+    // **After the audio graph has started**, when there is one to follow: a
+    // picture paced against a clock that is not running is a picture paced
+    // against a guess. With nothing to follow, the path starts the video
+    // engine's own clock with the loop.
     std::string why;
-    if (!video_->start(audio, why, origin_seconds)) {
+    if (!video_->start(follow, why, origin_seconds)) {
         note("the picture will not be shown: " + why);
         forget_video();
     }
@@ -2002,7 +2294,7 @@ Player::RunEnd Player::pump(Graph& graph, Playlist& playlist)
                    static_cast<double>(source_.sample_rate);
         };
         std::size_t showing = heard();
-        start_video(audible, began());
+        start_video(&audible, began());
 
         while (graph.running()) {
             if (quit_.load(std::memory_order_acquire) ||
@@ -2028,7 +2320,7 @@ Player::RunEnd Player::pump(Graph& graph, Playlist& playlist)
                 showing = heard();
                 stop_video();
                 open_video(playlist, showing);
-                start_video(audible, began());
+                start_video(&audible, began());
             }
             std::this_thread::sleep_for(k_poll);
         }

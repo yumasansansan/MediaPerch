@@ -71,7 +71,7 @@ public:
         return audio_.open(vtbl, path.c_str(), find, why);
     }
 
-    [[nodiscard]] ISource& audio() noexcept override { return audio_; }
+    [[nodiscard]] ISource* audio() noexcept override { return &audio_; }
     [[nodiscard]] const std::string& decoder() const noexcept override { return by_; }
     void opened_by(std::string id) { by_ = std::move(id); }
 
@@ -93,11 +93,22 @@ public:
     bool open(const MpDemuxVtbl& vtbl, const std::string& path,
               const PacketSource::FindCodec& find, std::string& why);
 
-    [[nodiscard]] ISource& audio() noexcept override { return audio_; }
+    [[nodiscard]] ISource* audio() noexcept override { return have_audio_ ? &audio_ : nullptr; }
     [[nodiscard]] IPacketFeed* video() noexcept override { return video_; }
     [[nodiscard]] Picture picture() const noexcept override { return picture_; }
     [[nodiscard]] const std::string& decoder() const noexcept override { return by_; }
     void opened_by(std::string id) { by_ = std::move(id); }
+
+    bool seek_picture(double seconds) override
+    {
+        if (!router_ || video_ == nullptr || picture_.info.timescale == 0 || seconds < 0.0) {
+            return false;
+        }
+        // In the picture's own ticks, which is what §9.9 says a video seek is
+        // counted in; the router moves the one position and empties its queues.
+        const auto ticks = static_cast<std::uint64_t>(seconds * picture_.info.timescale);
+        return router_->seek(video_stream_, ticks) == MP_OK;
+    }
 
     /// Whether the audio stream decodes itself, which is the one shape this
     /// class cannot serve. Asked of an already-open demuxer, before anything
@@ -111,7 +122,9 @@ private:
     /// selected -- two things that cannot happen in a member initialiser list.
     std::optional<PacketRouter> router_;
     PacketSource audio_;
+    bool have_audio_ = false;
     IPacketFeed* video_ = nullptr;
+    std::uint32_t video_stream_ = 0;
     Picture picture_{};
     std::vector<std::uint8_t> config_;
     std::string by_;
@@ -157,14 +170,19 @@ bool RoutedMedia::open(const MpDemuxVtbl& vtbl, const std::string& path,
             have_video = true;
         }
     }
-    if (!have_audio) {
-        // §8: the audio device is the master clock, so a playlist entry with no
-        // audio has no clock to be played against. Said, rather than played.
-        why = "no audio track in it";
+    if (!have_audio && !have_video) {
+        why = "nothing in it to play: no audio track and no picture";
         return false;
     }
 
-    std::vector<std::uint32_t> selected{audio_stream};
+    // **A file with no audio is a file that plays.** Its picture goes up on
+    // the video engine's own clock, which is what `VideoPath::start` does with
+    // nothing to follow; the router still owns the one position (§4), with one
+    // consumer of it instead of two.
+    std::vector<std::uint32_t> selected;
+    if (have_audio) {
+        selected.push_back(audio_stream);
+    }
     if (have_video) {
         selected.push_back(video_stream);
     }
@@ -173,6 +191,10 @@ bool RoutedMedia::open(const MpDemuxVtbl& vtbl, const std::string& path,
         // it.** What is dropped is the picture, not the track: refusing the
         // whole file because its video could not be read alongside would be a
         // player that plays less than the one before it did.
+        if (!have_audio) {
+            why = "the container would not serve its video stream";
+            return false;
+        }
         if (!have_video) {
             why = "the container would not serve its audio stream";
             return false;
@@ -186,8 +208,11 @@ bool RoutedMedia::open(const MpDemuxVtbl& vtbl, const std::string& path,
     }
 
     router_.emplace(demux_, selected);
-    if (!audio_.open(*router_, audio_stream, find, why)) {
-        return false;
+    if (have_audio) {
+        if (!audio_.open(*router_, audio_stream, find, why)) {
+            return false;
+        }
+        have_audio_ = true;
     }
 
     if (have_video) {
@@ -199,11 +224,17 @@ bool RoutedMedia::open(const MpDemuxVtbl& vtbl, const std::string& path,
             picture_.codec = video_info.codec;
             picture_.config = config_.empty() ? nullptr : config_.data();
             picture_.config_bytes = static_cast<std::uint32_t>(config_.size());
+            picture_.duration_ms = video_info.duration_ms;
+            video_stream_ = video_stream;
             video_ = router_->feed(video_stream);
         }
         // A container that will not describe its video stream leaves `video()`
         // null, and nothing above has to know why: it is a file with audio in
         // it, which is what most files are.
+    }
+    if (!have_audio_ && video_ == nullptr) {
+        why = "no audio track, and the container would not describe its picture";
+        return false;
     }
     return true;
 }

@@ -108,7 +108,8 @@ public:
     /// A graph is the one thing that knows all of it: it owns the sink, it
     /// knows what the file counts in and what the device counts in, it built
     /// the chain, and it has kept the anchor since gapless was written.
-    /// `AvClock` is what turns this plus a reading into a time.
+    /// A follower -- `AvClock`, in the video engine -- is what turns this plus
+    /// a reading into a time.
     [[nodiscard]] ClockSpec clock_spec() const noexcept;
 
     /// One reading of the device's clock. False when the sink module has none
