@@ -63,3 +63,7 @@ target_link_libraries(mp_demux_mkv PRIVATE mediaperch_pcm_format)
 
 # The host's log, shared rather than copied a thirteenth time.
 target_link_libraries(mp_demux_mkv PRIVATE mediaperch_module_log)
+
+# mediaperch_h264 for the HEVC prefix SEI: the mastering display and the light
+# levels of a file that states them in band and not in its Colour element.
+target_link_libraries(mp_demux_mkv PRIVATE mediaperch_h264)

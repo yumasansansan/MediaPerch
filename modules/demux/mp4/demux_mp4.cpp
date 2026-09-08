@@ -931,6 +931,14 @@ MpResult MP_CALL demux_stream_info(MpDemux* d, std::uint32_t index,
     out->config_bytes = static_cast<std::uint32_t>(s.config.size());
     out->format = s.format;
     out->total_frames = s.total_frames;
+    // A picture's length in milliseconds, for a transport with no audio to
+    // count in. `total_frames` above is in the track's own timescale -- 12 800
+    // a second on one set of HDR10 patterns, a number nothing can show -- and
+    // a video-only MP4 had no length at all: `position 0:02` and a shell
+    // scrubber disabled for want of one.
+    if (s.kind == MP_STREAM_VIDEO && s.track != nullptr) {
+        out->duration_ms = s.track->GetDurationMs();
+    }
     // **The gapless edit, which was always the container's.** `elst` says how
     // much of the front is the encoder's warm-up and how much of the rest is
     // the audio. v1 applied this inside each decoder; now it is stated once and
@@ -1058,8 +1066,7 @@ try {
         const mp::mft::AvcConfig nals =
             hevc ? mp::mft::parse_hvcc(blob.data(), blob.size()).annex : mp::mft::AvcConfig{};
 
-        if (!mp_video_has_mastering(&info) && hevc) {
-            const mp::mft::HdrMetadata hdr = mp::mft::hevc_hdr_metadata(nals);
+        const auto take = [&info](const mp::mft::HdrMetadata& hdr) {
             if (hdr.has_mastering) {
                 for (int i = 0; i < 3; ++i) {
                     info.mastering_primaries_x[i] = hdr.primaries_x[i];
@@ -1073,6 +1080,26 @@ try {
             if (hdr.has_light_levels) {
                 info.max_content_light_level = hdr.max_content_light_level;
                 info.max_frame_average_light_level = hdr.max_frame_average_light_level;
+            }
+        };
+        if (!mp_video_has_mastering(&info) && hevc) {
+            take(mp::mft::hevc_hdr_metadata(nals));
+        }
+        // **And the first sample, for the file whose SEI is in band only.**
+        // x265 puts the mastering display in front of every keyframe; the
+        // record has it only when the encoder was asked to repeat its headers,
+        // and the boxes only when the muxer wrote them. A set of 343 HDR10 test
+        // patterns stated 4000-nit mastering displays this way and this call
+        // reported none, so their roll-off started from 1000. The record's
+        // version wins when both are there, and only the prefix SEI NALs of
+        // the sample are looked at.
+        if (hevc && !mp_video_has_mastering(&info) && info.max_content_light_level == 0) {
+            AP4_Sample first;
+            AP4_DataBuffer data;
+            if (AP4_SUCCEEDED(track->GetSample(0, first)) &&
+                AP4_SUCCEEDED(first.ReadData(data))) {
+                take(mp::mft::hevc_hdr_metadata_in_sample(nals, data.GetData(),
+                                                          data.GetDataSize()));
             }
         }
         if (auto* colr = AP4_DYNAMIC_CAST(AP4_ColrAtom,

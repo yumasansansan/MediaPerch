@@ -36,6 +36,8 @@
 
 #include "pcm_format.hpp"
 
+#include "h264.hpp"
+
 #include <ebml/EbmlHead.h>
 #include <ebml/EbmlStream.h>
 #include <ebml/EbmlVoid.h>
@@ -348,6 +350,9 @@ struct Track {
     /// Looked for once, on the first `stream_info`.
     Tail tail{};
     bool tail_looked_for = false;
+    /// Whether the HEVC prefix SEI has been looked at for the mastering
+    /// display, for a track whose Colour element stated none. Once.
+    bool hdr_looked_for = false;
 
     /// What a video track states about itself. Zeroed for an audio track, and
     /// `MpFormat` is zeroed for a video one -- a track is one or the other and
@@ -1062,6 +1067,49 @@ bool peek_mpeg_header(MpDemux* d, std::size_t track, std::vector<std::uint8_t>& 
     return got;
 }
 
+/// **The mastering display and the light levels, from where an HEVC track
+/// keeps them when its Colour element does not**: the prefix SEI in the
+/// CodecPrivate's arrays, when an encoder repeated its headers, or in front of
+/// the first block's slice, which is where x265 always puts it. Looked at once,
+/// and only for a track that stated nothing -- the container's own statement
+/// wins. The file is put back where it was.
+void find_hdr_metadata(MpDemux* d, std::size_t index)
+{
+    Track& t = d->tracks[index];
+    if (t.hdr_looked_for) {
+        return;
+    }
+    t.hdr_looked_for = true;
+    if (t.codec != MP_CODEC_HEVC || t.white_x != 0 || t.luminance_max != 0 || t.max_cll != 0) {
+        return;
+    }
+    const mp::mft::AvcConfig nals = mp::mft::parse_hvcc(t.config.data(), t.config.size()).annex;
+    mp::mft::HdrMetadata hdr = mp::mft::hevc_hdr_metadata(nals);
+    if (!hdr.has_mastering && !hdr.has_light_levels) {
+        const OnlyTrack only{d, index};
+        if (restart_at(d, d->first_cluster) && next_block(d) && d->block != nullptr &&
+            d->block->NumberFrames() != 0) {
+            const auto* p = static_cast<const std::uint8_t*>(d->block->GetBuffer(0).Buffer());
+            hdr = mp::mft::hevc_hdr_metadata_in_sample(nals, p, d->block->GetBuffer(0).Size());
+        }
+        (void)restart_at(d, d->first_cluster);
+    }
+    if (hdr.has_mastering) {
+        for (int i = 0; i < 3; ++i) {
+            t.mastering_x[i] = hdr.primaries_x[i];
+            t.mastering_y[i] = hdr.primaries_y[i];
+        }
+        t.white_x = hdr.white_x;
+        t.white_y = hdr.white_y;
+        t.luminance_max = hdr.max_luminance;
+        t.luminance_min = hdr.min_luminance;
+    }
+    if (hdr.has_light_levels) {
+        t.max_cll = hdr.max_content_light_level;
+        t.max_fall = hdr.max_frame_average_light_level;
+    }
+}
+
 // --------------------------------------------------------------------------
 // The vtable
 // --------------------------------------------------------------------------
@@ -1312,10 +1360,11 @@ try {
         out->size < sizeof(MpVideoInfo::size)) {
         return MP_ERR_INVALID;
     }
-    const Track& t = d->tracks[index];
-    if (t.kind != MP_STREAM_VIDEO) {
+    if (d->tracks[index].kind != MP_STREAM_VIDEO) {
         return MP_ERR_UNSUPPORTED;
     }
+    find_hdr_metadata(d, index);
+    const Track& t = d->tracks[index];
 
     MpVideoInfo info{};
     info.size = out->size;

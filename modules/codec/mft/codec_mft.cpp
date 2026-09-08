@@ -236,6 +236,8 @@ struct MpVideoCodec {
     Com<ID3D11Device> device;
 
     mp::mft::AvcConfig avcc;
+    /// The `hvcC`, for the frame size and the profile the transform is told.
+    mp::mft::HevcConfig hvcc;
     MpCodec codec = MP_CODEC_UNKNOWN;
     /// True when frames come back as textures rather than as planes.
     bool on_gpu = false;
@@ -369,6 +371,22 @@ bool set_input_type(MpVideoCodec* c, std::string& why)
     type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
     type->SetGUID(MF_MT_SUBTYPE, subtype_of(c->codec));
     type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_MixedInterlaceOrProgressive);
+    if (c->codec == MP_CODEC_HEVC && c->hvcc.valid) {
+        // **The frame size and the profile, which the decoder is entitled to
+        // ask for before it offers an output type.** Microsoft's HEVC transform
+        // offers nothing at all for a ten-bit stream it has not been told the
+        // size of -- measured as "no NV12 or P010 output" on every one of a
+        // set of Main 10 test patterns -- while H.264's has always been
+        // forgiving. Both come out of the record's SPS; the profile's numbers
+        // are HEVC's own (1 Main, 2 Main 10), which is what MF counts in too.
+        const mp::mft::HevcSize size = mp::mft::hevc_size(c->hvcc.annex);
+        if (size.valid) {
+            (void)::MFSetAttributeSize(type.get(), MF_MT_FRAME_SIZE, size.width, size.height);
+        }
+        if (c->hvcc.profile_idc != 0) {
+            type->SetUINT32(MF_MT_VIDEO_PROFILE, c->hvcc.profile_idc);
+        }
+    }
     if (FAILED(c->transform->SetInputType(0, type.get(), 0))) {
         why = "the decoder would not take the stream";
         return false;
@@ -574,6 +592,12 @@ try {
     c->codec = codec;
     c->info.size = sizeof(MpVideoInfo);
 
+    if (codec == MP_CODEC_HEVC) {
+        // Read for the size and the profile; a stream without one is still
+        // handed over, because the transform may find its parameter sets in
+        // band, and refusing here would be refusing what `probe` claimed.
+        c->hvcc = mp::mft::parse_hvcc(config, config_bytes);
+    }
     if (codec == MP_CODEC_H264) {
         c->avcc = mp::mft::parse_avcc(config, config_bytes);
         if (!c->avcc.valid) {
@@ -643,8 +667,27 @@ try {
     }
 
     if (!set_input_type(c.get(), why) || !set_output_type(c.get(), why)) {
-        log_line(MP_LOG_DEBUG, ("codec_mft: " + why).c_str());
-        return MP_ERR_FORMAT;
+        // **The software transform is the second try, not the first refusal.**
+        // A decoder that took the device and then offers no output type for
+        // this stream is a driver declining the stream; Microsoft's own
+        // transform, asked again without the device, may still decode it in
+        // system memory, which is slower and correct.
+        const bool again = want_hardware && c->transform.get() != nullptr;
+        log_line(MP_LOG_DEBUG,
+                 ("codec_mft: " + why + (again ? "; trying again without the device" : ""))
+                     .c_str());
+        if (!again) {
+            return MP_ERR_FORMAT;
+        }
+        c->transform.reset();
+        c->manager.reset();
+        c->device.reset();
+        c->on_gpu = false;
+        if (!activate(c.get(), false, why) || !set_input_type(c.get(), why) ||
+            !set_output_type(c.get(), why)) {
+            log_line(MP_LOG_DEBUG, ("codec_mft: " + why).c_str());
+            return MP_ERR_FORMAT;
+        }
     }
     (void)read_output_format(c.get());
 
@@ -702,6 +745,22 @@ try {
     std::size_t payload_bytes = bytes;
     if (c->codec == MP_CODEC_H264) {
         if (!mp::mft::to_annex_b(c->avcc, payload, bytes, c->needs_parameter_sets,
+                                 c->annex_b)) {
+            c->trouble = "a sample whose NAL lengths do not fit inside it";
+            return MP_ERR_FORMAT;
+        }
+        payload = c->annex_b.data();
+        payload_bytes = c->annex_b.size();
+        c->needs_parameter_sets = false;
+    } else if (c->codec == MP_CODEC_HEVC && c->hvcc.valid) {
+        // **The same rewrite for HEVC, which had never been done.** An MP4
+        // sample is a list of length-prefixed NAL units and the transform,
+        // told MFVideoFormat_HEVC, wants Annex B start codes with the VPS, SPS
+        // and PPS in front of the first keyframe and again after a seek. Fed
+        // the sample as it came, the decoder took 4096 packets, produced
+        // nothing and then failed inside -- measured on a set of HDR10 test
+        // patterns, the first HEVC anybody had asked this module to decode.
+        if (!mp::mft::to_annex_b(c->hvcc.annex, payload, bytes, c->needs_parameter_sets,
                                  c->annex_b)) {
             c->trouble = "a sample whose NAL lengths do not fit inside it";
             return MP_ERR_FORMAT;

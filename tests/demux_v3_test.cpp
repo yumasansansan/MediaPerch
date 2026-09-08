@@ -22,6 +22,7 @@
 
 #include <mediaperch/module.h>
 
+#include "h264.hpp"
 #include "module_loader.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -322,6 +323,78 @@ TEST_CASE("a WebM's mastering display and light levels are read, as four-byte fl
     MpPacket packet{};
     std::uint32_t packets = 0;
     while (demux.read_packet(buffer, packet) == MP_OK) {
+        ++packets;
+    }
+    CHECK(packets == 8u);
+}
+
+TEST_CASE("a mastering display stated only in band, in the first sample, reaches the host",
+          "[abi][demux][hdr]")
+{
+    // **Where most HDR10 files keep it**: not in `mdcv`, which ffmpeg's muxer
+    // does not write; not in the `hvcC`, which carries SEI only when the
+    // encoder repeated its headers; but in the prefix SEI before the first
+    // keyframe's slice. A set of 343 HDR10 test patterns stated 4000-nit
+    // mastering displays this way and the demuxer reported none, so their
+    // roll-off started from 1000. The fixture is x265 with repeat-headers off,
+    // in MP4 and remuxed into Matroska, whose Colour element is empty too.
+    Module module{mp4_module(), MP_KIND_DEMUX};
+    REQUIRE(module.as<MpDemuxVtbl>() != nullptr);
+    mp::Demux demux;
+    REQUIRE(demux.open(*module.as<MpDemuxVtbl>(), MEDIAPERCH_TEST_HDR10_INBAND) == MP_OK);
+    std::vector<std::uint8_t> config;
+    REQUIRE(demux.stream_config(0, config));
+    // The record itself carries none: what comes back is the sample's.
+    CHECK_FALSE(mp::mft::hevc_hdr_metadata(mp::mft::parse_hvcc(config.data(), config.size()).annex)
+                    .has_mastering);
+
+    // And the picture's length -- eight frames at 25 fps -- in milliseconds,
+    // which a transport with no audio counts in: a ten-minute pattern showed
+    // no length at all, and the shell's scrubber was disabled for want of it.
+    MpStreamInfo stream{};
+    REQUIRE(demux.stream_info(0, stream));
+    CHECK(stream.kind == MP_STREAM_VIDEO);
+    CHECK(stream.codec == MP_CODEC_HEVC);
+    CHECK(stream.duration_ms == 320u);
+
+    MpVideoInfo info{};
+    info.size = sizeof(info);
+    REQUIRE(demux.video_info(0, info));
+    REQUIRE(mp_video_has_mastering(&info) != 0);
+    // ST.2086's units, red first: x265's G(8500,39850)B(6550,2300)R(35400,14600)
+    // WP(15635,16450)L(40000000,50), and max-cll=4000,1000.
+    CHECK(info.mastering_primaries_x[0] == 35400u);
+    CHECK(info.mastering_primaries_y[0] == 14600u);
+    CHECK(info.mastering_primaries_x[1] == 8500u);
+    CHECK(info.mastering_primaries_y[1] == 39850u);
+    CHECK(info.mastering_primaries_x[2] == 6550u);
+    CHECK(info.mastering_primaries_y[2] == 2300u);
+    CHECK(info.mastering_white_x == 15635u);
+    CHECK(info.mastering_white_y == 16450u);
+    CHECK(info.mastering_max_luminance == 40000000u);
+    CHECK(info.mastering_min_luminance == 50u);
+    CHECK(info.max_content_light_level == 4000u);
+    CHECK(info.max_frame_average_light_level == 1000u);
+
+    Module mkv{mkv_module(), MP_KIND_DEMUX};
+    REQUIRE(mkv.as<MpDemuxVtbl>() != nullptr);
+    mp::Demux other;
+    REQUIRE(other.open(*mkv.as<MpDemuxVtbl>(), MEDIAPERCH_TEST_HDR10_INBAND_MKV) == MP_OK);
+    MpVideoInfo again{};
+    again.size = sizeof(again);
+    REQUIRE(other.video_info(0, again));
+    REQUIRE(mp_video_has_mastering(&again) != 0);
+    CHECK(again.mastering_max_luminance == 40000000u);
+    CHECK(again.mastering_white_x == 15635u);
+    CHECK(again.max_content_light_level == 4000u);
+    CHECK(again.max_frame_average_light_level == 1000u);
+    // And the frames are still where they were after the peek at the first.
+    const std::uint32_t only[] = {0};
+    REQUIRE(other.select_streams(only) == MP_OK);
+    std::vector<std::uint8_t> buffer;
+    MpPacket packet{};
+    std::uint32_t packets = 0;
+    while (other.read_packet(buffer, packet) == MP_OK) {
         ++packets;
     }
     CHECK(packets == 8u);

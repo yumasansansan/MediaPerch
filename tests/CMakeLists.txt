@@ -263,6 +263,12 @@ if(TARGET mp_demux_mp4 AND TARGET mp_demux_mkv)
         # the Colour element, as four-byte floats: what Windows' HDR sample
         # states and what libebml read as garbage.
         "MEDIAPERCH_TEST_PQ_MASTERING_WEBM=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mkv/pq_mastering.webm\""
+        # Eight frames of ten-bit HEVC from x265 with repeat-headers off: the
+        # mastering display and the light levels are in the prefix SEI before
+        # the first keyframe and nowhere else -- which is where most HDR10
+        # files keep them. The same stream in both containers.
+        "MEDIAPERCH_TEST_HDR10_INBAND=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mp4/hdr10_inband.mp4\""
+        "MEDIAPERCH_TEST_HDR10_INBAND_MKV=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mkv/hdr10_inband.mkv\""
         "MEDIAPERCH_TEST_HEVC=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mp4/hevc.mp4\"")
     # One demuxer, two consumers, and the position they share -- which needs
     # a real file with two streams in it, so it lives with the fixtures.

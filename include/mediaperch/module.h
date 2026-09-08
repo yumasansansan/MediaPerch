@@ -386,7 +386,8 @@ typedef struct MpStreamInfo {
     uint64_t play_frames;
 
     /* Milliseconds, for a stream whose rate is not frames -- subtitles, and
-     * video where the audio clock is what matters (§9). 0 when not stated. */
+     * video, whose length a transport with no audio to count in shows from
+     * this and nothing else (§9). 0 when not stated. */
     uint64_t duration_ms;
 
     /* **Frames to drop from the end of the decoded stream, which is not the

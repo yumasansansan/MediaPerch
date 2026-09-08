@@ -3589,9 +3589,11 @@ somebody having installed something from a shop does not support HEVC.
 
 `codec_de265` is libde265 1.1.2, LGPL-3.0 for the library and MIT for the samples, which this
 tree's GPL-3.0-or-later may link. It reads the `hvcC`'s own chroma format and bit depths and
-declines anything that is not eight-bit 4:2:0, which is what libde265 does well — §7's
-rule that a decoder must not discover mid-file that it cannot do this, kept by refusing before
-the file starts.
+declines what libde265 declines — a depth outside eight to sixteen bits, or a luma depth and
+a chroma depth that differ — which is §7's rule that a decoder must not discover mid-file
+that it cannot do this, kept by refusing before the file starts. (For as long as it had
+existed it declined anything that was not eight-bit 4:2:0, on the belief that the library did
+no more. The belief was false, and the story is *The test patterns* under M8.)
 
 `parse_hvcc` went into `modules/shared/h264` beside `parse_avcc`, which is where that file's
 own header said it would go: *"HEVC is the same shape with a different configuration record.
@@ -5893,6 +5895,71 @@ film's frame rate divides, so frames land on refreshes rather than judder betwee
 has nothing to do with a seek: pre-roll is the container's sync points and the decoder's
 dependency on them, and no refresh rate changes which frame a seek lands on.
 
+#### The test patterns: "no audio in it, and the picture would not open"
+
+A set of 343 HDR10 test patterns — HEVC Main 10 in MP4, PQ on BT.2020, mastering displays of
+1000 and 4000 nits, some with no audio beside the picture — and every one tried was refused
+with the sentence in the title. The question asked was whether the container was the cause,
+and whether another would have failed the same way. The container was not the cause, and the
+same files in Matroska would have said the same sentence: the demuxer had handed over exactly
+what it was owed, and neither HEVC decoder would open it. Four faults, in the order found.
+
+**`codec_de265` refused ten bits, and libde265 does not.** The wrapper's `decodable()` said
+eight-bit 4:2:0 or nothing, on the belief that the library did no more — a belief the plan
+above repeated, and one nobody had read the library to check. libde265's own `sps.cc` accepts
+bit depths of eight to sixteen and all four chroma formats, and stores anything above eight
+bits as two bytes a sample, which the wrapper's `layout_of` already knew how to describe. What
+the wrapper declines now is what the library declines: a depth outside that range, or a luma
+depth and a chroma depth that differ. Held by a test that decodes twenty-four frames of Main
+10 and checks a ten-bit layout in a sixteen-bit container with no shift, and no sample above
+1023.
+
+**`codec_mft` could not set its input type, three ways.** Media Foundation's HEVC transform
+wants `MF_MT_FRAME_SIZE` and `MF_MT_VIDEO_PROFILE` on the input type before it accepts Main
+10 — H.264 needed neither — so the wrapper reads the picture size from the SPS (`hevc_size`,
+beside `parse_hvcc`) and states the profile. The transform takes Annex B, start codes and
+parameter sets in band, where an MP4 sample is length-prefixed NALs, so HEVC samples are
+rewritten the way `to_annex_b` already rewrote H.264's. And the hardware transform that
+answers for HEVC on this machine is the Store extension the plan records above as offering no
+NV12 or P010 output: when the hardware transform refuses the input or the output type, the
+wrapper activates the software one and tries again, rather than calling the file undecodable.
+Held by a test that runs the same Main 10 fixture through Media Foundation and expects P010,
+skipped where the probe scores zero.
+
+**The mastering display was in the first sample, and both demuxers looked only in the
+record.** The patterns state their mastering display and content light levels once, in the
+prefix SEI ahead of the first keyframe's slice, and nowhere in the `hvcC`'s arrays; both
+demuxers read the arrays, reported nothing, and a 4000-nit grade rolled off `from 1000`.
+`hevc_hdr_metadata_in_sample`, beside `parse_hvcc`, splits a length-prefixed sample into its
+NALs and reads the prefix SEI, and each demuxer falls back to the first sample when the record
+says nothing: `demux_mp4` reads sample 0, `demux_mkv` walks to the track's first block and
+puts the reader back where it was. `tests/data/mp4/hdr10_inband.mp4` is eight frames of x265
+whose muxer had copied the SEI into the record's arrays as well, cut out by hand so the
+sample is the only place the display is stated; `hdr10_inband.mkv` is the same, remuxed. The
+test holds that the record carries none, that both demuxers report 4000 nits and both light
+levels, and that the Matroska reader's peek at the first block leaves all eight packets where
+they were. Measured: `target 203 nits from 4000` on the 4000-nit patterns.
+
+**And a video-only MP4 had no length.** `demux_mp4` stated a picture's `total_frames` in the
+track's own timescale — 12 800 a second on these, a number nothing can show — and no
+`duration_ms`, so a ten-minute pattern showed `position 0:02` with nothing after it and the
+shell's scrubber was disabled for want of a length, again. Every video stream states its
+track duration in milliseconds now: `0:02 / 10:10`, and a `seek 300` lands at `5:00` with 157
+frames of pre-roll and none dropped. The fixture's eight frames at 25 fps read back as 320 ms.
+
+**Measured, on the patterns.** The 4K black-level pattern, video-only, on `codec_mft`: 53
+shown of 53 decoded two seconds in, none dropped; `show` on the same file for three seconds,
+73 shown, 74 decoded, 0 dropped. Two patterns with AAC beside the picture, a 1000-nit and a
+4000-nit grade: 102 shown of 103 decoded, and 78 of 78, the second `from 4000`.
+
+**What the container had to do with it.** Nothing. Both halves of the sentence were the
+decoders': *no audio in it* is true and was never a refusal (*Two engines* above), and *the
+picture would not open* was `codec_de265` declining a depth it could decode and `codec_mft`
+failing a type it had not been told enough about. What does differ between the two containers
+is where a mastering display may be stated — MP4 in `mdcv` and `clli` boxes, the record, or
+the sample; Matroska in the Colour element, the record, or the sample — and each demuxer now
+reads all three of its places, in that order.
+
 
 #### Built, and the palette needed a fourth verb
 
@@ -6450,6 +6517,15 @@ real time.
 - **"Unspecified" is a value that means nothing was said, and code must not take it for a
   statement.** A decoder's 2 overruled a container's 16 because the check was `!= 0`. Every
   reader of a code-point field has to know which value is *did not say*.
+- **A wrapper's refusal is a claim about the library, and the library is the only thing it
+  can be checked against.** `codec_de265` declined ten-bit HEVC from the day it was written,
+  on the strength of a sentence in a comment; libde265's `sps.cc` had taken eight to sixteen
+  bits the whole time, and 343 test patterns were refused before anyone read it. Bound a
+  refusal by the library's own bounds, and hold it with a fixture at the depth being refused.
+- **The newest thing is not the cause because it is newest.** The patterns were the first
+  MP4s to arrive with no audio, so the container was the suspect; it had handed the decoders
+  exactly what they were owed, and the same files in Matroska would have failed in the same
+  two places. Before blaming the layer that changed, ask which layer said the sentence.
 - **A rule nobody decided is still a rule, and it hardens.** *The audio device is the master
   clock* was a sentence about the common case that became a sentence about every case, and
   then a comment, and then an `IMedia` that could not say *no audio*, and then a queue that

@@ -654,6 +654,41 @@ bool skip_st_ref_pic_set(Bits& in, std::uint32_t index, std::uint32_t count,
 
 } // namespace
 
+HevcSize hevc_size(const AvcConfig& config)
+{
+    // The first fields of the SPS, walked exactly as `hevc_colour` walks them
+    // and no further: pic_width_in_luma_samples and pic_height_in_luma_samples
+    // come right after the chroma format.
+    HevcSize out;
+    for (const std::vector<std::uint8_t>& nal : config.parameter_sets) {
+        if (nal.size() < 4 || ((nal[0] >> 1) & 0x3fu) != 33u) {
+            continue;
+        }
+        Bits in{nal.data() + 2, nal.size() - 2};
+        std::uint32_t sub_layers_minus1 = 0;
+        if (!in.skip(4) || !in.un(3, sub_layers_minus1) || !in.skip(1)) {
+            return out;
+        }
+        if (!skip_profile_tier_level(in, sub_layers_minus1)) {
+            return out;
+        }
+        std::uint32_t value = 0;
+        std::uint32_t chroma_format_idc = 0;
+        if (!in.ue(value) || !in.ue(chroma_format_idc)) {
+            return out;
+        }
+        if (chroma_format_idc == 3 && !in.skip(1)) {
+            return out;
+        }
+        if (!in.ue(out.width) || !in.ue(out.height)) {
+            return out;
+        }
+        out.valid = out.width != 0 && out.height != 0;
+        return out;
+    }
+    return out;
+}
+
 HevcColour hevc_colour(const AvcConfig& config)
 {
     HevcColour out;
@@ -812,6 +847,32 @@ HevcColour hevc_colour(const AvcConfig& config)
         return out;
     }
     return out;
+}
+
+HdrMetadata hevc_hdr_metadata_in_sample(const AvcConfig& config, const std::uint8_t* sample,
+                                        std::size_t bytes)
+{
+    AvcConfig seis;
+    seis.length_size = config.length_size;
+    const std::uint32_t prefix = config.length_size != 0 ? config.length_size : 4u;
+    std::size_t at = 0;
+    while (sample != nullptr && at + prefix <= bytes) {
+        std::size_t length = 0;
+        for (std::uint32_t i = 0; i < prefix; ++i) {
+            length = (length << 8) | sample[at + i];
+        }
+        at += prefix;
+        if (length == 0 || length > bytes - at) {
+            break; // a length past the end is a truncated sample, left alone
+        }
+        // 39 is a prefix SEI; the slices and the parameter sets are skipped
+        // over by their lengths rather than read.
+        if (((sample[at] >> 1) & 0x3fu) == 39u) {
+            seis.parameter_sets.emplace_back(sample + at, sample + at + length);
+        }
+        at += length;
+    }
+    return hevc_hdr_metadata(seis);
 }
 
 HdrMetadata hevc_hdr_metadata(const AvcConfig& config)

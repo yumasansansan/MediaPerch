@@ -15,12 +15,18 @@
 // nothing is allocated across the module boundary is what keeps the boundary a
 // boundary rather than a formality.
 //
-// **What it does not do is as much of the shape as what it does.** libde265
-// decodes Main profile -- eight-bit 4:2:0 -- and is incomplete above that, so
-// `probe` reads the `hvcC`'s own chroma format and bit depths and declines
-// anything else before a decoder is opened. §7's rule is that a decoder failing
-// mid-file must never trigger a silent retry, and the way to keep it is to fail
-// before the file starts.
+// **What it declines is what libde265 declines, and nothing narrower.** The
+// library takes bit depths of eight to sixteen (sps.cc refuses outside that)
+// and all four chroma formats, and stores anything above eight bits as two
+// little-endian bytes a sample; `probe` reads the `hvcC`'s own chroma format
+// and bit depths and declines only what the library would -- and a luma depth
+// that differs from the chroma depth, which the ABI's one `bits` per frame
+// cannot describe. An earlier version of this file declined everything but
+// eight-bit 4:2:0 on the belief that libde265 did no more, which was false,
+// and which made every HDR file on this machine a picture that would not
+// open. §7's rule is that a decoder failing mid-file must never trigger a
+// silent retry, and the way to keep it is to fail before the file starts --
+// for the library's reasons, not for invented ones.
 //
 // The pictures come out planar and are handed over as libde265's own memory,
 // valid until the next call, which is what `MpVideoCodecVtbl` promises and
@@ -54,14 +60,13 @@ void log_line(MpLogLevel level, const char* msg) noexcept
     }
 }
 
-/// What libde265 will decode, which is narrower than what HEVC defines.
-///
-/// Main profile and nothing else: 4:2:0 at eight bits. The record states both,
-/// so this is read rather than discovered.
+/// What libde265 will decode, as the record states it: any of the four chroma
+/// formats, eight to sixteen bits -- the library's own bounds, in sps.cc --
+/// with the two depths equal, because a frame here states one depth.
 [[nodiscard]] bool decodable(const mp::mft::HevcConfig& config) noexcept
 {
-    return config.valid && config.chroma_format_idc == 1 && config.bit_depth_luma == 8 &&
-           config.bit_depth_chroma == 8;
+    return config.valid && config.chroma_format_idc <= 3 && config.bit_depth_luma >= 8 &&
+           config.bit_depth_luma <= 16 && config.bit_depth_chroma == config.bit_depth_luma;
 }
 
 } // namespace
@@ -253,9 +258,10 @@ try {
     if (config == nullptr || config_bytes == 0) {
         // **An HEVC stream with no `hvcC` is one this cannot start.** The
         // parameter sets could arrive in band, and libde265 would find them --
-        // but nothing here could have declined a ten-bit file first, and a
-        // decoder that discovers halfway through that it cannot do this is
-        // exactly what §7 forbids.
+        // but a seek resets the decoder and the parameter sets have to be
+        // pushed again, and the record is where this module keeps them; and
+        // nothing could have declined a depth the library refuses first, which
+        // a decoder discovering mid-file is exactly what §7 forbids.
         return MP_ERR_UNSUPPORTED;
     }
     const mp::mft::HevcConfig parsed = mp::mft::parse_hvcc(config, config_bytes);
@@ -295,7 +301,8 @@ try {
     auto owned = std::make_unique<MpVideoCodec>();
     owned->config = mp::mft::parse_hvcc(config, config_bytes);
     if (!decodable(owned->config)) {
-        log_line(MP_LOG_DEBUG, "codec_de265: the hvcC is not 8-bit 4:2:0");
+        log_line(MP_LOG_DEBUG,
+                 "codec_de265: the hvcC states a depth libde265 does not decode, or two");
         return MP_ERR_UNSUPPORTED;
     }
 

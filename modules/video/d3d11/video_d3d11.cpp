@@ -2372,10 +2372,16 @@ try {
                                   // no mastering display. It is still the peak the
                                   // roll-off should start from.
                                   .mastering_peak_nits =
-                                      in->size >= sizeof(MpVideoInfo) &&
-                                              in->mastering_max_luminance != 0
+                                      in->size < sizeof(MpVideoInfo) ? 0.0f
+                                      : in->mastering_max_luminance != 0
                                           ? static_cast<float>(in->mastering_max_luminance) /
                                                 10000.0f
+                                      // CTA-861.3's brightest pixel, for a stream that stated
+                                      // light levels and no mastering display: the content's
+                                      // own ceiling is the next best place for a roll-off to
+                                      // start from.
+                                      : in->max_content_light_level != 0
+                                          ? static_cast<float>(in->max_content_light_level)
                                           : 0.0f};
     v->full_range = (in->flags & MP_VIDEO_FULL_RANGE) != 0;
     // The container's aspect correction is the picture's size, not the

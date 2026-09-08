@@ -21,6 +21,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 
@@ -93,8 +94,8 @@ TEST_CASE("libde265 claims HEVC and declines what it does not decode",
 
     // **An HEVC stream with no `hvcC` is declined rather than attempted.** The
     // parameter sets could arrive in band and libde265 would find them -- but
-    // then nothing could have declined a ten-bit file first, and §7 says a
-    // decoder must not discover mid-file that it cannot do this.
+    // a seek has to push them again and the record is where they are kept,
+    // and §7 says a decoder must not discover mid-file what it cannot do.
     std::uint32_t bare = 1;
     codec->probe(MP_CODEC_HEVC, MP_GRAPHICS_NONE, nullptr, 0, &bare);
     CHECK(bare == 0u);
@@ -104,6 +105,86 @@ TEST_CASE("libde265 claims HEVC and declines what it does not decode",
     std::uint32_t rubbish = 1;
     codec->probe(MP_CODEC_HEVC, MP_GRAPHICS_NONE, nonsense, sizeof(nonsense), &rubbish);
     CHECK(rubbish == 0u);
+}
+
+TEST_CASE("ten-bit HEVC decodes to sixteen-bit planes, as libde265 stores them",
+          "[video][hevc][de265][hdr]")
+{
+    // **The defect this is written against**: the wrapper declined everything
+    // but eight-bit 4:2:0 on the belief that libde265 did no more. It decodes
+    // eight to sixteen bits and all four chroma formats, and above eight bits
+    // stores two little-endian bytes a sample with the value in the low bits
+    // -- which is what a Main 10 file, the shape every HDR10 stream has, comes
+    // out as.
+    Module demux_module{MEDIAPERCH_DEMUX_MP4, MP_KIND_DEMUX};
+    Module codec_module{MEDIAPERCH_CODEC_DE265, MP_KIND_VCODEC};
+    REQUIRE(demux_module.vtbl != nullptr);
+    REQUIRE(codec_module.vtbl != nullptr);
+    const auto* codec = static_cast<const MpVideoCodecVtbl*>(codec_module.vtbl);
+
+    Opened file;
+    open_video(*static_cast<const MpDemuxVtbl*>(demux_module.vtbl), MEDIAPERCH_TEST_HDR10,
+               file);
+    REQUIRE(file.info.codec == MP_CODEC_HEVC);
+    const auto config_bytes = static_cast<std::uint32_t>(file.config.size());
+
+    std::uint32_t score = 0;
+    REQUIRE(codec->probe(MP_CODEC_HEVC, MP_GRAPHICS_NONE, file.config.data(), config_bytes,
+                         &score) == MP_OK);
+    CHECK(score > 0u);
+
+    MpVideoCodec* decoder = nullptr;
+    REQUIRE(codec->open(MP_CODEC_HEVC, nullptr, file.config.data(), config_bytes, &decoder) ==
+            MP_OK);
+
+    std::vector<std::uint8_t> buffer;
+    MpPacket packet{};
+    std::uint32_t frames = 0;
+    MpPixelLayout seen{};
+    std::uint16_t brightest = 0;
+    bool any_content = false;
+    const auto drain = [&] {
+        for (int guard = 0; guard < 64; ++guard) {
+            MpVideoFrame frame{};
+            frame.size = sizeof(frame);
+            const MpResult r = codec->next_frame(decoder, &frame);
+            if (r == MP_END) {
+                return;
+            }
+            REQUIRE(r == MP_OK);
+            ++frames;
+            CHECK(frame.width == 320u);
+            CHECK(frame.height == 240u);
+            seen = frame.layout;
+            REQUIRE(mp_pixel_planes(&frame.layout) == 3u);
+            REQUIRE(frame.plane[0] != nullptr);
+            // Two bytes a sample, little-endian, the value in the low ten bits:
+            // nothing reaches 1024, and a PQ grade is not one flat value.
+            const auto* luma = static_cast<const std::uint16_t*>(frame.plane[0]);
+            for (std::uint32_t x = 0; x < frame.width; ++x) {
+                brightest = std::max(brightest, luma[x]);
+                if (luma[x] != luma[0]) {
+                    any_content = true;
+                }
+            }
+        }
+    };
+    while (file.demux.read_packet(buffer, packet) == MP_OK) {
+        REQUIRE(codec->decode(decoder, buffer.data(), packet.bytes, packet.frame) == MP_OK);
+        drain();
+    }
+    REQUIRE(codec->flush(decoder) == MP_OK);
+    drain();
+    codec->close(decoder);
+
+    CHECK(frames == 24u);
+    CHECK(seen.chroma == MP_CHROMA_420);
+    CHECK(seen.packing == MP_PACK_PLANAR);
+    CHECK(seen.bits == 10u);
+    CHECK(seen.container_bits == 16u);
+    CHECK(seen.shift == 0u);
+    CHECK(brightest < 1024u);
+    CHECK(any_content);
 }
 
 TEST_CASE("HEVC decodes to planar frames, every one of them",

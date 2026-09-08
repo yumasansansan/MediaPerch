@@ -143,6 +143,17 @@ struct HevcColour {
 /// is not in the record.
 [[nodiscard]] HevcColour hevc_colour(const AvcConfig& config);
 
+/// The coded size out of the first SPS among a config's NALs: what a decoder
+/// is entitled to be told before it offers an output type, and what the
+/// record does not state. `valid` false when there is no SPS or it could not
+/// be walked that far.
+struct HevcSize {
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    bool valid = false;
+};
+[[nodiscard]] HevcSize hevc_size(const AvcConfig& config);
+
 /// **What the content was graded on, as HEVC states it.**
 ///
 /// SMPTE ST 2086's mastering display and CTA-861.3's light levels, which HEVC
@@ -183,6 +194,17 @@ struct HdrMetadata {
 /// Everything absent when there are none, which is the common case: static
 /// metadata is optional and most streams state none.
 [[nodiscard]] HdrMetadata hevc_hdr_metadata(const AvcConfig& config);
+
+/// The same two messages out of one sample -- a list of length-prefixed NAL
+/// units, as MP4 and Matroska store them -- for the file that carries them in
+/// band only. **Which is where most HDR10 files keep them**: the record holds
+/// SEI only when an encoder was asked to repeat its headers, the boxes only
+/// when a muxer wrote them, and the first sample is a keyframe with the prefix
+/// SEI in front of its slice. Only prefix SEI NALs are copied out, so a 4K
+/// keyframe costs a few bytes to scan.
+[[nodiscard]] HdrMetadata hevc_hdr_metadata_in_sample(const AvcConfig& config,
+                                                       const std::uint8_t* sample,
+                                                       std::size_t bytes);
 
 /// Parses an `hvcC` box body.
 ///

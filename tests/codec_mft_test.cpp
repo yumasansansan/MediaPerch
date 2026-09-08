@@ -537,6 +537,87 @@ TEST_CASE("the H.264 track of a real MP4 decodes to frames", "[video][mft]")
     codec->close(decoder);
 }
 
+TEST_CASE("ten-bit HEVC through Media Foundation comes out as P010, once it is told the size",
+          "[video][mft][hdr]")
+{
+    // **Measured on a set of 343 HDR10 test patterns, all Main 10**: the
+    // transform took the stream and then offered no NV12 or P010 output,
+    // because it had not been told the frame size -- and the module gave up
+    // there rather than trying Microsoft's transform without the device.
+    // Skips where this machine has no HEVC decoder at all, which `probe` says.
+    Module demux_module{MEDIAPERCH_DEMUX_MP4, MP_KIND_DEMUX};
+    Module codec_module{MEDIAPERCH_CODEC_MFT, MP_KIND_VCODEC};
+    REQUIRE(demux_module.vtbl != nullptr);
+    REQUIRE(codec_module.vtbl != nullptr);
+    const auto* codec = static_cast<const MpVideoCodecVtbl*>(codec_module.vtbl);
+
+    mp::Demux demux;
+    REQUIRE(demux.open(*static_cast<const MpDemuxVtbl*>(demux_module.vtbl),
+                       MEDIAPERCH_TEST_HDR10) == MP_OK);
+    std::vector<std::uint8_t> config;
+    REQUIRE(demux.stream_config(0, config));
+    std::uint32_t score = 0;
+    REQUIRE(codec->probe(MP_CODEC_HEVC, MP_GRAPHICS_NONE, config.data(),
+                         static_cast<std::uint32_t>(config.size()), &score) == MP_OK);
+    if (score == 0) {
+        SKIP("this machine has no HEVC decoder for Media Foundation to find");
+    }
+
+    MpVideoCodec* decoder = nullptr;
+    REQUIRE(codec->open(MP_CODEC_HEVC, nullptr, config.data(),
+                        static_cast<std::uint32_t>(config.size()), &decoder) == MP_OK);
+    const std::uint32_t only_video[] = {0};
+    REQUIRE(demux.select_streams(only_video) == MP_OK);
+
+    std::vector<std::uint8_t> buffer;
+    MpPacket packet{};
+    std::uint32_t frames = 0;
+    MpPixelLayout seen{};
+    const auto drain = [&] {
+        for (int guard = 0; guard < 64; ++guard) {
+            MpVideoFrame frame{};
+            frame.size = sizeof(frame);
+            const MpResult r = codec->next_frame(decoder, &frame);
+            if (r == MP_END) {
+                return;
+            }
+            if (r == MP_ERR_BUSY) {
+                continue;
+            }
+            REQUIRE(r == MP_OK);
+            ++frames;
+            seen = frame.layout;
+            CHECK(frame.width == 320u);
+            CHECK(frame.height == 240u);
+            REQUIRE(frame.plane[0] != nullptr);
+        }
+    };
+    for (int guard = 0; guard < 500; ++guard) {
+        const MpResult r = demux.read_packet(buffer, packet);
+        if (r == MP_END) {
+            break;
+        }
+        REQUIRE(r == MP_OK);
+        const MpResult fed = codec->decode(decoder, buffer.data(), packet.bytes, packet.frame);
+        if (fed == MP_ERR_BUSY) {
+            drain();
+            REQUIRE(codec->decode(decoder, buffer.data(), packet.bytes, packet.frame) ==
+                    MP_OK);
+        } else {
+            REQUIRE(fed == MP_OK);
+        }
+        drain();
+    }
+    REQUIRE(codec->flush(decoder) == MP_OK);
+    drain();
+    codec->close(decoder);
+
+    CHECK(frames == 24u);
+    // P010: ten bits in a sixteen-bit container, the value in the high bits.
+    CHECK(seen.bits == 10u);
+    CHECK(seen.container_bits == 16u);
+}
+
 TEST_CASE("a decoded frame reaches the presenter and comes back as pixels",
           "[video][mft][d3d11]")
 {
