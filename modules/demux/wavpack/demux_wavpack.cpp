@@ -38,6 +38,7 @@
 #include <mediaperch/module.h>
 
 #include "module_log.hpp"
+#include "win_path.hpp"
 
 #include "pcm_format.hpp"
 
@@ -82,14 +83,7 @@ void log_fmt(MpLogLevel level, const char* format, ...) noexcept
 #if defined(_WIN32)
 FILE* open_utf8(const char* path)
 {
-    const int len = ::MultiByteToWideChar(CP_UTF8, 0, path, -1, nullptr, 0);
-    if (len <= 1) {
-        return nullptr;
-    }
-    std::wstring wide(static_cast<std::size_t>(len - 1), L'\0');
-    ::MultiByteToWideChar(CP_UTF8, 0, path, -1, wide.data(), len);
-    FILE* fp = nullptr;
-    return ::_wfopen_s(&fp, wide.c_str(), L"rb") == 0 ? fp : nullptr;
+    return mp::winpath::fopen_utf8(path, L"rb"); // and past MAX_PATH, see win_path.hpp
 }
 #else
 FILE* open_utf8(const char* path) { return std::fopen(path, "rb"); }

@@ -25,6 +25,7 @@
 #include <mediaperch/module.h>
 
 #include "module_log.hpp"
+#include "win_path.hpp"
 
 #include "pcm_format.hpp"
 
@@ -84,13 +85,8 @@ std::wstring widen(const char* utf8)
     if (utf8 == nullptr || *utf8 == '\0') {
         return {};
     }
-    const int needed = ::MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0);
-    if (needed <= 1) {
-        return {};
-    }
-    std::wstring out(static_cast<std::size_t>(needed - 1), L'\0');
-    ::MultiByteToWideChar(CP_UTF8, 0, utf8, -1, out.data(), needed);
-    return out;
+    // win_path.hpp: UTF-16, and past MAX_PATH the prefix that lifts the limit.
+    return mp::winpath::for_open(utf8);
 }
 #endif
 

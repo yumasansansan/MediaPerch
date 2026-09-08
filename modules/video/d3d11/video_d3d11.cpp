@@ -79,6 +79,7 @@
 // every case, which is the shape that work takes.
 
 #include "colour_plan.hpp"
+#include "kernels.hpp"
 #include "yuv_matrix.hpp"
 
 #include <mediaperch/module.h>
@@ -173,15 +174,25 @@ private:
 // for. The vertex shader makes it from `SV_VertexID` and there is no vertex
 // buffer at all.
 //
-// The pixel shader is §9.6 and nothing else yet: sRGB in, linear out, scaled by
-// what the display says its white is. Writing it as a shader rather than as a
-// lookup is what lets the tone mappers join it later without another pass.
+// The pixel shaders are §9's colour pipeline and, since the HDR10 test
+// patterns, the resampling around it: chroma reconstructed at each luma
+// sample by a kernel and the stream's siting, the transfer undone into linear
+// light, the picture resampled one axis at a time in that light when the
+// target is not the source's size, then the roll-off, the gamut and the
+// encoding. Writing it as shaders rather than as lookups is what lets each of
+// those be a formula a test can hold to a standard.
 constexpr char k_shader[] = R"HLSL(
 Texture2D<float4> rgba     : register(t0);  // the BGRA8 path
 Texture2D<float>  luma     : register(t1);  // Y, semi-planar and planar alike
 Texture2D<float2> chroma   : register(t2);  // semi-planar CbCr, interleaved
 Texture2D<float>  chroma_u : register(t3);  // planar Cb
 Texture2D<float>  chroma_v : register(t4);  // planar Cr
+// **Chroma at the luma's width, still at the chroma's height**: what
+// `ps_chroma_across` writes and the main pass finishes downwards. The
+// reconstruction is separable, so it is done as two passes of six taps
+// rather than one of thirty-six -- which on an Iris Xe at 4K60 was the
+// difference between a fifth of the frames dropped and almost none.
+Texture2D<float2> chroma_wide : register(t5);
 SamplerState bilinear : register(s0);
 
 cbuffer Constants : register(b0)
@@ -219,14 +230,32 @@ cbuffer Constants : register(b0)
 
     uint  linear_in;
     float tone_source;    // where the roll-off starts: the mastering peak, in nits
-    float pad2;
-    float pad3;
+    uint  gamut_mode;     // past the display's gamut: 0 clip, 1 desaturate at constant luminance
+    uint  chroma_kernel;  // kernels.hpp's Kernel, for the chroma reconstruction
 
     // Source primaries to the buffer's, in linear light. Identity unless they
     // differ, which is the usual case and costs three dots either way.
     float4 gamut0;
     float4 gamut1;
     float4 gamut2;
+
+    // **The resampling** (kernels.hpp). Where chroma sample 0 sits against
+    // luma sample 0 and how many chroma samples there are per luma sample,
+    // per axis; the chroma plane's picture size, for the edge clamp; and, for
+    // the two scale passes, which axis is being resampled and from what size
+    // to what.
+    float2 chroma_off;
+    float2 chroma_step;
+    float2 chroma_size;
+    uint   scale_axis;
+    uint   scale_kernel;
+    float2 scale_src;
+    float2 scale_dst;
+
+    uint   chroma_planar; // 1 when Cb and Cr are two planes, 0 when interleaved
+    uint   pad_a;
+    uint   pad_b;
+    uint   pad_c;
 };
 
 struct Vertex {
@@ -369,7 +398,211 @@ float3 decode(float3 c)
     if (transfer_kind == 2) {
         return pq_to_nits(c) / 80.0;
     }
+    if (transfer_kind == 4) {
+        // Code point 8: linear, which H.273 names and a test pattern uses.
+        return saturate(c) * sdr_scale;
+    }
     return sdr_to_linear(c) * sdr_scale;
+}
+
+// --------------------------------------------------------------------------
+// The resampling (kernels.hpp)
+// --------------------------------------------------------------------------
+//
+// **The weights are computed, once per tap, from the kernels' own formulas.**
+// A table would be one more thing to keep in step with a name; a formula is
+// what tests/scaler_test.cpp writes its references from, independently.
+
+static const float k_pi = 3.14159265358979;
+
+// Half the width of a kernel, in taps at one to one.
+float kernel_support(uint kind)
+{
+    if (kind == 0) {
+        return 1.0;
+    }
+    if (kind == 3 || kind == 4) {
+        return 2.0;
+    }
+    if (kind == 5) {
+        return 0.5;
+    }
+    return 3.0;
+}
+
+// The kernel's weight at `x` taps from its centre. Lanczos, spline36 and
+// Catmull-Rom are interpolating -- 1 at 0 and 0 at every other integer, so
+// one to one is the identity -- and Mitchell-Netravali is not, by design.
+float kernel_weight(uint kind, float x)
+{
+    x = abs(x);
+    if (kind == 0) {
+        return max(1.0 - x, 0.0);
+    }
+    if (kind == 1) {
+        // Lanczos, three lobes. Snapped at the integers, where sin(pi) in
+        // single precision is a hundred-millionth rather than nought.
+        if (x >= 3.0) {
+            return 0.0;
+        }
+        float n = round(x);
+        if (abs(x - n) < 1e-6) {
+            return n == 0.0 ? 1.0 : 0.0;
+        }
+        float px = k_pi * x;
+        return 3.0 * sin(px) * sin(px / 3.0) / (px * px);
+    }
+    if (kind == 2) {
+        // Spline36, as ImageMagick and mpv spell it.
+        if (x < 1.0) {
+            return ((13.0 / 11.0 * x - 453.0 / 209.0) * x - 3.0 / 209.0) * x + 1.0;
+        }
+        if (x < 2.0) {
+            float t = x - 1.0;
+            return ((-6.0 / 11.0 * t + 270.0 / 209.0) * t - 156.0 / 209.0) * t;
+        }
+        if (x < 3.0) {
+            float t = x - 2.0;
+            return ((1.0 / 11.0 * t - 45.0 / 209.0) * t + 26.0 / 209.0) * t;
+        }
+        return 0.0;
+    }
+    if (kind == 3 || kind == 4) {
+        // Mitchell and Netravali's two-parameter cubic: B=0, C=1/2 is
+        // Catmull-Rom, and B=C=1/3 is their own recommendation.
+        float b = kind == 3 ? 0.0 : 1.0 / 3.0;
+        float c = kind == 3 ? 0.5 : 1.0 / 3.0;
+        float x2 = x * x;
+        float x3 = x2 * x;
+        if (x < 1.0) {
+            return ((12.0 - 9.0 * b - 6.0 * c) * x3 + (-18.0 + 12.0 * b + 6.0 * c) * x2 +
+                    (6.0 - 2.0 * b)) / 6.0;
+        }
+        if (x < 2.0) {
+            return ((-b - 6.0 * c) * x3 + (6.0 * b + 30.0 * c) * x2 +
+                    (-12.0 * b - 48.0 * c) * x + (8.0 * b + 24.0 * c)) / 6.0;
+        }
+        return 0.0;
+    }
+    // The box, with a sample on the boundary shared: an integer downscale
+    // then counts every source sample exactly once.
+    return x < 0.5 ? 1.0 : (x == 0.5 ? 0.5 : 0.0);
+}
+
+// **Chroma, reconstructed at the luma samples' positions, in two halves.**
+// Chroma sample k of an axis sits at luma sample k / step + off, so the chroma
+// position for luma sample p is (p - off) * step and the kernel is centred
+// there. The kernel is separable, so the horizontal half runs once per
+// chroma *row* into `chroma_wide` -- the luma's width at the chroma's height
+// -- and the main pass takes the vertical taps from that. Edge samples repeat
+// past the plane's *picture*, which is the crop and not the texture.
+float2 chroma_sample(int2 c)
+{
+    return chroma_planar != 0 ? float2(chroma_u.Load(int3(c, 0)).r, chroma_v.Load(int3(c, 0)).r)
+                              : chroma.Load(int3(c, 0)).rg;
+}
+
+// The horizontal half: `p.x` is a luma column, `p.y` a chroma row.
+float2 chroma_across(int2 p)
+{
+    // One exit: fxc reads an early return ahead of a loop as a path on which
+    // the result is never written, and this file compiles warnings as errors.
+    float2 result = float2(0.0, 0.0);
+    if (chroma_step.x == 1.0) {
+        result = chroma_sample(p); // 4:4:4: nothing to reconstruct across
+    } else {
+        float k = (float(p.x) - chroma_off.x) * chroma_step.x;
+        uint kind = chroma_kernel;
+        float reach = kernel_support(kind);
+        int lo = int(ceil(k - reach));
+        int hi = int(floor(k + reach));
+        int last = int(chroma_size.x) - 1;
+        float2 sum = float2(0.0, 0.0);
+        float weights = 0.0;
+        [loop] for (int i = lo; i <= hi; ++i) {
+            float w = kernel_weight(kind, k - float(i));
+            if (w != 0.0) {
+                int ic = clamp(i, 0, last);
+                sum += w * chroma_sample(int2(ic, p.y));
+                weights += w;
+            }
+        }
+        result = sum / max(weights, 1e-6);
+    }
+    return result;
+}
+
+// The vertical half, at a luma sample, from the rows `chroma_across` made.
+float2 chroma_at(int2 p)
+{
+    float2 result = float2(0.0, 0.0);
+    if (chroma_step.y == 1.0) {
+        result = chroma_wide.Load(int3(p, 0)).rg; // 4:2:2 and 4:4:4: no vertical siting
+    } else {
+        float k = (float(p.y) - chroma_off.y) * chroma_step.y;
+        uint kind = chroma_kernel;
+        float reach = kernel_support(kind);
+        int lo = int(ceil(k - reach));
+        int hi = int(floor(k + reach));
+        int last = int(chroma_size.y) - 1;
+        float2 sum = float2(0.0, 0.0);
+        float weights = 0.0;
+        [loop] for (int j = lo; j <= hi; ++j) {
+            float w = kernel_weight(kind, k - float(j));
+            if (w != 0.0) {
+                int jc = clamp(j, 0, last);
+                sum += w * chroma_wide.Load(int3(p.x, jc, 0)).rg;
+                weights += w;
+            }
+        }
+        result = sum / max(weights, 1e-6);
+    }
+    return result;
+}
+
+// **A colour the display cannot show keeps its brightness and its hue, and
+// gives up saturation.** After the gamut matrix a saturated BT.2020 colour has
+// a component past 1 or below 0 in BT.709; clipping each on its own is what
+// the compositor did, and it changes the hue, throws away the luminance the
+// grade put there, and merges every bar of a clipping pattern above the level
+// where its own primary runs out -- a different level for each colour. This
+// moves the colour towards grey of the same luminance instead, along the line
+// through the achromatic axis, which keeps its chromaticity's hue angle, and
+// with a soft knee at eighty percent of the way to the boundary so that the
+// approach is a gradient rather than a wall. What comes out is inside the
+// display's gamut, at the luminance that went in, and the bars stay distinct
+// all the way to the source's peak, as the white ones do.
+float3 compress_gamut(float3 c)
+{
+    const float3 k_luma = float3(0.2126, 0.7152, 0.0722); // BT.709: the buffer's primaries
+    float y = dot(c, k_luma);
+    if (y <= 0.0) {
+        return float3(0.0, 0.0, 0.0);
+    }
+    if (y >= 1.0) {
+        return saturate(c);
+    }
+    float3 d = c - y;
+    // How far along the line from grey to `c` the gamut's boundary is: at
+    // t times the way, some component reaches 1 or 0.
+    float t = 1e9;
+    [unroll] for (int i = 0; i < 3; ++i) {
+        if (d[i] > 1e-9) {
+            t = min(t, (1.0 - y) / d[i]);
+        } else if (d[i] < -1e-9) {
+            t = min(t, -y / d[i]);
+        }
+    }
+    if (t >= 1e8) {
+        return c; // achromatic
+    }
+    float u = 1.0 / t; // the colour's own distance: 1 is on the boundary
+    const float knee = 0.8;
+    if (u <= knee) {
+        return c;
+    }
+    float compressed = knee + (1.0 - knee) * tanh((u - knee) / (1.0 - knee));
+    return y + d * (compressed / u);
 }
 
 /// Tone mapping and then the gamut, in that order: the roll-off is defined on
@@ -397,8 +630,16 @@ float3 to_scrgb(float3 c)
         // target agreed with each other and were both the wrong number.
         light = tone_map_bt2390(light * 80.0, tone_source, tone_peak) / tone_peak;
     }
-    return float3(dot(gamut0.xyz, light), dot(gamut1.xyz, light),
-                  dot(gamut2.xyz, light));
+    float3 moved = float3(dot(gamut0.xyz, light), dot(gamut1.xyz, light),
+                          dot(gamut2.xyz, light));
+    // **And what the display's gamut cannot hold**, only where a roll-off is
+    // in the path: that is an SDR display an HDR picture is being fitted to.
+    // On an HDR display scRGB carries BT.2020 as components outside [0, 1]
+    // and the compositor knows what they mean.
+    if (gamut_mode != 0 && tone_peak > 0.0) {
+        moved = compress_gamut(moved);
+    }
+    return moved;
 }
 
 float4 ps_rgba(Vertex input) : SV_Target
@@ -435,25 +676,72 @@ float4 convert(float y, float u, float v)
 
 float4 ps_nv12(Vertex input) : SV_Target
 {
-    // Chroma is sampled bilinearly at whatever resolution its plane has, which
-    // is the reconstruction subsampling asks for and is what every player does.
-    // **Normalised coordinates are why 4:2:2 and 4:4:4 need no case here**: a
-    // half-width plane and a full-width one are sampled by the same call.
-    // Nothing here pretends it is the chroma siting a stream may have stated:
-    // that is a quarter-pixel shift and it belongs with the tone mappers.
-    float  y  = luma.Sample(bilinear, input.uv).r * sample_scale;
-    float2 uv = chroma.Sample(bilinear, input.uv).rg * sample_scale;
+    // **Every sample read where it is.** This pass draws at the picture's
+    // own size -- the target's when they agree, the source's when the
+    // resampler is about to run -- so the pixel being drawn *is* a luma
+    // sample and `Load` fetches it exactly, and the chroma is reconstructed
+    // at that luma sample's position by the kernel and the siting the
+    // constants state. Normalised coordinates through the sampler would have
+    // put the crop and the siting in its hands, which is where a quarter-
+    // sample error lives undetected.
+    int2 p = int2(input.position.xy);
+    float y = luma.Load(int3(p, 0)).r * sample_scale;
+    float2 uv = has_chroma != 0.0 ? chroma_at(p) * sample_scale : float2(0.5, 0.5);
     return convert(y, uv.x, uv.y);
 }
 
 float4 ps_planar(Vertex input) : SV_Target
 {
     // Three planes, or one for 4:0:0 -- in which case `has_chroma` is 0 and
-    // what these two samples contain does not reach the picture.
-    float y = luma.Sample(bilinear, input.uv).r * sample_scale;
-    float u = chroma_u.Sample(bilinear, input.uv).r * sample_scale;
-    float v = chroma_v.Sample(bilinear, input.uv).r * sample_scale;
-    return convert(y, u, v);
+    // no chroma is read at all. The two arrangements meet in `chroma_across`,
+    // so this and `ps_nv12` are one shader in two names.
+    int2 p = int2(input.position.xy);
+    float y = luma.Load(int3(p, 0)).r * sample_scale;
+    float2 uv = has_chroma != 0.0 ? chroma_at(p) * sample_scale : float2(0.5, 0.5);
+    return convert(y, uv.x, uv.y);
+}
+
+// **The horizontal half of the chroma reconstruction**, drawn at the luma's
+// width and the chroma's height into `chroma_wide` before the main pass.
+float4 ps_chroma_across(Vertex input) : SV_Target
+{
+    return float4(chroma_across(int2(input.position.xy)), 0.0, 1.0);
+}
+
+// **One axis of the resampling.** Output sample i of `dst` along the axis
+// sits at source position (i + 0.5) * src / dst - 0.5, in source samples;
+// the kernel is centred there, stretched by the downscale factor so that
+// every source sample under the output is counted, and its weights are
+// normalised so that a flat field stays flat whatever the phase. The other
+// axis is carried across untouched, and the edge is clamped, which is what
+// the sampler did for the bilinear fetch this replaces.
+float4 ps_scale(Vertex input) : SV_Target
+{
+    int2 p = int2(input.position.xy);
+    uint kind = scale_kernel;
+    float src = scale_axis == 0 ? scale_src.x : scale_src.y;
+    float dst = scale_axis == 0 ? scale_dst.x : scale_dst.y;
+    float i = scale_axis == 0 ? float(p.x) : float(p.y);
+    float ratio = src / dst;
+    float stretch = max(ratio, 1.0);
+    float s = (i + 0.5) * ratio - 0.5;
+    float reach = kernel_support(kind) * stretch;
+    int lo = int(ceil(s - reach));
+    int hi = int(floor(s + reach));
+    int last = int(src) - 1;
+    float4 sum = float4(0.0, 0.0, 0.0, 0.0);
+    float weights = 0.0;
+    [loop] for (int j = lo; j <= hi; ++j) {
+        float w = kernel_weight(kind, (s - float(j)) / stretch);
+        if (w == 0.0) {
+            continue;
+        }
+        int jc = clamp(j, 0, last);
+        int3 at = scale_axis == 0 ? int3(jc, p.y, 0) : int3(p.x, jc, 0);
+        sum += w * rgba.Load(at);
+        weights += w;
+    }
+    return sum / max(weights, 1e-6);
 }
 )HLSL";
 
@@ -481,13 +769,27 @@ struct Constants {
 
     std::uint32_t linear_in = 0;
     float tone_source = 1000.0f;
-    float pad2 = 0.0f;
-    float pad3 = 0.0f;
+    std::uint32_t gamut_mode = 1;
+    std::uint32_t chroma_kernel = 1;
 
     float gamut0[4] = {1.0f, 0.0f, 0.0f, 0.0f};
     float gamut1[4] = {0.0f, 1.0f, 0.0f, 0.0f};
     float gamut2[4] = {0.0f, 0.0f, 1.0f, 0.0f};
+
+    float chroma_off[2] = {0.0f, 0.5f};
+    float chroma_step[2] = {0.5f, 0.5f};
+    float chroma_size[2] = {1.0f, 1.0f};
+    std::uint32_t scale_axis = 0;
+    std::uint32_t scale_kernel = 1;
+    float scale_src[2] = {1.0f, 1.0f};
+    float scale_dst[2] = {1.0f, 1.0f};
+
+    std::uint32_t chroma_planar = 0;
+    std::uint32_t pad_a = 0;
+    std::uint32_t pad_b = 0;
+    std::uint32_t pad_c = 0;
 };
+static_assert(sizeof(Constants) % 16 == 0, "a constant buffer is a whole number of rows");
 
 /// BT.2020 primaries to BT.709's, in linear light.
 ///
@@ -792,6 +1094,17 @@ struct MpVideo {
     Com<ID3D11PixelShader> pixel_rgba;
     Com<ID3D11PixelShader> pixel_nv12;
     Com<ID3D11PixelShader> pixel_planar;
+    /// One axis of the resampling, run twice (see `ps_scale`).
+    Com<ID3D11PixelShader> pixel_scale;
+    /// The horizontal half of the chroma reconstruction (see `ps_chroma_across`).
+    Com<ID3D11PixelShader> pixel_chroma_across;
+    /// What it writes: the luma's width at the chroma's height, fp32, remade
+    /// when the frame's size or its plane arrangement changes.
+    Com<ID3D11Texture2D> chroma_wide;
+    Com<ID3D11RenderTargetView> chroma_wide_view;
+    Com<ID3D11ShaderResourceView> chroma_wide_srv;
+    std::uint32_t chroma_wide_width = 0;
+    std::uint32_t chroma_wide_height = 0;
     Com<ID3D11SamplerState> sampler;
     Com<ID3D11Buffer> constants;
 
@@ -818,6 +1131,37 @@ struct MpVideo {
     std::uint32_t source_width = 0;
     std::uint32_t source_height = 0;
     MpPixelLayout source_layout{};
+
+    /// **The resampler's three textures** (see `make_scaled`): linear light
+    /// at the source's size, the target's width at the source's height, and
+    /// the target's size. Null until a frame needs resampling, and remade when
+    /// the frame's size or the target's changes.
+    Com<ID3D11Texture2D> linear_source;
+    Com<ID3D11RenderTargetView> linear_source_view;
+    Com<ID3D11ShaderResourceView> linear_source_srv;
+    Com<ID3D11Texture2D> scaled_h;
+    Com<ID3D11RenderTargetView> scaled_h_view;
+    Com<ID3D11ShaderResourceView> scaled_h_srv;
+    Com<ID3D11Texture2D> scaled;
+    Com<ID3D11RenderTargetView> scaled_view;
+    Com<ID3D11ShaderResourceView> scaled_srv;
+    std::uint32_t scaled_source_width = 0;
+    std::uint32_t scaled_source_height = 0;
+    std::uint32_t scaled_width = 0;
+    std::uint32_t scaled_height = 0;
+
+    /// What a person set, or the defaults: the kernels, the siting and what
+    /// happens past the gamut (kernels.hpp).
+    mp::video::Kernel scaler = mp::video::Kernel::lanczos;
+    mp::video::Kernel chroma_kernel = mp::video::Kernel::lanczos;
+    static constexpr std::uint32_t k_siting_auto = 0xffffffffu;
+    /// A person's `siting`, or `k_siting_auto` for the stream's own.
+    std::uint32_t siting_asked = k_siting_auto;
+    /// The siting in use for the frame in hand, resolved by `fill_resampling`.
+    std::uint32_t siting = mp::video::k_siting_left;
+    /// `MpVideoInfo::chroma_siting` as configured: H.273's type plus one.
+    std::uint32_t stream_siting = 0;
+    mp::video::Gamut gamut = mp::video::Gamut::desaturate;
 
     HWND window = nullptr;
     /// **§9.7.1: the frame crosses the boundary, not the window.**
@@ -862,13 +1206,14 @@ struct MpVideo {
     ///
     /// The alternative §9.7.1 weighed was to render at the picture's size and
     /// let the shell's visual carry a transform, which costs no message and no
-    /// resize. This costs one message and puts the scale **in the same fetch
-    /// as the chroma reconstruction**: a 4:2:0 frame is already being
-    /// resampled to reach full-rate RGB, so scaling in the same bilinear is
-    /// one interpolation where the other way is ours and then the
-    /// compositor's. It is also the only one of the two where the filter is
-    /// ours to improve later; a composition surface's is fixed and out of
-    /// reach.
+    /// resize. This costs one message and puts the scale **in the presenter's
+    /// own passes, beside the chroma reconstruction** (§9.11, kernels.hpp): a
+    /// 4:2:0 frame is already being resampled to reach full-rate RGB, so
+    /// scaling here is one resampling problem where the other way is ours and
+    /// then the compositor's. It is also the only one of the two where the
+    /// filter is ours -- a composition surface's is a fixed bilinear, out of
+    /// reach, and the HDR10 test patterns showed what a bilinear does to a
+    /// checkerboard.
     ///
     /// **The whole picture is drawn into the whole target.** Where black bars
     /// go, if any, is the shell's -- it has the window and the compositor puts
@@ -1553,10 +1898,14 @@ bool make_shaders(MpVideo* v, std::string& why)
     Com<ID3DBlob> rgba;
     Com<ID3DBlob> nv12;
     Com<ID3DBlob> planar;
+    Com<ID3DBlob> scale;
+    Com<ID3DBlob> across;
     if (!compile("vs_main", "vs_5_0", vs, why) ||
         !compile("ps_rgba", "ps_5_0", rgba, why) ||
         !compile("ps_nv12", "ps_5_0", nv12, why) ||
-        !compile("ps_planar", "ps_5_0", planar, why)) {
+        !compile("ps_planar", "ps_5_0", planar, why) ||
+        !compile("ps_scale", "ps_5_0", scale, why) ||
+        !compile("ps_chroma_across", "ps_5_0", across, why)) {
         return false;
     }
     if (FAILED(v->device->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(),
@@ -1567,7 +1916,12 @@ bool make_shaders(MpVideo* v, std::string& why)
                                             nullptr, v->pixel_nv12.put())) ||
         FAILED(v->device->CreatePixelShader(planar->GetBufferPointer(),
                                             planar->GetBufferSize(), nullptr,
-                                            v->pixel_planar.put()))) {
+                                            v->pixel_planar.put())) ||
+        FAILED(v->device->CreatePixelShader(scale->GetBufferPointer(), scale->GetBufferSize(),
+                                            nullptr, v->pixel_scale.put())) ||
+        FAILED(v->device->CreatePixelShader(across->GetBufferPointer(),
+                                            across->GetBufferSize(), nullptr,
+                                            v->pixel_chroma_across.put()))) {
         why = "the colour shader compiled and would not load";
         return false;
     }
@@ -2001,6 +2355,151 @@ bool replan(MpVideo* v)
     return true;
 }
 
+/// **The resampler's three textures**, made at the sizes of the frame in
+/// hand and the target, and remade when either changes: linear light at the
+/// source's size, the target's width at the source's height, and the target's
+/// size. fp32 all three, because §9.10 says the arithmetic is single
+/// precision until DXGI's fp16 at the very end -- and a half-precision
+/// intermediate would put the dark end of a PQ picture into subnormals, which
+/// is exactly the end the black-level patterns are about.
+bool make_scaled(MpVideo* v, std::string& why)
+{
+    if (v->linear_source && v->scaled_source_width == v->source_width &&
+        v->scaled_source_height == v->source_height && v->scaled_width == v->width &&
+        v->scaled_height == v->height) {
+        return true;
+    }
+    const auto make = [v](std::uint32_t width, std::uint32_t height,
+                          Com<ID3D11Texture2D>& texture, Com<ID3D11RenderTargetView>& target,
+                          Com<ID3D11ShaderResourceView>& source) {
+        source.reset();
+        target.reset();
+        texture.reset();
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = width;
+        desc.Height = height;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        return SUCCEEDED(v->device->CreateTexture2D(&desc, nullptr, texture.put())) &&
+               SUCCEEDED(v->device->CreateRenderTargetView(texture.get(), nullptr,
+                                                           target.put())) &&
+               SUCCEEDED(v->device->CreateShaderResourceView(texture.get(), nullptr,
+                                                             source.put()));
+    };
+    if (!make(v->source_width, v->source_height, v->linear_source, v->linear_source_view,
+              v->linear_source_srv) ||
+        !make(v->width, v->source_height, v->scaled_h, v->scaled_h_view, v->scaled_h_srv) ||
+        !make(v->width, v->height, v->scaled, v->scaled_view, v->scaled_srv)) {
+        why = "no intermediate for the resampler, so the picture cannot be scaled";
+        return false;
+    }
+    v->scaled_source_width = v->source_width;
+    v->scaled_source_height = v->source_height;
+    v->scaled_width = v->width;
+    v->scaled_height = v->height;
+    return true;
+}
+
+/// **The chroma's half-way texture**: the luma's width at the chroma's height,
+/// two channels of fp32, for the frame in hand. Null for a frame with no
+/// chroma to reconstruct.
+bool make_chroma_wide(MpVideo* v, std::uint32_t width, std::uint32_t height, std::string& why)
+{
+    if (v->chroma_wide && v->chroma_wide_width == width && v->chroma_wide_height == height) {
+        return true;
+    }
+    v->chroma_wide_srv.reset();
+    v->chroma_wide_view.reset();
+    v->chroma_wide.reset();
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = width;
+    desc.Height = height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R32G32_FLOAT;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(v->device->CreateTexture2D(&desc, nullptr, v->chroma_wide.put())) ||
+        FAILED(v->device->CreateRenderTargetView(v->chroma_wide.get(), nullptr,
+                                                 v->chroma_wide_view.put())) ||
+        FAILED(v->device->CreateShaderResourceView(v->chroma_wide.get(), nullptr,
+                                                   v->chroma_wide_srv.put()))) {
+        why = "no intermediate for the chroma, so it cannot be reconstructed";
+        return false;
+    }
+    v->chroma_wide_width = width;
+    v->chroma_wide_height = height;
+    return true;
+}
+
+/// Whether the frame in hand is resampled on its way to the target: the
+/// target is the shell's box or the picture's own size, the source is the
+/// frame, and equal means one pass with every sample read where it is.
+[[nodiscard]] bool resampling(const MpVideo* v) noexcept
+{
+    return v->source_width != 0 &&
+           (v->width != v->source_width || v->height != v->source_height);
+}
+
+/// **What the fetch needs to know about chroma, and which kernels.** Where a
+/// chroma sample sits is H.273's table (kernels.hpp), applied per axis by the
+/// layout's subsampling: 4:2:2 has no vertical siting and 4:4:4 has none at
+/// all. A person's `siting` wins; then the stream's own statement; then type
+/// 0, which is what MPEG-2, H.264, HEVC and AV1 mean by silence.
+void fill_resampling(MpVideo* v, Constants& constants) noexcept
+{
+    const MpPixelLayout& layout = v->source_layout;
+    const bool subsampled_x = layout.chroma == MP_CHROMA_420 || layout.chroma == MP_CHROMA_422;
+    const bool subsampled_y = layout.chroma == MP_CHROMA_420;
+    const std::uint32_t type = v->siting_asked < mp::video::k_siting_types ? v->siting_asked
+                               : v->stream_siting != 0 && v->stream_siting <= mp::video::k_siting_types
+                                   ? v->stream_siting - 1u
+                                   : mp::video::k_siting_left;
+    v->siting = type;
+    constants.chroma_off[0] = subsampled_x ? mp::video::siting_offset_x(type) : 0.0f;
+    constants.chroma_off[1] = subsampled_y ? mp::video::siting_offset_y(type) : 0.0f;
+    constants.chroma_step[0] = subsampled_x ? 0.5f : 1.0f;
+    constants.chroma_step[1] = subsampled_y ? 0.5f : 1.0f;
+    const bool has_chroma = layout.chroma != MP_CHROMA_RGB && layout.chroma != MP_CHROMA_MONO;
+    const std::uint32_t chroma_width =
+        has_chroma ? mp_pixel_chroma_width(&layout, v->source_width) : 1u;
+    const std::uint32_t chroma_height =
+        has_chroma ? mp_pixel_chroma_height(&layout, v->source_height) : 1u;
+    constants.chroma_size[0] = static_cast<float>(chroma_width != 0 ? chroma_width : 1u);
+    constants.chroma_size[1] = static_cast<float>(chroma_height != 0 ? chroma_height : 1u);
+    constants.chroma_kernel = static_cast<std::uint32_t>(v->chroma_kernel);
+    constants.gamut_mode = static_cast<std::uint32_t>(v->gamut);
+}
+
+/// **Where the roll-off starts from**, out of what the stream stated. The
+/// mastering display's peak (ST.2086, in ten-thousandths of a nit) is the
+/// grade's range; the content light level (CTA-861.3, in nits) is the
+/// brightest pixel actually in it, and when it is stated and lower it is the
+/// tighter bound: a 4000-nit mastering display with nothing above 1000 on it
+/// is a 1000-nit picture, and rolling it off from 4000 spends the display's
+/// range on highlights that never come. Measured on a set of test patterns
+/// whose every combination of the two is a separate folder. Zero when neither
+/// is stated, and the plan then assumes BT.2408's 1000.
+[[nodiscard]] float source_peak_of(const MpVideoInfo* in) noexcept
+{
+    if (in->size < offsetof(MpVideoInfo, max_frame_average_light_level) + sizeof(std::uint32_t)) {
+        return 0.0f;
+    }
+    const float mastering = in->mastering_max_luminance != 0
+                                ? static_cast<float>(in->mastering_max_luminance) / 10000.0f
+                                : 0.0f;
+    const float content = static_cast<float>(in->max_content_light_level);
+    if (content > 0.0f && (mastering <= 0.0f || content < mastering)) {
+        return content;
+    }
+    return mastering;
+}
+
 /// The target size: what the shell asked for, or the picture's own.
 void target_size(const MpVideo* v, std::uint32_t& width, std::uint32_t& height) noexcept
 {
@@ -2371,19 +2870,9 @@ try {
                                   // asks after the white point, rightly says that is
                                   // no mastering display. It is still the peak the
                                   // roll-off should start from.
-                                  .mastering_peak_nits =
-                                      in->size < sizeof(MpVideoInfo) ? 0.0f
-                                      : in->mastering_max_luminance != 0
-                                          ? static_cast<float>(in->mastering_max_luminance) /
-                                                10000.0f
-                                      // CTA-861.3's brightest pixel, for a stream that stated
-                                      // light levels and no mastering display: the content's
-                                      // own ceiling is the next best place for a roll-off to
-                                      // start from.
-                                      : in->max_content_light_level != 0
-                                          ? static_cast<float>(in->max_content_light_level)
-                                          : 0.0f};
+                                  .mastering_peak_nits = source_peak_of(in)};
     v->full_range = (in->flags & MP_VIDEO_FULL_RANGE) != 0;
+    v->stream_siting = mp_video_chroma_siting(in);
     // The container's aspect correction is the picture's size, not the
     // codec's: anamorphic 4:3 in a 16:9 frame is 16:9 the moment it is drawn.
     v->picture_width = in->display_width != 0 ? in->display_width : in->width;
@@ -2477,6 +2966,8 @@ try {
         constants.transfer_kind = 2;
     } else if (transfer == mp::video::k_transfer_srgb) {
         constants.transfer_kind = 0;
+    } else if (transfer == 8u) {
+        constants.transfer_kind = 4; // linear, which H.273 names and a test pattern uses
     } else {
         constants.transfer_kind = 1;
     }
@@ -2547,132 +3038,191 @@ try {
         constants.sample_scale = m.sample_scale;
     }
 
-    // Decided before the buffer is written, because the flag is in it.
-    const bool grading_now = !v->chain.empty() && v->graded_linear_view;
-    if (grading_now) {
-        constants.emit_linear = 1;
-    }
+    // **The resampling, and where chroma sits**, read by the fetch in every
+    // pass that touches a plane.
+    fill_resampling(v, constants);
 
-    D3D11_MAPPED_SUBRESOURCE mapped{};
-    if (SUCCEEDED(v->context->Map(v->constants.get(), 0, D3D11_MAP_WRITE_DISCARD, 0,
-                                  &mapped))) {
-        std::memcpy(mapped.pData, &constants, sizeof(constants));
-        v->context->Unmap(v->constants.get(), 0);
-    }
-
-    const D3D11_VIEWPORT viewport{0.0f,
-                                  0.0f,
-                                  static_cast<float>(v->width),
-                                  static_cast<float>(v->height),
-                                  0.0f,
-                                  1.0f};
-    // **Where the first pass lands.** Three answers, and they do not overlap:
-    // a chain sends it to the linear intermediate §9.8.3 runs on; a provider
-    // that is not ours sends it to the HDR10 one it will map from; otherwise it
-    // is the target and there is one pass.
+    // **Where the first pass lands, and how many there are.** The picture is
+    // the target's size and no chain is in the path: one pass, straight into
+    // the target -- or into the HDR10 intermediate a provider that is not
+    // ours maps from. Otherwise the first pass stops at linear light on the
+    // source's own primaries, at the source's own size when the picture is
+    // to be resampled so that every sample is read once, exactly where it
+    // is; then the resampling, one axis at a time; then the chain, if there
+    // is one; and then the second half -- tone mapping, the gamut and the
+    // encoding -- from linear.
     const bool grading = !v->chain.empty() && v->graded_linear_view;
     const bool second_pass = maps_elsewhere(v) && v->graded_view;
-    ID3D11RenderTargetView* views[] = {
-        grading        ? v->graded_linear_view.get()
-        : second_pass  ? v->graded_view.get()
-                       : v->target_view.get()};
-    // Five slots, of which a frame uses one, two or three. Binding all five
-    // each time keeps a stale view from a previous frame's shape out of the one
-    // being drawn -- and an unused slot is a null the current shader does not
-    // declare, rather than a texture it might read.
-    ID3D11ShaderResourceView* resources[] = {v->source_view.get(), v->luma_view.get(),
-                                             v->chroma_view.get(),
-                                             v->chroma_u_view.get(),
-                                             v->chroma_v_view.get()};
-    ID3D11SamplerState* samplers[] = {v->sampler.get()};
-    ID3D11Buffer* buffers[] = {v->constants.get()};
+    const bool scaling = resampling(v);
+    if (scaling && !make_scaled(v, v->trouble)) {
+        return MP_ERR_UNSUPPORTED;
+    }
 
-    v->context->OMSetRenderTargets(1, views, nullptr);
-    v->context->RSSetViewports(1, &viewport);
-    v->context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    v->context->IASetInputLayout(nullptr); // the triangle comes from SV_VertexID
-    v->context->VSSetShader(v->vertex_shader.get(), nullptr, 0);
-    v->context->PSSetShader(shader, nullptr, 0);
-    v->context->PSSetShaderResources(0, 5, resources);
-    v->context->PSSetSamplers(0, 1, samplers);
-    v->context->PSSetConstantBuffers(0, 1, buffers);
-    v->context->Draw(3, 0);
-
-    if (grading) {
-        // **§9.8.3's chain, between the two halves.** The picture is linear
-        // light on the source's own primaries now, which is what a grade is
-        // defined on and the only place a lookup table means what its author
-        // meant.
+    const auto upload_constants = [&]() {
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if (SUCCEEDED(v->context->Map(v->constants.get(), 0, D3D11_MAP_WRITE_DISCARD, 0,
+                                      &mapped))) {
+            std::memcpy(mapped.pData, &constants, sizeof(constants));
+            v->context->Unmap(v->constants.get(), 0);
+        }
+    };
+    // **Everything bound, every time, because a stage is a program too.** A
+    // stage draws with its own vertex shader, its own sampler and its own
+    // constant buffer at the same slots this one uses; whatever ran last left
+    // them bound. The first version of the chain rebound only the pixel
+    // shader and the texture, and the second pass read the *stage's*
+    // constants as though they were the presenter's -- a black picture with
+    // nothing reporting an error anywhere. And the previous pass's render
+    // target is this pass's source, so it comes off the output before it goes
+    // on the input; Direct3D unbinds one of the two silently otherwise.
+    const auto draw = [&](ID3D11PixelShader* pixel, ID3D11RenderTargetView* into,
+                          std::uint32_t width, std::uint32_t height,
+                          ID3D11ShaderResourceView* const (&sources)[6]) {
+        const D3D11_VIEWPORT viewport{0.0f,
+                                      0.0f,
+                                      static_cast<float>(width),
+                                      static_cast<float>(height),
+                                      0.0f,
+                                      1.0f};
         ID3D11RenderTargetView* none[] = {nullptr};
+        ID3D11ShaderResourceView* unbound[6] = {nullptr, nullptr, nullptr,
+                                                nullptr, nullptr, nullptr};
         v->context->OMSetRenderTargets(1, none, nullptr);
+        v->context->PSSetShaderResources(0, 6, unbound);
+        ID3D11RenderTargetView* views[] = {into};
+        ID3D11SamplerState* samplers[] = {v->sampler.get()};
+        ID3D11Buffer* buffers[] = {v->constants.get()};
+        v->context->OMSetRenderTargets(1, views, nullptr);
+        v->context->RSSetViewports(1, &viewport);
+        v->context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        v->context->IASetInputLayout(nullptr); // the triangle comes from SV_VertexID
+        v->context->VSSetShader(v->vertex_shader.get(), nullptr, 0);
+        v->context->PSSetShader(pixel, nullptr, 0);
+        v->context->PSSetShaderResources(0, 6, sources);
+        v->context->PSSetSamplers(0, 1, samplers);
+        v->context->PSSetConstantBuffers(0, 1, buffers);
+        v->context->Draw(3, 0);
+    };
 
-        MpVideoFrame linear{};
-        linear.size = sizeof(linear);
-        linear.width = v->width;
-        linear.height = v->height;
-        linear.layout = MP_LAYOUT_RGBA32F;
-        linear.pts = frame->pts;
-        linear.texture = v->graded_linear.get();
-
-        MpVideoFrame graded{};
-        if (!run_chain(v, linear, graded) || graded.texture == nullptr) {
-            graded = linear;
+    ID3D11RenderTargetView* const final_target =
+        second_pass ? v->graded_view.get() : v->target_view.get();
+    // Six slots, of which a frame uses one, two, three or four. Binding all
+    // six each time keeps a stale view from a previous frame's shape out of
+    // the one being drawn -- and an unused slot is a null the current shader
+    // does not declare, rather than a texture it might read.
+    // **The chroma's horizontal half first**, for a frame that has chroma:
+    // the luma's width at the chroma's height, from the planes, so that the
+    // main pass takes its taps downwards from that rather than a square of
+    // them from the plane.
+    if (ycbcr && v->source_layout.chroma != MP_CHROMA_MONO) {
+        const std::uint32_t chroma_height =
+            mp_pixel_chroma_height(&v->source_layout, v->source_height);
+        if (!make_chroma_wide(v, v->source_width, chroma_height != 0 ? chroma_height : 1u,
+                              v->trouble)) {
+            return MP_ERR_UNSUPPORTED;
         }
-        // Named, so that what is about to be viewed is a pointer the reader --
-        // and the analyser -- can see cannot be null.
-        auto* produced = static_cast<ID3D11Resource*>(graded.texture);
-        if (produced == nullptr) {
-            v->trouble = "the chain produced no texture and neither did the pass before it";
-            return MP_ERR_INTERNAL;
+        constants.chroma_planar = mp_pixel_planes(&v->source_layout) == 3u ? 1u : 0u;
+        upload_constants();
+        ID3D11ShaderResourceView* const from_planes[6] = {
+            v->source_view.get(),   v->luma_view.get(), v->chroma_view.get(),
+            v->chroma_u_view.get(), v->chroma_v_view.get(), nullptr};
+        draw(v->pixel_chroma_across.get(), v->chroma_wide_view.get(), v->source_width,
+             v->chroma_wide_height, from_planes);
+    }
+    ID3D11ShaderResourceView* const planes[6] = {v->source_view.get(),   v->luma_view.get(),
+                                                 v->chroma_view.get(),   v->chroma_u_view.get(),
+                                                 v->chroma_v_view.get(), v->chroma_wide_srv.get()};
+
+    if (!scaling && !grading) {
+        upload_constants();
+        draw(shader, final_target, v->width, v->height, planes);
+    } else {
+        constants.emit_linear = 1;
+        upload_constants();
+        // What the second half reads: the resampled picture, or the chain's.
+        ID3D11ShaderResourceView* light = nullptr;
+        if (scaling) {
+            draw(shader, v->linear_source_view.get(), v->source_width, v->source_height,
+                 planes);
+            // **One axis at a time.** A separable kernel over W by H taps is
+            // W taps and then H, not W times H; the intermediate is the
+            // target's width at the source's height, in the same fp32 as
+            // everything else between the decode and DXGI's fp16 (§9.10).
+            constants.scale_kernel = static_cast<std::uint32_t>(v->scaler);
+            constants.scale_axis = 0;
+            constants.scale_src[0] = static_cast<float>(v->source_width);
+            constants.scale_src[1] = static_cast<float>(v->source_height);
+            constants.scale_dst[0] = static_cast<float>(v->width);
+            constants.scale_dst[1] = static_cast<float>(v->source_height);
+            upload_constants();
+            ID3D11ShaderResourceView* const from_source[6] = {
+                v->linear_source_srv.get(), nullptr, nullptr, nullptr, nullptr, nullptr};
+            draw(v->pixel_scale.get(), v->scaled_h_view.get(), v->width, v->source_height,
+                 from_source);
+            constants.scale_axis = 1;
+            constants.scale_src[0] = static_cast<float>(v->width);
+            constants.scale_dst[1] = static_cast<float>(v->height);
+            upload_constants();
+            ID3D11ShaderResourceView* const from_h[6] = {v->scaled_h_srv.get(), nullptr,
+                                                         nullptr, nullptr, nullptr, nullptr};
+            draw(v->pixel_scale.get(),
+                 grading ? v->graded_linear_view.get() : v->scaled_view.get(), v->width,
+                 v->height, from_h);
+            light = v->scaled_srv.get();
+        } else {
+            draw(shader, v->graded_linear_view.get(), v->width, v->height, planes);
         }
 
-        if (v->chain_out_texture != graded.texture) {
-            v->chain_out_view.reset();
-            if (FAILED(v->device->CreateShaderResourceView(produced, nullptr,
-                                                           v->chain_out_view.put()))) {
-                v->trouble = "what the chain produced would take no view";
-                return MP_ERR_UNSUPPORTED;
+        if (grading) {
+            // **§9.8.3's chain, between the two halves.** The picture is
+            // linear light on the source's own primaries now, at the target's
+            // size, which is what a grade is defined on and the only place a
+            // lookup table means what its author meant. Unbound first: the
+            // intermediate is about to be sampled by somebody else's program.
+            ID3D11RenderTargetView* none[] = {nullptr};
+            v->context->OMSetRenderTargets(1, none, nullptr);
+
+            MpVideoFrame linear{};
+            linear.size = sizeof(linear);
+            linear.width = v->width;
+            linear.height = v->height;
+            linear.layout = MP_LAYOUT_RGBA32F;
+            linear.pts = frame->pts;
+            linear.texture = v->graded_linear.get();
+
+            MpVideoFrame graded{};
+            if (!run_chain(v, linear, graded) || graded.texture == nullptr) {
+                graded = linear;
             }
-            v->chain_out_texture = graded.texture;
+            // Named, so that what is about to be viewed is a pointer the reader
+            // -- and the analyser -- can see cannot be null.
+            auto* produced = static_cast<ID3D11Resource*>(graded.texture);
+            if (produced == nullptr) {
+                v->trouble = "the chain produced no texture and neither did the pass before it";
+                return MP_ERR_INTERNAL;
+            }
+            if (v->chain_out_texture != graded.texture) {
+                v->chain_out_view.reset();
+                if (FAILED(v->device->CreateShaderResourceView(produced, nullptr,
+                                                               v->chain_out_view.put()))) {
+                    v->trouble = "what the chain produced would take no view";
+                    return MP_ERR_UNSUPPORTED;
+                }
+                v->chain_out_texture = graded.texture;
+            }
+            light = v->chain_out_view.get();
         }
 
         // **The second half, starting from linear.** Tone mapping, the gamut
         // and the output encoding, exactly as they would have run in one pass
-        // -- `linear_in` is the only thing that differs, and it is there because
-        // decoding a signal that has no transfer would apply one twice.
+        // -- `linear_in` is the only thing that differs, and it is there
+        // because decoding a signal that has no transfer would apply one twice.
         constants.emit_linear = 0;
         constants.linear_in = 1;
-        D3D11_MAPPED_SUBRESOURCE again{};
-        if (SUCCEEDED(v->context->Map(v->constants.get(), 0, D3D11_MAP_WRITE_DISCARD, 0,
-                                      &again))) {
-            std::memcpy(again.pData, &constants, sizeof(constants));
-            v->context->Unmap(v->constants.get(), 0);
-        }
-
-        ID3D11RenderTargetView* onward[] = {second_pass ? v->graded_view.get()
-                                                        : v->target_view.get()};
-        ID3D11ShaderResourceView* graded_source[] = {v->chain_out_view.get(), nullptr,
-                                                     nullptr, nullptr, nullptr};
-        // **Everything, because a stage is a program too.** A stage draws with
-        // its own vertex shader, its own sampler and its own constant buffer at
-        // the same slots this one uses; whatever ran last left them bound. The
-        // first version of this rebound only the pixel shader and the texture,
-        // so the second pass read the *stage's* constants as though they were
-        // the presenter's -- and `linear_in` landed on a field that meant
-        // something else, which came out as a black picture with nothing
-        // reporting an error anywhere.
-        ID3D11SamplerState* our_samplers[] = {v->sampler.get()};
-        ID3D11Buffer* our_buffers[] = {v->constants.get()};
-        v->context->OMSetRenderTargets(1, onward, nullptr);
-        v->context->RSSetViewports(1, &viewport);
-        v->context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        v->context->IASetInputLayout(nullptr);
-        v->context->VSSetShader(v->vertex_shader.get(), nullptr, 0);
-        v->context->PSSetShader(v->pixel_rgba.get(), nullptr, 0);
-        v->context->PSSetShaderResources(0, 5, graded_source);
-        v->context->PSSetSamplers(0, 1, our_samplers);
-        v->context->PSSetConstantBuffers(0, 1, our_buffers);
-        v->context->Draw(3, 0);
+        upload_constants();
+        ID3D11ShaderResourceView* const from_light[6] = {light,   nullptr, nullptr,
+                                                         nullptr, nullptr, nullptr};
+        draw(v->pixel_rgba.get(), final_target, v->width, v->height, from_light);
     }
 
     if (second_pass) {
@@ -2924,6 +3474,42 @@ try {
             return MP_OK; // `configure` will read it
         }
         return replan(v) ? MP_OK : MP_ERR_UNSUPPORTED;
+    }
+    if (std::strcmp(key, "scaler") == 0 || std::strcmp(key, "chroma") == 0) {
+        // **The kernels, by name** (kernels.hpp): one for the picture and
+        // one for the chroma reconstruction, settable between frames because
+        // both are read per frame.
+        mp::video::Kernel kernel{};
+        if (!mp::video::kernel_from_name(value, kernel)) {
+            v->trouble = "a kernel is bilinear, lanczos, spline36, catrom, mitchell or box";
+            return MP_ERR_INVALID;
+        }
+        (key[0] == 's' ? v->scaler : v->chroma_kernel) = kernel;
+        return MP_OK;
+    }
+    if (std::strcmp(key, "siting") == 0) {
+        // Where a chroma sample sits: `auto` is the stream's own statement,
+        // and type 0 where it made none.
+        if (std::strcmp(value, "auto") == 0) {
+            v->siting_asked = MpVideo::k_siting_auto;
+            return MP_OK;
+        }
+        std::uint32_t type = 0;
+        if (!mp::video::siting_from_name(value, type)) {
+            v->trouble = "a siting is auto, left, centre, topleft, top, bottomleft or bottom";
+            return MP_ERR_INVALID;
+        }
+        v->siting_asked = type;
+        return MP_OK;
+    }
+    if (std::strcmp(key, "gamut") == 0) {
+        mp::video::Gamut gamut{};
+        if (!mp::video::gamut_from_name(value, gamut)) {
+            v->trouble = "a gamut is clip or desaturate";
+            return MP_ERR_INVALID;
+        }
+        v->gamut = gamut;
+        return MP_OK;
     }
     if (std::strcmp(key, "size") == 0) {
         // **§9.7.1's other decision, as a setting.** `WxH` in pixels, or
@@ -3179,6 +3765,59 @@ try {
             std::snprintf(out, out_bytes,
                           "target\tnone\twhere the roll-off aims; nothing is rolled off "
                           "(read only)");
+        }
+        return MP_OK;
+    case 17:
+        std::snprintf(out, out_bytes,
+                      "scaler\t%s\tthe kernel the picture is resampled with: bilinear, "
+                      "lanczos, spline36, catrom, mitchell, box",
+                      mp::video::name_of(v->scaler));
+        return MP_OK;
+    case 18:
+        std::snprintf(out, out_bytes,
+                      "chroma\t%s\tthe kernel chroma is reconstructed with, from the same list",
+                      mp::video::name_of(v->chroma_kernel));
+        return MP_OK;
+    case 19:
+        // **Which siting, and whose.** A person's, the stream's, or the
+        // assumption -- and the row says which, because a quarter-sample
+        // shift is invisible in a colour and plain in a test pattern.
+        if (v->siting_asked < mp::video::k_siting_types) {
+            std::snprintf(out, out_bytes,
+                          "siting\t%s\twhere a chroma sample sits against the luma: auto, "
+                          "left, centre, topleft, top, bottomleft, bottom",
+                          mp::video::siting_name(v->siting_asked));
+        } else {
+            std::snprintf(out, out_bytes,
+                          "siting\tauto (%s, %s)\twhere a chroma sample sits against the "
+                          "luma: auto, left, centre, topleft, top, bottomleft, bottom",
+                          mp::video::siting_name(v->siting),
+                          v->stream_siting != 0 ? "the stream's" : "assumed");
+        }
+        return MP_OK;
+    case 20:
+        std::snprintf(out, out_bytes,
+                      "gamut\t%s\twhat a colour past the display's gamut gets: clip, "
+                      "desaturate",
+                      mp::video::name_of(v->gamut));
+        return MP_OK;
+    case 21:
+        // **Source to target, and the factor**, which is the number that says
+        // whether the resampler is in the path at all.
+        if (v->source_width == 0) {
+            std::snprintf(out, out_bytes,
+                          "scale\tno frame yet\tsource to target, and the factor (read only)");
+        } else if (!resampling(v)) {
+            std::snprintf(out, out_bytes,
+                          "scale\t%ux%u 1:1\tsource to target, and the factor: one to one "
+                          "is one pass, every sample read where it is (read only)",
+                          v->source_width, v->source_height);
+        } else {
+            std::snprintf(out, out_bytes,
+                          "scale\t%ux%u -> %ux%u, x%.3f\tsource to target, and the factor; "
+                          "the kernel is stretched by it when the picture shrinks (read only)",
+                          v->source_width, v->source_height, v->width, v->height,
+                          static_cast<double>(v->width) / static_cast<double>(v->source_width));
         }
         return MP_OK;
     default:

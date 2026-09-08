@@ -584,6 +584,18 @@ typedef struct MpVideoInfo {
      * mastering display. */
     uint32_t max_content_light_level;
     uint32_t max_frame_average_light_level;
+
+    /* **Where a chroma sample sits against the luma samples**, for a picture
+     * whose chroma is subsampled: ISO/IEC 23091-2's `ChromaLocType`, plus one,
+     * so that zero is "not stated". 1 is type 0 -- level with the left luma
+     * sample of each pair and halfway between the two rows, which is what
+     * MPEG-2, H.264, HEVC and AV1 all mean when they say nothing -- and 2 is
+     * type 1, centred both ways, which is JPEG's. A presenter reconstructing
+     * chroma reads this; one that ignored it would put every colour edge a
+     * quarter of a luma sample to one side, which is what a chroma-sharpness
+     * test pattern is drawn to show. Appended, and guarded by `size` like the
+     * mastering display above: `mp_video_chroma_siting` is the one question. */
+    uint32_t chroma_siting;
 } MpVideoInfo;
 
 /* Whether `info` carries a mastering display at all.
@@ -593,10 +605,24 @@ typedef struct MpVideoInfo {
  * from zero. */
 MP_INLINE int mp_video_has_mastering(const MpVideoInfo *info)
 {
-    if (info == NULL || info->size < sizeof(MpVideoInfo)) {
+    /* Up to and including the light levels, which is what the struct was
+     * when the mastering display was the last thing in it: a caller of that
+     * size states one as well as anybody. */
+    if (info == NULL ||
+        info->size < offsetof(MpVideoInfo, max_frame_average_light_level) + sizeof(uint32_t)) {
         return 0;
     }
     return info->mastering_white_x != 0u && info->mastering_white_y != 0u;
+}
+
+/* Where the chroma sits: `chroma_siting` as stated, or 0 for a caller from
+ * before the field existed, whose struct ends before it. */
+MP_INLINE uint32_t mp_video_chroma_siting(const MpVideoInfo *info)
+{
+    if (info == NULL || info->size < sizeof(MpVideoInfo)) {
+        return 0u;
+    }
+    return info->chroma_siting;
 }
 
 enum {
@@ -1680,7 +1706,10 @@ MP_STATIC_ASSERT(offsetof(MpVideoVtbl, size) == 0, "size must lead");
  * x and y, a white point, two luminances and the two light levels. */
 MP_STATIC_ASSERT(offsetof(MpVideoInfo, mastering_primaries_x) == 48,
                  "MpVideoInfo only ever grows at the end");
-MP_STATIC_ASSERT(sizeof(MpVideoInfo) == 96, "MpVideoInfo layout is ABI");
+/* And the chroma siting after those ten, appended the same way. */
+MP_STATIC_ASSERT(offsetof(MpVideoInfo, chroma_siting) == 96,
+                 "MpVideoInfo only ever grows at the end");
+MP_STATIC_ASSERT(sizeof(MpVideoInfo) == 100, "MpVideoInfo layout is ABI");
 MP_STATIC_ASSERT(offsetof(MpVideoInfo, flags) < offsetof(MpVideoInfo, timescale),
                  "MpVideoInfo only ever grows at the end");
 MP_STATIC_ASSERT(offsetof(MpVideoInfo, timescale) <

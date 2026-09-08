@@ -231,6 +231,13 @@ void read_sequence(MpVideoCodec* c, const Dav1dSequenceHeader& seq) noexcept
     if (seq.film_grain_present != 0) {
         c->info.flags |= MP_VIDEO_FILM_GRAIN;
     }
+    // **Where the chroma sits**, as AV1 spells it: "vertical" is H.273's type
+    // 0 -- level with the left luma sample, halfway between the rows -- and
+    // "colocated" is type 2, on the top-left one. Unknown stays 0, and a
+    // presenter takes that as type 0 as well.
+    c->info.chroma_siting = seq.chr == DAV1D_CHR_VERTICAL    ? 1u
+                            : seq.chr == DAV1D_CHR_COLOCATED ? 3u
+                                                             : 0u;
 
     // **Zero, and it means "unchanged" rather than "untimed" here.** dav1d
     // hands back the timestamp it was given, so whatever the demuxer counted

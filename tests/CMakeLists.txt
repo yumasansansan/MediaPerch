@@ -222,7 +222,8 @@ endif()
 # The presenter, rendered off-screen on WARP and read back. Not a screenshot
 # somebody looks at: pixels, hashed, on the same path a display gets.
 if(TARGET mp_video_d3d11)
-    target_sources(mediaperch_tests PRIVATE video_d3d11_test.cpp hdr_transfer_test.cpp)
+    target_sources(mediaperch_tests PRIVATE video_d3d11_test.cpp hdr_transfer_test.cpp
+                                            scaler_test.cpp)
     target_compile_definitions(mediaperch_tests PRIVATE
         "MEDIAPERCH_VIDEO_D3D11=\"$<TARGET_FILE:mp_video_d3d11>\"")
     target_link_libraries(mediaperch_tests PRIVATE d3d11 dxgi)
@@ -269,6 +270,13 @@ if(TARGET mp_demux_mp4 AND TARGET mp_demux_mkv)
         # files keep them. The same stream in both containers.
         "MEDIAPERCH_TEST_HDR10_INBAND=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mp4/hdr10_inband.mp4\""
         "MEDIAPERCH_TEST_HDR10_INBAND_MKV=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mkv/hdr10_inband.mkv\""
+        # Eight frames of ten-bit HEVC at 320x238: coded 320x240 with a
+        # conformance window of two rows, and the chroma sited top-left by the
+        # VUI (x265 chromaloc=2). What a decoder must crop and a demuxer must
+        # read; the same stream remuxed into Matroska, whose ChromaSiting
+        # elements say the same thing.
+        "MEDIAPERCH_TEST_CROP=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mp4/crop_320x238.mp4\""
+        "MEDIAPERCH_TEST_CROP_MKV=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mkv/crop_320x238.mkv\""
         "MEDIAPERCH_TEST_HEVC=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mp4/hevc.mp4\"")
     # One demuxer, two consumers, and the position they share -- which needs
     # a real file with two streams in it, so it lives with the fixtures.
@@ -391,3 +399,7 @@ if(TARGET mediaperch_probe)
                 -P "${CMAKE_SOURCE_DIR}/cmake/FormatMatrix.cmake")
     set_tests_properties(format_matrix PROPERTIES TIMEOUT 600 LABELS quality)
 endif()
+
+# win_path.hpp, for the module sources compiled straight into the tests
+# (autoeq.cpp opens a profile by name): the header beside module_log.
+target_include_directories(mediaperch_tests PRIVATE ../modules/shared/module_log)

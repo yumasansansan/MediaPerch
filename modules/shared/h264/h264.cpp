@@ -684,6 +684,35 @@ HevcSize hevc_size(const AvcConfig& config)
             return out;
         }
         out.valid = out.width != 0 && out.height != 0;
+        out.visible_width = out.width;
+        out.visible_height = out.height;
+        // **The conformance window**, stated in units of the chroma
+        // subsampling: SubWidthC and SubHeightC are 2 and 2 for 4:2:0, 2 and
+        // 1 for 4:2:2, 1 and 1 for 4:4:4 and for monochrome (7.4.3.2.1).
+        std::uint32_t window = 0;
+        if (!in.u1(window) || window == 0) {
+            return out;
+        }
+        std::uint32_t left = 0;
+        std::uint32_t right = 0;
+        std::uint32_t top = 0;
+        std::uint32_t bottom = 0;
+        if (!in.ue(left) || !in.ue(right) || !in.ue(top) || !in.ue(bottom)) {
+            return out;
+        }
+        const std::uint32_t sub_x = chroma_format_idc == 1 || chroma_format_idc == 2 ? 2u : 1u;
+        const std::uint32_t sub_y = chroma_format_idc == 1 ? 2u : 1u;
+        const std::uint64_t across = (static_cast<std::uint64_t>(left) + right) * sub_x;
+        const std::uint64_t down = (static_cast<std::uint64_t>(top) + bottom) * sub_y;
+        if (across >= out.width || down >= out.height) {
+            return out; // a window that leaves no picture is a window nobody meant
+        }
+        out.crop_left = left * sub_x;
+        out.crop_right = right * sub_x;
+        out.crop_top = top * sub_y;
+        out.crop_bottom = bottom * sub_y;
+        out.visible_width = out.width - static_cast<std::uint32_t>(across);
+        out.visible_height = out.height - static_cast<std::uint32_t>(down);
         return out;
     }
     return out;
@@ -827,23 +856,38 @@ HevcColour hevc_colour(const AvcConfig& config)
             return out;
         }
         std::uint32_t signal = 0;
-        if (!in.u1(signal) || signal == 0) {
+        if (!in.u1(signal)) {
             return out;
         }
-        std::uint32_t full_range = 0;
-        std::uint32_t described = 0;
-        if (!in.skip(3) || !in.u1(full_range) || !in.u1(described)) {
+        if (signal != 0) {
+            std::uint32_t full_range = 0;
+            std::uint32_t described = 0;
+            if (!in.skip(3) || !in.u1(full_range) || !in.u1(described)) {
+                return out;
+            }
+            out.full_range = full_range != 0;
+            if (described != 0) {
+                if (!in.un(8, out.primaries) || !in.un(8, out.transfer) ||
+                    !in.un(8, out.matrix)) {
+                    return out;
+                }
+                out.valid = true;
+            }
+        }
+        // **Where the chroma sits**, which follows the colour in the VUI
+        // whether or not the colour was stated (E.2.1). Only the top field's
+        // is kept: nothing here is interlaced, and the two are the same for a
+        // progressive stream.
+        std::uint32_t located = 0;
+        if (!in.u1(located) || located == 0) {
             return out;
         }
-        out.full_range = full_range != 0;
-        if (described == 0) {
+        std::uint32_t top = 0;
+        std::uint32_t bottom = 0;
+        if (!in.ue(top) || !in.ue(bottom) || top > 5) {
             return out;
         }
-        if (!in.un(8, out.primaries) || !in.un(8, out.transfer) ||
-            !in.un(8, out.matrix)) {
-            return out;
-        }
-        out.valid = true;
+        out.chroma_loc = static_cast<int>(top);
         return out;
     }
     return out;

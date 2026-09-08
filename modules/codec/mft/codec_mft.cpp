@@ -258,6 +258,15 @@ struct MpVideoCodec {
     /// `codec_next_frame`.
     bool draining = false;
 
+    /// **The coded frame around the picture.** `info` is the picture; the
+    /// transform's buffers are the coded size, with the picture at an offset
+    /// in them -- 3840x1606 arrives as 3840x1608, 1080 rows as 1088 -- and
+    /// the chroma plane starts after the *coded* height, not the picture's.
+    std::uint32_t coded_width = 0;
+    std::uint32_t coded_height = 0;
+    std::uint32_t crop_x = 0;
+    std::uint32_t crop_y = 0;
+
     /// The sample being handed out, and whatever it is holding, kept alive
     /// until the next call because that is what `next_frame` promises.
     Com<IMFSample> out_sample;
@@ -318,6 +327,43 @@ bool read_output_format(MpVideoCodec* c)
     }
     GUID subtype = GUID_NULL;
     (void)type->GetGUID(MF_MT_SUBTYPE, &subtype);
+
+    // **The picture inside the frame.** `MF_MT_FRAME_SIZE` is the coded size,
+    // padded to the codec's block; the transform states what of it is picture
+    // as `MF_MT_MINIMUM_DISPLAY_APERTURE`, and a decoder that reported the
+    // frame instead had the presenter draw two rows of padding under every
+    // 2.39:1 test pattern and squeeze the picture to fit them in. The record's
+    // own conformance window is the fallback for a transform that states no
+    // aperture, and it says the same thing.
+    c->coded_width = width;
+    c->coded_height = height;
+    c->crop_x = 0;
+    c->crop_y = 0;
+    MFVideoArea aperture{};
+    UINT32 aperture_bytes = 0;
+    const bool stated = SUCCEEDED(type->GetBlob(MF_MT_MINIMUM_DISPLAY_APERTURE,
+                                                reinterpret_cast<UINT8*>(&aperture),
+                                                sizeof aperture, &aperture_bytes)) &&
+                        aperture_bytes == sizeof aperture;
+    if (stated && aperture.Area.cx > 0 && aperture.Area.cy > 0 && aperture.OffsetX.value >= 0 &&
+        aperture.OffsetY.value >= 0 &&
+        static_cast<UINT32>(aperture.OffsetX.value) + static_cast<UINT32>(aperture.Area.cx) <=
+            width &&
+        static_cast<UINT32>(aperture.OffsetY.value) + static_cast<UINT32>(aperture.Area.cy) <=
+            height) {
+        c->crop_x = static_cast<std::uint32_t>(aperture.OffsetX.value);
+        c->crop_y = static_cast<std::uint32_t>(aperture.OffsetY.value);
+        width = static_cast<UINT32>(aperture.Area.cx);
+        height = static_cast<UINT32>(aperture.Area.cy);
+    } else if (c->codec == MP_CODEC_HEVC && c->hvcc.valid) {
+        const mp::mft::HevcSize sps = mp::mft::hevc_size(c->hvcc.annex);
+        if (sps.valid && sps.width == width && sps.height == height) {
+            c->crop_x = sps.crop_left;
+            c->crop_y = sps.crop_top;
+            width = sps.visible_width;
+            height = sps.visible_height;
+        }
+    }
 
     const std::uint32_t size = c->info.size != 0 ? c->info.size : sizeof(MpVideoInfo);
     c->info = MpVideoInfo{};
@@ -967,9 +1013,18 @@ try {
     // the only thing that separates them is the depth and where in each
     // sixteen bits it sits. Which is what MP_LAYOUT_P010's `shift` of 6 says.
     out->layout = c->ten_bit ? k_p010 : k_nv12;
-    out->plane[0] = scanline0;
+    // **The picture's corner, not the frame's.** The chroma plane begins after
+    // the coded height; within each plane the picture starts `crop_y` rows
+    // down and `crop_x` samples in, halved for chroma. (A texture from the
+    // hardware path is the coded frame whole, and its frame states the
+    // picture's size from the top-left corner: an aperture with an offset is
+    // one no decoder here has produced.)
+    const std::ptrdiff_t row = static_cast<std::ptrdiff_t>(pitch);
+    const std::ptrdiff_t sample = c->ten_bit ? 2 : 1;
+    out->plane[0] = scanline0 + row * c->crop_y + sample * c->crop_x;
     out->stride[0] = static_cast<std::uint32_t>(pitch < 0 ? -pitch : pitch);
-    out->plane[1] = scanline0 + static_cast<std::ptrdiff_t>(pitch) * c->info.height;
+    out->plane[1] = scanline0 + row * c->coded_height + row * (c->crop_y / 2u) +
+                    sample * 2 * (c->crop_x / 2u);
     out->stride[1] = out->stride[0];
     return MP_OK;
 } catch (...) {

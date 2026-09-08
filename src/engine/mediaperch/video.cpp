@@ -345,6 +345,7 @@ void VideoGraph::reconcile()
     take(want.height, said.height);
     take(want.display_width, said.display_width);
     take(want.display_height, said.display_height);
+    take(want.chroma_siting, said.chroma_siting);
     take_colour(want.primaries, said.primaries);
     take_colour(want.transfer, said.transfer);
     take_colour(want.matrix, said.matrix);

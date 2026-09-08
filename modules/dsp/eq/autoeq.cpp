@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#if defined(_WIN32)
+#    include "win_path.hpp"
+#endif
 #include "autoeq.hpp"
 
 #include <algorithm>
@@ -230,16 +233,7 @@ bool load(const std::string& path, Profile& out, std::string& why)
 {
     std::FILE* file = nullptr;
 #if defined(_WIN32)
-    const int wide = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
-    if (wide <= 0) {
-        why = "that path is not UTF-8";
-        return false;
-    }
-    std::vector<wchar_t> name(static_cast<std::size_t>(wide));
-    MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, name.data(), wide);
-    if (_wfopen_s(&file, name.data(), L"rb") != 0) {
-        file = nullptr;
-    }
+    file = mp::winpath::fopen_utf8(path.c_str(), L"rb"); // and past MAX_PATH, see win_path.hpp
 #else
     file = std::fopen(path.c_str(), "rb");
 #endif

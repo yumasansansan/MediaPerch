@@ -2995,6 +2995,178 @@ same week:
 - **`demux_mp4` truncated the 16.16 display size** rather than rounding it, losing the
   fraction an anamorphic track states. It rounds now.
 
+### 9.11 The resampler, where chroma sits, and what the gamut does
+
+**Every frame is resampled at least once, so the filter is ours.** A 4:2:0 frame's chroma
+is half the luma's size on both axes and has to be brought to the luma grid before there is a
+colour; the picture then has to reach the target's size, which is the shell's box and not the
+picture's own (§9.7.1). Both were one bilinear fetch through the sampler until the HDR10 test
+patterns arrived: a 4K checkerboard in a 1080p window was moiré the size of a thumb, the
+one-pixel rulers along the edge of a 2.39:1 field came and went with the phase and read as a
+picture that had been cropped, and text in anything larger than the window was smeared. Two
+taps cannot average a neighbourhood, and averaging the neighbourhood is what downscaling is.
+
+**The passes, in order**, in `video_d3d11.cpp`'s one shader string:
+
+1. **Chroma across.** For a frame with subsampled chroma, the horizontal half of the
+   reconstruction: the luma's width at the chroma's height, from the chroma plane or planes,
+   by the kernel and the horizontal siting, into a two-channel fp32 texture. Separable, so
+   this and the next are six taps each rather than thirty-six together — which on an Iris Xe
+   at 4K60 was the difference between a fifth of the frames dropped and one percent.
+2. **The picture.** At the source's own size, so that every luma sample is read exactly
+   where it is (`Load` at the pixel's index, never the sampler at a normalised coordinate,
+   which is where a crop and a quarter-sample siting error both hide): luma, the chroma's
+   vertical half from pass 1, the matrix, the transfer undone into linear light on the
+   source's own primaries, fp32. **When the target is the source's size and no chain is in
+   the path, this pass is the whole thing** — the roll-off, the gamut and the encoding run in
+   it and it lands in the target: one pass, as before.
+3. **Across, then down.** Otherwise the linear picture is resampled one axis at a time, in
+   linear light: output sample i of dst sits at (i + 0.5) · src / dst − 0.5 in source
+   samples, the kernel is centred there, **stretched by the downscale factor** so that every
+   source sample under an output sample is counted, its weights normalised so a flat field
+   stays flat at every phase, and the edge clamped. The intermediate is the target's width at
+   the source's height. fp32 throughout, because §9.10 says the arithmetic is single
+   precision until DXGI's fp16 at the end, and a half-precision intermediate would put the
+   dark end of a PQ picture into subnormals.
+4. **The second half.** Tone mapping, the gamut and the output encoding, from linear — the
+   same code that runs after a §9.8.3 chain, and the chain runs between 3 and 4 when there is
+   one.
+
+**The kernels** (`kernels.hpp`), by the names `scaler` and `chroma` take:
+
+| name | taps at 1:1 | what it is |
+|---|---|---|
+| `lanczos` | 6 | three-lobe windowed sinc; **the default for both** |
+| `spline36` | 6 | the 36-support cubic spline, as ImageMagick and mpv spell it |
+| `catrom` | 4 | Catmull-Rom, B=0 C=1/2; interpolating |
+| `mitchell` | 4 | Mitchell-Netravali, B=C=1/3; **not** interpolating, blurs by design |
+| `bilinear` | 2 | the triangle: what the fetch was |
+| `box` | 1 | an area average when downscaling by an integer, nearest when upscaling |
+
+The weights are computed in the shader from the formulas, once per tap; a Lanczos weight is
+snapped to nought at the integers, where single-precision sin(π) is a hundred-millionth
+rather than zero, so that one to one is the identity to the last bit.
+
+**In linear light, and why.** Downscaling averages, and what the eye averages when it looks
+at a 4K panel from across a room is light, not code values: the pixel-field pattern's squares
+are drawn at the checkerboard's *luminance* so that they vanish on a display that shows every
+pixel, and they vanish here too because the average is taken after the transfer is undone.
+Averaging PQ codes would have put them a stop dark.
+
+**Where a chroma sample sits.** ISO/IEC 23091-2's `ChromaLocType`, six positions, of which
+type 0 — level with the left luma sample of each pair, halfway between the two rows — is what
+MPEG-2, H.264, HEVC and AV1 all mean by silence, and type 1, centred, is JPEG's. A fetch at
+normalised coordinates was type 1 for every stream: a quarter of a luma sample to one side on
+every colour edge, invisible in a film and plain in the chroma-sharpness patterns. The ABI
+carries it now (`MpVideoInfo::chroma_siting`, the type plus one, appended and guarded by
+`size`): `demux_mp4` reads HEVC's VUI, `demux_mkv` its ChromaSitingHorz and ChromaSitingVert,
+`codec_dav1d` the sequence header's `chroma_sample_position`, and `VideoGraph::reconcile`
+lets the decoder's statement carry like its size. `siting` is `auto` — the stream's, or type 0
+— or one of the six by name, and the row says which and whose.
+
+**What the gamut does past BT.709.** After the roll-off a saturated BT.2020 colour has a
+component past 1 or below 0 in BT.709. Clipping each on its own is what the compositor did:
+it changes the hue, discards the luminance the grade put there, and on the colour-clipping
+patterns merged the red bars from a third of the way up while the white ones never merged —
+a different level for every primary, because each runs out at its own. `gamut desaturate`,
+the default, moves the colour towards grey of the same luminance instead, along the line
+through the achromatic axis (which keeps its chromaticity's hue angle), with a soft knee at
+eighty percent of the way to the boundary; what comes out is inside the display's gamut at
+the luminance that went in, and every bar of the pattern is a step in brightness the display
+can show. The price is that a BT.2020 red at the roll-off's top is a lighter, less saturated
+red than the display's own primary — BT.709 has no red that bright, and something has to
+give. `gamut clip` is the old behaviour by name. Neither runs on an HDR display, where scRGB
+carries BT.2020 as components outside [0, 1] and the compositor knows what they mean.
+
+**The two peaks.** The roll-off starts from the mastering display's peak when the stream
+states one; when it also states a content light level that is *lower*, that is the tighter
+bound — a 4000-nit mastering display with nothing above 1000 on it is a 1000-nit picture, and
+rolling it off from 4000 spends range on highlights that never come. The pattern set has a
+folder for every combination, and `target` says which number won.
+
+**The cost, measured** on an Iris Xe, Media Foundation's software HEVC decoder, six seconds
+each, `node vsource`:
+
+| picture | target | scaler / chroma | decoded | shown | dropped |
+|---|---|---|---|---|---|
+| 3840x1606 at 59.94 | 1920x803 | lanczos / lanczos, chroma in one pass of 36 taps | 468 | 368 | 99 |
+| same | same | lanczos / catrom, one pass of 16 | 458 | 416 | 42 |
+| same | same | bilinear / bilinear | 454 | 447 | 7 |
+| same | same | **lanczos / lanczos, chroma in two passes of 6** | 450 | 446 | 4 |
+| same | same | lanczos / catrom, two passes | 464 | 457 | 7 |
+| 3840x2160 at 23.976 | 1920x1080 | lanczos / lanczos | 186 | 183 | 1 |
+| 3840x2160 at 23.976 | 3840x2160 | lanczos / lanczos, one pass | 184 | 181 | 2 |
+
+The chroma reconstruction was the whole cost, and making it separable took it away: the
+full-quality default now drops what the cheapest setting drops.
+
+**What it is not.** Not a §9.8.3 stage, although a stage was considered. The chroma
+reconstruction and the scale are one resampling problem — a stage that scaled a picture the
+presenter had already reconstructed would resample twice — and the stage ABI has no way to
+change a picture's size: `configure` states a layout, not a geometry. When it can, a scaler
+somebody else wrote can sit where passes 3 and 4 are; the presenter's stays the one the
+tests hold.
+
+**Looked at, not argued about.** `mediaperch-probe render --file F --frame N --size WxH --out
+X.ppm` draws one frame through the presenter off screen — no window, no device — reads it
+back in fp32, writes it as 8-bit sRGB, and prints the presenter's rows; `--set key=value`
+takes any of them (`scaler=box`, `gamut=clip`, `display=hdr=0`). It is how every claim in
+this section was checked against a picture, and `tests/scaler_test.cpp` is how the arithmetic
+is checked against references written from the formulas: one to one is the identity; a
+two-to-one checkerboard is a flat grey in linear light for every kernel; the real shader
+resamples as a double-precision reference does, up, down and one axis at a time; a chroma
+step lands where the siting says; a red past the gamut keeps its luminance and its
+gradation; the roll-off starts from the tighter peak; a texture larger than its picture is
+drawn cropped.
+
+### 9.12 Dither for the picture: where it is quantised, and what is planned
+
+§9.10 counts the bits. This is about the rounding at the end, which the audio side treats
+as a first-class stage (design.md's *Dither* and *Noise shaping*) and the picture does not
+yet. Three quantisers stand between the shader's fp32 and a panel, and they are not equal:
+
+- **The fp32 write into the fp16 swap chain**, which DXGI rounds to nearest even on an
+  11-bit significand: a relative step between 1/2048 and 1/1024 of the value, at every
+  level. Against an 8-bit or a 10-bit link that step is thirty to a hundred times finer than
+  the display's own, everywhere, including the dark end where a float's step shrinks with
+  the value. It is a rounding, and rounding without dither correlates the error with the
+  signal; it is not where anything visible comes from.
+- **The compositor's conversion of fp16 scRGB to the link's 8 or 10 bits.** Outside this
+  process, on every path that composites, and whether it dithers is not documented. This is
+  the quantiser that shows.
+- **The R10G10B10A2 intermediate** the `driver` and `d2d` providers read (§9.3), written by
+  the shader's own PQ encode and not dithered. Ours, and the smallest of the three.
+
+**The plan, in the order it pays.**
+
+1. **An integer output path, at the link's depth.** On an SDR display present
+   `B8G8R8A8_UNORM` with the sRGB encode done in the shader; on an HDR display
+   `R10G10B10A2_UNORM` with the PQ encode, the colour space HDR10; the depth read from
+   `DXGI_OUTPUT_DESC1::BitsPerColor`. What the compositor then receives is already at the
+   link's depth and it has nothing left to round, which is the only way to take the second
+   quantiser out of the picture. It is a new `Encoding` in colour_plan.hpp, decided the way the
+   others are, and a setting (`output`: `fp16`, `link`) so that the two can be compared on
+   the same file.
+2. **The dither itself, at that write.** TPDF, two samples of a blue-noise texture — void-
+   and-cluster, 64 by 64, generated once and kept as bytes — with a per-frame offset so the
+   pattern does not sit still. Blue noise is the picture's counterpart of the audio engine's
+   noise shaping: error diffusion, which is what noise shaping is in two dimensions, is a
+   serial algorithm and does not run on a GPU, and a blue-noise field is a dither whose
+   spectrum has already been pushed to where the eye is least sensitive. A setting (`dither`:
+   `none`, `tpdf`, `blue`) and a row.
+3. **The fp16 write too**, since it is one line once 2 exists: half an ulp of TPDF at the
+   value's own exponent before the write, so that what fp16 rounds is uncorrelated with the
+   signal. Measurable with `read_back` at `precision fp16`, and worth exactly as much as the
+   measurement says.
+4. **Held to a test the way the audio dither is** (`dither_test.cpp`): a ramp through the
+   quantiser has the right mean, the right variance and a spectrum that is blue; a flat
+   field through it has no visible structure at any offset.
+
+**What is not planned** is a noise shaper in the audio sense: there is no sequential error
+to feed back in a pixel shader, and blue noise is what replaces it. And none of this changes
+what the *measurements* see: `read_back` stays fp32 and undithered, because a test that
+compares a shader to a reference wants the shader's number and not a random one.
+
 ### 9.7.1 Who owns the window, and how a frame crosses a process
 
 **Decided: the engine renders, the shell hosts.** The alternatives were the engine opening
@@ -3098,12 +3270,14 @@ profile, and the display* below.
 render at the picture's native size and let the shell's visual carry a transform, which costs
 no resize and no message at all. It was the simpler one and it was not chosen, for two
 reasons that are the same reason. A 4:2:0 frame is **already** being resampled to reach
-full-rate RGB — the chroma planes are half-size and the shader fetches them bilinearly — so
-scaling in that same fetch is one interpolation, where a transform on the visual is ours and
-then the compositor's, one after the other. And a composition surface's scaling is a fixed
+full-rate RGB — the chroma planes are half-size and have to be brought to the luma grid — so
+scaling in the same shader is one resampling problem, where a transform on the visual is ours
+and then the compositor's, one after the other. And a composition surface's scaling is a fixed
 bilinear nobody in this tree can reach, while a filter in our own pixel shader is a filter
-§9.8.3 can improve later without asking anybody. **Where the quality of the picture is the
-point, the resampling belongs where we can see it.**
+that can be improved later without asking anybody. **Where the quality of the picture is the
+point, the resampling belongs where we can see it.** (It was improved: the fetch this
+paragraph first described was a bilinear one, and §9.11 is the resampler that replaced it on
+the day the HDR10 test patterns showed what two taps do to a checkerboard.)
 
 So `video_d3d11` takes `set("size", "WxH")`, or `native` for the picture's own, at any time —
 before `configure`, and again between frames, because a window dragged by a corner is this
@@ -5961,6 +6135,89 @@ the sample; Matroska in the Colour element, the record, or the sample — and ea
 reads all three of its places, in that order.
 
 
+#### The test patterns, part two: a scaler, a siting, a gamut, and what a picture is not
+
+The set complete, three more reports. On the colour-clipping patterns the bars merged into
+their background at a different level for each colour. On the aspect-ratio patterns at
+3840x1606 the top and bottom of the picture were cut off. On the pixel-field patterns the
+dots were enormous and nothing like the grey they are meant to be. And two requests: a
+higher-precision scaler, perhaps as a module, because the chroma-sharpness patterns and any
+text larger than the window came out blurred; and dither, or a noise shaper, at DXGI's fp16.
+
+**The dots were the fetch.** The pixel field is a one-pixel checkerboard, and a bilinear
+fetch of it at any factor but exactly two is moiré: two taps at a phase that drifts across
+the picture, which is the size-of-a-thumb blotches reported. `mediaperch-probe render`, new
+that day so that a frame could be looked at without a screenshot, reproduced it at
+1226x514 and drew the same frame flat grey through the resampler (§9.11): six-tap Lanczos
+in both directions, stretched by the downscale factor, in linear light. The squares inside
+the pattern's corner circles — drawn at the checkerboard's luminance so that they vanish on
+a panel that shows every pixel — vanish here too, which is the checkerboard test in
+`scaler_test.cpp` measured on a real file.
+
+**The cut-off was three things, and none of them was a crop.** The rulers along the edges of
+the 2.39:1 field are drawn to count cropped pixels, one tick a pixel; bilinearly downscaled
+by three, the ticks came and went with the phase and the picture *read* as cropped. Under
+that, `codec_mft` reported the coded 3840x1608 rather than the picture's 1606 — the
+presenter's `picture` row said so — so two rows of the encoder's padding were drawn and the
+picture squeezed a tenth of a percent to make room; it reads `MF_MT_MINIMUM_DISPLAY_APERTURE`
+now, or the SPS's conformance window when the transform states none, and the chroma plane
+still starts after the *coded* height. And the shell was rounding the picture's corners by
+eight pixels, so that it would read as a card on the acrylic, which cut the corner markers
+off every pattern; a player does not get to hide pixels for looks, and it does not now.
+libde265 crops on its own (`width_confwin`), so the other decoder was already right.
+`tests/data/mp4/crop_320x238.mp4` is eight frames coded 320x240 with a two-row window and the
+chroma sited top-left, in both containers; both decoders report 238 and both demuxers report
+the siting.
+
+**The colours merged at different levels because the compositor clipped.** A BT.2020 red at
+the roll-off's top is 1.66 of BT.709's red after the gamut matrix, and clipping that
+component alone merges every red bar above the level where it first reaches 1 — about a
+third of the way up the pattern — while white, which never leaves the gamut, never merges.
+Green and blue run out at their own levels. The presenter desaturates towards grey at
+constant luminance instead, with a soft knee (§9.11, `gamut`), so every bar keeps its own
+brightness; the honest cost is that a saturated red at the top is a lighter red than the
+display's primary, and `gamut clip` is one setting away. Held by a test that presents the
+red bars from 240 to 1000 nits and checks each one's luminance against BT.2390's roll-off of
+its BT.2020 red weight, strictly increasing to where the curve itself flattens. And on an SDR
+display *every* colour's bars merge towards the top, white included — from 1000 nits to
+203, BT.2390 puts 620 nits at 202.3 and 820 at 203.0 — which is the pattern doing what it
+says it does on a display that cannot show 1000 nits, not a fault.
+
+**The quarter of a sample nobody had seen.** The sampler at a normalised coordinate put every
+chroma sample midway between two luma samples, which is JPEG's siting and not MPEG's; the
+chroma-sharpness patterns are drawn to show exactly that. The ABI grew `chroma_siting`, three
+demuxers and a decoder fill it, and the reconstruction reads it (§9.11). The stream's own
+statement is what the `siting` row reports.
+
+**Thirty-six taps became twelve.** The first resampler reconstructed chroma in one pass of
+six by six taps, and on this machine's Iris Xe a 4K59.94 pattern dropped 99 frames of 468 in
+six seconds — a fifth. The kernel is separable, so the horizontal half now runs once per
+chroma row into a half-height texture and the picture pass takes six taps down from that:
+4 dropped of 450, which is what the two-tap fetch had cost. The table is in §9.11.
+
+**And a folder that would not open at all.** The sweep of the whole set -- every file in
+folders 01 to 10 and every two-hundredth of the 8832 calibration clips, frame 0 through
+`render` -- refused one folder of calibration patterns outright: *nothing here reads it*,
+and nothing in the log to say why. Every module opened files through its own copy of the same
+fifteen lines, UTF-8 to UTF-16 then `_wfopen_s`, and every copy stopped at MAX_PATH, which
+the set's deepest folder passes by fifty characters. One header now (`win_path.hpp`, beside
+module_log.hpp) adds the `\\?\` prefix past 260 with the slashes turned round; the head's
+own `open_utf8` follows the same rule; and the Matroska reader, which had been handing
+libebml a *narrow* path -- the ANSI code page, so a Japanese folder name would not have
+opened either -- opens its own file. Held by a test that copies a fixture 300 characters deep
+under %TEMP% and opens it plain, in both containers.
+
+**What was built, and what was planned.** Six kernels by name for the picture and for the
+chroma, the siting, the gamut, the tighter of the two peaks (a MaxCLL below the mastering
+display's peak is the source's range), `render`, and nine test cases against references
+written from the kernels' formulas; 491 pass. The scaler stays in the presenter rather than
+becoming a §9.8.3 stage, for the reason §9.11 gives: the reconstruction and the scale are one
+problem, and a stage cannot yet say a size. Dither is planned and not built — §9.12 says
+where the picture is actually quantised (the compositor's conversion to the link, not
+DXGI's fp16, which is thirty times finer than any panel) and what to do about it, in the
+order it pays: an integer output at the link's depth first, blue-noise TPDF at that write,
+then the fp16 write as well.
+
 #### Built, and the palette needed a fourth verb
 
 `graph`, `node_settings` / `node_setting_set` and `modules` are on the wire, and
@@ -6526,6 +6783,22 @@ real time.
   MP4s to arrive with no audio, so the container was the suspect; it had handed the decoders
   exactly what they were owed, and the same files in Matroska would have failed in the same
   two places. Before blaming the layer that changed, ask which layer said the sentence.
+- **Two taps are not a filter.** A bilinear fetch reconstructs one point; downscaling is an
+  integral over a neighbourhood, and no phase makes two samples an integral. A checkerboard
+  is the measurement that says so in one frame, and it said so the first time it was drawn.
+- **What a viewer calls cut off is whatever the pattern was drawn to detect.** A ruler that
+  counts cropped pixels, blurred into dashes, reads as cropping; the report was exact about
+  the symptom and wrong about the cause, and the shell's rounded corners *were* cutting eight
+  pixels off every corner marker regardless. Reproduce the picture before naming the fault --
+  which is what `render` is for.
+- **Separable is a factor of three that costs one texture.** Thirty-six taps at 4K60 dropped
+  a fifth of the frames on an integrated GPU; six and six dropped one percent, and the
+  picture is the same to the last bit the tests check. Look for the product before reaching
+  for a cheaper kernel.
+- **A path is a string until it is 260 characters long.** Nine copies of the same open
+  helper, each right about UTF-8 and each silent past MAX_PATH; a sweep found the folder that
+  nobody's hand-picked file had reached. A refusal with no reason in the log is the other
+  half of that lesson.
 - **A rule nobody decided is still a rule, and it hardens.** *The audio device is the master
   clock* was a sentence about the common case that became a sentence about every case, and
   then a comment, and then an `IMedia` that could not say *no audio*, and then a queue that

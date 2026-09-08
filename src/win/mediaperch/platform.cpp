@@ -552,10 +552,30 @@ std::FILE* open_utf8(const std::string& path, const wchar_t* mode) noexcept
     if (wide <= 0) {
         return nullptr;
     }
-    std::vector<wchar_t> name(static_cast<std::size_t>(wide));
+    std::wstring name(static_cast<std::size_t>(wide - 1), L'\0');
     MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, name.data(), wide);
+    // **Past MAX_PATH, the prefix that lifts the limit** -- the rule
+    // modules/shared/module_log/win_path.hpp states for the modules, written
+    // here as well so that this head does not include modules/shared. The
+    // HDR10 test patterns' deepest folder is fifty characters past 260, and
+    // this function said "no such file" of every file in it.
+    if (name.size() >= MAX_PATH && name.rfind(L"\\\\?\\", 0) != 0) {
+        for (wchar_t& c : name) {
+            if (c == L'/') {
+                c = L'\\';
+            }
+        }
+        const bool dotted = name.find(L"\\.\\") != std::wstring::npos ||
+                            name.find(L"\\..\\") != std::wstring::npos ||
+                            name.compare(name.size() - 2, 2, L"\\.") == 0;
+        if (!dotted && name.size() >= 3 && name[1] == L':' && name[2] == L'\\') {
+            name = L"\\\\?\\" + name;
+        } else if (!dotted && name.rfind(L"\\\\", 0) == 0) {
+            name = L"\\\\?\\UNC\\" + name.substr(2);
+        }
+    }
     std::FILE* file = nullptr;
-    if (_wfopen_s(&file, name.data(), mode) != 0) {
+    if (_wfopen_s(&file, name.c_str(), mode) != 0) {
         return nullptr;
     }
     return file;

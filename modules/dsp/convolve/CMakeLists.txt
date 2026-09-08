@@ -22,3 +22,7 @@ mediaperch_add_module(mp_dsp_convolve
     SOURCES dsp_convolve.cpp
     LINK mediaperch_convolve mediaperch_impulse)
 
+
+# win_path.hpp, for a path past MAX_PATH: the one header beside module_log
+# that every module opening a file by name includes (see it for why).
+target_include_directories(mediaperch_impulse PRIVATE "${CMAKE_SOURCE_DIR}/modules/shared/module_log")

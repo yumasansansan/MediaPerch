@@ -33,6 +33,7 @@
 #include <mediaperch/module.h>
 
 #include "module_log.hpp"
+#include "win_path.hpp"
 
 #include "pcm_format.hpp"
 
@@ -41,7 +42,7 @@
 #include <ebml/EbmlHead.h>
 #include <ebml/EbmlStream.h>
 #include <ebml/EbmlVoid.h>
-#include <ebml/StdIOCallback.h>
+#include <ebml/IOCallback.h>
 
 #include <matroska/KaxBlock.h>
 #include <matroska/KaxCluster.h>
@@ -310,6 +311,57 @@ std::uint64_t to_frames(std::uint64_t ns, std::uint32_t rate)
     return ns / 1000000000ull * rate + (rem + 500000000ull) / 1000000000ull;
 }
 
+/// **The file, opened by this module and not by libebml.** `StdIOCallback`
+/// takes a narrow path through `fopen`, which on Windows is the ANSI code
+/// page: a path with a character outside it -- most of the world's -- does
+/// not open, and one past MAX_PATH does not open at all. This is the same
+/// five calls over `_wfopen_s` and win_path.hpp's rule; `float_of` seeks and
+/// reads through it unchanged.
+class FileIo final : public libebml::IOCallback {
+public:
+    explicit FileIo(const char* path)
+#if defined(_WIN32)
+        : file_(mp::winpath::fopen_utf8(path, L"rb"))
+#else
+        : file_(std::fopen(path, "rb"))
+#endif
+    {
+    }
+    ~FileIo() override { close(); }
+    FileIo(const FileIo&) = delete;
+    FileIo& operator=(const FileIo&) = delete;
+
+    [[nodiscard]] bool ok() const noexcept { return file_ != nullptr; }
+
+    std::size_t read(void* buffer, std::size_t size) override
+    {
+        return file_ != nullptr ? std::fread(buffer, 1, size, file_) : 0;
+    }
+    void setFilePointer(std::int64_t offset,
+                        libebml::seek_mode mode = libebml::seek_beginning) override
+    {
+        if (file_ != nullptr) {
+            // libebml's three modes are SEEK_SET, SEEK_END and SEEK_CUR by value.
+            (void)_fseeki64(file_, offset, static_cast<int>(mode));
+        }
+    }
+    std::size_t write(const void*, std::size_t) override { return 0; }
+    std::uint64_t getFilePointer() override
+    {
+        return file_ != nullptr ? static_cast<std::uint64_t>(_ftelli64(file_)) : 0u;
+    }
+    void close() override
+    {
+        if (file_ != nullptr) {
+            std::fclose(file_);
+            file_ = nullptr;
+        }
+    }
+
+private:
+    std::FILE* file_ = nullptr;
+};
+
 /// **A float element's value, with four-byte floats read back from the file
 /// rather than taken from libebml.** The revision of libebml this tree pins
 /// byte-swaps 32-bit values through a 16-bit cast on MSVC --
@@ -380,6 +432,8 @@ struct Track {
     std::uint32_t transfer = 2;
     std::uint32_t matrix = 2;
     bool full_range = false;
+    /// `MpVideoInfo::chroma_siting`: H.273's type plus one, 0 unstated.
+    std::uint32_t chroma_siting = 0;
     /// **What the content was graded on**, in ST.2086's units rather than
     /// Matroska's: converted where the container's spelling is known, so that
     /// nothing downstream has to ask which of its callers used which. Red,
@@ -397,7 +451,7 @@ struct Track {
 } // namespace
 
 struct MpDemux {
-    std::unique_ptr<StdIOCallback> io;
+    std::unique_ptr<libebml::IOCallback> io;
     std::unique_ptr<EbmlStream> stream;
     std::unique_ptr<EbmlElement> segment;
 
@@ -583,6 +637,23 @@ void read_track_entry(MpDemux* d, KaxTrackEntry& entry)
             // 3 defined by the transfer function -- not the flag MP4 uses.
             if (auto* v = FindChild<KaxVideoColourRange>(*colour)) {
                 t.full_range = static_cast<std::uint64_t>(*v) == 2;
+            }
+            // **Where the chroma sits**, in Matroska's two axes: horizontally
+            // 0 unspecified, 1 left, 2 half; vertically 0, 1 top, 2 half. Into
+            // H.273's one number plus one, with an axis that was not stated
+            // taken as the default -- left, and halfway down -- which is what
+            // every MPEG-family codec means by silence. The four the two axes
+            // can spell are types 0 to 3: left, centre, top-left, top.
+            std::uint64_t horizontal = 0;
+            std::uint64_t vertical = 0;
+            if (auto* v = FindChild<KaxVideoChromaSitHorz>(*colour)) {
+                horizontal = static_cast<std::uint64_t>(*v);
+            }
+            if (auto* v = FindChild<KaxVideoChromaSitVert>(*colour)) {
+                vertical = static_cast<std::uint64_t>(*v);
+            }
+            if (horizontal != 0 || vertical != 0) {
+                t.chroma_siting = 1u + (horizontal == 2 ? 1u : 0u) + (vertical == 1 ? 2u : 0u);
             }
 
             // **What the content was graded on**, which says nothing about how
@@ -1143,11 +1214,11 @@ try {
     *out = nullptr;
 
     auto d = std::make_unique<MpDemux>();
-    try {
-        d->io = std::make_unique<StdIOCallback>(path, MODE_READ);
-    } catch (...) {
+    auto io = std::make_unique<FileIo>(path);
+    if (!io->ok()) {
         return MP_ERR_IO;
     }
+    d->io = std::move(io);
     d->stream = std::make_unique<EbmlStream>(*d->io);
 
     std::unique_ptr<EbmlElement> head{d->stream->FindNextID(EBML_INFO(EbmlHead), 0xFFFFFFFFull)};
@@ -1376,6 +1447,7 @@ try {
     info.transfer = t.transfer;
     info.matrix = t.matrix;
     info.flags = t.full_range ? MP_VIDEO_FULL_RANGE : 0u;
+    info.chroma_siting = t.chroma_siting;
     for (int i = 0; i < 3; ++i) {
         info.mastering_primaries_x[i] = t.mastering_x[i];
         info.mastering_primaries_y[i] = t.mastering_y[i];

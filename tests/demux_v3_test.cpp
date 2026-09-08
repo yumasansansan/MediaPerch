@@ -1169,3 +1169,158 @@ TEST_CASE("a file that states no mastering display says so", "[demux][hdr]")
     CHECK(mp_video_has_mastering(&picture) == 0);
     CHECK(picture.max_content_light_level == 0u);
 }
+
+TEST_CASE("a conformance window is the picture's edge, and both containers say where chroma sits",
+          "[abi][demux][mp4][mkv][hevc]")
+{
+    // The MP4's sample entry states the picture, 320x238; the SPS in its
+    // record states the coded 320x240 and a window of two rows at the bottom,
+    // which `hevc_size` reads so that a decoder that reports the frame can
+    // be corrected. And the VUI states the chroma siting -- top-left here,
+    // H.273's type 2 -- which the ABI carries as the type plus one; the same
+    // stream in Matroska says it in ChromaSitingHorz and ChromaSitingVert.
+    Module module{mp4_module(), MP_KIND_DEMUX};
+    REQUIRE(module.as<MpDemuxVtbl>() != nullptr);
+    mp::Demux demux;
+    REQUIRE(demux.open(*module.as<MpDemuxVtbl>(), MEDIAPERCH_TEST_CROP) == MP_OK);
+    MpVideoInfo info{};
+    info.size = sizeof(info);
+    REQUIRE(demux.video_info(0, info));
+    CHECK(info.width == 320u);
+    CHECK(info.height == 238u);
+    CHECK(mp_video_chroma_siting(&info) == 3u);
+
+    std::vector<std::uint8_t> config;
+    REQUIRE(demux.stream_config(0, config));
+    const mp::mft::HevcSize size =
+        mp::mft::hevc_size(mp::mft::parse_hvcc(config.data(), config.size()).annex);
+    REQUIRE(size.valid);
+    CHECK(size.width == 320u);
+    CHECK(size.height == 240u);
+    CHECK(size.crop_top == 0u);
+    CHECK(size.crop_bottom == 2u);
+    CHECK(size.crop_left == 0u);
+    CHECK(size.crop_right == 0u);
+    CHECK(size.visible_width == 320u);
+    CHECK(size.visible_height == 238u);
+    const mp::mft::HevcColour colour =
+        mp::mft::hevc_colour(mp::mft::parse_hvcc(config.data(), config.size()).annex);
+    CHECK(colour.chroma_loc == 2);
+
+    // A caller from before the field reads nothing there.
+    MpVideoInfo older = info;
+    older.size = 96;
+    CHECK(mp_video_chroma_siting(&older) == 0u);
+
+    Module mkv{mkv_module(), MP_KIND_DEMUX};
+    REQUIRE(mkv.as<MpDemuxVtbl>() != nullptr);
+    mp::Demux other;
+    REQUIRE(other.open(*mkv.as<MpDemuxVtbl>(), MEDIAPERCH_TEST_CROP_MKV) == MP_OK);
+    MpVideoInfo again{};
+    again.size = sizeof(again);
+    REQUIRE(other.video_info(0, again));
+    CHECK(again.width == 320u);
+    CHECK(again.height == 238u);
+    CHECK(mp_video_chroma_siting(&again) == 3u);
+}
+
+namespace {
+
+/// A copy of `source` under %TEMP%, at a path longer than MAX_PATH, made with
+/// the prefix the file functions want and handed back plain -- forward
+/// slashes, no prefix -- which is how a shell hands a path over. Empty when
+/// the temp directory could not be built.
+struct DeepFile {
+    std::wstring prefixed;
+    std::vector<std::wstring> directories; // deepest last
+    std::string plain;
+
+    explicit DeepFile(const char* source, const wchar_t* name)
+    {
+        wchar_t temp[MAX_PATH];
+        const DWORD n = ::GetTempPathW(MAX_PATH, temp);
+        if (n == 0 || n >= MAX_PATH) {
+            return;
+        }
+        std::wstring at = std::wstring{L"\\\\?\\"} + temp;
+        if (at.back() != L'\\') {
+            at += L'\\';
+        }
+        at += L"mediaperch-long";
+        if (!::CreateDirectoryW(at.c_str(), nullptr) && ::GetLastError() != ERROR_ALREADY_EXISTS) {
+            return;
+        }
+        directories.push_back(at);
+        // Twelve segments of twenty-two characters: past 300 with the root.
+        for (int i = 0; i < 12; ++i) {
+            at += L"\\a-segment-that-is-long-" + std::to_wstring(i);
+            if (!::CreateDirectoryW(at.c_str(), nullptr) &&
+                ::GetLastError() != ERROR_ALREADY_EXISTS) {
+                return;
+            }
+            directories.push_back(at);
+        }
+        prefixed = at + L"\\" + name;
+        std::wstring wide_source;
+        {
+            const int needed = ::MultiByteToWideChar(CP_UTF8, 0, source, -1, nullptr, 0);
+            wide_source.assign(static_cast<std::size_t>(needed > 0 ? needed - 1 : 0), L'\0');
+            ::MultiByteToWideChar(CP_UTF8, 0, source, -1, wide_source.data(), needed);
+        }
+        if (!::CopyFileW(wide_source.c_str(), prefixed.c_str(), FALSE)) {
+            prefixed.clear();
+            return;
+        }
+        std::wstring shown = prefixed.substr(4); // without the prefix
+        for (wchar_t& c : shown) {
+            if (c == L'\\') {
+                c = L'/';
+            }
+        }
+        const int bytes = ::WideCharToMultiByte(CP_UTF8, 0, shown.c_str(), -1, nullptr, 0,
+                                                nullptr, nullptr);
+        plain.assign(static_cast<std::size_t>(bytes > 0 ? bytes - 1 : 0), '\0');
+        ::WideCharToMultiByte(CP_UTF8, 0, shown.c_str(), -1, plain.data(), bytes, nullptr,
+                              nullptr);
+    }
+    ~DeepFile()
+    {
+        if (!prefixed.empty()) {
+            ::DeleteFileW(prefixed.c_str());
+        }
+        for (auto it = directories.rbegin(); it != directories.rend(); ++it) {
+            ::RemoveDirectoryW(it->c_str());
+        }
+    }
+};
+
+} // namespace
+
+TEST_CASE("a path past MAX_PATH opens, in both containers", "[abi][demux][mp4][mkv]")
+{
+    // The HDR10 test patterns' folder tree is fifty characters past 260 at its
+    // deepest, and a whole folder of calibration patterns was "nothing here
+    // reads it" for that reason alone -- every module opened files through
+    // its own fifteen lines that stopped where the file functions stop
+    // without the `\\?\` prefix. The Matroska reader was worse: it handed
+    // libebml a narrow path, which is the ANSI code page.
+    DeepFile mp4_file{MEDIAPERCH_TEST_HDR10, L"deep.mp4"};
+    DeepFile mkv_file{MEDIAPERCH_TEST_AV_MKV, L"deep.mkv"};
+    if (mp4_file.plain.empty() || mkv_file.plain.empty()) {
+        SKIP("the temp directory would not take a path past MAX_PATH");
+    }
+    REQUIRE(mp4_file.plain.size() > 260u);
+    REQUIRE(mkv_file.plain.size() > 260u);
+
+    Module mp4{mp4_module(), MP_KIND_DEMUX};
+    REQUIRE(mp4.as<MpDemuxVtbl>() != nullptr);
+    mp::Demux demux;
+    REQUIRE(demux.open(*mp4.as<MpDemuxVtbl>(), mp4_file.plain.c_str()) == MP_OK);
+    CHECK(demux.stream_count() >= 1u);
+
+    Module mkv{mkv_module(), MP_KIND_DEMUX};
+    REQUIRE(mkv.as<MpDemuxVtbl>() != nullptr);
+    mp::Demux other;
+    REQUIRE(other.open(*mkv.as<MpDemuxVtbl>(), mkv_file.plain.c_str()) == MP_OK);
+    CHECK(other.stream_count() >= 2u);
+}

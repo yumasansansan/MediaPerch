@@ -8,3 +8,7 @@ mediaperch_add_module(mp_dsp_eq
     SOURCES dsp_eq.cpp autoeq.cpp
     LINK mediaperch_biquad mediaperch_convolve mediaperch_transform)
 
+
+# win_path.hpp, for a path past MAX_PATH: the one header beside module_log
+# that every module opening a file by name includes (see it for why).
+target_include_directories(mp_dsp_eq PRIVATE "${CMAKE_SOURCE_DIR}/modules/shared/module_log")

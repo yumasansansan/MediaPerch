@@ -132,6 +132,11 @@ struct HevcColour {
     std::uint32_t transfer = 2;
     std::uint32_t matrix = 2;
     bool full_range = false;
+    /// `valid` is the colour description; this is read whether or not the
+    /// colour was stated, because it follows it in the VUI either way.
+    /// ISO/IEC 23091-2's `ChromaLocType`, 0 to 5, or -1 when the stream did
+    /// not say -- which every MPEG-family codec means as type 0.
+    int chroma_loc = -1;
     bool valid = false;
 };
 
@@ -148,8 +153,23 @@ struct HevcColour {
 /// record does not state. `valid` false when there is no SPS or it could not
 /// be walked that far.
 struct HevcSize {
+    /// The coded size: what a decoder is told, and what its frames are.
     std::uint32_t width = 0;
     std::uint32_t height = 0;
+    /// **The conformance window**, in luma samples: what the encoder padded
+    /// the picture with to reach a multiple of its block size, and what a
+    /// player must not show. 3840x1606 is coded as 3840x1608 with two rows to
+    /// crop at the bottom; a decoder that reported all 1608 had the presenter
+    /// draw the padding and squeeze the picture a tenth of a percent to make
+    /// room for it. Zero when the SPS states no window.
+    std::uint32_t crop_left = 0;
+    std::uint32_t crop_right = 0;
+    std::uint32_t crop_top = 0;
+    std::uint32_t crop_bottom = 0;
+    /// The picture: the coded size less the window. Equal to the coded size
+    /// when there is none.
+    std::uint32_t visible_width = 0;
+    std::uint32_t visible_height = 0;
     bool valid = false;
 };
 [[nodiscard]] HevcSize hevc_size(const AvcConfig& config);

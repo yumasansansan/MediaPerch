@@ -975,3 +975,90 @@ TEST_CASE("a hardware decoder decodes into a texture the presenter samples in pl
 
     video->close(presenter);
 }
+
+TEST_CASE("Media Foundation's frame is the coded size, and the picture is what is reported",
+          "[video][mft][hevc]")
+{
+    // The transform's buffers are 320x240 for this 320x238 picture. What it
+    // states as the display aperture -- or, when it states none, what the
+    // SPS's conformance window says -- is what the frame reports, and the
+    // chroma plane still begins after the *coded* height. Before this the
+    // presenter drew the two rows of padding under every 2.39:1 test pattern.
+    Module demux_module{MEDIAPERCH_DEMUX_MP4, MP_KIND_DEMUX};
+    Module codec_module{MEDIAPERCH_CODEC_MFT, MP_KIND_VCODEC};
+    REQUIRE(demux_module.vtbl != nullptr);
+    REQUIRE(codec_module.vtbl != nullptr);
+    const auto* codec = static_cast<const MpVideoCodecVtbl*>(codec_module.vtbl);
+
+    mp::Demux demux;
+    REQUIRE(demux.open(*static_cast<const MpDemuxVtbl*>(demux_module.vtbl),
+                       MEDIAPERCH_TEST_CROP) == MP_OK);
+    std::vector<std::uint8_t> config;
+    REQUIRE(demux.stream_config(0, config));
+    std::uint32_t score = 0;
+    REQUIRE(codec->probe(MP_CODEC_HEVC, MP_GRAPHICS_NONE, config.data(),
+                         static_cast<std::uint32_t>(config.size()), &score) == MP_OK);
+    if (score == 0) {
+        SKIP("this machine has no HEVC decoder for Media Foundation to find");
+    }
+
+    MpVideoCodec* decoder = nullptr;
+    REQUIRE(codec->open(MP_CODEC_HEVC, nullptr, config.data(),
+                        static_cast<std::uint32_t>(config.size()), &decoder) == MP_OK);
+    const std::uint32_t only_video[] = {0};
+    REQUIRE(demux.select_streams(only_video) == MP_OK);
+
+    std::vector<std::uint8_t> buffer;
+    MpPacket packet{};
+    std::uint32_t frames = 0;
+    const auto drain = [&] {
+        for (int guard = 0; guard < 64; ++guard) {
+            MpVideoFrame frame{};
+            frame.size = sizeof(frame);
+            const MpResult r = codec->next_frame(decoder, &frame);
+            if (r == MP_END) {
+                return;
+            }
+            if (r == MP_ERR_BUSY) {
+                continue;
+            }
+            REQUIRE(r == MP_OK);
+            ++frames;
+            CHECK(frame.width == 320u);
+            CHECK(frame.height == 238u);
+            if (frame.texture == nullptr) {
+                REQUIRE(frame.plane[0] != nullptr);
+                // The chroma plane after the coded 240 rows, not the 238.
+                CHECK(static_cast<const std::uint8_t*>(frame.plane[1]) ==
+                      static_cast<const std::uint8_t*>(frame.plane[0]) +
+                          static_cast<std::size_t>(frame.stride[0]) * 240u);
+            }
+        }
+    };
+    for (int guard = 0; guard < 500; ++guard) {
+        const MpResult r = demux.read_packet(buffer, packet);
+        if (r == MP_END) {
+            break;
+        }
+        REQUIRE(r == MP_OK);
+        const MpResult fed = codec->decode(decoder, buffer.data(), packet.bytes, packet.frame);
+        if (fed == MP_ERR_BUSY) {
+            drain();
+            REQUIRE(codec->decode(decoder, buffer.data(), packet.bytes, packet.frame) ==
+                    MP_OK);
+        } else {
+            REQUIRE(fed == MP_OK);
+        }
+        drain();
+    }
+    REQUIRE(codec->flush(decoder) == MP_OK);
+    drain();
+    CHECK(frames == 8u);
+
+    MpVideoInfo said{};
+    said.size = sizeof(said);
+    REQUIRE(codec->get_format(decoder, &said) == MP_OK);
+    CHECK(said.width == 320u);
+    CHECK(said.height == 238u);
+    codec->close(decoder);
+}

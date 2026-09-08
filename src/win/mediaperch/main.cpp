@@ -43,6 +43,7 @@
 #include <chrono>
 #include <conio.h>
 #include <cmath>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -89,6 +90,12 @@ struct Options {
     /// Whether `--seconds` was actually asked for. A file plays to its end
     /// unless somebody said otherwise; a tone has no end and needs the default.
     bool seconds_given = false;
+    /// `render`: which frame, at what size, into which file, with which
+    /// presenter settings.
+    std::uint64_t frame_index = 0;
+    std::string render_size;
+    std::string out_path;
+    std::vector<std::string> sets;
     std::uint64_t seek = 0;
     mp::PathPolicy path = mp::PathPolicy::bit_exact;
     double gain = 1.0;
@@ -289,14 +296,17 @@ void usage()
   play        play a test tone.
               TAKES THE ENDPOINT for the whole duration.
   show        open a file in a window and play it: one demuxer feeding both
-              halves, the audio device holding the clock, and the picture going
-              up against it. TAKES THE ENDPOINT unless --no-audio.
+              engines, each on its own clock and the picture following the
+              sound. TAKES THE ENDPOINT unless --no-audio.
               Takes the same audio flags `play` does, --dsp included: a file
               whose rate or channel count the device refuses needs a stage
               named, because nothing here resamples or remixes on its own.
-              Takes the same audio flags `play` does, --dsp included: a file
-              whose rate or channel count the device refuses needs a stage
-              named, because nothing here resamples or remixes on its own.
+  render      draw one frame of a file through the presenter, off screen, at
+              the size a window would ask for, and write it as an 8-bit sRGB
+              PPM: --file, --frame N, --size WxH (or native), --out PATH, and
+              --set key=value for any presenter setting (scaler=box,
+              gamut=clip, display=hdr=0). Prints the presenter's rows. No
+              device and no window: what a test pattern is checked with.
   calibrate   measure what this machine needs to play these files, and write it
               down. Plays each file, in windows, at one ring size after another.
               TAKES THE ENDPOINT, at real speed, for as long as the windows add
@@ -544,7 +554,7 @@ bool parse(int argc, char** argv, Options& out)
             usage();
             std::exit(0);
         } else if (arg == "devices" || arg == "negotiate" || arg == "play" ||
-                   arg == "show" || arg == "calibrate" ||
+                   arg == "show" || arg == "render" || arg == "calibrate" ||
                    arg == "verify" || arg == "decode" || arg == "modules" ||
                    arg == "compare" || arg == "loudness" || arg == "claims") {
             out.command = arg;
@@ -772,6 +782,22 @@ bool parse(int argc, char** argv, Options& out)
             std::uint32_t s = 0;
             value(s);
             out.seconds = s;
+        } else if (arg == "--frame") {
+            if (i + 1 < argc) {
+                out.frame_index = std::strtoull(argv[++i], nullptr, 10);
+            }
+        } else if (arg == "--size") {
+            if (i + 1 < argc) {
+                out.render_size = argv[++i];
+            }
+        } else if (arg == "--out") {
+            if (i + 1 < argc) {
+                out.out_path = argv[++i];
+            }
+        } else if (arg == "--set") {
+            if (i + 1 < argc) {
+                out.sets.emplace_back(argv[++i]);
+            }
         } else if (arg == "--sink") {
             if (i + 1 < argc) {
                 out.sink_id = argv[++i];
@@ -1655,8 +1681,8 @@ bool switch_path(Options& current, const RunOutcome& run, mp::Queue& queue)
 /// this program made before there were any.
 bool read_profile(const std::string& path, mp::Profile& out, std::string& why)
 {
-    std::FILE* file = nullptr;
-    if (fopen_s(&file, path.c_str(), "rb") != 0 || file == nullptr) {
+    std::FILE* file = mp::win::open_utf8(path, L"rb");
+    if (file == nullptr) {
         why = path + " could not be opened";
         return false;
     }
@@ -1701,6 +1727,323 @@ struct ShowResult {
     std::uint32_t sample_rate = 0;
     std::uint32_t frame_bytes = 0;
 };
+
+/// **`render`: one frame of a file, through the presenter, into a file.** The
+/// picture as the engine would draw it, at the size a window would ask for,
+/// read back in fp32 and written as an 8-bit sRGB PPM anything can open. It
+/// is how a test pattern is checked against what it is meant to look like
+/// without a screenshot, and how the resampler, the siting and the gamut are
+/// looked at rather than argued about. No device and no window: the decoder
+/// is opened without the presenter's device, so the frames take the upload
+/// path every machine has.
+int render(const mp::win::ModuleRegistry& registry, const Options& options)
+{
+    if (options.files.empty()) {
+        std::fprintf(stderr, "render needs a file: --file <path>\n");
+        return 1;
+    }
+    const std::string& path = options.files.front();
+
+    mp::Demux demux;
+    const MpDemuxVtbl* demux_vtbl = nullptr;
+    for (const auto& choice : registry.demuxers_for(path, options.decoder_id)) {
+        if (demux.open(*choice.vtbl, path.c_str()) == MP_OK) {
+            demux_vtbl = choice.vtbl;
+            std::printf("container  %s\n", choice.desc->id);
+            break;
+        }
+        demux.close();
+    }
+    if (demux_vtbl == nullptr) {
+        std::fprintf(stderr, "nothing here reads %s\n", path.c_str());
+        return 1;
+    }
+    std::uint32_t video_stream = 0;
+    bool have_video = false;
+    MpStreamInfo video_info{};
+    for (std::uint32_t i = 0; i < demux.stream_count(); ++i) {
+        MpStreamInfo info{};
+        if (demux.stream_info(i, info) && info.kind == MP_STREAM_VIDEO) {
+            video_stream = i;
+            video_info = info;
+            have_video = true;
+            break;
+        }
+    }
+    if (!have_video) {
+        std::fprintf(stderr, "%s has no video in it\n", path.c_str());
+        return 1;
+    }
+    MpVideoInfo picture{};
+    picture.size = sizeof(picture);
+    if (!demux.video_info(video_stream, picture) || picture.width == 0) {
+        std::fprintf(stderr, "the container would not describe its video stream\n");
+        return 1;
+    }
+    const std::vector<std::uint32_t> selected{video_stream};
+    if (demux.select_streams(selected) != MP_OK) {
+        std::fprintf(stderr, "the container would not serve the video stream\n");
+        return 1;
+    }
+    std::vector<std::uint8_t> config;
+    (void)demux.stream_config(video_stream, config);
+    const std::uint8_t* config_bytes = config.empty() ? nullptr : config.data();
+    const auto config_size = static_cast<std::uint32_t>(config.size());
+
+    // The presenter, off screen: no window and no composition surface, so it
+    // renders into an fp32 texture and `read_back` hands over the floats.
+    const MpModuleDesc* presenter_desc = nullptr;
+    const MpVideoVtbl* presenter_vtbl = registry.video({}, &presenter_desc);
+    if (presenter_vtbl == nullptr || presenter_desc == nullptr) {
+        std::fprintf(stderr, "no presenter module is loaded\n");
+        return 1;
+    }
+    mp::Presenter presenter;
+    if (presenter.open(*presenter_vtbl, nullptr) != MP_OK) {
+        std::fprintf(stderr, "%s would not open a presenter\n", presenter_desc->id);
+        return 1;
+    }
+    if (!options.render_size.empty() &&
+        presenter.set("size", options.render_size.c_str()) != MP_OK) {
+        std::fprintf(stderr, "the presenter refused --size %s\n", options.render_size.c_str());
+        return 1;
+    }
+    for (const std::string& pair : options.sets) {
+        const std::size_t eq = pair.find('=');
+        if (eq == std::string::npos) {
+            std::fprintf(stderr, "--set wants key=value, not %s\n", pair.c_str());
+            return 1;
+        }
+        const std::string key = pair.substr(0, eq);
+        const std::string value = pair.substr(eq + 1);
+        if (presenter.set(key.c_str(), value.c_str()) != MP_OK) {
+            std::fprintf(stderr, "the presenter refused %s=%s\n", key.c_str(), value.c_str());
+            return 1;
+        }
+    }
+
+    // The decoder, without a device. Best first, and the next one when the
+    // best declines, which is `video_codecs_for`'s rule.
+    mp::VideoDecoder decoder;
+    const MpModuleDesc* decoder_desc = nullptr;
+    for (const auto& choice :
+         registry.video_codecs_for(video_info.codec, MP_GRAPHICS_NONE, config_bytes, config_size)) {
+        if (decoder.open(*choice.vtbl, video_info.codec, nullptr, config_bytes, config_size) ==
+            MP_OK) {
+            decoder_desc = choice.desc;
+            break;
+        }
+        decoder.close();
+    }
+    if (decoder_desc == nullptr) {
+        std::fprintf(stderr, "nothing here decodes the video in %s\n", path.c_str());
+        return 1;
+    }
+    std::printf("decoder    %s\n", decoder_desc->id);
+
+    // Frames until the one asked for. The presenter is configured on the
+    // first, with what the decoder said reconciled the way the engine does
+    // it: its size and its siting, and its colour where the container's is
+    // unspecified.
+    bool configured = false;
+    bool presented = false;
+    std::uint64_t index = 0;
+    const auto take = [&](const MpVideoFrame& frame) -> int {
+        if (!configured) {
+            MpVideoInfo said{};
+            said.size = sizeof(said);
+            if (decoder.get_format(said) == MP_OK) {
+                const auto adopt = [](std::uint32_t& into, std::uint32_t from) {
+                    if (from != 0) {
+                        into = from;
+                    }
+                };
+                const auto adopt_colour = [](std::uint32_t& into, std::uint32_t from) {
+                    if (from != 0 && from != 2) {
+                        into = from;
+                    }
+                };
+                adopt(picture.width, said.width);
+                adopt(picture.height, said.height);
+                adopt(picture.display_width, said.display_width);
+                adopt(picture.display_height, said.display_height);
+                adopt(picture.chroma_siting, said.chroma_siting);
+                adopt_colour(picture.primaries, said.primaries);
+                adopt_colour(picture.transfer, said.transfer);
+                adopt_colour(picture.matrix, said.matrix);
+                picture.flags = said.flags;
+            }
+            if (presenter.configure(picture) != MP_OK) {
+                std::fprintf(stderr, "the presenter would not take the picture\n");
+                char row[512];
+                for (std::uint32_t i = 0; presenter.describe(i, row, sizeof row) == MP_OK; ++i) {
+                    if (std::strncmp(row, "trouble\t", 8) == 0) {
+                        std::fprintf(stderr, "  %s\n", row + 8);
+                    }
+                }
+                return 1;
+            }
+            configured = true;
+        }
+        if (index++ != options.frame_index) {
+            return 0;
+        }
+        const MpResult shown = presenter.present(frame);
+        if (shown != MP_OK) {
+            char row[512];
+            for (std::uint32_t i = 0; presenter.describe(i, row, sizeof row) == MP_OK; ++i) {
+                if (std::strncmp(row, "trouble\t", 8) == 0) {
+                    std::fprintf(stderr, "the presenter refused the frame: %s\n", row + 8);
+                }
+            }
+            return 1;
+        }
+        presented = true;
+        return 0;
+    };
+    const auto drain = [&]() -> int {
+        while (!presented) {
+            MpVideoFrame frame{};
+            frame.size = sizeof(frame);
+            const MpResult r = decoder.next_frame(frame);
+            if (r == MP_END || r == MP_ERR_BUSY) {
+                return 0;
+            }
+            if (r != MP_OK) {
+                std::fprintf(stderr, "the decoder failed with MpResult %u\n",
+                             static_cast<unsigned>(r));
+                return 1;
+            }
+            if (take(frame) != 0) {
+                return 1;
+            }
+        }
+        return 0;
+    };
+
+    std::vector<std::uint8_t> buffer;
+    MpPacket packet{};
+    while (!presented) {
+        const MpResult r = demux.read_packet(buffer, packet);
+        if (r == MP_END) {
+            break;
+        }
+        if (r != MP_OK) {
+            std::fprintf(stderr, "the container failed with MpResult %u\n",
+                         static_cast<unsigned>(r));
+            return 1;
+        }
+        MpResult fed = decoder.decode(buffer.data(), packet.bytes, packet.frame);
+        if (fed == MP_ERR_BUSY) {
+            if (drain() != 0) {
+                return 1;
+            }
+            if (presented) {
+                break;
+            }
+            fed = decoder.decode(buffer.data(), packet.bytes, packet.frame);
+        }
+        if (fed != MP_OK) {
+            std::fprintf(stderr, "the decoder refused a packet with MpResult %u\n",
+                         static_cast<unsigned>(fed));
+            return 1;
+        }
+        if (drain() != 0) {
+            return 1;
+        }
+    }
+    if (!presented) {
+        (void)decoder.flush();
+        for (int guard = 0; guard < 256 && !presented; ++guard) {
+            MpVideoFrame frame{};
+            frame.size = sizeof(frame);
+            const MpResult r = decoder.next_frame(frame);
+            if (r == MP_END) {
+                break;
+            }
+            if (r == MP_ERR_BUSY) {
+                continue;
+            }
+            if (r != MP_OK || take(frame) != 0) {
+                break;
+            }
+        }
+    }
+    if (!presented) {
+        std::fprintf(stderr, "%s has %llu frame%s, and --frame asked for %llu\n", path.c_str(),
+                     static_cast<unsigned long long>(index), index == 1 ? "" : "s",
+                     static_cast<unsigned long long>(options.frame_index));
+        return 1;
+    }
+
+    // **The pixels as they were rendered**: fp32, RGBA, the whole target.
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    MpPixelLayout layout{};
+    layout.size = sizeof(layout);
+    if (presenter.read_back(nullptr, 0, width, height, layout) != MP_ERR_NO_MEMORY ||
+        (layout.flags & MP_PIXEL_FLOAT) == 0 || layout.container_bits != 32u) {
+        std::fprintf(stderr, "the presenter would not hand back its frame as fp32\n");
+        return 1;
+    }
+    std::vector<float> pixels(static_cast<std::size_t>(width) * height * 4u);
+    if (presenter.read_back(pixels.data(), pixels.size() * sizeof(float), width, height,
+                            layout) != MP_OK) {
+        std::fprintf(stderr, "the presenter would not hand back its frame\n");
+        return 1;
+    }
+    std::printf("picture    %ux%u, frame %llu\n", width, height,
+                static_cast<unsigned long long>(options.frame_index));
+    // **The presenter's own rows**, because they are the numbers the picture
+    // was made with, and a picture without them is a matter of opinion.
+    for (std::uint32_t i = 0;; ++i) {
+        char row[512];
+        if (presenter.describe(i, row, sizeof row) != MP_OK) {
+            break;
+        }
+        const std::string line{row};
+        const std::size_t first = line.find('\t');
+        if (first == std::string::npos) {
+            continue;
+        }
+        const std::size_t second = line.find('\t', first + 1);
+        std::printf("  %-12s %s\n", line.substr(0, first).c_str(),
+                    line.substr(first + 1, second == std::string::npos ? std::string::npos
+                                                                       : second - first - 1)
+                        .c_str());
+    }
+
+    if (options.out_path.empty()) {
+        return 0;
+    }
+    // **8-bit sRGB, clamped, no dither**: what an image viewer shows. The fp32
+    // the presenter drew is what the rows above describe; this is a look at
+    // it, not a measurement of it.
+    std::FILE* file = mp::win::open_utf8(options.out_path, L"wb");
+    if (file == nullptr) {
+        std::fprintf(stderr, "cannot write %s\n", options.out_path.c_str());
+        return 1;
+    }
+    std::fprintf(file, "P6\n%u %u\n255\n", width, height);
+    const auto encode = [](float linear) -> std::uint8_t {
+        const double v = std::clamp(static_cast<double>(linear), 0.0, 1.0);
+        const double s = v <= 0.0031308 ? 12.92 * v : 1.055 * std::pow(v, 1.0 / 2.4) - 0.055;
+        return static_cast<std::uint8_t>(std::lround(s * 255.0));
+    };
+    std::vector<std::uint8_t> row(static_cast<std::size_t>(width) * 3u);
+    for (std::uint32_t y = 0; y < height; ++y) {
+        for (std::uint32_t x = 0; x < width; ++x) {
+            const float* px = &pixels[(static_cast<std::size_t>(y) * width + x) * 4u];
+            row[static_cast<std::size_t>(x) * 3u] = encode(px[0]);
+            row[static_cast<std::size_t>(x) * 3u + 1u] = encode(px[1]);
+            row[static_cast<std::size_t>(x) * 3u + 2u] = encode(px[2]);
+        }
+        std::fwrite(row.data(), 1, row.size(), file);
+    }
+    std::fclose(file);
+    std::printf("wrote      %s\n", options.out_path.c_str());
+    return 0;
+}
 
 int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
          const Options& options, ShowResult* measured = nullptr)
@@ -3899,6 +4242,9 @@ int main(int argc, char** argv)
     }
     if (options.command == "show") {
         return show(sink, registry, options);
+    }
+    if (options.command == "render") {
+        return render(registry, options);
     }
     if (options.command == "play") {
         return play(sink, registry, options);

@@ -34,6 +34,7 @@
 
 #include "h264.hpp"
 #include "module_log.hpp"
+#include "win_path.hpp"
 
 #include <Ap4.h>
 #include <Ap4ColrAtom.h>
@@ -82,14 +83,8 @@ constexpr std::uint64_t k_packet_budget = 100000;
 FILE* open_utf8(const char* path) noexcept
 {
 #if defined(_WIN32)
-    const int len = MultiByteToWideChar(CP_UTF8, 0, path, -1, nullptr, 0);
-    if (len <= 0) {
-        return nullptr;
-    }
-    std::wstring wide(static_cast<std::size_t>(len - 1), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, path, -1, wide.data(), len);
-    FILE* fp = nullptr;
-    return _wfopen_s(&fp, wide.c_str(), L"rb") == 0 ? fp : nullptr;
+    // win_path.hpp: UTF-16, and past MAX_PATH the prefix that lifts the limit.
+    return mp::winpath::fopen_utf8(path, L"rb");
 #else
     return std::fopen(path, "rb");
 #endif
@@ -1124,15 +1119,20 @@ try {
         // BT.709 and decodes with an SDR curve. The SPS's VUI has it, and this
         // is the one thing in this module that needs a bitstream. A box still
         // wins: it is the container's own statement about its own track.
-        if (hevc && info.primaries == 2 && info.transfer == 2) {
+        if (hevc) {
             const mp::mft::HevcColour colour = mp::mft::hevc_colour(nals);
-            if (colour.valid) {
+            if (colour.valid && info.primaries == 2 && info.transfer == 2) {
                 info.primaries = colour.primaries;
                 info.transfer = colour.transfer;
                 info.matrix = colour.matrix;
                 if (colour.full_range) {
                     info.flags |= MP_VIDEO_FULL_RANGE;
                 }
+            }
+            // **And where the chroma sits**, which no box states: the VUI is
+            // the only place, and the presenter reconstructs chroma by it.
+            if (colour.chroma_loc >= 0) {
+                info.chroma_siting = static_cast<std::uint32_t>(colour.chroma_loc) + 1u;
             }
         }
 

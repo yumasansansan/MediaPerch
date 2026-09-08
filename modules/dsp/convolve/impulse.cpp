@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#if defined(_WIN32)
+#    include "win_path.hpp" // a path past MAX_PATH; see the header
+#endif
 #include "impulse.hpp"
 
 #include <dr_wav.h>
@@ -25,13 +28,7 @@ constexpr double k_pi = 3.14159265358979323846;
 #if defined(_WIN32)
 std::wstring widen(const std::string& utf8)
 {
-    const int length = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
-    if (length <= 0) {
-        return {};
-    }
-    std::wstring wide(static_cast<std::size_t>(length - 1), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, wide.data(), length);
-    return wide;
+    return mp::winpath::for_open(utf8.c_str()); // and past MAX_PATH, see win_path.hpp
 }
 #endif
 

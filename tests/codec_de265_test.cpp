@@ -282,3 +282,57 @@ TEST_CASE("HEVC decodes to planar frames, every one of them",
     REQUIRE(codec->reset(decoder) == MP_OK);
     codec->close(decoder);
 }
+
+TEST_CASE("a conformance window is cropped by the decoder, and the padding never shows",
+          "[video][hevc][de265]")
+{
+    // 320x238 is coded as 320x240: a window of two rows, which libde265
+    // applies itself and reports through `de265_get_image_height`, and which
+    // the presenter -- drawing what it is given -- must never be given.
+    Module demux_module{MEDIAPERCH_DEMUX_MP4, MP_KIND_DEMUX};
+    Module codec_module{MEDIAPERCH_CODEC_DE265, MP_KIND_VCODEC};
+    REQUIRE(demux_module.vtbl != nullptr);
+    REQUIRE(codec_module.vtbl != nullptr);
+    const auto* codec = static_cast<const MpVideoCodecVtbl*>(codec_module.vtbl);
+
+    Opened file;
+    open_video(*static_cast<const MpDemuxVtbl*>(demux_module.vtbl), MEDIAPERCH_TEST_CROP, file);
+    REQUIRE(file.info.codec == MP_CODEC_HEVC);
+    const auto config_bytes = static_cast<std::uint32_t>(file.config.size());
+
+    MpVideoCodec* decoder = nullptr;
+    REQUIRE(codec->open(MP_CODEC_HEVC, nullptr, file.config.data(), config_bytes, &decoder) ==
+            MP_OK);
+
+    std::vector<std::uint8_t> buffer;
+    MpPacket packet{};
+    std::uint32_t frames = 0;
+    const auto drain = [&] {
+        for (int guard = 0; guard < 64; ++guard) {
+            MpVideoFrame frame{};
+            frame.size = sizeof(frame);
+            const MpResult r = codec->next_frame(decoder, &frame);
+            if (r == MP_END) {
+                return;
+            }
+            REQUIRE(r == MP_OK);
+            ++frames;
+            CHECK(frame.width == 320u);
+            CHECK(frame.height == 238u);
+        }
+    };
+    while (file.demux.read_packet(buffer, packet) == MP_OK) {
+        REQUIRE(codec->decode(decoder, buffer.data(), packet.bytes, packet.frame) == MP_OK);
+        drain();
+    }
+    REQUIRE(codec->flush(decoder) == MP_OK);
+    drain();
+    CHECK(frames == 8u);
+
+    MpVideoInfo said{};
+    said.size = sizeof(said);
+    REQUIRE(codec->get_format(decoder, &said) == MP_OK);
+    CHECK(said.width == 320u);
+    CHECK(said.height == 238u);
+    codec->close(decoder);
+}

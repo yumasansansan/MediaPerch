@@ -334,6 +334,11 @@ public:
         return vtbl_->set(handle_, "tonemap", name);
     }
 
+    [[nodiscard]] MpResult set(const char* key, const char* value)
+    {
+        return vtbl_->set(handle_, key, value);
+    }
+
     [[nodiscard]] std::string configure()
     {
         const MpResult r = vtbl_->configure(handle_, &info_);
@@ -1077,6 +1082,10 @@ TEST_CASE("a colour rolls off in ratio through the real shader, on the derived g
     const std::uint8_t r = 200;
     const std::uint8_t g = 140;
     const std::uint8_t b = 80;
+    // Clipped rather than desaturated, because this measures the roll-off's
+    // ratio form against the derived matrix and nothing after it; what the
+    // gamut does with a colour past BT.709 is scaler_test.cpp's to hold.
+    REQUIRE(presenter.set("gamut", "clip") == MP_OK);
     REQUIRE(presenter.present(b, g, r) == MP_OK);
     const Rgb got = presenter.pixel();
     const Rgb nits{pq_to_nits(r / 255.0), pq_to_nits(g / 255.0), pq_to_nits(b / 255.0)};

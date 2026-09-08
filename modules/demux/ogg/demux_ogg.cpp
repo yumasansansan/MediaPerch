@@ -21,6 +21,7 @@
 #include <mediaperch/module.h>
 
 #include "module_log.hpp"
+#include "win_path.hpp"
 
 #include <cstdarg>
 #include <cstdio>
@@ -54,14 +55,8 @@ void log_fmt(MpLogLevel level, const char* format, ...) noexcept
 FILE* open_utf8(const char* path) noexcept
 {
 #if defined(_WIN32)
-    const int len = MultiByteToWideChar(CP_UTF8, 0, path, -1, nullptr, 0);
-    if (len <= 0) {
-        return nullptr;
-    }
-    std::wstring wide(static_cast<std::size_t>(len - 1), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, path, -1, wide.data(), len);
-    FILE* fp = nullptr;
-    return _wfopen_s(&fp, wide.c_str(), L"rb") == 0 ? fp : nullptr;
+    // win_path.hpp: UTF-16, and past MAX_PATH the prefix that lifts the limit.
+    return mp::winpath::fopen_utf8(path, L"rb");
 #else
     return std::fopen(path, "rb");
 #endif
