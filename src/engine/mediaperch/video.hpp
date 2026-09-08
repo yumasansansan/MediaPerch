@@ -212,7 +212,14 @@ public:
     /// run's, and a run with a seek in it is still one run; a report that
     /// forgot the frames before the seek would be a report of the last seek
     /// rather than of the playback.
-    void rewound() noexcept;
+    /// `target_seconds`, when not negative, is where the move was aimed in
+    /// the stream's own seconds. **A seek lands on the sync point before the
+    /// target** (§9.9), and what the decoder emits from there up to the target
+    /// is the container's pre-roll: let go without being shown, and counted
+    /// in `Stats::preroll` rather than as dropped, because its time never
+    /// came. `prerolling()` says while that is still going on.
+    void rewound(double target_seconds = -1.0) noexcept;
+    [[nodiscard]] bool prerolling() const noexcept { return preroll_until_ >= 0.0; }
 
     /// One decision, against the audio being heard at `audible_seconds`.
     ///
@@ -227,8 +234,13 @@ public:
         std::uint64_t shown = 0;
         /// Frames let go because their time had passed.
         std::uint64_t dropped = 0;
-        /// Frames the decoder produced. `shown + dropped` once the stream ends.
+        /// Frames the decoder produced. `shown + dropped + preroll` once the
+        /// stream ends.
         std::uint64_t decoded = 0;
+        /// Frames decoded after a seek and let go before its target -- the
+        /// container's pre-roll from the sync point it landed on, which is
+        /// not lateness and is not counted as it.
+        std::uint64_t preroll = 0;
         /// How late a frame was, in seconds, at the moment it was decided
         /// about. Never positive: a frame is not shown early.
         ///
@@ -279,6 +291,9 @@ private:
     bool reconciled_ = false;
     bool drained_ = false;
     bool finished_ = false;
+    /// Where the last seek was aimed, while frames before it are still
+    /// coming out; negative once one at or past it has.
+    double preroll_until_ = -1.0;
     MpResult error_ = MP_OK;
 
     std::vector<std::uint8_t> buffer_;

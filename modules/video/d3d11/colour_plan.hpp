@@ -52,7 +52,29 @@ struct Stream {
     std::uint32_t matrix = k_primaries_unspecified;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
+    /// The mastering display's peak, in nits, when the stream states one
+    /// (ST.2086), and zero when it does not. **What BT.2390's roll-off starts
+    /// from**: the EETF normalises the source to its own range before it
+    /// rolls off, and a mapper that left this at PQ's ceiling of 10000 nits
+    /// started rolling a 1000-nit grade off at about four nits: its midtones
+    /// lifted towards a reference white that reached two thirds of the
+    /// display, and its highlights crushed into the third that was left.
+    float mastering_peak_nits = 0.0f;
 };
+
+/// **HDR reference white, in nits: what an SDR display's white means to HDR
+/// content.** BT.2408 puts HDR's diffuse white -- the white a graded picture
+/// puts skin and paper below -- at 203 cd/m^2, and states that converting HDR
+/// to SDR maps that level to SDR's 100 %. So on an SDR display the roll-off
+/// aims at 203 nits and the shader's output is in units of it, which is what
+/// makes an HDR film and an SDR film of the same scene come out the same
+/// brightness on the same panel. 80 is scRGB's unit and was the wrong number
+/// here: it is where the compositor puts *SDR* white in scene-referred terms,
+/// not a luminance the panel is known to show.
+constexpr float k_reference_white_nits = 203.0f;
+/// What a PQ stream that states no mastering display is taken to have been
+/// graded to. BT.2408's own assumption, and what most of them were.
+constexpr float k_assumed_mastering_nits = 1000.0f;
 
 /// What the display turned out to be, out of §9.4's three calls.
 struct Display {
@@ -160,6 +182,15 @@ struct Plan {
     float sdr_scale = 1.0f;
     /// True when the stream carries more than the display can show as-is.
     bool tone_mapping = false;
+    /// **Where the shader's roll-off aims, in the content's nits, and the unit
+    /// its output is in when it maps.** `k_reference_white_nits` on an SDR
+    /// display, so that 203 nits of PQ becomes scRGB 1.0 -- the display's
+    /// white -- and zero when nothing is mapped. The other providers map in
+    /// their own pass and do not read it.
+    float tone_target_nits = 0.0f;
+    /// Where it starts from: the mastering display's peak when the stream
+    /// stated one, `k_assumed_mastering_nits` when it did not.
+    float tone_source_nits = k_assumed_mastering_nits;
 };
 
 /// Whether a transfer function means high dynamic range.
@@ -196,7 +227,7 @@ struct Plan {
 /// `composited` says whether anything is drawn over the video -- subtitles, an
 /// OSD. It costs the packed PQ buffer, which cannot blend.
 [[nodiscard]] constexpr Plan plan_for(const Stream& stream, const Display& display,
-                                      ToneMap preferred = ToneMap::driver,
+                                      ToneMap preferred = ToneMap::shader,
                                       bool composited = true) noexcept
 {
     Plan plan{};
@@ -229,10 +260,16 @@ struct Plan {
     } else {
         // HDR content, SDR display: §9.1's whole point. Something must map it,
         // and composition will not -- it clips, silently, and everything
-        // outside [0, 1] is gone.
-        plan.tone_map = preferred == ToneMap::none ? ToneMap::driver : preferred;
+        // outside [0, 1] is gone. **Ours by default**, since §9.2: the OS
+        // mappers are free and are what every other Windows player shows, and
+        // they map to a curve Windows uses nowhere else; a request for none
+        // is a request for the clipping and is declined the same way.
+        plan.tone_map = preferred == ToneMap::none ? ToneMap::shader : preferred;
         plan.tone_mapping = true;
         plan.encoding = Encoding::linear;
+        plan.tone_target_nits = k_reference_white_nits;
+        plan.tone_source_nits = stream.mastering_peak_nits > 0.0f ? stream.mastering_peak_nits
+                                                                  : k_assumed_mastering_nits;
     }
 
     // What the transfer needs, which follows from the two above and is stated

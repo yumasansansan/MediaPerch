@@ -255,6 +255,14 @@ if(TARGET mp_demux_mp4 AND TARGET mp_demux_mkv)
         "MEDIAPERCH_TEST_VP9=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mkv/vp9.webm\""
         "MEDIAPERCH_TEST_VP8=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mkv/vp8.webm\""
         "MEDIAPERCH_TEST_AV2=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mkv/av2.webm\""
+        # Eight orange frames of ten-bit VP9, tagged PQ on BT.2020 in the
+        # container's Colour element and nowhere else -- which is where an HDR
+        # WebM says so, and what a decoder must not overrule.
+        "MEDIAPERCH_TEST_PQ_WEBM=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mkv/pq.webm\""
+        # The same eight frames with a mastering display and light levels in
+        # the Colour element, as four-byte floats: what Windows' HDR sample
+        # states and what libebml read as garbage.
+        "MEDIAPERCH_TEST_PQ_MASTERING_WEBM=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mkv/pq_mastering.webm\""
         "MEDIAPERCH_TEST_HEVC=\"${CMAKE_CURRENT_SOURCE_DIR}/data/mp4/hevc.mp4\"")
     # One demuxer, two consumers, and the position they share -- which needs
     # a real file with two streams in it, so it lives with the fixtures.

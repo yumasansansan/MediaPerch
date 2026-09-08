@@ -1091,6 +1091,8 @@ std::vector<ipc::Setting> Player::node_settings(const std::string& node) const
                           "frames the presenter was given"));
         out.push_back(row("dropped", std::to_string(frames.dropped),
                           "frames let go because their time had passed"));
+        out.push_back(row("preroll", std::to_string(frames.preroll),
+                          "frames decoded on the way to a seek's target and let go"));
         if (video->running()) {
             const DisplayLoop::Stats loop = video->loop_stats();
             out.push_back(row("turns", std::to_string(loop.turns),
@@ -1893,7 +1895,8 @@ Player::RunEnd Player::play_alone(Playlist& playlist, std::size_t index, std::ui
              (end == RunEnd::finished ? "ended" : "was left") + " at " +
              std::to_string(position) + " ms: " + std::to_string(turns.turns) +
              " turns, decoded " + std::to_string(shown.decoded) + ", shown " +
-             std::to_string(shown.shown) + ", dropped " + std::to_string(shown.dropped));
+             std::to_string(shown.shown) + ", dropped " + std::to_string(shown.dropped) +
+             ", pre-roll " + std::to_string(shown.preroll));
     }
     stop_video();
     forget_video();

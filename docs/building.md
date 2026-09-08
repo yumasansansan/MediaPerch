@@ -72,6 +72,12 @@ in the Windows SDK the build already requires. The colour shader is compiled at 
 rather than baked in, because a shader that sits next to the comment explaining it is one
 somebody can check -- and `d3dcompiler_47.dll` has shipped in Windows since 10.
 
+**A patch a submodule needs is kept beside it.** `external/patches/` holds the diffs this
+tree's pinned revisions would want and does not apply them: the code reads around each fault
+so that a clean checkout is right, and the patch is there for whoever updates the submodule.
+One so far: libebml's MSVC byte swap for 32-bit values returns sixteen of them, which the
+Matroska demuxer sidesteps by reading four-byte floats from the file itself.
+
 **Each submodule sits with the one module that needs it**, which is a property of the
 container/codec split rather than a tidying. One module used to bring in four of the Xiph
 libraries at once, because it was the container and both codecs together. libogg belongs to the

@@ -309,6 +309,16 @@ public:
         return movable_;
     }
 
+    /// What `seek_together` reads to say where the move was aimed in the
+    /// picture's seconds: a source counting in 48 kHz frames.
+    [[nodiscard]] mp::ClockSpec clock_spec() const noexcept
+    {
+        mp::ClockSpec spec;
+        spec.wire_rate = 48000;
+        spec.source_rate = 48000;
+        return spec;
+    }
+
     std::vector<std::uint64_t> asked;
     bool parked_when_asked = false;
 

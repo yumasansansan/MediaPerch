@@ -65,6 +65,86 @@ TEST_CASE("libvpx claims VP8 and VP9 and declines the rest", "[video][vpx]")
     }
 }
 
+TEST_CASE("the VP9 decoder names the colour family and leaves the curve to the container",
+          "[video][vpx][hdr]")
+{
+    // **VP9's three bits say BT.2020 and cannot say PQ.** libvpx reports the
+    // family; the decoder used to turn that into BT.2020's SDR curve, which
+    // `VideoGraph` then took as the bitstream speaking and let overrule the
+    // container's PQ -- an HDR film through a 2.4 gamma. The family is stated
+    // and the curve is left unspecified, and the presenter, told what the
+    // container said, plans a roll-off for it.
+    Module demux_module{MEDIAPERCH_DEMUX_MKV, MP_KIND_DEMUX};
+    Module codec_module{MEDIAPERCH_CODEC_VPX, MP_KIND_VCODEC};
+    Module video_module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(demux_module.vtbl != nullptr);
+    REQUIRE(codec_module.vtbl != nullptr);
+    REQUIRE(video_module.vtbl != nullptr);
+    const auto* codec = static_cast<const MpVideoCodecVtbl*>(codec_module.vtbl);
+    const auto* video = static_cast<const MpVideoVtbl*>(video_module.vtbl);
+
+    mp::Demux demux;
+    REQUIRE(demux.open(*static_cast<const MpDemuxVtbl*>(demux_module.vtbl),
+                       MEDIAPERCH_TEST_PQ_WEBM) == MP_OK);
+    MpVideoInfo container{};
+    container.size = sizeof(container);
+    REQUIRE(demux.video_info(0, container));
+    REQUIRE(container.transfer == 16u);
+
+    MpVideoCodec* decoder = nullptr;
+    REQUIRE(codec->open(MP_CODEC_VP9, nullptr, nullptr, 0, &decoder) == MP_OK);
+    const std::uint32_t only_video[] = {0};
+    REQUIRE(demux.select_streams(only_video) == MP_OK);
+    std::vector<std::uint8_t> buffer;
+    MpPacket packet{};
+    REQUIRE(demux.read_packet(buffer, packet) == MP_OK);
+    REQUIRE(codec->decode(decoder, buffer.data(), packet.bytes, packet.frame) == MP_OK);
+    MpVideoFrame frame{};
+    frame.size = sizeof(frame);
+    REQUIRE(codec->next_frame(decoder, &frame) == MP_OK);
+
+    MpVideoInfo said{};
+    said.size = sizeof(said);
+    REQUIRE(codec->get_format(decoder, &said) == MP_OK);
+    CHECK(said.primaries == 9u);
+    CHECK(said.matrix == 9u);
+    CHECK(said.transfer == 2u); // unspecified: the container's to say
+    CHECK(said.width == 16u);
+    codec->close(decoder);
+
+    // The presenter, told what the container said, on this machine's display:
+    // an SDR one rolls the picture off towards BT.2408's reference white.
+    MpVideo* presenter = nullptr;
+    REQUIRE(video->open(nullptr, &presenter) == MP_OK);
+    REQUIRE(video->set(presenter, "device", "warp") == MP_OK);
+    REQUIRE(video->configure(presenter, &container) == MP_OK);
+    const auto described = [&](const char* key) {
+        for (std::uint32_t i = 0;; ++i) {
+            char row[256];
+            if (video->describe(presenter, i, row, sizeof row) != MP_OK) {
+                return std::string{};
+            }
+            const std::string line{row};
+            const std::size_t first = line.find('\t');
+            if (first == std::string::npos || line.substr(0, first) != key) {
+                continue;
+            }
+            const std::size_t second = line.find('\t', first + 1);
+            return line.substr(first + 1, second == std::string::npos ? std::string::npos
+                                                                       : second - first - 1);
+        }
+    };
+    const std::string display = described("display");
+    INFO(display);
+    if (display.rfind("SDR", 0) == 0) {
+        CHECK(described("applied") == "shader");
+        CHECK(described("target") == "203 nits from 1000");
+    } else {
+        CHECK(described("applied") == "none");
+    }
+    video->close(presenter);
+}
+
 TEST_CASE("VP8 and VP9 decode out of a WebM and reach the presenter",
           "[video][vpx][d3d11]")
 {

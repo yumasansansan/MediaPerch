@@ -256,8 +256,14 @@ bool seek_together(AudioGraph& audio, VideoGraph& video, DisplayLoop& loop,
     // **Even when it did not move.** A source that refused the seek may still
     // have been asked, and a decoder holding frames from a position that was
     // half-moved is worse than one holding none. The cost of being wrong here
-    // is one repeated picture.
-    video.rewound();
+    // is one repeated picture. And where the move was aimed, in this track's
+    // own seconds, so what the decoder emits on the way there is counted as
+    // the container's pre-roll rather than as frames dropped.
+    const std::uint32_t rate = audio.clock_spec().source_rate;
+    video.rewound(moved && rate != 0
+                      ? static_cast<double>(frame) / static_cast<double>(rate) -
+                            loop.origin_seconds()
+                      : -1.0);
 
     loop.release();
     return moved;

@@ -322,6 +322,11 @@ void VideoGraph::reconcile()
     // not guess -- but where the two disagree the pixels came from the one that
     // encoded them. Geometry the same way: `codec_mft` learns the real size
     // from the sequence parameter set.
+    //
+    // **And "unspecified" is not speaking.** ISO/IEC 23091-2 spells colour in
+    // code points where 2 means the stream did not say and 0 is reserved; a
+    // decoder that answers 2 has nothing to overrule the container with. This
+    // took a container's PQ and replaced it with a decoder's shrug, once.
     MpVideoInfo want = info_;
     bool changed = false;
     const auto take = [&changed](std::uint32_t& into, std::uint32_t from) {
@@ -330,13 +335,19 @@ void VideoGraph::reconcile()
             changed = true;
         }
     };
+    const auto take_colour = [&changed](std::uint32_t& into, std::uint32_t from) {
+        if (from != 0 && from != 2 && into != from) {
+            into = from;
+            changed = true;
+        }
+    };
     take(want.width, said.width);
     take(want.height, said.height);
     take(want.display_width, said.display_width);
     take(want.display_height, said.display_height);
-    take(want.primaries, said.primaries);
-    take(want.transfer, said.transfer);
-    take(want.matrix, said.matrix);
+    take_colour(want.primaries, said.primaries);
+    take_colour(want.transfer, said.transfer);
+    take_colour(want.matrix, said.matrix);
     if (want.flags != said.flags) {
         want.flags = said.flags;
         changed = true;
@@ -350,7 +361,7 @@ void VideoGraph::reconcile()
     }
 }
 
-void VideoGraph::rewound() noexcept
+void VideoGraph::rewound(double target_seconds) noexcept
 {
     // The decoder first: it may be holding frames it has not parted with, and
     // they are frames from before the move.
@@ -361,6 +372,7 @@ void VideoGraph::rewound() noexcept
     frame_ = MpVideoFrame{};
     drained_ = false;
     finished_ = false;
+    preroll_until_ = target_seconds;
     // **Not `reconciled_`.** What the bitstream said its pixels were is a fact
     // about the stream, not about the position in it, and asking the presenter
     // to reconfigure at every seek would be a rebuild nobody needed.
@@ -395,6 +407,19 @@ VideoGraph::Step VideoGraph::pump(double audible_seconds)
             have_frame_ = true;
             if (!reconciled_) {
                 reconcile();
+            }
+            if (preroll_until_ >= 0.0) {
+                // **The container's pre-roll, and not the clock's business.**
+                // A seek landed on the sync point before its target, and the
+                // frames from there to the target are decoded because the one
+                // at the target needs them, and let go because nobody asked
+                // for them. Counted apart from dropping, which is lateness.
+                if (stream_seconds(frame_.pts, info_.timescale) < preroll_until_) {
+                    ++stats_.preroll;
+                    have_frame_ = false;
+                    continue;
+                }
+                preroll_until_ = -1.0;
             }
         }
 

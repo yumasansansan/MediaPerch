@@ -308,11 +308,29 @@ std::uint64_t to_frames(std::uint64_t ns, std::uint32_t rate)
     return ns / 1000000000ull * rate + (rem + 500000000ull) / 1000000000ull;
 }
 
+/// **A float element's value, with four-byte floats read back from the file
+/// rather than taken from libebml.** The revision of libebml this tree pins
+/// byte-swaps 32-bit values through a 16-bit cast on MSVC --
+/// `endian::swap_big(std::int32_t)` in EbmlEndian.h returns
+/// `*reinterpret_cast<std::int16_t*>(&res)` -- so every four-byte float came
+/// back as the low sixteen bits of its swapped image: a mastering display of
+/// nothing and a sampling frequency of garbage, in any file that wrote one
+/// that way. Eight-byte floats take the 64-bit path and are fine, and ffmpeg
+/// writes eight; Windows' own HDR sample writes four, which is how this was
+/// found. external/patches/libebml-msvc-swap_big32.patch is the one-line fix
+/// for the submodule; this reads the bytes itself so the tree is right
+/// whether or not the patch is applied. Declared here, before the first use.
+double float_of(MpDemux* d, const libebml::EbmlFloat& e);
+
 /// What a track's last block says about where its audio stops. Filled by
 /// `find_tail`, which is where the two elements involved are explained.
 struct Tail {
     std::uint64_t end_ns = 0;   ///< 0 when the last block did not say.
     std::uint64_t trim_ns = 0;  ///< 0 when it stated no padding, which is usual.
+    /// The last block's own timestamp, for a track whose blocks state no
+    /// duration -- which is what video blocks are: a picture's length is the
+    /// last frame's time plus one frame.
+    std::uint64_t last_ns = 0;
 };
 
 struct Track {
@@ -579,13 +597,13 @@ void read_track_entry(MpDemux* d, KaxTrackEntry& entry)
                 // guessing which of its callers used which.
                 const auto chroma = [&](auto* e) {
                     return e == nullptr ? 0u
-                                        : static_cast<std::uint32_t>(
-                                              static_cast<double>(*e) * 50000.0 + 0.5);
+                                        : static_cast<std::uint32_t>(float_of(d, *e) * 50000.0 +
+                                                                     0.5);
                 };
                 const auto nits = [&](auto* e) {
                     return e == nullptr ? 0u
-                                        : static_cast<std::uint32_t>(
-                                              static_cast<double>(*e) * 10000.0 + 0.5);
+                                        : static_cast<std::uint32_t>(float_of(d, *e) * 10000.0 +
+                                                                     0.5);
                 };
                 t.mastering_x[0] = chroma(FindChild<KaxVideoRChromaX>(*master));
                 t.mastering_y[0] = chroma(FindChild<KaxVideoRChromaY>(*master));
@@ -602,7 +620,7 @@ void read_track_entry(MpDemux* d, KaxTrackEntry& entry)
     }
     if (auto* audio = FindChild<KaxTrackAudio>(entry)) {
         if (auto* rate = FindChild<KaxAudioSamplingFreq>(*audio)) {
-            t.format.sample_rate = static_cast<std::uint32_t>(static_cast<double>(*rate));
+            t.format.sample_rate = static_cast<std::uint32_t>(float_of(d, *rate));
         }
         if (auto* channels = FindChild<KaxAudioChannels>(*audio)) {
             t.format.channels = static_cast<std::uint32_t>(
@@ -707,7 +725,7 @@ bool read_head(MpDemux* d)
                 }
             }
             if (auto* duration = FindChild<KaxDuration>(info)) {
-                d->duration_scaled = static_cast<double>(*duration);
+                d->duration_scaled = float_of(d, *duration);
             }
         } else if (id == EBML_ID(KaxTracks)) {
             int level = 0;
@@ -945,6 +963,31 @@ bool next_block(MpDemux* d)
 ///
 /// Costs one walk from the last cue to the end of the file, which is a cluster
 /// or two -- not a pass over the whole thing.
+double float_of(MpDemux* d, const libebml::EbmlFloat& e)
+{
+    if (e.GetSize() != 4 || !d->io) {
+        return static_cast<double>(e);
+    }
+    // The element's own bytes, big-endian as EBML writes them, and the file
+    // put back where it was.
+    const auto at = static_cast<std::int64_t>(e.GetDataStart());
+    const auto was = static_cast<std::int64_t>(d->io->getFilePointer());
+    std::uint8_t raw[4] = {0, 0, 0, 0};
+    d->io->setFilePointer(at);
+    const std::size_t got = d->io->read(raw, sizeof raw);
+    d->io->setFilePointer(was);
+    if (got != sizeof raw) {
+        return static_cast<double>(e);
+    }
+    const std::uint32_t bits = (static_cast<std::uint32_t>(raw[0]) << 24) |
+                               (static_cast<std::uint32_t>(raw[1]) << 16) |
+                               (static_cast<std::uint32_t>(raw[2]) << 8) |
+                               static_cast<std::uint32_t>(raw[3]);
+    float value = 0.0f;
+    std::memcpy(&value, &bits, sizeof value);
+    return static_cast<double>(value);
+}
+
 Tail find_tail(MpDemux* d)
 {
     const std::uint64_t from = d->cues.empty() ? d->first_cluster : d->cues.back().at;
@@ -956,6 +999,7 @@ Tail find_tail(MpDemux* d)
         if (!next_block(d)) {
             break;
         }
+        tail.last_ns = d->block->GlobalTimestamp();
         if (d->block_duration_ns != 0) {
             tail.end_ns = d->block->GlobalTimestamp() + d->block_duration_ns;
         } else {
@@ -1206,12 +1250,22 @@ try {
             out->total_frames = frames > gone ? frames - gone : 0;
         }
     }
-    if (t.kind == MP_STREAM_VIDEO && d->duration_scaled > 0.0) {
+    if (t.kind == MP_STREAM_VIDEO) {
         // **A picture's length, for a transport with no audio to count in.**
-        // The segment's Duration, in its own scale, to the millisecond -- which
+        // The last block's end where it stated one; the last block's time plus
+        // a frame where it did not, which video blocks seldom do; the
+        // segment's Duration when there is neither. To the millisecond, which
         // is what `duration_ms` is for and all that Matroska can state.
-        out->duration_ms = static_cast<std::uint64_t>(
-            d->duration_scaled * static_cast<double>(d->timestamp_scale) / 1'000'000.0);
+        const Tail& tail = tail_of(d, index);
+        std::uint64_t ns = tail.end_ns;
+        if (ns == 0 && tail.last_ns != 0) {
+            ns = tail.last_ns + t.frame_duration_ns;
+        }
+        if (ns == 0 && d->duration_scaled > 0.0) {
+            ns = static_cast<std::uint64_t>(d->duration_scaled *
+                                            static_cast<double>(d->timestamp_scale));
+        }
+        out->duration_ms = ns / 1'000'000ull;
     }
     return MP_OK;
 } catch (...) {

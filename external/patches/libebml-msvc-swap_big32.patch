@@ -1,0 +1,23 @@
+libebml: swap_big(std::int32_t) returns sixteen bits on MSVC
+
+`endian::swap_big(std::int32_t)` byte-swaps through `_byteswap_ulong` and then
+reads the result back through a pointer to std::int16_t, so every 32-bit
+big-endian value read on MSVC -- which is every four-byte float in a Matroska
+file -- comes back as the low sixteen bits of its swapped image. GCC and Clang
+take the __builtin_bswap32 branch and are right.
+
+MediaPerch reads four-byte floats back from the file itself (modules/demux/mkv,
+`float_of`) so it is right with or without this; the patch is here for whoever
+updates the submodule. Against release-1.4.3-535-g928e273.
+
+--- a/ebml/EbmlEndian.h
++++ b/ebml/EbmlEndian.h
+@@ -83,7 +83,7 @@ static inline std::int32_t swap_big(std::int32_t value)
+     return __builtin_bswap32(value);
+ #else // _MSC_VER
+     std::uint32_t res = _byteswap_ulong(*reinterpret_cast<std::uint32_t*>(&value));
+-    return *reinterpret_cast<std::int16_t*>(&res);
++    return *reinterpret_cast<std::int32_t*>(&res);
+ #endif
+ }
+

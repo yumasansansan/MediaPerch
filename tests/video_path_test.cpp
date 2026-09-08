@@ -380,6 +380,101 @@ TEST_CASE("a path with nothing to follow runs on the video engine's own clock",
     CHECK(at <= 900u);
 }
 
+TEST_CASE("a decoder that does not state a colour does not overrule the container",
+          "[video][path][colour]")
+{
+    // **"Unspecified" is not speaking.** The container said PQ on BT.2020; a
+    // VP9 bitstream names the family and not the curve, and a decoder that
+    // answered 2 -- unspecified -- used to have that taken as a statement and
+    // the container's PQ replaced with it: an HDR film drawn through an SDR
+    // curve, flat and dark. Where a decoder does state a curve, it still wins.
+    const auto run_with = [](std::uint32_t decoder_transfer) {
+        const Fresh fresh;
+        {
+            const std::lock_guard lock{decoder_log().mutex};
+            decoder_log().frames = 10;
+            decoder_log().says = picture(64, 48);
+            decoder_log().says.primaries = 9;
+            decoder_log().says.transfer = decoder_transfer;
+            decoder_log().says.matrix = 2;
+        }
+        mp::test::Host host;
+        Endless feed;
+        MpVideoInfo container = picture(64, 48);
+        container.primaries = 9;
+        container.transfer = 16; // PQ
+        container.matrix = 9;
+
+        mp::VideoPath path;
+        std::string why;
+        REQUIRE(path.open(host, nullptr, feed, container, MP_CODEC_AV1, nullptr, 0, {}, why));
+        CountedFrames frames{40};
+        REQUIRE(path.start(nullptr, frames, why));
+        REQUIRE(mp::test::wait_for([&] { return path.ended(); }));
+        path.stop();
+        REQUIRE(path.graph_stats().decoded > 0u);
+        const std::lock_guard lock{presenter_log().mutex};
+        return presenter_log().info;
+    };
+
+    const MpVideoInfo kept = run_with(2);
+    CHECK(kept.transfer == 16u);
+    CHECK(kept.primaries == 9u);
+    CHECK(kept.matrix == 9u);
+
+    const MpVideoInfo overruled = run_with(14);
+    CHECK(overruled.transfer == 14u);
+    CHECK(overruled.primaries == 9u);
+}
+
+TEST_CASE("a seek on the engine's own clock pre-rolls without dropping, and holds the clock",
+          "[video][path]")
+{
+    // A seek lands on the sync point before its target; the fake decoder,
+    // reset, starts again from frame zero, so a seek to two seconds has fifty
+    // frames of pre-roll at forty milliseconds each. They are let go and
+    // counted as pre-roll, not as dropped; the clock stands at the target
+    // until the first frame past them is in hand; and a clock somebody had
+    // paused stays paused through it.
+    const Fresh fresh;
+    {
+        const std::lock_guard lock{decoder_log().mutex};
+        decoder_log().frames = 100'000;
+    }
+    mp::test::Host host;
+    Endless feed;
+
+    mp::VideoPath path;
+    std::string why;
+    REQUIRE(path.open(host, nullptr, feed, picture(64, 48), MP_CODEC_AV1, nullptr, 0, {},
+                      why));
+    SlowFrames frames;
+    REQUIRE(path.start(nullptr, frames, why));
+    REQUIRE(mp::test::wait_for([&] { return path.own_clock()->position() >= 200u; }));
+    const std::uint64_t dropped_before = path.graph_stats().dropped;
+
+    bool moved = false;
+    REQUIRE(path.seek_alone(2.0, [&](double seconds) { moved = seconds == 2.0; return true; },
+                            why));
+    CHECK(moved);
+    REQUIRE(mp::test::wait_for([&] { return path.graph_stats().preroll == 50u; }));
+    REQUIRE(mp::test::wait_for([&] { return !path.own_clock()->paused(); }));
+    REQUIRE(mp::test::wait_for([&] { return path.own_clock()->position() > 2000u; }));
+    CHECK(path.graph_stats().dropped == dropped_before);
+    REQUIRE(mp::test::wait_for([&] { return path.graph_stats().shown > 60u; }));
+
+    // Paused, then seeked: still paused, and the target's frame was shown.
+    path.own_clock()->pause();
+    const std::uint64_t shown_before = path.graph_stats().shown;
+    REQUIRE(path.seek_alone(4.0, [](double) { return true; }, why));
+    REQUIRE(mp::test::wait_for([&] { return path.graph_stats().preroll == 150u; }));
+    REQUIRE(mp::test::wait_for([&] { return path.graph_stats().shown > shown_before; }));
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    CHECK(path.own_clock()->paused());
+    CHECK(path.own_clock()->position() == 4000u);
+    path.stop();
+}
+
 TEST_CASE("stopping cancels the clock rather than waiting for it", "[video][path]")
 {
     // **A loop is stopped from outside it.** `wait` blocks for a whole refresh

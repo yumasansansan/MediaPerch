@@ -244,6 +244,89 @@ TEST_CASE("float PCM in Matroska is named rather than refused",
     CHECK(bytes == 8000u);
 }
 
+TEST_CASE("a WebM states PQ on BT.2020 in its Colour element, and it is read",
+          "[abi][demux][mkv][hdr]")
+{
+    // **Where an HDR WebM says what it is.** VP9's bitstream names the colour
+    // family and not the curve, so the container's Colour element is the only
+    // place PQ is stated -- and the file Windows ships as its HDR sample was
+    // drawn through an SDR curve because a decoder's shrug overruled it. The
+    // fixture is eight frames of ten-bit VP9 with Colour and nothing else.
+    Module module{mkv_module(), MP_KIND_DEMUX};
+    REQUIRE(module.as<MpDemuxVtbl>() != nullptr);
+
+    mp::Demux demux;
+    REQUIRE(demux.open(*module.as<MpDemuxVtbl>(), MEDIAPERCH_TEST_PQ_WEBM) == MP_OK);
+    REQUIRE(demux.stream_count() == 1u);
+
+    MpVideoInfo info{};
+    info.size = sizeof(info);
+    REQUIRE(demux.video_info(0, info));
+    CHECK(info.width == 16u);
+    CHECK(info.height == 16u);
+    CHECK(info.primaries == 9u);  // BT.2020
+    CHECK(info.transfer == 16u);  // PQ
+    CHECK(info.matrix == 9u);     // BT.2020 non-constant
+    CHECK((info.flags & MP_VIDEO_FULL_RANGE) == 0u);
+    // No mastering display was written, and none is invented.
+    CHECK(mp_video_has_mastering(&info) == 0);
+
+    // And its length: eight frames at 25 fps, from the last block and one
+    // frame, since video blocks state no duration.
+    MpStreamInfo stream{};
+    REQUIRE(demux.stream_info(0, stream));
+    CHECK(stream.kind == MP_STREAM_VIDEO);
+    CHECK(stream.codec == MP_CODEC_VP9);
+    CHECK(stream.duration_ms == 320u);
+}
+
+TEST_CASE("a WebM's mastering display and light levels are read, as four-byte floats",
+          "[abi][demux][mkv][hdr]")
+{
+    // **Matroska allows a float to be four bytes or eight, and the two are
+    // not read alike.** ffmpeg writes eight; Windows' own HDR sample states
+    // its mastering display in four, and every one of them came back as
+    // nothing or as garbage -- a 1000-nit roll-off for an 800-nit grade, and
+    // no mastering display handed to the compositor. The fixture is pq.webm
+    // with the same numbers written in as four-byte floats, by hand.
+    Module module{mkv_module(), MP_KIND_DEMUX};
+    REQUIRE(module.as<MpDemuxVtbl>() != nullptr);
+
+    mp::Demux demux;
+    REQUIRE(demux.open(*module.as<MpDemuxVtbl>(), MEDIAPERCH_TEST_PQ_MASTERING_WEBM) == MP_OK);
+    MpVideoInfo info{};
+    info.size = sizeof(info);
+    REQUIRE(demux.video_info(0, info));
+    CHECK(info.transfer == 16u);
+    REQUIRE(mp_video_has_mastering(&info) != 0);
+    // ST.2086's units: chromaticities in 0.00002, luminances in 0.0001 cd/m^2.
+    CHECK(info.mastering_primaries_x[0] == 35400u); // red x 0.708
+    CHECK(info.mastering_primaries_y[0] == 14600u); // red y 0.292
+    CHECK(info.mastering_primaries_x[1] == 8500u);  // green x 0.170
+    CHECK(info.mastering_primaries_y[1] == 39850u); // green y 0.797
+    CHECK(info.mastering_primaries_x[2] == 6550u);  // blue x 0.131
+    CHECK(info.mastering_primaries_y[2] == 2300u);  // blue y 0.046
+    CHECK(info.mastering_white_x == 15635u);        // D65 x 0.3127
+    CHECK(info.mastering_white_y == 16450u);        // D65 y 0.3290
+    CHECK(info.mastering_max_luminance == 8000000u); // 800 nits
+    CHECK(info.mastering_min_luminance == 200u);     // 0.02 nits
+    CHECK(info.max_content_light_level == 800u);
+    CHECK(info.max_frame_average_light_level == 400u);
+
+    // And the frames are still where they were: the positions after the
+    // tracks moved when the Colour element grew, and the cues and the seek
+    // head were moved with them.
+    const std::uint32_t only[] = {0};
+    REQUIRE(demux.select_streams(only) == MP_OK);
+    std::vector<std::uint8_t> buffer;
+    MpPacket packet{};
+    std::uint32_t packets = 0;
+    while (demux.read_packet(buffer, packet) == MP_OK) {
+        ++packets;
+    }
+    CHECK(packets == 8u);
+}
+
 TEST_CASE("a Matroska with no audio in it still opens", "[abi][demux][mkv]")
 {
     // **This module refused every silent file, and nothing had noticed.** open
@@ -271,6 +354,9 @@ TEST_CASE("a Matroska with no audio in it still opens", "[abi][demux][mkv]")
     // module names the audio track instead, which is the same rule and not a
     // special case for silence.
     CHECK((info.flags & MP_STREAM_DEFAULT) != 0u);
+    // And it has a length, from its last block and one frame: what a transport
+    // with no audio to count in shows as the track's end.
+    CHECK(info.duration_ms > 0u);
 
     const std::uint32_t only[] = {0};
     REQUIRE(demux.select_streams(only) == MP_OK);

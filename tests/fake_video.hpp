@@ -284,6 +284,9 @@ struct DecoderLog {
     /// Made to refuse, so `VideoPath`'s error path is a path something takes.
     bool refuse_threads = false;
     bool refuse_open = false;
+    /// What `get_format` answers, when a test gives it something to say: a
+    /// `size` of zero is a decoder with no answer, which is the default.
+    MpVideoInfo says{};
 
     void reset()
     {
@@ -297,6 +300,7 @@ struct DecoderLog {
         threads.clear();
         refuse_threads = false;
         refuse_open = false;
+        says = MpVideoInfo{};
     }
 };
 
@@ -331,10 +335,17 @@ inline void MP_CALL codec_close(MpVideoCodec*) noexcept
 
 inline MpResult MP_CALL codec_get_format(MpVideoCodec*, MpVideoInfo* out) noexcept
 {
-    // The container's answer, unchanged: a decoder that disagreed would send
-    // `VideoGraph` down its reconfigure path, which is another test's subject.
-    (void)out;
-    return MP_ERR_UNSUPPORTED;
+    // The container's answer, unchanged, unless a test gave this decoder
+    // something to say -- then `VideoGraph` reconciles the two, which is
+    // video_path_test.cpp's subject.
+    DecoderLog& log = decoder_log();
+    const std::lock_guard lock{log.mutex};
+    if (out == nullptr || log.says.size == 0) {
+        return MP_ERR_UNSUPPORTED;
+    }
+    std::memcpy(out, &log.says, sizeof(log.says));
+    out->size = sizeof(MpVideoInfo);
+    return MP_OK;
 }
 
 inline MpResult MP_CALL codec_decode(MpVideoCodec*, const void*, std::size_t,

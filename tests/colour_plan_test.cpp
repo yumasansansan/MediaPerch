@@ -16,6 +16,8 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+using Catch::Approx;
+
 namespace {
 
 mp::video::Stream sdr_1080p()
@@ -70,19 +72,26 @@ TEST_CASE("HDR content on an SDR display is mapped, because composition clips",
     CHECK(plan.tone_mapping);
     CHECK(plan.encoding == Encoding::linear);
 
-    // §9.3: the driver's is the default, because it is the cheapest, it is what
-    // the OS player path uses, and it is the answer to why this looks like
-    // Windows and MPC-BE does not.
-    CHECK(plan.tone_map == ToneMap::driver);
+    // §9.2 and §9.3: ours is the default, because the OS mappers map to a
+    // curve Windows uses nowhere else, and because the roll-off's two numbers
+    // are known here and can be checked -- see hdr_transfer_test.cpp.
+    CHECK(plan.tone_map == ToneMap::shader);
+    // BT.2408: an SDR display's white is HDR's reference white, 203 nits; and
+    // a stream that stated no mastering display is taken to be a 1000-nit grade.
+    CHECK(plan.tone_target_nits == Approx(203.0f));
+    CHECK(plan.tone_source_nits == Approx(1000.0f));
+    Stream mastered = hdr10_2160p();
+    mastered.mastering_peak_nits = 4000.0f;
+    CHECK(plan_for(mastered, sdr).tone_source_nits == Approx(4000.0f));
 
     // And what a person asked for is honoured where it can be.
-    CHECK(plan_for(hdr10_2160p(), sdr, ToneMap::shader).tone_map == ToneMap::shader);
+    CHECK(plan_for(hdr10_2160p(), sdr, ToneMap::driver).tone_map == ToneMap::driver);
     CHECK(plan_for(hdr10_2160p(), sdr, ToneMap::d2d).tone_map == ToneMap::d2d);
 
     // Asking for none on a display that needs one is asking for the clipping.
     // The plan declines: a request that would produce a knowingly wrong picture
     // is not a preference.
-    CHECK(plan_for(hdr10_2160p(), sdr, ToneMap::none).tone_map == ToneMap::driver);
+    CHECK(plan_for(hdr10_2160p(), sdr, ToneMap::none).tone_map == ToneMap::shader);
 }
 
 TEST_CASE("HDR content on an HDR display passes through", "[video][colour]")

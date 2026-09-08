@@ -405,11 +405,23 @@ bool VideoPath::start(IMediaClock* follow, IFrameClock& frames, std::string& why
         follow = own_clock_.get();
     }
     loop_ = std::make_unique<DisplayLoop>(*graph_, *follow, frames, origin_seconds);
+    resume_on_arrival_.store(false, std::memory_order_release);
     if (own_clock_ != nullptr) {
         own_clock_->start();
     }
     thread_ = std::thread{[this] {
-        loop_->run();
+        DisplayStep step;
+        while (loop_->once(step)) {
+            // **A clock held for a seek runs again once the pre-roll is
+            // over**: the first frame at or past the target is in hand, and it
+            // goes up the moment the clock says it is due, which is now.
+            if (resume_on_arrival_.load(std::memory_order_acquire) && !graph_->prerolling()) {
+                resume_on_arrival_.store(false, std::memory_order_release);
+                if (own_clock_ != nullptr) {
+                    own_clock_->resume();
+                }
+            }
+        }
         ended_.store(true, std::memory_order_release);
     }};
     return true;
@@ -423,6 +435,12 @@ bool VideoPath::seek_alone(double seconds, const std::function<bool(double)>& mo
         why = "the picture is not running on its own clock";
         return false;
     }
+    // Held through the pre-roll, unless somebody had already paused it -- then
+    // it stays paused, and the target's frame is shown in it.
+    const bool was_paused = own_clock_->paused();
+    if (!was_paused) {
+        own_clock_->pause();
+    }
     loop_->hold();
     // The same wait `seek_together` takes, for the same reason: a turn taken
     // while the file moves is a turn deciding about a frame from a place
@@ -432,9 +450,14 @@ bool VideoPath::seek_alone(double seconds, const std::function<bool(double)>& mo
         std::this_thread::sleep_for(std::chrono::milliseconds{1});
     }
     const bool moved = move(seconds);
-    // Even when it did not move: see `seek_together`.
-    graph_->rewound();
-    own_clock_->seek(static_cast<std::uint64_t>(seconds * k_own_rate));
+    // Even when it did not move: see `seek_together`. The clock moves only
+    // when the file did; a clock at a place the file is not is every frame
+    // late.
+    graph_->rewound(moved ? seconds : -1.0);
+    if (moved) {
+        own_clock_->seek(static_cast<std::uint64_t>(seconds * k_own_rate));
+    }
+    resume_on_arrival_.store(!was_paused, std::memory_order_release);
     loop_->release();
     if (!moved) {
         why = "the file would not move";

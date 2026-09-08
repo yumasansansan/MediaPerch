@@ -150,6 +150,15 @@ void read_image_format(MpVideoCodec* c, const vpx_image_t& img) noexcept
 
     // libvpx's colour space values are not the code points: it has its own
     // short enumeration, and mapping it is the whole of the translation.
+    //
+    // **And it names the primaries and the matrix, not the transfer.** VP9's
+    // `color_space` is three bits that say which family the signal is in; a
+    // BT.2020 stream may be PQ, HLG or BT.2020's own curve, and the bitstream
+    // cannot say which -- that is the container's to state, and every HDR
+    // WebM states it. A decoder that answered BT.2020's SDR curve here
+    // overruled the container's PQ, and an HDR film was drawn through a 2.4
+    // gamma: flat, dark and desaturated, which is exactly the fault section
+    // 9.1 was written about. The SDR families do imply their curves.
     switch (img.cs) {
     case VPX_CS_BT_601:
         c->info.primaries = 6;
@@ -173,7 +182,7 @@ void read_image_format(MpVideoCodec* c, const vpx_image_t& img) noexcept
         break;
     case VPX_CS_BT_2020:
         c->info.primaries = 9;
-        c->info.transfer = 14;
+        c->info.transfer = 2; // unspecified: PQ, HLG or SDR is the container's to say
         c->info.matrix = 9;
         break;
     case VPX_CS_SRGB:

@@ -21,7 +21,7 @@ twice.
 | Layer | as low as practical. Prefer the platform API over a wrapper when the wrapper adds no capability we need |
 | Audio | WASAPI **exclusive**, event-driven, MMCSS `Pro Audio`. Shared mode is a fallback, not the design centre |
 | Bit-exactness | a testable property, not a marketing word. §12 says how it is tested |
-| Video | Direct3D 11 + DirectComposition. HDR delegated to **the OS tone mappers** by default — with a correct one selectable, because the OS one is known to be wrong (§9.2) |
+| Video | Direct3D 11 + DirectComposition. HDR on an SDR display is rolled off by **our own BT.2390 mapper** by default, aimed at BT.2408's reference white and held to the recommendations by a test; the OS mappers are selectable, because they are what every other Windows player shows (§9.2) |
 | Modularity | decoders, sinks, DSP and the video presenter are runtime-loaded shared libraries behind one C ABI |
 | Shell | separate process, optional, replaceable. The engine is complete without it |
 | Windows floor | Windows 10 2004 for audio; Windows 11 22H2 for Advanced Color; Windows 11 24H2 for the desktop HDR-state APIs, degrading gracefully below each |
@@ -2258,10 +2258,13 @@ Function Is Incorrect"; there is no fix on an internal panel short of a 3D LUT t
 DWM, and external monitors only work around it by having their own gamma control.
 
 So "it looks fine" and "it is correct" are both true statements about different things, and
-the design follows from that: **default to the OS mapper because it is free, hardware
-accelerated and matches every other Windows app, and keep a correct one selectable.** Ours
-targets sRGB with a BT.2390 EETF — which is, precisely, what those bug reports have been
-asking Microsoft to do.
+the design followed from that for a while: default to the OS mapper because it is free,
+hardware accelerated and matches every other Windows app, and keep a correct one selectable.
+**Ours is the default now** — see *The dull picture* under M8 — because a mapper whose two
+numbers are printed and whose curve a test holds to the recommendation is the one a person
+can check, and the OS's is the one they can compare it with. Ours targets BT.2408's reference
+white with a BT.2390 EETF, which is, precisely, what those bug reports have been asking
+Microsoft to do.
 
 ### 9.3 The providers
 
@@ -2420,7 +2423,9 @@ Two things came with it that the plan had not listed and that are not optional:
   path on a fixed-function video processor that a test cannot hold to anything, and §9.2 is a
   whole section about it being measurably wrong. So `shader` was written first and `driver`
   stayed the default, which is the part of §9.7's ordering that was about shipping rather than
-  about writing. Both of the others are built now — see above.
+  about writing. Both of the others are built now — see above. (`shader` became the default
+  later, when its numbers were put right and held to the recommendation by a test: *The dull
+  picture*, under M8.)
 
 And one number that had never been printed anywhere: the presenter now describes the display
 as *SDR, white 80 nits, peak 470 nits*, and `show` prints that beside the encoding, the
@@ -2557,7 +2562,7 @@ exactly the roll-off, which is the thing being chosen between.
 |---|---|---|
 | `driver` | `VideoProcessorBlt`, told PQ/BT.2020 in and the display's space out | **yes**, `VideoProcessorSetStreamHDRMetaData` |
 | `d2d` | `CLSID_D2D1HdrToneMap`, told the content's peak and the display's | **yes**, as its input luminance |
-| `shader` | BT.2390's EETF in the same pass as the decode | **no** — it rolls off towards the display's peak, which it knows |
+| `shader` | BT.2390's EETF in the same pass as the decode | **yes**, since *The dull picture*: the mastering peak is where the roll-off starts from, as the recommendation normalises it, and BT.2408's reference white is where it aims |
 
 That last column is a real difference and not an omission: the same file looks different under
 the three, because two of them are told what it was graded on and one of them asks the display
@@ -2665,10 +2670,12 @@ right twice: once about the file, and once about the fixture.** `video_d3d11` ha
 only when the stream stated one** — inventing a mastering display is how a display
 tone-maps for a picture that does not exist.
 
-**And a difference worth keeping in sight**: this tree's own mapper does not read it. BT.2390
-rolls off towards the *display's* peak, which it knows, rather than away from the *content's*,
-which it would have to be told. `driver` does read it, so the same file will look different
-under the two providers, and that is the format working rather than a fault.
+**And a difference that was kept in sight for too long**: this tree's own mapper did not read
+it, on the argument that BT.2390 rolls off towards the *display's* peak, which it knows. The
+recommendation normalises to the source's range first, and a mapper that skipped that took
+every PQ stream to be a 10 000-nit grade — see *The dull picture* under M8 for what that
+cost. It reads the mastering peak now, as the source's range; `driver` reads the whole
+display as it pleases, so the same file still looks different under the two providers.
 
 #### The white level, checked rather than asserted
 
@@ -5803,6 +5810,89 @@ shell could say more about a picture-only track than one line; and a viewer that
 `MediaPerch::video` is a program nobody has written yet, which is the test of the split that
 matters.
 
+#### The dull picture: an HDR sample on an SDR display, and three faults under it
+
+Windows' own `HDRSample.mkv` — ten-bit VP9, PQ on BT.2020, a mastering display of 800 nits,
+no audio — played on an SDR panel with the saturation and the brightness of a photocopy. Asked
+whether that was right, the answer was no three times over, and each of the three was found
+by printing a number that had not been printed before.
+
+**The container's PQ was overruled by a decoder that had nothing to say.** `codec_vpx` mapped
+libvpx's three-bit `color_space` — which names a family, BT.2020, and cannot name a curve —
+into a full colour triple with BT.2020's *SDR* transfer in it; `VideoGraph::reconcile` took a
+non-zero code point as the bitstream speaking and replaced the container's 16 with a 14. So
+the presenter planned no roll-off at all, decoded PQ as a 2.4 gamma, and drew the HDR film
+flat, dark and desaturated: `applied none`, which the `node presenter` row said in as many
+words once somebody looked. The decoder leaves the transfer at 2 — unspecified, the
+container's to say — and `reconcile` no longer takes 2 for a statement, since ISO/IEC 23091-2
+spells *did not say* as 2 and *reserved* as 0. A fixture, `tests/data/mkv/pq.webm`, is eight
+frames of ten-bit VP9 with PQ stated in the Colour element and nowhere else; the demuxer test
+reads it back, the decoder test checks that the decoder does not overrule it, and a fake
+decoder that says 2 is held not to move the presenter's transfer while one that says 14 is.
+
+**The roll-off's two numbers were both the wrong number.** The shader's BT.2390 EETF aimed at
+`sdr_white_nits`, which on an SDR display is 80 — scRGB's unit, where the compositor puts SDR
+white in scene-referred terms, not a luminance the panel is known to show — and it skipped the
+recommendation's first step, normalising to the source's range, so every PQ stream was taken
+for a 10 000-nit grade. Against an 80-nit target that put the knee at about four nits and
+compressed everything above it: a 1000-nit grade's reference white came out at 52 nits, two
+thirds of the display, with the midtones lifted towards it and the highlights crushed into the
+third that was left. BT.2408 says what an SDR display's white means to HDR content — 203 cd/m²,
+HDR's reference white, mapped to SDR's 100 % — and BT.2390 says to normalise to the source's
+range before the knee is placed. Both are in now: the target is 203 nits, the source is the
+mastering display's peak when the stream states one and 1000 when it does not, the shader's
+output is in units of the target white so 203 nits of PQ is scRGB 1.0 exactly where an SDR
+film's white is, and the EETF runs on the brightest component with the other two in ratio —
+BT.2390's hue-preserving form — so a saturated highlight rolls off without changing hue. From a
+1000-nit grade to 203, the knee sits at 92 nits: everything below it untouched, reference white
+at 159 nits — 0.78 of the display — and the top fifth kept for what is above it. `shader` is
+the default provider on an SDR display now; `driver` and `d2d` are one `tonemap` away.
+
+**And the file's own mastering display arrived as garbage.** The plan's *from 1000* stayed at
+1000 for a file that states 800, and the demuxer, instrumented, found ten children under
+MasteringMetadata every one of whose values was nonsense. Matroska floats are four bytes or
+eight; ffmpeg writes eight, Windows' sample writes four, and the revision of libebml this tree
+pins byte-swaps 32-bit values through a 16-bit cast on MSVC — `swap_big(std::int32_t)` in
+EbmlEndian.h returns `*reinterpret_cast<std::int16_t*>` — so every four-byte float came back as
+the low sixteen bits of its swapped image. A sampling frequency written that way would have
+come back the same. The demuxer reads a four-byte float's bytes back from the file itself now
+(`float_of`), so it is right with or without the library; the one-line fix is in
+`external/patches/libebml-msvc-swap_big32.patch` for whoever updates the submodule; and
+`tests/data/mkv/pq_mastering.webm` is `pq.webm` with the mastering display and the light levels
+written in as four-byte floats by hand, cues and seek head moved to match, read back in ST.2086's
+units. Measured: `target 203 nits from 800` on the sample.
+
+**Held to the standards, not to the shader.** hdr_transfer_test.cpp's reference EETF is
+written from BT.2390-8 with the normalisation, its PQ and HLG curves from ST.2084 and ARIB
+STD-B67, and before any of them touches a GPU they are held to the numbers the recommendations
+state in words: PQ 1.0 is 10 000 cd/m², 0.7518 is 1000, 0.58 is 203; HLG 0.75 on a 1000-nit
+display is 203; the EETF from 1000 to 203 is the identity below its knee, monotonic through
+it, reaches the target exactly at the source's peak and never above it, and leaves reference
+white above three quarters of the target. The real shader is then held to those references on
+grey ramps at eight, ten and twelve bits, and — new — on a saturated orange, which the greys
+could not tell apart from the per-component form, against a BT.2020-to-BT.709 matrix derived
+in the test from the two sets of chromaticities and D65 rather than typed. The precision test
+moved below the knee, because above it the curve is flat towards the target and two adjacent
+codes rightly land on one float.
+
+**Two smaller things from the same afternoon.** A seek lands on the sync point before its
+target and the decoder has to get from there to the target before it has a frame to show;
+those frames were counted as *dropped*, and the clock, running meanwhile, put every frame
+after the target behind it as well — 53 of pre-roll and then 24 more let go, on the sample. The
+graph counts pre-roll as pre-roll now (`Stats::preroll`, a `preroll` row under `node vsource`),
+and a seek on the video engine's own clock holds the clock at the target until the first frame
+past the pre-roll is in hand, resumed by the loop's thread; a clock somebody had paused stays
+paused, with the target's frame shown in it. Measured: `seek 8` on the sample, 73 of pre-roll
+and 0 dropped. And a Matroska picture has a length: the last block's end where it stated one,
+the last block's time plus a frame where it did not, the segment's Duration when neither —
+which is what the shell's scrubber was disabled for want of. `position 0:02 / 0:11` now, on a
+file whose blocks state no duration.
+
+**What refresh-rate matching is not.** §9.5's mode switch puts the display at a rate the
+film's frame rate divides, so frames land on refreshes rather than judder between them. It
+has nothing to do with a seek: pre-roll is the container's sync points and the decoder's
+dependency on them, and no refresh rate changes which frame a seek lands on.
+
 
 #### Built, and the palette needed a fourth verb
 
@@ -6351,6 +6441,15 @@ real time.
   handles passed in are `WAIT_OBJECT_0 + i`, and the compositor tick is `WAIT_OBJECT_0 +
   count`, one past the end. Read the usual way round, every tick looks like the first handle
   and the loop stops on its first turn. Measured as `wait -> 0x1` with one handle passed.
+- **A number nobody prints is a fault nobody finds.** Three faults under one dull picture,
+  and each surfaced the moment its number was printed: `applied none` on an HDR file, `target
+  203 nits from 1000` on an 800-nit grade, ten mastering values of garbage. A colour path
+  whose numbers are on a `describe` row is one a person can check against a standard; the
+  standard's own numbers, held in a test before the shader is, are what the row is checked
+  against.
+- **"Unspecified" is a value that means nothing was said, and code must not take it for a
+  statement.** A decoder's 2 overruled a container's 16 because the check was `!= 0`. Every
+  reader of a code-point field has to know which value is *did not say*.
 - **A rule nobody decided is still a rule, and it hardens.** *The audio device is the master
   clock* was a sentence about the common case that became a sentence about every case, and
   then a comment, and then an `IMedia` that could not say *no audio*, and then a queue that

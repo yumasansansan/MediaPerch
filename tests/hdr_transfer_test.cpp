@@ -22,12 +22,15 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
+
+using Catch::Approx;
 
 namespace {
 
@@ -90,20 +93,136 @@ double nits_to_pq(double nits)
     return std::pow((c1 + c2 * y) / (1.0 + c3 * y), m2);
 }
 
-double tone_map_bt2390(double nits, double peak)
+/// BT.2390-8, section 5.4.1: the source's range is normalised to [0, 1] first,
+/// the knee sits at 1.5 * maxT - 0.5 with maxT the target's peak as a fraction
+/// of the source's, the Hermite spline runs from the knee to maxT, and the
+/// result is de-normalised. Black stays at zero: the recommendation's lift is
+/// for a display that cannot reach it, and none of these can be asked to.
+double eetf_bt2390(double e, double max_source, double max_target)
 {
-    const double e = nits_to_pq(nits);
-    const double max_pq = nits_to_pq(peak);
-    const double ks = 1.5 * max_pq - 0.5;
-    if (e < ks) {
-        return nits;
+    const double e1 = e / max_source;
+    const double mt = max_target / max_source;
+    const double ks = 1.5 * mt - 0.5;
+    if (e1 < ks) {
+        return e;
     }
-    const double t = (e - ks) / (1.0 - ks);
+    const double t = std::clamp((e1 - ks) / (1.0 - ks), 0.0, 1.0);
     const double t2 = t * t;
     const double t3 = t2 * t;
-    const double knee = (2.0 * t3 - 3.0 * t2 + 1.0) * ks +
-                        (t3 - 2.0 * t2 + t) * (1.0 - ks) + (-2.0 * t3 + 3.0 * t2) * max_pq;
-    return pq_to_nits(knee);
+    const double knee = (2.0 * t3 - 3.0 * t2 + 1.0) * ks + (t3 - 2.0 * t2 + t) * (1.0 - ks) +
+                        (-2.0 * t3 + 3.0 * t2) * mt;
+    return std::min(knee, mt) * max_source;
+}
+
+/// The EETF on a luminance, in nits: from a source graded to `source_peak`,
+/// aimed at `peak`. A source the target can show whole is untouched.
+double tone_map_bt2390(double nits, double source_peak, double peak)
+{
+    const double max_source = nits_to_pq(source_peak);
+    const double max_target = nits_to_pq(peak);
+    if (max_target >= max_source) {
+        return nits;
+    }
+    return pq_to_nits(eetf_bt2390(nits_to_pq(nits), max_source, max_target));
+}
+
+/// The EETF on a colour: on its brightest component, the other two in ratio,
+/// which is BT.2390's hue-preserving form and what the shader does.
+Rgb tone_map_rgb(const Rgb& nits, double source_peak, double peak)
+{
+    const double brightest = std::max(nits.r, std::max(nits.g, nits.b));
+    if (brightest <= 0.0) {
+        return nits;
+    }
+    const double ratio = tone_map_bt2390(brightest, source_peak, peak) / brightest;
+    return Rgb{nits.r * ratio, nits.g * ratio, nits.b * ratio};
+}
+
+/// RGB to XYZ from a set of chromaticities and a white point, as SMPTE RP 177
+/// derives it; BT.2020 to BT.709 is then XYZ back out through the other set.
+/// Written from the two recommendations' chromaticity tables and nothing else.
+using Mat3 = std::array<std::array<double, 3>, 3>;
+
+Mat3 rgb_to_xyz(double xr, double yr, double xg, double yg, double xb, double yb, double xw,
+                double yw)
+{
+    const Mat3 p{{{xr / yr, xg / yg, xb / yb},
+                  {1.0, 1.0, 1.0},
+                  {(1.0 - xr - yr) / yr, (1.0 - xg - yg) / yg, (1.0 - xb - yb) / yb}}};
+    const double wx = xw / yw;
+    const double wz = (1.0 - xw - yw) / yw;
+    // Solve p * s = w for the three scales.
+    const double det = p[0][0] * (p[1][1] * p[2][2] - p[1][2] * p[2][1]) -
+                       p[0][1] * (p[1][0] * p[2][2] - p[1][2] * p[2][0]) +
+                       p[0][2] * (p[1][0] * p[2][1] - p[1][1] * p[2][0]);
+    const auto minor = [&](int r0, int c0) {
+        int rows[2];
+        int cols[2];
+        int ri = 0;
+        int ci = 0;
+        for (int i = 0; i < 3; ++i) {
+            if (i != r0) {
+                rows[ri++] = i;
+            }
+            if (i != c0) {
+                cols[ci++] = i;
+            }
+        }
+        return p[rows[0]][cols[0]] * p[rows[1]][cols[1]] -
+               p[rows[0]][cols[1]] * p[rows[1]][cols[0]];
+    };
+    Mat3 inv{};
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            inv[j][i] = ((i + j) % 2 == 0 ? 1.0 : -1.0) * minor(i, j) / det;
+        }
+    }
+    const double s0 = inv[0][0] * wx + inv[0][1] * 1.0 + inv[0][2] * wz;
+    const double s1 = inv[1][0] * wx + inv[1][1] * 1.0 + inv[1][2] * wz;
+    const double s2 = inv[2][0] * wx + inv[2][1] * 1.0 + inv[2][2] * wz;
+    Mat3 m{};
+    for (int i = 0; i < 3; ++i) {
+        m[i][0] = p[i][0] * s0;
+        m[i][1] = p[i][1] * s1;
+        m[i][2] = p[i][2] * s2;
+    }
+    return m;
+}
+
+Mat3 invert(const Mat3& a)
+{
+    const double det = a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) -
+                       a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) +
+                       a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
+    Mat3 out{};
+    out[0][0] = (a[1][1] * a[2][2] - a[1][2] * a[2][1]) / det;
+    out[0][1] = (a[0][2] * a[2][1] - a[0][1] * a[2][2]) / det;
+    out[0][2] = (a[0][1] * a[1][2] - a[0][2] * a[1][1]) / det;
+    out[1][0] = (a[1][2] * a[2][0] - a[1][0] * a[2][2]) / det;
+    out[1][1] = (a[0][0] * a[2][2] - a[0][2] * a[2][0]) / det;
+    out[1][2] = (a[0][2] * a[1][0] - a[0][0] * a[1][2]) / det;
+    out[2][0] = (a[1][0] * a[2][1] - a[1][1] * a[2][0]) / det;
+    out[2][1] = (a[0][1] * a[2][0] - a[0][0] * a[2][1]) / det;
+    out[2][2] = (a[0][0] * a[1][1] - a[0][1] * a[1][0]) / det;
+    return out;
+}
+
+/// BT.2020 to BT.709, from the chromaticities: BT.2020's (0.708, 0.292),
+/// (0.170, 0.797), (0.131, 0.046); BT.709's (0.640, 0.330), (0.300, 0.600),
+/// (0.150, 0.060); D65 (0.3127, 0.3290) for both.
+Mat3 bt2020_to_bt709_derived()
+{
+    const Mat3 to_xyz = rgb_to_xyz(0.708, 0.292, 0.170, 0.797, 0.131, 0.046, 0.3127, 0.3290);
+    const Mat3 from_xyz =
+        invert(rgb_to_xyz(0.640, 0.330, 0.300, 0.600, 0.150, 0.060, 0.3127, 0.3290));
+    Mat3 out{};
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            out[i][j] = from_xyz[i][0] * to_xyz[0][j] + from_xyz[i][1] * to_xyz[1][j] +
+                        from_xyz[i][2] * to_xyz[2][j];
+        }
+    }
+    return out;
 }
 
 /// BT.2020's primaries into BT.709's, in linear light -- what scRGB needs.
@@ -180,6 +299,22 @@ public:
     {
         const std::string row = described("display");
         const std::size_t at = row.find("peak ");
+        if (at == std::string::npos) {
+            return 0.0;
+        }
+        return std::strtod(row.c_str() + at + 5, nullptr);
+    }
+
+    /// Where the shader's roll-off aims and where it starts, off the `target`
+    /// row: "203 nits from 1000". Zero when nothing is mapped.
+    [[nodiscard]] double target_nits() const
+    {
+        return std::strtod(described("target").c_str(), nullptr);
+    }
+    [[nodiscard]] double source_nits() const
+    {
+        const std::string row = described("target");
+        const std::size_t at = row.find("from ");
         if (at == std::string::npos) {
             return 0.0;
         }
@@ -421,7 +556,12 @@ TEST_CASE("PQ decodes to the nits ST.2084 says, through the real shader",
     REQUIRE(presenter.tonemap("shader") == MP_OK);
     REQUIRE(presenter.configure() == "");
     CHECK(presenter.described("applied") == "shader");
-    const double target = presenter.white_nits();
+    // BT.2408: on an SDR display the roll-off aims at HDR's reference white,
+    // and a stream with no mastering display is taken as a 1000-nit grade.
+    const double target = presenter.target_nits();
+    const double source = presenter.source_nits();
+    CHECK(target == Approx(203.0));
+    CHECK(source == Approx(1000.0));
     REQUIRE(target > 0.0);
 
     // A ramp, and every step of it against the standard.
@@ -431,10 +571,11 @@ TEST_CASE("PQ decodes to the nits ST.2084 says, through the real shader",
         REQUIRE(presenter.present(code, code, code) == MP_OK);
         const Rgb got = presenter.pixel();
 
-        const double nits = tone_map_bt2390(pq_to_nits(code / 255.0), target);
-        // scRGB's unit is 80 nits, and BT.2020 to BT.709 for a grey is not
-        // identity: the matrix rows do not each sum to one.
-        const Rgb want = bt2020_to_bt709(Rgb{nits / 80.0, nits / 80.0, nits / 80.0});
+        const double nits = tone_map_bt2390(pq_to_nits(code / 255.0), source, target);
+        // In units of the target white, and BT.2020 to BT.709 for a grey is
+        // not identity: the matrix rows do not each sum to one.
+        const Rgb want =
+            bt2020_to_bt709(Rgb{nits / target, nits / target, nits / target});
 
         INFO("code " << static_cast<unsigned>(code) << " is " << nits << " nits");
         close_enough(got.r, want.r);
@@ -455,7 +596,8 @@ TEST_CASE("HLG decodes through its OOTF at the display's peak", "[video][hdr]")
     REQUIRE(presenter.configure() == "");
 
     const double peak = presenter.peak_nits();
-    const double target = presenter.white_nits();
+    const double target = presenter.target_nits();
+    const double source = presenter.source_nits();
     REQUIRE(peak > 0.0);
     REQUIRE(target > 0.0);
 
@@ -466,10 +608,9 @@ TEST_CASE("HLG decodes through its OOTF at the display's peak", "[video][hdr]")
 
         const double e = code / 255.0;
         const Rgb light = hlg_to_nits(Rgb{e, e, e}, peak);
-        const Rgb nits{tone_map_bt2390(light.r, target), tone_map_bt2390(light.g, target),
-                       tone_map_bt2390(light.b, target)};
+        const Rgb nits = tone_map_rgb(light, source, target);
         const Rgb want =
-            bt2020_to_bt709(Rgb{nits.r / 80.0, nits.g / 80.0, nits.b / 80.0});
+            bt2020_to_bt709(Rgb{nits.r / target, nits.g / target, nits.b / target});
 
         INFO("code " << static_cast<unsigned>(code));
         close_enough(got.r, want.r);
@@ -603,7 +744,8 @@ TEST_CASE("PQ and HLG at ten and twelve bits, which is how HDR is coded",
             REQUIRE(presenter.configure() == "");
 
             const double peak = presenter.peak_nits();
-            const double target = presenter.white_nits();
+            const double target = presenter.target_nits();
+    const double source = presenter.source_nits();
             REQUIRE(peak > 0.0);
             REQUIRE(target > 0.0);
 
@@ -622,16 +764,13 @@ TEST_CASE("PQ and HLG at ten and twelve bits, which is how HDR is coded",
                     1.0);
                 Rgb light;
                 if (curve.code_point == 16) {
-                    const double nits = tone_map_bt2390(pq_to_nits(e), target);
+                    const double nits = tone_map_bt2390(pq_to_nits(e), source, target);
                     light = Rgb{nits, nits, nits};
                 } else {
-                    const Rgb raw = hlg_to_nits(Rgb{e, e, e}, peak);
-                    light = Rgb{tone_map_bt2390(raw.r, target),
-                                tone_map_bt2390(raw.g, target),
-                                tone_map_bt2390(raw.b, target)};
+                    light = tone_map_rgb(hlg_to_nits(Rgb{e, e, e}, peak), source, target);
                 }
                 const Rgb want = bt2020_to_bt709(
-                    Rgb{light.r / 80.0, light.g / 80.0, light.b / 80.0});
+                    Rgb{light.r / target, light.g / target, light.b / target});
 
                 INFO(curve.name << " at " << bits << " bits, code " << code);
                 close_enough(got.r, want.r);
@@ -664,10 +803,11 @@ TEST_CASE("the arithmetic is wider than the format a display gets", "[video][hdr
         return presenter.pixel_any().g;
     };
 
-    // Two twelve-bit codes one step apart, high enough that half's exponent is
-    // coarse there. Single precision resolves them; half is asked whether it
-    // does.
-    constexpr std::uint32_t code = 3000;
+    // Two twelve-bit codes one step apart, **below the roll-off's knee** so
+    // the curve is still one to one: above it BT.2390 flattens towards the
+    // target and two adjacent codes can land on one float, rightly. Single
+    // precision resolves them; half is asked whether it does.
+    constexpr std::uint32_t code = 1800;
     const double wide_low = render("fp32", code);
     const double wide_high = render("fp32", code + 1);
     REQUIRE(wide_low > 0.0);
@@ -714,7 +854,8 @@ TEST_CASE("8K, which nothing here had ever been asked for", "[video][hdr][slow]"
         WARN("8K would not configure on this machine: " << trouble);
         return;
     }
-    const double target = presenter.white_nits();
+    const double target = presenter.target_nits();
+    const double source = presenter.source_nits();
     REQUIRE(target > 0.0);
 
     // Ten-bit, which is what an 8K HDR stream is.
@@ -725,8 +866,8 @@ TEST_CASE("8K, which nothing here had ever been asked for", "[video][hdr][slow]"
     REQUIRE(pixels.size() == 7680ull * 4320ull * 4ull);
 
     const double e = std::clamp((code / 1023.0 - 16.0 / 255.0) * (255.0 / 219.0), 0.0, 1.0);
-    const double nits = tone_map_bt2390(pq_to_nits(e), target);
-    const Rgb want = bt2020_to_bt709(Rgb{nits / 80.0, nits / 80.0, nits / 80.0});
+    const double nits = tone_map_bt2390(pq_to_nits(e), source, target);
+    const Rgb want = bt2020_to_bt709(Rgb{nits / target, nits / target, nits / target});
 
     // **Every pixel, not the first one.** A presenter that got the size wrong
     // draws a correct corner and a wrong edge, and a test that looked at one
@@ -830,4 +971,125 @@ TEST_CASE("the engine renders into a surface and still has no window",
     // shell's to composite and this process is deliberately not looking at it.
     REQUIRE(presenter.present(0x20, 0x40, 0x80) == MP_OK);
     CHECK(presenter.described("frames") == "1");
+}
+
+TEST_CASE("the reference curves land on the numbers the standards publish",
+          "[video][hdr][reference]")
+{
+    // **The references above are what the shader is held to, so they are held
+    // to something first**: values the recommendations state in words rather
+    // than formulas, so a transcription error in a constant cannot pass by
+    // agreeing with itself.
+    //
+    // ST.2084 / BT.2100: PQ 1.0 is 10 000 cd/m^2 and 0.7518 is 1000. BT.2408
+    // section 5: HDR reference white is 203 cd/m^2, which is PQ 0.58 and HLG
+    // 0.75 on a 1000 cd/m^2 display, and SDR's 100 % maps to it.
+    CHECK(pq_to_nits(1.0) == Approx(10000.0).epsilon(1e-6));
+    CHECK(nits_to_pq(1000.0) == Approx(0.7518).margin(5e-4));
+    CHECK(nits_to_pq(203.0) == Approx(0.58).margin(5e-3));
+    CHECK(pq_to_nits(nits_to_pq(203.0)) == Approx(203.0).epsilon(1e-9));
+    CHECK(hlg_to_nits(Rgb{0.75, 0.75, 0.75}, 1000.0).g == Approx(203.0).margin(2.0));
+    CHECK(hlg_to_nits(Rgb{1.0, 1.0, 1.0}, 1000.0).g == Approx(1000.0).margin(1.0));
+
+    // BT.2390's EETF from a 1000-nit grade to a 203-nit target: identity below
+    // the knee, monotonic through it, the target reached exactly at the
+    // source's peak and never exceeded above it, and reference white kept
+    // above four fifths of the target -- the number a viewer sees.
+    const double source = 1000.0;
+    const double target = 203.0;
+    const double knee = pq_to_nits((1.5 * nits_to_pq(target) / nits_to_pq(source) - 0.5) *
+                                   nits_to_pq(source));
+    CHECK(knee > 50.0);
+    CHECK(knee < 120.0);
+    CHECK(tone_map_bt2390(knee * 0.5, source, target) == Approx(knee * 0.5).epsilon(1e-9));
+    CHECK(tone_map_bt2390(source, source, target) == Approx(target).epsilon(1e-6));
+    CHECK(tone_map_bt2390(4000.0, source, target) == Approx(target).epsilon(1e-6));
+    double previous = 0.0;
+    for (double nits = 0.0; nits <= 1200.0; nits += 1.0) {
+        const double mapped = tone_map_bt2390(nits, source, target);
+        CHECK(mapped >= previous - 1e-9);
+        CHECK(mapped <= target + 1e-9);
+        previous = mapped;
+    }
+    // Reference white lands at 159 of 203 nits -- 0.78 of the display's white,
+    // with the top fifth kept for the highlights above it.
+    CHECK(tone_map_bt2390(203.0, source, target) > 0.75 * target);
+    CHECK(tone_map_bt2390(203.0, source, target) < 0.8 * target);
+    // A target the source fits in is left alone.
+    CHECK(tone_map_bt2390(500.0, 600.0, 1000.0) == Approx(500.0).epsilon(1e-9));
+
+    // The un-normalised form this replaced, for the record: against an 80-nit
+    // target it started rolling off at about four nits, and a 1000-nit grade's
+    // reference white came out at 52 -- two thirds of the display, with the
+    // midtones lifted towards it and the highlights crushed into what was left.
+    const double old_ks = 1.5 * nits_to_pq(80.0) - 0.5;
+    CHECK(pq_to_nits(old_ks) < 5.0);
+    const double old_white = pq_to_nits(eetf_bt2390(nits_to_pq(203.0), 1.0, nits_to_pq(80.0)));
+    CHECK(old_white > 50.0);
+    CHECK(old_white < 55.0);
+
+    // The ratio form keeps hue: a colour comes out as the same three ratios.
+    const Rgb colour{900.0, 300.0, 100.0};
+    const Rgb mapped = tone_map_rgb(colour, source, target);
+    CHECK(mapped.g / mapped.r == Approx(colour.g / colour.r).epsilon(1e-9));
+    CHECK(mapped.b / mapped.r == Approx(colour.b / colour.r).epsilon(1e-9));
+    CHECK(mapped.r == Approx(tone_map_bt2390(900.0, source, target)).epsilon(1e-9));
+}
+
+TEST_CASE("a colour rolls off in ratio through the real shader, on the derived gamut",
+          "[video][hdr]")
+{
+    // **Not a grey.** The ramps above cannot tell per-component mapping from
+    // the ratio form, and cannot tell a gamut matrix typed by hand from one
+    // derived from the primaries. This presents a saturated PQ colour and
+    // holds the pixel to both: BT.2390 on the brightest component with the
+    // other two in ratio, then BT.2020 to BT.709 as the chromaticities give it.
+    mp::test::Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
+
+    Presenter presenter{*module.as<MpVideoVtbl>(), 8, 8};
+    REQUIRE(presenter.ok());
+    REQUIRE(presenter.tonemap("shader") == MP_OK);
+    REQUIRE(presenter.configure() == "");
+    const double target = presenter.target_nits();
+    const double source = presenter.source_nits();
+    REQUIRE(target > 0.0);
+
+    // The matrix the module carries, checked against one derived here from
+    // the two sets of primaries and D65 -- so a digit wrong in either is a
+    // disagreement rather than two copies of one mistake.
+    const auto derived = bt2020_to_bt709_derived();
+    const Rgb red = bt2020_to_bt709(Rgb{1.0, 0.0, 0.0});
+    const Rgb green = bt2020_to_bt709(Rgb{0.0, 1.0, 0.0});
+    const Rgb blue = bt2020_to_bt709(Rgb{0.0, 0.0, 1.0});
+    CHECK(red.r == Approx(derived[0][0]).margin(2e-3));
+    CHECK(green.r == Approx(derived[0][1]).margin(2e-3));
+    CHECK(blue.r == Approx(derived[0][2]).margin(2e-3));
+    CHECK(red.g == Approx(derived[1][0]).margin(2e-3));
+    CHECK(green.g == Approx(derived[1][1]).margin(2e-3));
+    CHECK(blue.g == Approx(derived[1][2]).margin(2e-3));
+    CHECK(red.b == Approx(derived[2][0]).margin(2e-3));
+    CHECK(green.b == Approx(derived[2][1]).margin(2e-3));
+    CHECK(blue.b == Approx(derived[2][2]).margin(2e-3));
+
+    // A bright, saturated orange in PQ: past the knee on its red, well below
+    // it on its blue. `present` takes the bytes in the order BGRA8 stores them.
+    const std::uint8_t r = 200;
+    const std::uint8_t g = 140;
+    const std::uint8_t b = 80;
+    REQUIRE(presenter.present(b, g, r) == MP_OK);
+    const Rgb got = presenter.pixel();
+    const Rgb nits{pq_to_nits(r / 255.0), pq_to_nits(g / 255.0), pq_to_nits(b / 255.0)};
+    const Rgb mapped = tone_map_rgb(nits, source, target);
+    const Rgb want =
+        bt2020_to_bt709(Rgb{mapped.r / target, mapped.g / target, mapped.b / target});
+    close_enough(got.r, want.r);
+    close_enough(got.g, want.g);
+    close_enough(got.b, want.b);
+    // And it is not the per-component answer, which the ramps could not see.
+    const Rgb per_component{tone_map_bt2390(nits.r, source, target),
+                            tone_map_bt2390(nits.g, source, target),
+                            tone_map_bt2390(nits.b, source, target)};
+    CHECK(per_component.g / per_component.r != Approx(nits.g / nits.r).epsilon(1e-3));
+    CHECK(mapped.g / mapped.r == Approx(nits.g / nits.r).epsilon(1e-9));
 }

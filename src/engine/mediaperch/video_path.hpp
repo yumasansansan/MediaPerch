@@ -188,6 +188,16 @@ public:
     /// the file through `move` (in seconds), rewinds the graph and re-anchors
     /// the clock. `mp::seek_together` is the same move with an audio graph in
     /// the middle; this is what is left of it when there is none.
+    ///
+    /// **And the clock is held until the pre-roll is over.** A seek lands on
+    /// the sync point before its target and the decoder has to get from there
+    /// to the target before it has anything to show; a clock that ran
+    /// meanwhile put every frame after the target behind it, and the loop
+    /// dropped them until the decoder caught up -- measured as 24 more frames
+    /// let go after a seek's 53 of pre-roll. So the clock is paused at the
+    /// target and resumed by the loop's thread the moment the first frame at
+    /// or past it is in hand. A clock somebody had already paused stays
+    /// paused, with the target's frame shown in it.
     bool seek_alone(double seconds, const std::function<bool(double)>& move, std::string& why,
                     std::chrono::milliseconds deadline = std::chrono::milliseconds{500});
 
@@ -330,6 +340,10 @@ private:
     /// follow. Declared after `own_frames_`, whose counter it reads, so it is
     /// destroyed first.
     std::unique_ptr<FreeClock> own_clock_;
+    /// Set by `seek_alone` when it paused the clock for the pre-roll; the
+    /// loop's thread resumes the clock and clears it once the graph is past
+    /// the target.
+    std::atomic<bool> resume_on_arrival_{false};
     Modules modules_;
 
     /// The head's window, or null for §9.7.1's engine. Kept because the frame

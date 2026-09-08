@@ -204,7 +204,8 @@ cbuffer Constants : register(b0)
     float has_chroma;     // 0 for 4:0:0, where there is no chroma plane to read
 
     float hlg_peak;       // §9.9.1: the OOTF's system gamma is a function of it
-    float tone_peak;      // the display's white in nits, or 0 for no tone mapping
+    float tone_peak;      // where the roll-off aims, in nits -- and the unit the
+                          // output is in when it maps -- or 0 for no tone mapping
     // **Write HDR10 instead of scRGB.** A provider that is not ours does its
     // mapping in its own pass and wants what a display would be sent: PQ on
     // BT.2020 primaries. So the shader stops one step short -- it still
@@ -217,7 +218,7 @@ cbuffer Constants : register(b0)
     uint  emit_linear;
 
     uint  linear_in;
-    float pad1;
+    float tone_source;    // where the roll-off starts: the mastering peak, in nits
     float pad2;
     float pad3;
 
@@ -308,19 +309,52 @@ float3 hlg_to_nits(float3 e, float peak)
 /// knee is where the eye's sensitivity is rather than where the arithmetic is
 /// convenient. Black is left at zero -- a lift belongs to a display that cannot
 /// reach it, and this one is being asked to reach less light, not more.
-float3 tone_map_bt2390(float3 nits, float peak)
+///
+/// **Normalised to the source's range first, as the recommendation writes
+/// it.** The knee sits at 1.5 * maxT - 0.5 with maxT the target's peak as a
+/// fraction of the *source's*; a mapper that skipped that step took the source
+/// to be PQ's whole 10000 nits, put the knee at about four nits for an 80-nit
+/// target, and flattened everything above it: a 1000-nit grade's reference
+/// white at two thirds of the display, its midtones lifted towards that and
+/// its highlights crushed into the third that was left.
+/// `e` and both peaks are PQ code values.
+float eetf_bt2390(float e, float max_source, float max_target)
 {
-    float3 e = nits_to_pq(nits);
-    float max_pq = nits_to_pq(float3(peak, peak, peak)).x;
-    float ks = 1.5 * max_pq - 0.5;
-    float3 t = saturate((e - ks) / max(1.0 - ks, 1e-6));
-    float3 t2 = t * t;
-    float3 t3 = t2 * t;
-    float3 knee = (2.0 * t3 - 3.0 * t2 + 1.0) * ks +
-                  (t3 - 2.0 * t2 + t) * (1.0 - ks) +
-                  (-2.0 * t3 + 3.0 * t2) * max_pq;
-    float3 mapped = e < ks ? e : knee;
-    return pq_to_nits(mapped);
+    float e1 = e / max_source;
+    float mt = max_target / max_source;
+    float ks = 1.5 * mt - 0.5;
+    float t = saturate((e1 - ks) / max(1.0 - ks, 1e-6));
+    float t2 = t * t;
+    float t3 = t2 * t;
+    float knee = (2.0 * t3 - 3.0 * t2 + 1.0) * ks +
+                 (t3 - 2.0 * t2 + t) * (1.0 - ks) +
+                 (-2.0 * t3 + 3.0 * t2) * mt;
+    // Nothing above the target, however far past its stated peak the source
+    // strays, and nothing rolled off below the knee.
+    float mapped = e1 < ks ? e1 : min(knee, mt);
+    return mapped * max_source;
+}
+
+/// **On the brightest component, and the other two follow in ratio.** BT.2390
+/// offers the EETF per component or on the maximum of the three; per component
+/// bends each channel by its own amount and a saturated highlight comes out a
+/// different hue and greyer. The ratio form keeps the hue and the saturation
+/// and rolls off the brightness, which is the thing a display cannot show.
+/// A source the display can show whole is passed through untouched.
+float3 tone_map_bt2390(float3 nits, float source_peak, float peak)
+{
+    float max_source = nits_to_pq(float3(source_peak, source_peak, source_peak)).x;
+    float max_target = nits_to_pq(float3(peak, peak, peak)).x;
+    if (max_target >= max_source) {
+        return nits;
+    }
+    float brightest = max(nits.r, max(nits.g, nits.b));
+    if (brightest <= 0.0) {
+        return nits;
+    }
+    float e = nits_to_pq(float3(brightest, brightest, brightest)).x;
+    float mapped = pq_to_nits(float3(1.0, 1.0, 1.0) * eetf_bt2390(e, max_source, max_target)).x;
+    return nits * (mapped / brightest);
 }
 
 /// The transfer the stream stated, into linear scRGB units where 1.0 is 80
@@ -357,7 +391,11 @@ float3 to_scrgb(float3 c)
         return nits_to_pq(light * 80.0);
     }
     if (tone_peak > 0.0) {
-        light = tone_map_bt2390(light * 80.0, tone_peak) / 80.0;
+        // **In units of the target white**, which is the display's: 203 nits
+        // of PQ comes out as 1.0 on an SDR display, exactly where an SDR
+        // film's white is. With the target at scRGB's 80 the unit and the
+        // target agreed with each other and were both the wrong number.
+        light = tone_map_bt2390(light * 80.0, tone_source, tone_peak) / tone_peak;
     }
     return float3(dot(gamut0.xyz, light), dot(gamut1.xyz, light),
                   dot(gamut2.xyz, light));
@@ -442,7 +480,7 @@ struct Constants {
     std::uint32_t emit_linear = 0;
 
     std::uint32_t linear_in = 0;
-    float pad1 = 0.0f;
+    float tone_source = 1000.0f;
     float pad2 = 0.0f;
     float pad3 = 0.0f;
 
@@ -872,7 +910,7 @@ struct MpVideo {
     bool display_told = false;
     mp::video::Display told_display{};
     mp::video::Plan plan{};
-    mp::video::ToneMap preferred = mp::video::ToneMap::driver;
+    mp::video::ToneMap preferred = mp::video::ToneMap::shader;
     bool composited = true;
     bool configured = false;
     /// Said once. A provider that is not on this machine is not on it every
@@ -1220,10 +1258,10 @@ bool tone_map_by_driver(MpVideo* v, std::string& why)
     if (SUCCEEDED(video_context->QueryInterface(
             __uuidof(ID3D11VideoContext2), reinterpret_cast<void**>(video_context2.put())))) {
         if (mp_video_has_mastering(&v->graded)) {
-            // §9.7.2 step six: what the content was graded on. **Ours ignores
-            // it and this one does not** -- BT.2390 rolls off towards the
-            // display's peak, the driver rolls off away from the content's --
-            // which is why the same file looks different under the two.
+            // §9.7.2 step six: what the content was graded on. Ours reads it
+            // as the peak its roll-off starts from; the driver reads it as it
+            // pleases, which is why the same file looks different under the
+            // two.
             DXGI_HDR_METADATA_HDR10 hdr{};
             hdr.RedPrimary[0] = static_cast<UINT16>(v->graded.mastering_primaries_x[0]);
             hdr.RedPrimary[1] = static_cast<UINT16>(v->graded.mastering_primaries_y[0]);
@@ -2325,7 +2363,20 @@ try {
                                   .transfer = in->transfer,
                                   .matrix = in->matrix,
                                   .width = in->width,
-                                  .height = in->height};
+                                  .height = in->height,
+                                  // ST.2086 states it in ten-thousandths of a nit. **The
+                                  // peak on its own counts**: a file may state the
+                                  // luminances and no primaries -- Windows' own HDR
+                                  // sample does -- and `mp_video_has_mastering`, which
+                                  // asks after the white point, rightly says that is
+                                  // no mastering display. It is still the peak the
+                                  // roll-off should start from.
+                                  .mastering_peak_nits =
+                                      in->size >= sizeof(MpVideoInfo) &&
+                                              in->mastering_max_luminance != 0
+                                          ? static_cast<float>(in->mastering_max_luminance) /
+                                                10000.0f
+                                          : 0.0f};
     v->full_range = (in->flags & MP_VIDEO_FULL_RANGE) != 0;
     // The container's aspect correction is the picture's size, not the
     // codec's: anamorphic 4:3 in a 16:9 frame is 16:9 the moment it is drawn.
@@ -2432,8 +2483,9 @@ try {
     // also what an HDR display gets.
     constants.tone_peak =
         v->plan.tone_mapping && v->plan.tone_map == mp::video::ToneMap::shader
-            ? v->display.sdr_white_nits
+            ? v->plan.tone_target_nits
             : 0.0f;
+    constants.tone_source = v->plan.tone_source_nits;
     // **Stop one step short for the other two.** They map in their own pass and
     // want what a display would be sent, so the shader decodes and then
     // re-encodes as PQ rather than converting to scRGB and moving the gamut.
@@ -2649,7 +2701,7 @@ try {
             // supposed to be invisible. From here on `maps_elsewhere` is false
             // and there is one pass again.
             constants.emit_pq = 0;
-            constants.tone_peak = v->display.sdr_white_nits;
+            constants.tone_peak = v->plan.tone_target_nits;
             D3D11_MAPPED_SUBRESOURCE again{};
             if (SUCCEEDED(v->context->Map(v->constants.get(), 0, D3D11_MAP_WRITE_DISCARD, 0,
                                           &again))) {
@@ -3105,6 +3157,23 @@ try {
         std::snprintf(out, out_bytes,
                       "display_from\t%s\twho said what the display is (read only)",
                       v->display_told ? "the shell" : "this process");
+        return MP_OK;
+    case 16:
+        // **The two numbers the roll-off is made of**, so a person can see
+        // that 203 is what an SDR display's white means to HDR content and
+        // 1000 is what the file was graded to -- or what it was taken to be.
+        if (v->plan.tone_mapping && v->plan.tone_map == mp::video::ToneMap::shader) {
+            std::snprintf(out, out_bytes,
+                          "target\t%.0f nits from %.0f\twhere the roll-off aims (BT.2408's "
+                          "reference white on an SDR display) and the source peak it "
+                          "starts from (read only)",
+                          static_cast<double>(v->plan.tone_target_nits),
+                          static_cast<double>(v->plan.tone_source_nits));
+        } else {
+            std::snprintf(out, out_bytes,
+                          "target\tnone\twhere the roll-off aims; nothing is rolled off "
+                          "(read only)");
+        }
         return MP_OK;
     default:
         break;
