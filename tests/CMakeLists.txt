@@ -147,6 +147,16 @@ if(TARGET mp_vdsp_lut AND TARGET mp_video_d3d11)
     add_dependencies(mediaperch_tests mp_vdsp_lut)
 endif()
 
+# §9.11's scaler, as a stage: held to references written from the kernels'
+# formulas, for every kernel and every parameter, and to the ringing the
+# HDR10 aspect-ratio pattern showed.
+if(TARGET mp_vdsp_scale AND TARGET mp_video_d3d11)
+    target_sources(mediaperch_tests PRIVATE vdsp_scale_test.cpp)
+    target_compile_definitions(mediaperch_tests PRIVATE
+        "MEDIAPERCH_VDSP_SCALE=\"$<TARGET_FILE:mp_vdsp_scale>\"")
+    add_dependencies(mediaperch_tests mp_vdsp_scale)
+endif()
+
 # The video decoder, and the bitstream conversion it needs first. Driven
 # against the same fixture demux_v3_test uses, through demux_mp4, so it checks
 # the split §9.8 argues for rather than one module in isolation.
@@ -348,7 +358,7 @@ add_test(NAME core_purity
 # that write is 32-bit, and this is what keeps it so. See plan.md §9.10.
 add_test(NAME shader_precision
     COMMAND "${CMAKE_COMMAND}"
-            -D "MEDIAPERCH_SHADER_DIR=${CMAKE_SOURCE_DIR}/modules/video/d3d11"
+            -D "MEDIAPERCH_SHADER_DIR=${CMAKE_SOURCE_DIR}/modules/video/d3d11;${CMAKE_SOURCE_DIR}/modules/vdsp;${CMAKE_SOURCE_DIR}/modules/shared/kernels"
             -P "${CMAKE_SOURCE_DIR}/cmake/ShaderPrecision.cmake")
 
 # Also not a unit test: a second compiler front end over the portable sources.
@@ -403,3 +413,8 @@ endif()
 # win_path.hpp, for the module sources compiled straight into the tests
 # (autoeq.cpp opens a profile by name): the header beside module_log.
 target_include_directories(mediaperch_tests PRIVATE ../modules/shared/module_log)
+
+# The source tree, for the test that reads the shell's C# mirror of the wire
+# and holds it to the C++ enum -- see protocol_test.cpp.
+target_compile_definitions(mediaperch_tests PRIVATE
+    "MEDIAPERCH_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"")

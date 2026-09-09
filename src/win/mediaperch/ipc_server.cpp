@@ -661,8 +661,13 @@ bool IpcServer::handle(const std::shared_ptr<Client>& client, const ipc::Header&
         }
         std::string why;
         if (!player_->set_node(node, key, value, why)) {
+            // In the log as well as on the wire: a shell that shows a sentence
+            // for a second is a shell whose sentence is gone by the time
+            // somebody asks what happened.
+            log_->add("refused " + node + " " + key + " = " + value + ": " + why);
             return fail(why);
         }
+        log_->add("set " + node + " " + key + " = " + value);
         return ok();
     }
     case ipc::Kind::modules: {
@@ -715,6 +720,7 @@ bool IpcServer::handle(const std::shared_ptr<Client>& client, const ipc::Header&
         }
         std::string why;
         if (!player_->set(key, value, why)) {
+            log_->add("refused " + key + " = " + value + ": " + why);
             return fail(why);
         }
         log_->add("set " + key + " = " + value);

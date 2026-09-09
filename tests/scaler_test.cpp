@@ -1,22 +1,28 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// The resampler, the chroma siting and the gamut, held to references written
-// from the published formulas rather than to the shader's own arithmetic.
+// The presenter's own resampling: where chroma sits, what the gamut does, the
+// fetch a chain with no scaler leaves, and the crop -- held to references
+// written from the published formulas rather than to the shader's own
+// arithmetic.
 //
 // **What the HDR10 test patterns found.** A 4K checkerboard bilinearly
 // downscaled into a 1080p window was moiré the size of a thumb; the one-pixel
 // rulers along the edges of a 2.39:1 field came and went with the phase, and
 // read as a picture that had been cropped; a colour-clipping pattern merged
 // its red bars a third of the way up and its white ones never, because the
-// compositor clipped each BT.709 component on its own. Three faults, one
-// presenter, and the three properties below are what it is held to now:
+// compositor clipped each BT.709 component on its own. The picture's own
+// resampling is a stage now (§9.11, tests/vdsp_scale_test.cpp), and what the
+// presenter is held to here is what is left with it:
 //
-//   - a two-to-one checkerboard is a flat grey, in linear light, for every
-//     kernel: what a downscale *is*;
-//   - the real shader's resampling equals a reference written in double from
-//     the kernels' formulas, up and down, one axis and both;
-//   - a chroma sample lands where the stream sites it, and a colour past the
-//     display's gamut keeps its luminance and its gradation.
+//   - at one to one every sample comes back as it went in;
+//   - a chroma sample lands where the stream sites it, by the kernel and its
+//     parameters, and a colour past the display's gamut keeps its luminance
+//     and its gradation;
+//   - the roll-off starts from the tighter of the two peaks a stream states;
+//   - a texture larger than its picture is drawn cropped, at one to one and
+//     through the fallback;
+//   - with no scaler in the chain another size is the sampler's bilinear,
+//     and the row says so.
 //
 // Everything renders off screen on WARP and reads back fp32, the way
 // hdr_transfer_test.cpp does: pixels, not a screenshot somebody looks at.
@@ -48,166 +54,6 @@ using Catch::Approx;
 namespace {
 
 using mp::test::Module;
-
-// --------------------------------------------------------------------------
-// The reference: the kernels as the literature states them
-// --------------------------------------------------------------------------
-
-enum class Kind { bilinear, lanczos, spline36, catrom, mitchell, box };
-
-constexpr std::array<Kind, 6> k_kinds{Kind::bilinear, Kind::lanczos, Kind::spline36,
-                                      Kind::catrom,   Kind::mitchell, Kind::box};
-
-const char* name_of(Kind k)
-{
-    switch (k) {
-    case Kind::bilinear:
-        return "bilinear";
-    case Kind::lanczos:
-        return "lanczos";
-    case Kind::spline36:
-        return "spline36";
-    case Kind::catrom:
-        return "catrom";
-    case Kind::mitchell:
-        return "mitchell";
-    case Kind::box:
-        return "box";
-    }
-    return "?";
-}
-
-double support_of(Kind k)
-{
-    switch (k) {
-    case Kind::bilinear:
-        return 1.0;
-    case Kind::lanczos:
-    case Kind::spline36:
-        return 3.0;
-    case Kind::catrom:
-    case Kind::mitchell:
-        return 2.0;
-    case Kind::box:
-        return 0.5;
-    }
-    return 3.0;
-}
-
-/// Mitchell and Netravali's cubic, *Reconstruction Filters in Computer
-/// Graphics* (1988), equation 8.
-double cubic_bc(double b, double c, double x)
-{
-    x = std::fabs(x);
-    const double x2 = x * x;
-    const double x3 = x2 * x;
-    if (x < 1.0) {
-        return ((12.0 - 9.0 * b - 6.0 * c) * x3 + (-18.0 + 12.0 * b + 6.0 * c) * x2 +
-                (6.0 - 2.0 * b)) /
-               6.0;
-    }
-    if (x < 2.0) {
-        return ((-b - 6.0 * c) * x3 + (6.0 * b + 30.0 * c) * x2 + (-12.0 * b - 48.0 * c) * x +
-                (8.0 * b + 24.0 * c)) /
-               6.0;
-    }
-    return 0.0;
-}
-
-double weight(Kind k, double x)
-{
-    x = std::fabs(x);
-    switch (k) {
-    case Kind::bilinear:
-        return std::max(1.0 - x, 0.0);
-    case Kind::lanczos: {
-        if (x >= 3.0) {
-            return 0.0;
-        }
-        if (x < 1e-12) {
-            return 1.0;
-        }
-        const double px = 3.14159265358979323846 * x;
-        return 3.0 * std::sin(px) * std::sin(px / 3.0) / (px * px);
-    }
-    case Kind::spline36:
-        if (x < 1.0) {
-            return ((13.0 / 11.0 * x - 453.0 / 209.0) * x - 3.0 / 209.0) * x + 1.0;
-        }
-        if (x < 2.0) {
-            const double t = x - 1.0;
-            return ((-6.0 / 11.0 * t + 270.0 / 209.0) * t - 156.0 / 209.0) * t;
-        }
-        if (x < 3.0) {
-            const double t = x - 2.0;
-            return ((1.0 / 11.0 * t - 45.0 / 209.0) * t + 26.0 / 209.0) * t;
-        }
-        return 0.0;
-    case Kind::catrom:
-        return cubic_bc(0.0, 0.5, x);
-    case Kind::mitchell:
-        return cubic_bc(1.0 / 3.0, 1.0 / 3.0, x);
-    case Kind::box:
-        return x < 0.5 ? 1.0 : (x == 0.5 ? 0.5 : 0.0);
-    }
-    return 0.0;
-}
-
-/// One axis: `src` samples to `dst`, by the convention the presenter states.
-/// Output i sits at (i + 0.5) * src / dst - 0.5 in source samples; the kernel
-/// is stretched by the downscale factor, the edge is clamped, and the weights
-/// are normalised.
-std::vector<double> resample_axis(const std::vector<double>& in, std::size_t dst, Kind k)
-{
-    const std::size_t src = in.size();
-    const double ratio = static_cast<double>(src) / static_cast<double>(dst);
-    const double stretch = std::max(ratio, 1.0);
-    const double reach = support_of(k) * stretch;
-    std::vector<double> out(dst);
-    for (std::size_t i = 0; i < dst; ++i) {
-        const double s = (static_cast<double>(i) + 0.5) * ratio - 0.5;
-        const auto lo = static_cast<long>(std::ceil(s - reach));
-        const auto hi = static_cast<long>(std::floor(s + reach));
-        double sum = 0.0;
-        double weights = 0.0;
-        for (long j = lo; j <= hi; ++j) {
-            const double w = weight(k, (s - static_cast<double>(j)) / stretch);
-            if (w == 0.0) {
-                continue;
-            }
-            const long jc = std::clamp(j, 0L, static_cast<long>(src) - 1L);
-            sum += w * in[static_cast<std::size_t>(jc)];
-            weights += w;
-        }
-        out[i] = sum / weights;
-    }
-    return out;
-}
-
-/// Both axes, horizontally first, as the presenter does it.
-std::vector<double> resample(const std::vector<double>& in, std::size_t w, std::size_t h,
-                             std::size_t dw, std::size_t dh, Kind k)
-{
-    std::vector<double> rows(dw * h);
-    for (std::size_t y = 0; y < h; ++y) {
-        const std::vector<double> row(in.begin() + static_cast<std::ptrdiff_t>(y * w),
-                                      in.begin() + static_cast<std::ptrdiff_t>((y + 1) * w));
-        const std::vector<double> scaled = resample_axis(row, dw, k);
-        std::copy(scaled.begin(), scaled.end(), rows.begin() + static_cast<std::ptrdiff_t>(y * dw));
-    }
-    std::vector<double> out(dw * dh);
-    for (std::size_t x = 0; x < dw; ++x) {
-        std::vector<double> column(h);
-        for (std::size_t y = 0; y < h; ++y) {
-            column[y] = rows[y * dw + x];
-        }
-        const std::vector<double> scaled = resample_axis(column, dh, k);
-        for (std::size_t y = 0; y < dh; ++y) {
-            out[y * dw + x] = scaled[y];
-        }
-    }
-    return out;
-}
 
 // --------------------------------------------------------------------------
 // The standards' curves, for the gamut test
@@ -306,7 +152,7 @@ public:
     [[nodiscard]] std::string described(const char* key) const
     {
         for (std::uint32_t i = 0;; ++i) {
-            char row[256];
+            char row[512];
             if (vtbl_->describe(handle_, i, row, sizeof row) != MP_OK) {
                 return {};
             }
@@ -395,13 +241,7 @@ std::vector<std::uint16_t> random_plane(std::uint32_t width, std::uint32_t heigh
     return plane;
 }
 
-std::string size_string(std::uint32_t width, std::uint32_t height)
-{
-    return std::to_string(width) + "x" + std::to_string(height);
-}
-
-/// The picture at one to one, as the presenter decodes it: what the reference
-/// resamples, so that the range mapping is not part of the comparison.
+/// The picture at one to one, as the presenter decodes it.
 std::vector<double> rendered_linear(Canvas& canvas, const std::vector<std::uint16_t>& plane,
                                     std::uint32_t width, std::uint32_t height)
 {
@@ -421,42 +261,11 @@ std::vector<double> rendered_linear(Canvas& canvas, const std::vector<std::uint1
     return out;
 }
 
-} // namespace
+constexpr std::array<const char*, 10> k_kernel_names{
+    "bilinear", "box",      "hermite",  "bicubic",  "catrom",
+    "mitchell", "spline16", "spline36", "spline64", "lanczos"};
 
-TEST_CASE("the kernels are what the literature says they are", "[video][scaler]")
-{
-    // Interpolating: 1 at the centre and 0 at every other integer, so that one
-    // to one is the identity. Mitchell-Netravali is not, and says so in its
-    // own paper: it trades that for the absence of ringing.
-    for (const Kind k : {Kind::bilinear, Kind::lanczos, Kind::spline36, Kind::catrom}) {
-        INFO(name_of(k));
-        CHECK(weight(k, 0.0) == Approx(1.0));
-        CHECK(weight(k, 1.0) == Approx(0.0).margin(1e-12));
-        CHECK(weight(k, 2.0) == Approx(0.0).margin(1e-12));
-        CHECK(weight(k, -1.0) == Approx(0.0).margin(1e-12));
-    }
-    CHECK(weight(Kind::mitchell, 0.0) == Approx(8.0 / 9.0));
-    CHECK(weight(Kind::mitchell, 1.0) == Approx(1.0 / 18.0));
-    CHECK(weight(Kind::box, 0.0) == 1.0);
-    CHECK(weight(Kind::box, 0.5) == 0.5);
-    CHECK(weight(Kind::box, 0.6) == 0.0);
-    // Symmetric, every one of them, and zero past their support.
-    for (const Kind k : k_kinds) {
-        INFO(name_of(k));
-        for (double x = 0.0; x < 3.5; x += 0.37) {
-            CHECK(weight(k, x) == Approx(weight(k, -x)));
-        }
-        CHECK(weight(k, support_of(k) + 0.01) == 0.0);
-    }
-    // Lanczos sums to one only approximately, which is why the presenter
-    // normalises: at the worst phase the raw sum is within two percent.
-    double raw = 0.0;
-    for (int j = -3; j <= 3; ++j) {
-        raw += weight(Kind::lanczos, 0.5 - j);
-    }
-    CHECK(raw == Approx(1.0).margin(0.02));
-    CHECK(raw != Approx(1.0).margin(1e-6));
-}
+} // namespace
 
 TEST_CASE("at one to one every sample comes back as it went in", "[video][scaler]")
 {
@@ -476,20 +285,20 @@ TEST_CASE("at one to one every sample comes back as it went in", "[video][scaler
         CHECK(got[i] == Approx(plane[i] / 65535.0).margin(1e-6));
     }
     CHECK(canvas.described("scale") == "16x12 1:1");
+    CHECK(canvas.described("chain") == "none");
 }
 
-TEST_CASE("a two-to-one checkerboard is a flat grey, in linear light, for every kernel",
+TEST_CASE("with no scaler in the chain, another size is the sampler's bilinear, and the row "
+          "says so",
           "[video][scaler]")
 {
-    // **What a downscale is.** Every output sample sits on the boundary
-    // between two source samples, on both axes, and a symmetric kernel gives
-    // the two sides of that boundary equal weight; with the source alternating
-    // the sum is the mean whatever the kernel. A bilinear fetch got this right
-    // only at exactly two to one, and at any other factor drew the
-    // checkerboard as blotches the size of a thumb -- which is the pixel-field
-    // pattern's whole complaint. And it is the mean of the *light*: the
-    // squares a 4K panel would show the eye average as luminance, not as
-    // code values.
+    // **What is left when the scaler node is taken out** (§9.11): the first
+    // pass stops at linear light at the source's size and the finish pass
+    // samples it through the sampler's bilinear. At exactly two to one every
+    // target pixel's centre sits on the boundary between four source
+    // samples, and a bilinear at a boundary is their mean -- so a two-to-one
+    // checkerboard is still a flat grey here, and at any other factor it is
+    // not, which is the whole reason there is a stage.
     Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
     REQUIRE(module.as<MpVideoVtbl>() != nullptr);
     Canvas canvas{*module.as<MpVideoVtbl>()};
@@ -509,84 +318,21 @@ TEST_CASE("a two-to-one checkerboard is a flat grey, in linear light, for every 
 
     REQUIRE(canvas.set("size", "16x12") == MP_OK);
     REQUIRE(canvas.configure(linear_mono(width, height)) == MP_OK);
-    for (const Kind k : k_kinds) {
-        INFO(name_of(k));
-        REQUIRE(canvas.set("scaler", name_of(k)) == MP_OK);
-        REQUIRE(canvas.present(mono16(plane, width, height)) == MP_OK);
-        std::uint32_t w = 0;
-        std::uint32_t h = 0;
-        const std::vector<float> got = canvas.pixels(w, h);
-        REQUIRE(w == 16u);
-        REQUIRE(h == 12u);
-        REQUIRE(got.size() == 16u * 12u * 4u);
-        // **The interior.** At the edge the kernel's taps past the picture
-        // repeat the edge sample -- the clamp every resampler applies, and
-        // what the sampler did before -- which gives one parity of the
-        // checkerboard extra weight there. Three output samples in is past
-        // the widest kernel's reach at this factor.
-        for (std::uint32_t y = 3; y < 9; ++y) {
-            for (std::uint32_t x = 3; x < 13; ++x) {
-                const std::size_t i = (static_cast<std::size_t>(y) * 16u + x) * 4u;
-                CHECK(got[i] == Approx(mean).margin(2e-5));
-                CHECK(got[i + 1] == Approx(mean).margin(2e-5));
-                CHECK(got[i + 2] == Approx(mean).margin(2e-5));
-            }
-        }
+    REQUIRE(canvas.present(mono16(plane, width, height)) == MP_OK);
+    std::uint32_t w = 0;
+    std::uint32_t h = 0;
+    const std::vector<float> got = canvas.pixels(w, h);
+    REQUIRE(w == 16u);
+    REQUIRE(h == 12u);
+    REQUIRE(got.size() == 16u * 12u * 4u);
+    for (std::size_t i = 0; i < got.size(); i += 4) {
+        CHECK(got[i] == Approx(mean).margin(2e-5));
+        CHECK(got[i + 1] == Approx(mean).margin(2e-5));
+        CHECK(got[i + 2] == Approx(mean).margin(2e-5));
     }
-    CHECK(canvas.described("scale") == "32x24 -> 16x12, x0.500");
-}
-
-TEST_CASE("the real shader resamples as the reference does, up, down and one axis at a time",
-          "[video][scaler]")
-{
-    // The reference is double precision from the formulas above; the shader
-    // is single precision with its own sin. Two ten-thousandths is the room
-    // that leaves, on a random picture, and the sizes are chosen so that no
-    // output sample of the box kernel lands exactly on a tie between two
-    // source samples, where the two precisions would rightly pick differently:
-    // a tie is (2i + 1) * src / (2 * dst) landing on an integer, which 16 to
-    // 48 and 12 to 36 never do and 16 to 41 does at i = 20.
-    Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
-    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
-    Canvas canvas{*module.as<MpVideoVtbl>()};
-    REQUIRE(canvas.ok());
-
-    const std::uint32_t width = 16;
-    const std::uint32_t height = 12;
-    const std::vector<std::uint16_t> plane = random_plane(width, height, 11u);
-    const std::vector<double> source = rendered_linear(canvas, plane, width, height);
-
-    struct Target {
-        std::uint32_t width;
-        std::uint32_t height;
-        const char* what;
-    };
-    const Target targets[] = {{48, 36, "up"}, {7, 5, "down"}, {16, 24, "one axis"}};
-    for (const Target& target : targets) {
-        REQUIRE(canvas.set("size", size_string(target.width, target.height).c_str()) == MP_OK);
-        for (const Kind k : k_kinds) {
-            INFO(name_of(k) << ", " << target.what << " to " << target.width << "x"
-                            << target.height);
-            REQUIRE(canvas.set("scaler", name_of(k)) == MP_OK);
-            REQUIRE(canvas.present(mono16(plane, width, height)) == MP_OK);
-            std::uint32_t w = 0;
-            std::uint32_t h = 0;
-            const std::vector<float> got = canvas.pixels(w, h);
-            REQUIRE(w == target.width);
-            REQUIRE(h == target.height);
-            const std::vector<double> want =
-                resample(source, width, height, target.width, target.height, k);
-            REQUIRE(got.size() == want.size() * 4u);
-            double worst = 0.0;
-            for (std::size_t i = 0; i < want.size(); ++i) {
-                worst = std::max(worst, std::fabs(got[i * 4u] - want[i]));
-                // Grey in, grey out: the three channels are one number.
-                CHECK(got[i * 4u + 1u] == Approx(got[i * 4u]).margin(1e-6));
-                CHECK(got[i * 4u + 2u] == Approx(got[i * 4u]).margin(1e-6));
-            }
-            CHECK(worst < 2e-4);
-        }
-    }
+    CHECK(canvas.described("scale") ==
+          "32x24 -> 16x12, x0.500 by the presenter's bilinear fetch");
+    CHECK(canvas.described("chain") == "none");
 }
 
 TEST_CASE("chroma is reconstructed where the stream sites it", "[video][scaler][yuv]")
@@ -688,6 +434,28 @@ TEST_CASE("chroma is reconstructed where the stream sites it", "[video][scaler][
         REQUIRE(canvas.present(frame_with(k_before, k_after, luma, chroma)) == MP_OK);
         CHECK(blue_at(4, 1) < high - 0.1 * (high - low));
         CHECK(canvas.described("siting") == "auto (centre, the stream's)");
+    }
+    SECTION("the kernel's parameters reach the reconstruction")
+    {
+        // The parameterised cubic at Catmull-Rom's B and C is Catmull-Rom:
+        // the same three columns as the interpolating kernel above. Hermite,
+        // B=0 C=0, is interpolating too, so columns 2 and 4 hold, and its
+        // midpoint is the same midpoint -- a step is symmetric.
+        REQUIRE(canvas.set("siting", "left") == MP_OK);
+        for (const char* kernel : {"bicubic", "hermite", "spline16", "lanczos"}) {
+            INFO(kernel);
+            REQUIRE(canvas.set("chroma", kernel) == MP_OK);
+            REQUIRE(canvas.set("chroma_b", "0") == MP_OK);
+            REQUIRE(canvas.set("chroma_c", "0.5") == MP_OK);
+            REQUIRE(canvas.present(frame_with(k_before, k_after, luma, chroma)) == MP_OK);
+            CHECK(blue_at(2, 1) == Approx(low).margin(1e-4));
+            CHECK(blue_at(4, 1) == Approx(high).margin(1e-4));
+            CHECK(blue_at(3, 1) == Approx((low + high) / 2.0).margin(1e-4));
+        }
+        // Mitchell is not interpolating: column 4 is short of the step's top.
+        REQUIRE(canvas.set("chroma", "mitchell") == MP_OK);
+        REQUIRE(canvas.present(frame_with(k_before, k_after, luma, chroma)) == MP_OK);
+        CHECK(blue_at(4, 1) < high - 0.02 * (high - low));
     }
 }
 
@@ -846,8 +614,10 @@ TEST_CASE("a texture larger than the picture is drawn cropped, not whole", "[vid
     // A decoder's texture is the coded frame -- 1608 rows for a 1606-row
     // picture -- and its frame states the picture. The rows past it are the
     // encoder's padding and must not reach the target, at one to one or
-    // through the resampler. Made by hand on the presenter's own device, as
-    // the adopted-texture test does, with the padding a different value.
+    // through the fallback's fetch, which clamps to the picture and not to
+    // the texture because the intermediate it samples *is* the picture. Made
+    // by hand on the presenter's own device, as the adopted-texture test
+    // does, with the padding a different value.
     Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
     REQUIRE(module.as<MpVideoVtbl>() != nullptr);
     Canvas canvas{*module.as<MpVideoVtbl>()};
@@ -924,17 +694,18 @@ TEST_CASE("a texture larger than the picture is drawn cropped, not whole", "[vid
     CHECK(all_one_value(24, 24) == Approx(want).margin(1e-4));
     CHECK(canvas.described("scale") == "24x24 1:1");
 
-    // And through the resampler, which clamps its edge to the picture and
-    // not to the texture.
+    // And through the fallback's fetch, which clamps its edge to the picture
+    // and not to the texture.
     REQUIRE(canvas.set("size", "48x36") == MP_OK);
     REQUIRE(canvas.present(frame) == MP_OK);
     CHECK(all_one_value(48, 36) == Approx(want).margin(1e-4));
-    CHECK(canvas.described("scale") == "24x24 -> 48x36, x2.000");
+    CHECK(canvas.described("scale") ==
+          "24x24 -> 48x36, x2.000 by the presenter's bilinear fetch");
 
     texture->Release();
 }
 
-TEST_CASE("what a person can set for the resampler, and what it reports back",
+TEST_CASE("what a person can set for the chroma reconstruction, and what it reports back",
           "[video][scaler]")
 {
     Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
@@ -942,18 +713,31 @@ TEST_CASE("what a person can set for the resampler, and what it reports back",
     Canvas canvas{*module.as<MpVideoVtbl>()};
     REQUIRE(canvas.ok());
 
-    CHECK(canvas.described("scaler") == "lanczos");
     CHECK(canvas.described("chroma") == "lanczos");
+    CHECK(canvas.described("chroma_lobes") == "3");
     CHECK(canvas.described("gamut") == "desaturate");
     CHECK(canvas.described("scale") == "no frame yet");
-    for (const Kind k : k_kinds) {
-        REQUIRE(canvas.set("scaler", name_of(k)) == MP_OK);
-        CHECK(canvas.described("scaler") == name_of(k));
-        REQUIRE(canvas.set("chroma", name_of(k)) == MP_OK);
-        CHECK(canvas.described("chroma") == name_of(k));
+    // **The scaler's keys are the stage's now** (§9.11): a presenter asked
+    // for one answers as it answers any key it does not have.
+    CHECK(canvas.described("scaler").empty());
+    CHECK(canvas.set("scaler", "box") == MP_ERR_UNSUPPORTED);
+    for (const char* name : k_kernel_names) {
+        REQUIRE(canvas.set("chroma", name) == MP_OK);
+        CHECK(canvas.described("chroma") == name);
     }
-    CHECK(canvas.set("scaler", "sharpest") == MP_ERR_INVALID);
+    CHECK(canvas.set("chroma", "sharpest") == MP_ERR_INVALID);
     CHECK(canvas.set("chroma", "") == MP_ERR_INVALID);
+    REQUIRE(canvas.set("chroma_lobes", "2") == MP_OK);
+    CHECK(canvas.described("chroma_lobes") == "2");
+    REQUIRE(canvas.set("chroma_lobes", "1000") == MP_OK);
+    CHECK(canvas.described("chroma_lobes") == "1000");
+    CHECK(canvas.set("chroma_lobes", "0") == MP_ERR_INVALID);
+    CHECK(canvas.set("chroma_lobes", "many") == MP_ERR_INVALID);
+    REQUIRE(canvas.set("chroma_b", "0.25") == MP_OK);
+    CHECK(canvas.described("chroma_b") == "0.2500");
+    REQUIRE(canvas.set("chroma_c", "0.75") == MP_OK);
+    CHECK(canvas.described("chroma_c") == "0.7500");
+    CHECK(canvas.set("chroma_c", "some") == MP_ERR_INVALID);
     for (const char* name : {"left", "centre", "topleft", "top", "bottomleft", "bottom"}) {
         REQUIRE(canvas.set("siting", name) == MP_OK);
         CHECK(canvas.described("siting") == name);

@@ -25,6 +25,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstddef>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -64,6 +65,15 @@ struct PresenterLog {
     /// Made to refuse, so a caller's error path is a path something takes.
     bool refuse_size = false;
     bool refuse_configure = false;
+    /// **Which thread called.** A presenter is one graphics context, and the
+    /// thread that presents is the thread that may set and describe it; a
+    /// test compares these three rather than assuming.
+    std::atomic<std::thread::id> present_thread{};
+    std::atomic<std::thread::id> set_thread{};
+    std::atomic<std::thread::id> describe_thread{};
+    /// How many settings had been said when `configure` came: what a path
+    /// applies before the target is made is what the target is made from.
+    std::size_t settings_before_configure = 0;
 
     void reset()
     {
@@ -79,6 +89,10 @@ struct PresenterLog {
         surface = 0;
         refuse_size = false;
         refuse_configure = false;
+        present_thread.store(std::thread::id{});
+        set_thread.store(std::thread::id{});
+        describe_thread.store(std::thread::id{});
+        settings_before_configure = 0;
     }
 
     [[nodiscard]] std::string setting(const std::string& key)
@@ -159,12 +173,14 @@ inline MpResult MP_CALL video_configure(MpVideo*, const MpVideoInfo* in) noexcep
         return MP_ERR_UNSUPPORTED;
     }
     log.configured = true;
+    log.settings_before_configure = log.settings.size();
     std::memcpy(&log.info, in, std::min<std::size_t>(in->size, sizeof(log.info)));
     return MP_OK;
 }
 
 inline MpResult MP_CALL video_present(MpVideo*, const MpVideoFrame*) noexcept
 {
+    presenter_log().present_thread.store(std::this_thread::get_id());
     presenter_log().presented.fetch_add(1, std::memory_order_relaxed);
     return MP_OK;
 }
@@ -173,6 +189,7 @@ inline MpResult MP_CALL video_set(MpVideo*, const char* key, const char* value) 
 {
     PresenterLog& log = presenter_log();
     const std::lock_guard lock{log.mutex};
+    log.set_thread.store(std::this_thread::get_id());
     if (std::strcmp(key, "size") == 0) {
         if (log.refuse_size) {
             return MP_ERR_INVALID;
@@ -188,8 +205,9 @@ inline MpResult MP_CALL video_describe(MpVideo*, std::uint32_t index, char* out,
 {
     PresenterLog& log = presenter_log();
     const std::lock_guard lock{log.mutex};
+    log.describe_thread.store(std::this_thread::get_id());
     if (index == 0) {
-        std::snprintf(out, out_bytes, "size\t%s\twhat it renders at",
+        std::snprintf(out, out_bytes, "size\t%s\twhat it renders at\tsize group=Picture",
                       log.size.empty() ? "native" : log.size.c_str());
         return MP_OK;
     }
@@ -407,6 +425,16 @@ struct StageLog {
     std::string amount{"1"};
     /// Made to refuse, so a caller's error path is a path something takes.
     bool refuse_open = false;
+    /// **The pre-fill contract, recorded.** What `configure` was given, what
+    /// `out` arrived pre-filled with -- the size the presenter would like --
+    /// and what this fake answers: zero echoes the input, as a grade does;
+    /// anything else is what a scaler says.
+    std::uint32_t in_width = 0;
+    std::uint32_t in_height = 0;
+    std::uint32_t wanted_width = 0;
+    std::uint32_t wanted_height = 0;
+    std::uint32_t answer_width = 0;
+    std::uint32_t answer_height = 0;
 
     void reset()
     {
@@ -417,6 +445,12 @@ struct StageLog {
         processed = 0;
         amount = "1";
         refuse_open = false;
+        in_width = 0;
+        in_height = 0;
+        wanted_width = 0;
+        wanted_height = 0;
+        answer_width = 0;
+        answer_height = 0;
     }
 };
 
@@ -462,7 +496,21 @@ inline MpResult MP_CALL vdsp_configure(MpVideoDsp*, const MpVideoInfo* in,
     StageLog& log = stage_log();
     const std::lock_guard lock{log.mutex};
     log.configured = true;
-    std::memcpy(out, in, std::min<std::size_t>(in->size, out->size));
+    log.in_width = in->width;
+    log.in_height = in->height;
+    const bool prefilled = out->size >= offsetof(MpVideoInfo, display_width);
+    log.wanted_width = prefilled ? out->width : 0u;
+    log.wanted_height = prefilled ? out->height : 0u;
+    MpVideoInfo answer{};
+    std::memcpy(&answer, in, std::min<std::size_t>(in->size, sizeof(answer)));
+    answer.size = out->size;
+    if (log.answer_width != 0 && log.answer_height != 0) {
+        answer.width = log.answer_width;
+        answer.height = log.answer_height;
+        answer.display_width = log.answer_width;
+        answer.display_height = log.answer_height;
+    }
+    std::memcpy(out, &answer, std::min<std::size_t>(out->size, sizeof(answer)));
     return MP_OK;
 }
 
@@ -495,7 +543,8 @@ inline MpResult MP_CALL vdsp_describe(MpVideoDsp*, std::uint32_t index, char* ou
         return MP_END;
     }
     const std::lock_guard lock{stage_log().mutex};
-    std::snprintf(out, out_bytes, "amount\t%s\twhat this fake stage was told",
+    std::snprintf(out, out_bytes,
+                  "amount\t%s\twhat this fake stage was told\tnumber step=0.5 group=Gain",
                   stage_log().amount.c_str());
     return MP_OK;
 }

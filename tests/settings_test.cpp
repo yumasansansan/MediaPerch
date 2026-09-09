@@ -185,3 +185,22 @@ TEST_CASE("an empty list is empty rather than one empty thing", "[settings]")
     CHECK(mp::split_list(" one , two ,, three ") ==
           std::vector<std::string>{"one", "two", "three"});
 }
+
+TEST_CASE("the engine's rows say what kind of value they take", "[settings]")
+{
+    // The one row that is a directory says so, because a file picker on a
+    // modules directory is a picker that cannot pick it.
+    mp::Settings settings;
+    settings.modules = "C:/modules";
+    const std::vector<mp::ipc::Setting> rows = mp::engine_settings(settings);
+    REQUIRE(rows.size() == 5);
+    CHECK(rows[0].key == "pipe");
+    CHECK(rows[0].kind == mp::ipc::SettingKind::text);
+    CHECK(rows[1].key == "modules");
+    CHECK(rows[1].kind == mp::ipc::SettingKind::path);
+    CHECK(rows[1].hints == "pick=folder");
+    CHECK(rows[1].value == "C:/modules");
+    CHECK(rows[4].key == "profile");
+    CHECK(rows[4].kind == mp::ipc::SettingKind::path);
+    CHECK(rows[4].hints.empty());
+}

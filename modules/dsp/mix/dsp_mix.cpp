@@ -231,47 +231,55 @@ try {
     }
     switch (index) {
     case 0:
-        std::snprintf(out, out_bytes, "channels\t%u\ttarget channel count; 0 leaves it",
+        std::snprintf(out, out_bytes, "channels\t%u\ttarget channel count; 0 leaves it"
+                                      "\tint min=0 group=Target",
                       d->channels);
         return MP_OK;
     case 1:
         std::snprintf(out, out_bytes,
-                      "mask\t0x%x\ttarget speaker mask; 0 takes the conventional one",
+                      "mask\t0x%x\ttarget speaker mask; 0 takes the conventional one"
+                      "\ttext group=Target",
                       d->mask);
         return MP_OK;
     case 2:
         std::snprintf(out, out_bytes,
-                      "centre\t%.2f\tdB of the centre channel into each front speaker",
+                      "centre\t%.2f\tdB of the centre channel into each front speaker"
+                      "\tnumber step=0.5 unit=dB group=Recipe",
                       d->recipe.centre_db);
         return MP_OK;
     case 3:
         std::snprintf(out, out_bytes,
-                      "surround\t%.2f\tdB of each surround into the front on its side",
+                      "surround\t%.2f\tdB of each surround into the front on its side"
+                      "\tnumber step=0.5 unit=dB group=Recipe",
                       d->recipe.surround_db);
         return MP_OK;
     case 4:
         if (d->recipe.lfe_db <= -400.0) {
             std::snprintf(out, out_bytes,
                           "lfe\toff\tdB of the effects channel into the front pair; "
-                          "dropped by default");
+                          "dropped by default\tnumber step=0.5 unit=dB group=Recipe");
         } else {
             std::snprintf(out, out_bytes,
-                          "lfe\t%.2f\tdB of the effects channel into the front pair",
+                          "lfe\t%.2f\tdB of the effects channel into the front pair"
+                          "\tnumber step=0.5 unit=dB group=Recipe",
                           d->recipe.lfe_db);
         }
         return MP_OK;
     case 5:
         std::snprintf(out, out_bytes,
-                      "normalise\t%s\tnone, peak (cannot clip) or energy (keeps loudness)",
+                      "normalise\t%s\tnone, peak (cannot clip) or energy (keeps loudness)"
+                      "\tenum:none,peak,energy group=Recipe",
                       mp::mix::normalise_name(d->recipe.normalise));
         return MP_OK;
     case 6:
         std::snprintf(out, out_bytes,
-                      "synthesise\t%s\tderive a channel nothing feeds, instead of silence",
+                      "synthesise\t%s\tderive a channel nothing feeds, instead of silence"
+                      "\tbool group=Recipe",
                       d->recipe.synthesise ? "1" : "0");
         return MP_OK;
     case 7:
-        std::snprintf(out, out_bytes, "matrix\t%s\texplicit coefficients, or auto",
+        std::snprintf(out, out_bytes, "matrix\t%s\texplicit coefficients, or auto"
+                                      "\ttext group=Recipe",
                       d->explicit_matrix.empty() ? "auto" : d->explicit_matrix.c_str());
         return MP_OK;
     case 8: {

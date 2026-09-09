@@ -94,6 +94,21 @@ public sealed partial class NowPlayingPage : Page
 
         Session.Current.Changed += ShowStatus;
         Session.Current.Tick += () => _ = RefreshPictureAsync();
+        // **A surface from an engine that is gone is a frozen frame.** When
+        // the connection drops the picture comes off and the generation is
+        // forgotten, so the engine that comes back -- restarted by the
+        // session, or by somebody -- is attached as the new picture it is.
+        Session.Current.ConnectionChanged += () =>
+        {
+            if (Session.Current.Connected)
+            {
+                return;
+            }
+            _picture.Detach(Picture);
+            CloseSurface();
+            string note = Session.Current.EngineNote;
+            PictureLine.Text = note.Length == 0 ? "The engine is not connected." : note;
+        };
         _smooth = DispatcherQueue.CreateTimer();
         _smooth.Interval = TimeSpan.FromMilliseconds(100);
         _smooth.Tick += (_, _) => Smooth();
@@ -297,6 +312,19 @@ public sealed partial class NowPlayingPage : Page
         {
             // Ours the moment it arrived, so ours to close even unused.
             CloseHandle((nint)handle);
+            // **The same picture, asked again what shape it is.** The
+            // presenter learns the coded size from the decoder's first frame
+            // -- 1608 rows in the container, 1606 in the bitstream's crop --
+            // and a box fitted to the container's number is a box two rows
+            // too tall, which the engine fills: a picture stretched by a row
+            // at each edge. Once a second is cheap and catches it.
+            uint width = _pictureWidth;
+            uint height = _pictureHeight;
+            await LearnShapeAsync();
+            if (width != _pictureWidth || height != _pictureHeight)
+            {
+                await TellSizeAsync();
+            }
             return;
         }
 
@@ -398,13 +426,21 @@ public sealed partial class NowPlayingPage : Page
             width = Math.Max(1u, (uint)Math.Round(_pictureWidth * fit));
             height = Math.Max(1u, (uint)Math.Round(_pictureHeight * fit));
         }
-        // **The visual is that box, centred**, in the host's own units. Placed
-        // before the message rather than after, so a resize the engine has not
-        // answered yet already shows the picture where it is going to be.
+        // **The visual is that box, centred on a whole physical pixel**, in
+        // the host's own units. The box is a whole number of pixels; the
+        // space around it may be odd, and half of an odd number is a visual
+        // sitting between two pixels -- which the compositor resamples, and
+        // which blended the top and bottom rows of the aspect-ratio patterns
+        // with the page behind them. The offset is rounded in physical pixels
+        // and converted back, and `SurfaceHost` asks the compositor to snap
+        // whatever is left. Placed before the message rather than after, so a
+        // resize the engine has not answered yet already shows the picture
+        // where it is going to be.
         double boxWidth = width / scale;
         double boxHeight = height / scale;
-        _picture.Place((Picture.ActualWidth - boxWidth) / 2.0,
-                       (Picture.ActualHeight - boxHeight) / 2.0, boxWidth, boxHeight);
+        double left = Math.Round((Picture.ActualWidth * scale - width) / 2.0) / scale;
+        double top = Math.Round((Picture.ActualHeight * scale - height) / 2.0) / scale;
+        _picture.Place(left, top, boxWidth, boxHeight);
         if (width == _toldWidth && height == _toldHeight)
         {
             return;

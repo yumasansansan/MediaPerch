@@ -3,6 +3,7 @@
 
 // The Windows head: everything the portable core is handed rather than knows.
 
+#include "mediaperch/log.hpp"
 #include "mediaperch/source.hpp"
 
 #include <mediaperch/module.h>
@@ -136,6 +137,19 @@ private:
 /// Where modules live: beside the executable, as in DragonPerch.
 [[nodiscard]] std::filesystem::path module_directory();
 
+/// **The log, as a file** -- the head's business, which log.hpp says it is.
+/// Every line the ring is given from now on is appended to `path` as it
+/// arrives, the file truncated first: a process that dies takes its ring with
+/// it, and "the engine went down" was undiagnosable for exactly that reason.
+[[nodiscard]] bool log_to_file(LogRing& log, const std::filesystem::path& path,
+                               std::string& why);
+
+/// **A crash, written down before the process goes.** An unhandled exception
+/// or a `std::terminate` appends its code and address and the ring's last
+/// lines to `path`, and says so on the error stream; the handler then lets
+/// the crash proceed. Installed once, for the process.
+void install_crash_report(LogRing& log, const std::filesystem::path& path);
+
 /// `fopen` for a UTF-8 path, which the narrow CRT cannot do.
 ///
 /// The narrow calls go through the process code page, so half the files on a
@@ -212,6 +226,8 @@ public:
     [[nodiscard]] const MpVideoDspVtbl* video_dsp(std::string_view id) const;
     /// Every loaded DSP module, for `--dsp list` and for a settings dialogue.
     [[nodiscard]] std::vector<const MpModuleDesc*> dsps() const;
+    /// Every loaded video stage module, for `--vdsp list`.
+    [[nodiscard]] std::vector<const MpModuleDesc*> video_dsps() const;
 
     struct DemuxChoice {
         const MpDemuxVtbl* vtbl = nullptr;

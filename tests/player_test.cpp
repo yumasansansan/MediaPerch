@@ -11,6 +11,8 @@
 #include "fake_dsp.hpp"
 #include "fake_host.hpp"
 
+#include "mediaperch/settings.hpp"
+
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
@@ -660,8 +662,12 @@ TEST_CASE("a measurement crosses as one, not as two English words",
     REQUIRE(rows.size() == 2);
     CHECK(rows[0].key == "amount");
     CHECK_FALSE(rows[0].read_only);
+    // The fourth field, read by the same reader: what the stage said it takes.
+    CHECK(rows[0].kind == mp::ipc::SettingKind::number);
+    CHECK(rows[0].hints == "min=0 step=0.5");
     CHECK(rows[1].key == "peak");
     CHECK(rows[1].read_only);
+    CHECK(rows[1].kind == mp::ipc::SettingKind::text);
 
     // And it survives the wire, which is the half a shell actually sees.
     mp::ipc::Writer w;
@@ -672,7 +678,47 @@ TEST_CASE("a measurement crosses as one, not as two English words",
     REQUIRE(r.complete());
     REQUIRE(back.size() == 2);
     CHECK_FALSE(back[0].read_only);
+    CHECK(back[0].kind == mp::ipc::SettingKind::number);
     CHECK(back[1].read_only);
+}
+
+TEST_CASE("the player's own rows say what kind of value they take", "[player]")
+{
+    // **One grammar for the player's rows and a module's.** A shell draws the
+    // player's settings from the same fields it draws a stage's from, so the
+    // rows here go through the same parser, and a typo in a spec here would
+    // be a text box rather than a build error -- which is why this reads them.
+    Host host;
+    mp::Player player{host};
+    const std::vector<mp::ipc::Setting> rows = player.settings();
+    const auto find = [&rows](const char* key) {
+        const auto it = std::find_if(rows.begin(), rows.end(), [&](const mp::ipc::Setting& s) {
+            return s.key == key;
+        });
+        REQUIRE(it != rows.end());
+        return *it;
+    };
+    CHECK(find("share").kind == mp::ipc::SettingKind::choice);
+    CHECK(find("share").choices == std::vector<std::string>{"exclusive", "shared"});
+    CHECK(find("path").choices ==
+          std::vector<std::string>{"bitexact", "exact", "auto", "processed"});
+    CHECK(find("dither").kind == mp::ipc::SettingKind::choice);
+    CHECK(find("gain").kind == mp::ipc::SettingKind::number);
+    CHECK(find("dither_seed").kind == mp::ipc::SettingKind::integer);
+    CHECK(find("wait_timeout").hints == "min=0 unit=ms");
+    CHECK(find("recover").kind == mp::ipc::SettingKind::toggle);
+    CHECK(find("recover_timeout").when == "recover=1");
+    CHECK(find("dsp").kind == mp::ipc::SettingKind::text);
+    // Every row has a group, so the dialog has no orphans at the top.
+    for (const mp::ipc::Setting& row : rows) {
+        INFO(row.key);
+        CHECK_FALSE(row.group.empty());
+    }
+    // And the node views carry the same rows, spec included.
+    const std::vector<mp::ipc::Setting> sink = player.node_settings("sink");
+    REQUIRE_FALSE(sink.empty());
+    CHECK(sink[0].key == "device");
+    CHECK(sink[0].group == "Output");
 }
 
 TEST_CASE("a display message with no picture to apply it to is still taken",
@@ -1472,4 +1518,174 @@ TEST_CASE("an engine can be shut down at any moment", "[player]")
         player.shutdown();
     }
     SUCCEED("it came back");
+}
+
+TEST_CASE("a presenter key set on the node is kept, written as a row, and said again",
+          "[player][video]")
+{
+    // **After a restart it was lanczos again.** A key set through the
+    // `presenter` node lived in the presenter that was open, which the next
+    // track and the next start both replaced; and `save` wrote rows the player
+    // held, none of which was this. Now the player holds it: the row is what
+    // the file gets, and a new player given that row says it at the first open.
+    mp::test::presenter_log().reset();
+    mp::test::decoder_log().reset();
+    {
+        const std::lock_guard lock{mp::test::decoder_log().mutex};
+        mp::test::decoder_log().frames = 1'000'000;
+    }
+    Host host;
+    host.add_silent("clip", 60'000);
+    host.pace_with([] { return std::make_unique<Endless>(); });
+
+    std::string why;
+    {
+        mp::Player player{host};
+        player.start();
+        player.play({"clip"});
+        REQUIRE(wait_for_state(player, mp::ipc::State::playing));
+        REQUIRE(wait_for([&] {
+            return mp::test::presenter_log().presented.load(std::memory_order_relaxed) > 2u;
+        }));
+
+        REQUIRE(player.set_node("presenter", "gamut", "clip", why));
+        CHECK(mp::test::presenter_log().setting("gamut") == "clip");
+        // The presenter's rows come with their kind, read on the loop's thread
+        // by the same reader a stage's rows go through.
+        const std::vector<mp::ipc::Setting> shown = player.node_settings("presenter");
+        REQUIRE_FALSE(shown.empty());
+        CHECK(shown[0].key == "size");
+        CHECK(shown[0].kind == mp::ipc::SettingKind::size);
+        CHECK(shown[0].group == "Picture");
+        REQUIRE(player.set_node("presenter", "gamut", "desaturate", why));
+        REQUIRE(player.set_node("presenter", "tonemap", "shader", why));
+        // The window's, and not kept.
+        REQUIRE(player.set_node("presenter", "size", "64x48", why));
+
+        std::string row;
+        for (const mp::ipc::Setting& setting : player.settings()) {
+            if (setting.key == "presenter") {
+                row = setting.value;
+            }
+        }
+        CHECK(row == "gamut=desaturate,tonemap=shader");
+
+        player.stop();
+        REQUIRE(wait_for_state(player, mp::ipc::State::stopped));
+        player.shutdown();
+    }
+
+    // The row through the settings file, which is what a restart reads.
+    mp::Settings file;
+    file.player.push_back(mp::PlayerSetting{"presenter", "gamut=desaturate,tonemap=shader", 0});
+    const mp::SettingsFile back = mp::read_settings(mp::write_settings(file), "test");
+    REQUIRE(back.settings.player.size() == 1u);
+    CHECK(back.settings.player[0].key == "presenter");
+    CHECK(back.settings.player[0].value == "gamut=desaturate,tonemap=shader");
+
+    // And a new player given the row says it before the first frame.
+    mp::test::presenter_log().reset();
+    mp::Player again{host};
+    again.start();
+    REQUIRE(again.set("presenter", back.settings.player[0].value, why));
+    CHECK_FALSE(again.set("presenter", "gamut", why));
+    again.play({"clip"});
+    REQUIRE(wait_for_state(again, mp::ipc::State::playing));
+    REQUIRE(wait_for([&] {
+        return mp::test::presenter_log().presented.load(std::memory_order_relaxed) > 0u;
+    }));
+    CHECK(mp::test::presenter_log().setting("gamut") == "desaturate");
+    CHECK(mp::test::presenter_log().setting("tonemap") == "shader");
+    again.stop();
+    REQUIRE(wait_for_state(again, mp::ipc::State::stopped));
+    again.shutdown();
+}
+
+TEST_CASE("the scaler is in the picture's chain by default, and a missing one is said once",
+          "[player][video]")
+{
+    // **`video_dsp` is `scale` unless somebody says otherwise** (§9.11): the
+    // resampling to the window is a stage, visible on the canvas and
+    // removable, and the presenter's own fetch is what is left when it is
+    // removed. A machine without the module plays, and the log says why the
+    // picture is softer -- once, at the open, rather than never.
+    mp::test::presenter_log().reset();
+    mp::test::decoder_log().reset();
+    mp::test::stage_log().reset();
+    {
+        const std::lock_guard lock{mp::test::decoder_log().mutex};
+        mp::test::decoder_log().frames = 1'000'000;
+    }
+    Host host;
+    host.add_silent("clip", 60'000);
+    host.pace_with([] { return std::make_unique<Endless>(); });
+    const auto has_edge = [](const mp::ipc::Graph& shape, const std::string& from,
+                             const std::string& to) {
+        return std::any_of(shape.edges.begin(), shape.edges.end(), [&](const mp::ipc::Edge& e) {
+            return e.from == from && e.to == to;
+        });
+    };
+    const auto node_of = [](const mp::ipc::Graph& shape, const std::string& id) {
+        return std::find_if(shape.nodes.begin(), shape.nodes.end(),
+                            [&](const mp::ipc::Node& n) { return n.id == id; });
+    };
+
+    SECTION("with the module, the node is there and the row says so")
+    {
+        host.add_video_dsp("vdsp_scale", &mp::test::fake_video_stage_vtbl());
+        mp::Player player{host};
+        std::string row;
+        for (const mp::ipc::Setting& setting : player.settings()) {
+            if (setting.key == "video_dsp") {
+                row = setting.value;
+            }
+        }
+        CHECK(row == "scale");
+        player.start();
+        player.play({"clip"});
+        REQUIRE(wait_for_state(player, mp::ipc::State::playing));
+        REQUIRE(wait_for([] {
+            const std::lock_guard lock{mp::test::presenter_log().mutex};
+            return mp::test::presenter_log().stages == 1u;
+        }));
+        const mp::ipc::Graph shape = player.graph();
+        const auto node = node_of(shape, "vdsp.0");
+        REQUIRE(node != shape.nodes.end());
+        CHECK(node->module == "vdsp_scale");
+        CHECK(has_edge(shape, "vsource", "vdsp.0"));
+        CHECK(has_edge(shape, "vdsp.0", "presenter"));
+        // Its rows are the stage's, kinds and all.
+        const std::vector<mp::ipc::Setting> rows = player.node_settings("vdsp.0");
+        REQUIRE_FALSE(rows.empty());
+        CHECK(rows[0].key == "amount");
+        CHECK(rows[0].kind == mp::ipc::SettingKind::number);
+        // And taken out, the picture is the presenter's own two nodes.
+        std::string why;
+        REQUIRE(player.set("video_dsp", "", why));
+        REQUIRE(wait_for([&] {
+            const mp::ipc::Graph after = player.graph();
+            return node_of(after, "vdsp.0") == after.nodes.end() &&
+                   has_edge(after, "vsource", "presenter");
+        }));
+        player.shutdown();
+    }
+    SECTION("without it, the picture plays and the log says which module is missing")
+    {
+        mp::Player player{host};
+        player.start();
+        player.play({"clip"});
+        REQUIRE(wait_for_state(player, mp::ipc::State::playing));
+        REQUIRE(wait_for([&] {
+            return mp::test::presenter_log().presented.load(std::memory_order_relaxed) > 0u;
+        }));
+        const mp::ipc::Graph shape = player.graph();
+        CHECK(node_of(shape, "vdsp.0") == shape.nodes.end());
+        CHECK(has_edge(shape, "vsource", "presenter"));
+        const std::vector<std::string> lines = host.lines();
+        CHECK(std::any_of(lines.begin(), lines.end(), [](const std::string& line) {
+            return line.find("vdsp_scale") != std::string::npos &&
+                   line.find("plays without it") != std::string::npos;
+        }));
+        player.shutdown();
+    }
 }

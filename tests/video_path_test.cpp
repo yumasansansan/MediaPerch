@@ -20,6 +20,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <condition_variable>
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -548,4 +550,139 @@ TEST_CASE("a resize reaches the presenter while the loop is turning", "[video][p
     CHECK(presenter_log().setting("size") == "native");
 
     path.stop();
+}
+
+namespace {
+
+/// A display that never comes round until it is cancelled: a loop stuck in
+/// `wait`, which is what a compositor that has stopped ticking looks like.
+class BlockedFrames final : public mp::IFrameClock {
+public:
+    bool wait() override
+    {
+        std::unique_lock lock{mutex_};
+        released_.wait(lock, [&] { return cancelled_; });
+        return false;
+    }
+    [[nodiscard]] std::uint64_t now() const override { return 0; }
+    [[nodiscard]] std::uint64_t rate() const override { return 10'000'000; }
+    void cancel() noexcept override
+    {
+        {
+            const std::lock_guard lock{mutex_};
+            cancelled_ = true;
+        }
+        released_.notify_all();
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable released_;
+    bool cancelled_ = false;
+};
+
+} // namespace
+
+TEST_CASE("a presenter setting is applied on the loop's thread, not the caller's",
+          "[video][path]")
+{
+    // **One graphics context, one thread.** A setting from this thread while
+    // the loop is presenting from another was two threads in the presenter;
+    // now it is a message the loop runs between two frames, and so is a read
+    // of the presenter's rows.
+    const Fresh fresh;
+    {
+        const std::lock_guard lock{decoder_log().mutex};
+        decoder_log().frames = 10'000;
+    }
+    mp::test::Host host;
+    Endless feed;
+
+    mp::VideoPath path;
+    std::string why;
+    REQUIRE(path.open(host, nullptr, feed, picture(64, 48), MP_CODEC_AV1, nullptr, 0, {},
+                      why));
+    SlowFrames frames;
+    REQUIRE(path.start(nullptr, frames, why));
+    REQUIRE(mp::test::wait_for([&] {
+        return presenter_log().presented.load(std::memory_order_relaxed) > 2u;
+    }));
+
+    REQUIRE(path.set_presenter("gamut", "clip", why));
+    CHECK(presenter_log().setting("gamut") == "clip");
+    CHECK(presenter_log().set_thread.load() == presenter_log().present_thread.load());
+    CHECK(presenter_log().set_thread.load() != std::this_thread::get_id());
+
+    const std::vector<std::string> rows = path.presenter_describe();
+    CHECK(!rows.empty());
+    CHECK(presenter_log().describe_thread.load() == presenter_log().present_thread.load());
+
+    // And the loop went on turning afterwards: a message is not a hold.
+    const std::uint64_t turns = path.loop().stats().turns;
+    REQUIRE(mp::test::wait_for([&] { return path.loop().stats().turns > turns + 2; }));
+    path.stop();
+}
+
+TEST_CASE("a loop that never comes round refuses within the deadline, and applies nothing",
+          "[video][path]")
+{
+    // A compositor that has stopped ticking is a loop inside `wait`, and a
+    // setting posted to it would wait for ever. It is refused instead, in the
+    // deadline it was given, and the presenter never sees it -- which is the
+    // whole point: the alternative was to apply it from this thread anyway.
+    const Fresh fresh;
+    mp::test::Host host;
+    Endless feed;
+
+    mp::VideoPath path;
+    std::string why;
+    REQUIRE(path.open(host, nullptr, feed, picture(64, 48), MP_CODEC_AV1, nullptr, 0, {},
+                      why));
+    BlockedFrames frames;
+    REQUIRE(path.start(nullptr, frames, why));
+
+    const auto started = std::chrono::steady_clock::now();
+    CHECK_FALSE(path.set_presenter("gamut", "clip", why, std::chrono::milliseconds{100}));
+    const auto took = std::chrono::steady_clock::now() - started;
+    CHECK(took < std::chrono::milliseconds{2000});
+    CHECK(why.find("did not come round") != std::string::npos);
+    CHECK(presenter_log().setting("gamut").empty());
+
+    // Stopping cancels the clock, the loop ends, and what it never ran is
+    // answered rather than left.
+    path.stop();
+    CHECK(path.ended());
+    // Not running any more: a setting now is applied inline, as before a start.
+    REQUIRE(path.set_presenter("gamut", "clip", why));
+    CHECK(presenter_log().setting("gamut") == "clip");
+}
+
+TEST_CASE("the shape is one copy, and the settings a person kept are said at every open",
+          "[video][path]")
+{
+    const Fresh fresh;
+    mp::test::Host host;
+    Endless feed;
+
+    mp::VideoPath path;
+    CHECK_FALSE(path.shape().opened);
+
+    mp::VideoPath::Config want;
+    want.presenter_settings = {{"gamut", "clip"}, {"tonemap", "shader"}};
+    std::string why;
+    REQUIRE(path.open(host, nullptr, feed, picture(64, 48), MP_CODEC_AV1, nullptr, 0, want,
+                      why));
+    const mp::VideoPath::Shape shape = path.shape();
+    CHECK(shape.opened);
+    CHECK(shape.decoder == path.modules().decoder);
+    CHECK(shape.presenter == path.modules().presenter);
+    CHECK(shape.stages.empty());
+    CHECK(presenter_log().setting("gamut") == "clip");
+    CHECK(presenter_log().setting("tonemap") == "shader");
+    CHECK(path.refused_settings().empty());
+    // Before `configure`, where the target is made from them.
+    {
+        const std::lock_guard lock{presenter_log().mutex};
+        CHECK(presenter_log().settings_before_configure >= 2u);
+    }
 }

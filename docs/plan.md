@@ -2995,7 +2995,7 @@ same week:
 - **`demux_mp4` truncated the 16.16 display size** rather than rounding it, losing the
   fraction an anamorphic track states. It rounds now.
 
-### 9.11 The resampler, where chroma sits, and what the gamut does
+### 9.11 The scaler as a stage, where chroma sits, and what the gamut does
 
 **Every frame is resampled at least once, so the filter is ours.** A 4:2:0 frame's chroma
 is half the luma's size on both axes and has to be brought to the luma grid before there is a
@@ -3005,8 +3005,11 @@ patterns arrived: a 4K checkerboard in a 1080p window was moiré the size of a t
 one-pixel rulers along the edge of a 2.39:1 field came and went with the phase and read as a
 picture that had been cropped, and text in anything larger than the window was smeared. Two
 taps cannot average a neighbourhood, and averaging the neighbourhood is what downscaling is.
+The first resampler lived in the presenter's own shader; the second round of patterns moved
+it into a stage, and the reasons are below.
 
-**The passes, in order**, in `video_d3d11.cpp`'s one shader string:
+**The passes, in order.** The first two and the last are `video_d3d11.cpp`'s one shader
+string; the third is somebody else's program.
 
 1. **Chroma across.** For a frame with subsampled chroma, the horizontal half of the
    reconstruction: the luma's width at the chroma's height, from the chroma plane or planes,
@@ -3019,39 +3022,87 @@ taps cannot average a neighbourhood, and averaging the neighbourhood is what dow
    vertical half from pass 1, the matrix, the transfer undone into linear light on the
    source's own primaries, fp32. **When the target is the source's size and no chain is in
    the path, this pass is the whole thing** — the roll-off, the gamut and the encoding run in
-   it and it lands in the target: one pass, as before.
-3. **Across, then down.** Otherwise the linear picture is resampled one axis at a time, in
-   linear light: output sample i of dst sits at (i + 0.5) · src / dst − 0.5 in source
-   samples, the kernel is centred there, **stretched by the downscale factor** so that every
-   source sample under an output sample is counted, its weights normalised so a flat field
-   stays flat at every phase, and the edge clamped. The intermediate is the target's width at
-   the source's height. fp32 throughout, because §9.10 says the arithmetic is single
-   precision until DXGI's fp16 at the end, and a half-precision intermediate would put the
-   dark end of a PQ picture into subnormals.
-4. **The second half.** Tone mapping, the gamut and the output encoding, from linear — the
-   same code that runs after a §9.8.3 chain, and the chain runs between 3 and 4 when there is
-   one.
+   it and it lands in the target: one pass, as before. Otherwise it stops at linear light in
+   an intermediate at the source's size.
+3. **The chain, at the source's size.** §9.8.3's stages run on that intermediate, and the
+   scaler is one of them: `vdsp_scale`, in the default chain (`video_dsp = scale`), resamples
+   the picture to the target one axis at a time — output sample i of dst sits at
+   (i + 0.5) · src / dst − 0.5 in source samples, the kernel is centred there, **stretched by
+   the downscale factor** so that every source sample under an output sample is counted, its
+   weights normalised so a flat field stays flat at every phase, and the edge clamped. An
+   axis at one to one is passed through, and a picture at the target's size already is
+   handed back untouched with no draw at all. How the stage knows the target is §9.8.3's
+   pre-fill: the presenter fills `configure`'s `out` with the size it would like and the
+   stage answers with what it will produce.
+4. **The finish pass.** Tone mapping, the gamut and the output encoding, from linear, drawn
+   over the whole target from whatever the chain produced. At the target's size that is an
+   exact fetch at every pixel's own texel; at any other size it is the sampler's bilinear,
+   which is what a chain with no scaler in it leaves — a softer picture rather than none, and
+   the `scale` row says which: *by the chain*, or *by the presenter's bilinear fetch*.
 
-**The kernels** (`kernels.hpp`), by the names `scaler` and `chroma` take:
+**The kernels** (`modules/shared/kernels/kernels.hpp`, one header and one HLSL text shared
+by the stage and the presenter's chroma passes so that the two compile one formula set), by
+the names `up`, `down` and `chroma` take:
 
-| name | taps at 1:1 | what it is |
-|---|---|---|
-| `lanczos` | 6 | three-lobe windowed sinc; **the default for both** |
-| `spline36` | 6 | the 36-support cubic spline, as ImageMagick and mpv spell it |
-| `catrom` | 4 | Catmull-Rom, B=0 C=1/2; interpolating |
-| `mitchell` | 4 | Mitchell-Netravali, B=C=1/3; **not** interpolating, blurs by design |
-| `bilinear` | 2 | the triangle: what the fetch was |
-| `box` | 1 | an area average when downscaling by an integer, nearest when upscaling |
+| name | taps at 1:1 | parameters | what it is |
+|---|---|---|---|
+| `lanczos` | 2 × lobes | `lobes` (3) | a windowed sinc; **the default for going up and for chroma**. Two lobes is softer, four sharper and ringier, and a thousand is a thousand |
+| `hermite` | 2 | — | the cubic Hermite interpolant, B=0 C=0: **no negative lobes, so it cannot ring; the default for going down** (and mpv's) |
+| `bicubic` | 4 | `b`, `c` (1/3, 1/3) | Mitchell and Netravali's two-parameter cubic, whatever B and C a person types |
+| `catrom` | 4 | — | B=0 C=1/2; interpolating |
+| `mitchell` | 4 | — | B=C=1/3; **not** interpolating, blurs by design |
+| `spline16`, `spline36`, `spline64` | 4, 6, 8 | — | the cubic splines, as ImageMagick and mpv spell them; less ringing than Lanczos at the same sharpness |
+| `bilinear` | 2 | — | the triangle: what the fetch was |
+| `box` | 1 | — | an area average when downscaling by an integer, nearest when upscaling |
 
 The weights are computed in the shader from the formulas, once per tap; a Lanczos weight is
 snapped to nought at the integers, where single-precision sin(π) is a hundred-millionth
-rather than zero, so that one to one is the identity to the last bit.
+rather than zero, so that one to one is the identity to the last bit. The stage's keys are
+`up`, `up_lobes`, `up_b`, `up_c`, the same four for `down`, `antiring`, `light`, `gamma`,
+`sigmoid_center`, `sigmoid_slope` and `sigmoid_range`, each with a fourth `describe` field
+that says what it takes and when it matters (§10); the presenter keeps `chroma`,
+`chroma_lobes`, `chroma_b` and `chroma_c`.
+
+**Ringing, and why down is not up.** The second round of the aspect-ratio pattern showed a
+dark halo either side of every one-pixel ruler, wider than the ruler. That is Lanczos: three
+lobes, two of them negative, stretched over a field by a factor of 2.09, put a negative
+weight on the line for every output sample within two stretched taps of it, and a field with
+nothing darker on it came out darker. Going down, the kernel is an averaging filter and a
+kernel with no negative lobes averages without overshoot; going up, the kernel is an
+interpolator and the sharpness the lobes buy is the point. So the two directions have two
+kernels, Hermite down and Lanczos up, and a person who wants Lanczos down gets it with
+`antiring` — libplacebo's rule: the result is pulled back inside the range of the source
+samples within one stretched tap of the output, by the fraction asked, 1 removing the halo
+entirely. `light` chooses what the passes average: linear (the default, and the right answer
+for a downscale — see below), a gamma curve, or mpv's sigmoid, an inverse logistic over
+`0..sigmoid_range` continued as a straight line outside it so that an HDR highlight at a
+hundred and twenty-five is neither clipped nor crushed.
+
+**No caps, and what a thousand lobes costs.** Every parameter is a number a person typed,
+and none is clamped: `up_lobes=1000` is accepted, read back and held to the reference like
+`3`. The `cost` row says what it costs — taps per output sample per axis, 2·⌈support ·
+max(src/dst, 1)⌉, and the passes the last frame took — and the help says the rest: a draw
+longer than the GPU's timeout resets the driver, which the presenter recovers from by
+rebuilding. That is the tree's rule about its user (§1), with denial of service as the one
+exception, and a driver reset a person asked for by name is not that.
+
+**Why "one resampling problem" was moot.** The first version of this section kept the scaler
+in the presenter because "the chroma reconstruction and the scale are one resampling
+problem — a stage that scaled a picture the presenter had already reconstructed would
+resample twice", and because the stage ABI could not say a size. Neither held. The
+reconstruction ran at the source's size and the scale after it, in two passes of their own;
+a stage between them resamples exactly once, as the presenter's own passes did, and costs the
+same two draws. And the ABI says a size now, by the pre-fill (§9.8.3), without a struct
+change. What the move bought is what a stage is for: a node a person can see, set every
+parameter of, take out, and replace with somebody else's — and a second implementation to
+hold the presenter's own fetch to.
 
 **In linear light, and why.** Downscaling averages, and what the eye averages when it looks
 at a 4K panel from across a room is light, not code values: the pixel-field pattern's squares
 are drawn at the checkerboard's *luminance* so that they vanish on a display that shows every
 pixel, and they vanish here too because the average is taken after the transfer is undone.
-Averaging PQ codes would have put them a stop dark.
+Averaging PQ codes would have put them a stop dark. `light=gamma` is there for a person who
+wants the other answer, and the test that holds it shows what it does to that checkerboard.
 
 **Where a chroma sample sits.** ISO/IEC 23091-2's `ChromaLocType`, six positions, of which
 type 0 — level with the left luma sample of each pair, halfway between the two rows — is what
@@ -3062,7 +3113,7 @@ carries it now (`MpVideoInfo::chroma_siting`, the type plus one, appended and gu
 `size`): `demux_mp4` reads HEVC's VUI, `demux_mkv` its ChromaSitingHorz and ChromaSitingVert,
 `codec_dav1d` the sequence header's `chroma_sample_position`, and `VideoGraph::reconcile`
 lets the decoder's statement carry like its size. `siting` is `auto` — the stream's, or type 0
-— or one of the six by name, and the row says which and whose.
+— or one of the six by name (`siting.hpp`), and the row says which and whose.
 
 **What the gamut does past BT.709.** After the roll-off a saturated BT.2020 colour has a
 component past 1 or below 0 in BT.709. Clipping each on its own is what the compositor did:
@@ -3085,7 +3136,7 @@ rolling it off from 4000 spends range on highlights that never come. The pattern
 folder for every combination, and `target` says which number won.
 
 **The cost, measured** on an Iris Xe, Media Foundation's software HEVC decoder, six seconds
-each, `node vsource`:
+each, `node vsource`, with the resampler still in the presenter:
 
 | picture | target | scaler / chroma | decoded | shown | dropped |
 |---|---|---|---|---|---|
@@ -3100,24 +3151,35 @@ each, `node vsource`:
 The chroma reconstruction was the whole cost, and making it separable took it away: the
 full-quality default now drops what the cheapest setting drops.
 
-**What it is not.** Not a §9.8.3 stage, although a stage was considered. The chroma
-reconstruction and the scale are one resampling problem — a stage that scaled a picture the
-presenter had already reconstructed would resample twice — and the stage ABI has no way to
-change a picture's size: `configure` states a layout, not a geometry. When it can, a scaler
-somebody else wrote can sit where passes 3 and 4 are; the presenter's stays the one the
-tests hold.
+**And with the stage**, the same file through `mediaperch-probe show`, ten seconds from the
+window opening, twice each: `scale` (hermite down) 44 and 38 dropped of about 563 decoded;
+`scale:down=lanczos` 42 and 49; the presenter's fallback alone 15 and 24. The stage runs the
+same two passes at the same sizes the presenter's own resampler ran, and hermite's six
+stretched taps are fewer than Lanczos's fourteen, so the twenty frames it costs over the
+fallback are not the taps; what they are is the next thing to profile, and until then a
+machine that drops frames at 4K59.94 has the fallback one node away, and `node vsource` says
+which it is on.
 
-**Looked at, not argued about.** `mediaperch-probe render --file F --frame N --size WxH --out
-X.ppm` draws one frame through the presenter off screen — no window, no device — reads it
-back in fp32, writes it as 8-bit sRGB, and prints the presenter's rows; `--set key=value`
-takes any of them (`scaler=box`, `gamut=clip`, `display=hdr=0`). It is how every claim in
-this section was checked against a picture, and `tests/scaler_test.cpp` is how the arithmetic
-is checked against references written from the formulas: one to one is the identity; a
-two-to-one checkerboard is a flat grey in linear light for every kernel; the real shader
-resamples as a double-precision reference does, up, down and one axis at a time; a chroma
-step lands where the siting says; a red past the gamut keeps its luminance and its
-gradation; the roll-off starts from the tighter peak; a texture larger than its picture is
-drawn cropped.
+**Looked at, not argued about.** `mediaperch-probe render --file F --frame N --size WxH
+--vdsp scale --out X.ppm` draws one frame through the presenter and the chain off screen —
+no window, no device — reads it back in fp32, writes it as 8-bit sRGB, and prints the
+presenter's rows and each stage's; `--set key=value` takes any of the presenter's
+(`chroma=catrom`, `gamut=clip`, `display=hdr=0`) and `--vdsp scale:down=lanczos,antiring=1`
+any of the stage's; `--vdsp list` says what is loaded and what each takes. It is how every
+claim in this section was checked against a picture. `tests/vdsp_scale_test.cpp` is how the
+stage's arithmetic is checked against references written from the formulas: with no size
+asked of it the stage is the identity and draws nothing; it answers the size the presenter
+asked for and the picture comes back at it; a two-to-one checkerboard is a flat grey for every
+kernel; the real shader resamples as a double-precision reference does, up, down and one axis
+at a time, for every kernel and for a thousand lobes; a one-pixel ruler on a field does not
+ring through hermite, does through lanczos, and does not once antiring is on; and the light
+changes the average and changes nothing at one to one. `tests/scaler_test.cpp` keeps what is
+the presenter's: one to one is the identity; a chain with no scaler at another size is the
+sampler's bilinear and the row says so; a chroma step lands where the siting says, by the
+kernel and its parameters; a red past the gamut keeps its luminance and its gradation; the
+roll-off starts from the tighter peak; a texture larger than its picture is drawn cropped.
+And `tests/video_d3d11_test.cpp` holds the pre-fill: a stage is asked for the target's size,
+and the row credits whoever answers it.
 
 ### 9.12 Dither for the picture: where it is quantised, and what is planned
 
@@ -4951,14 +5013,21 @@ with the tone mapping, after. A stage that wanted the *coded* signal — AV1 fil
 one that will — would make the position a choice, and that is an append for the day something
 needs it rather than an enumerator with nothing behind it (§4 made that mistake once).
 
-**And a stage may not change the picture's size.** §9.7.1 put the scaling in the first pass,
-beside the chroma reconstruction; a stage that resized afterwards would be a second scaler
-nobody asked for, so `configure_chain` refuses one with a sentence.
+**And a stage may change the picture's size, by being asked.** `configure`'s `out` arrives
+pre-filled with what the presenter would like to come out — the target's size — and a stage
+answers with what it will produce: a grade answers what it was given, a scaler answers what
+it was asked, and zeros ask for the identity. The next stage is told the answer, and what the
+last one says is what the presenter's finish pass draws from (§9.11): an exact fetch at the
+target's size, the sampler's bilinear at any other. No struct changed for this; the field was
+always there, and what changed is who fills it first. The earlier rule — that a stage may
+not resize, because §9.7.1 had put the scaling in the first pass — went when the scaler
+became a stage; `configure_chain` refuses a size of nothing and nothing else.
 
 #### `vdsp_lut`, and why a lookup table went first
 
 The three candidates this section named were film grain moved off dav1d, a lookup table and a
-scaler. The scaler is out because §9.7.1 decided where scaling happens. Film grain needs a
+scaler. The scaler was out then, because §9.7.1 had decided where scaling happens; it came second,
+once a stage could say a size (§9.11). Film grain needs a
 *second* ABI append to carry the grain parameters and only ever applies to two codecs. A cube
 LUT needs neither: every grading tool writes one, it works on any stream, and **it is the one
 colour transform that can be held to a number with no reference at all** — an identity table
@@ -5492,6 +5561,41 @@ parsed, and crosses as a boolean.
 Reading it once meant having one place to read it in, and there were three: the presenter's
 rows, a video stage's and an audio stage's, each with its own copy of the same eight lines.
 **The third copy is where a difference would have gone unnoticed.** They are one function now.
+
+**Typed rows, and why hints.** A box for everything was the second thing the settings page
+taught: a person choosing a kernel from ten names by typing one is a person guessing at the
+spelling, a switch drawn as a `1` is a switch nobody flips, and thirty keys in one column is a
+list nobody reads. So a `describe` row grew an optional fourth field —
+`key<tab>value<tab>help<tab>spec` — that says what kind of value the key takes:
+`enum:a,b,c`, `int`, `number`, `bool`, `text`, `size` or `path`, and after it hints:
+`group=`, so that a module with thirty keys is a dialog with five sections; `when=key=value`,
+so that Lanczos's lobes are shown while the kernel is Lanczos and the cubic's B and C while
+it is the cubic; `min=`, `max=`, `step=`, `unit=`, `pick=folder`. The wire's second version
+carries them beside `read_only` — a kind, the choices, the group, the condition and the rest
+of the hints — read once where the rows are parsed (`ipc::setting_from_row`), and the C#
+mirror is held to the C++ enum by a test that reads both files. **Hints, not rules.** A
+`min` is not a clamp and a choice is an editable drop-down: whatever a person types is sent,
+and the module says no in its own words. That is the tree's rule about its user, and a
+thousand-lobe Lanczos is the example of it.
+
+**The dialog.** The shell draws the rows as a `ContentDialog` over a dimmed page: the
+settable rows under their groups' headings, by their kind — a drop-down, a number field with
+the step and the unit and no minimum, a switch, a box, a box with *Browse* — and what the
+engine only reports under *Status*. OK applies what changed, in the rows' order, and stops at
+the first refusal with the engine's sentence under that row and everything before it already
+taken, which is the truth; then it writes the settings file, because a setting a person saw
+take effect is one they expect to find after a restart. Cancel sends nothing. The page's own
+commands — Refresh, the player's and the engine's settings, Save — sit bottom right with the
+primary one last and accented, where Fluent puts them; the engine's dialog says its rows are
+read at the next start and offers the restart.
+
+**The canvas is worked by wires.** A module from the palette dragged onto the canvas is
+appended to its chain, and dropped on a wire is put there; a wire dragged from a node's
+output socket onto another's input socket moves the removable one of the two so that the
+first flows into the second; a wire picked up at a stage's input and let go on nothing takes
+the stage out; a click selects, Delete removes, and the right button offers both. Every one
+of them ends as the same thing the first version's drag did: one `dsp` or `video_dsp` value,
+rewritten by the page and read back from the engine.
 
 #### The transport, and a coordinate that is missing
 
@@ -6218,6 +6322,72 @@ DXGI's fp16, which is thirty times finer than any panel) and what to do about it
 order it pays: an integer output at the link's depth first, blue-noise TPDF at that write,
 then the fp16 write as well.
 
+#### The test patterns, part three: the scaler as a stage, a shell that said the engine was down, and a band that was the compositor's
+
+Three more reports on the same pattern, `04-asp-2.39(3840x1606)`: severe ringing around the
+one-pixel rulers; the top and bottom edges still wrong — the field stopped short of the
+picture's edge and the page's background showed through it, while the rulers, being
+brighter, stuck out past it; and `scaler=spline36` set in the shell changed nothing and was
+`lanczos` again after a restart. Pressing *Set* on the settings page left the shell saying
+`mediaperchd` was down until the shell was restarted. And four requests: the scaler as a
+module, every parameter of every kernel settable with no cap, a settings page that is a
+dialog with OK and Cancel rather than a column of *Set* buttons, and node editing by dragging
+wires. Six causes, none of them the one reported.
+
+**The shell's kind table was swapped.** `Save = 17, Quit = 18` in the C# mirror, the other
+way round in `protocol.hpp`: *Save settings* quit the engine, and closing the window asked
+it to save and then killed it two seconds later. Nothing had ever been written to
+`settings.ini`, which is why every setting was back to its default after a restart, and why
+the shell said the engine was down — it was. A hand-written mirror needs a test that reads
+the mirror: `protocol_test` reads both files now and holds every enumerator of `Kind`,
+`NodeKind` and `SettingKind`, and the version, to one number, and `--check` reads every
+settings verb through to `Complete`.
+
+**A setting was applied on the wrong thread.** `set_stage`, `tell` and `presenter_describe`
+spun for the display loop to park and then called the module from the IPC thread, and `size`
+remade the target and its views under a loop that might be inside `present`: a data race
+with a name, and the instability that followed a *Set*. The loop has a job queue now
+(`DisplayLoop::post`), drained between two frames on the loop's own thread, and every
+setting, every `describe` and the surface handle go through it with a deadline; a loop that
+never comes round answers *the display loop did not come round in N ms; nothing was
+changed*. `hold` returns a serial and `parked` compares it, which closes the check-then-act
+the old flag had. And the daemon writes a log file and a crash report beside it, so that the
+next *it went down* has a sentence behind it.
+
+**A presenter setting lived in the presenter**, which is built again at every track and
+remembers nothing. The player keeps them now — the `presenter` row, `key=value,key=value` —
+says them again at every open before `configure`, and `save` writes them. The size and the
+display are not kept: those are the window's.
+
+**The ringing was Lanczos**, three lobes stretched over a field by 2.09, and the fix is
+§9.11: the scaler is a stage, `vdsp_scale`, in the default chain; Hermite down, Lanczos up,
+`antiring` for a person who wants Lanczos down, every kernel and every parameter with no
+cap, and a fourth `describe` field so that the shell draws a drop-down and shows the lobes
+only while the kernel is Lanczos. The presenter keeps a bilinear fetch for a chain with no
+scaler in it, so that taking the node out is a softer picture rather than none, and the
+`scale` row says who scaled.
+
+**The band was the compositor's.** `render` at the shell's box size draws the field to the
+picture's edge and the ruler in row 0 — the numbers are in the PPM — so the engine was
+right. The shell's visual sat at a fractional physical offset: the box is a whole number of
+pixels, the space around it may be odd, and half of an odd number is a visual between two
+pixels, which the compositor resamples by half a pixel and blends the outermost rows with
+the transparent page behind. The offset is rounded to a physical pixel now, the visual asks
+the compositor to snap what is left, and the page asks the picture its size once a second,
+because the container's 1608 rows become the bitstream's 1606 at the first frame.
+
+**The engine that dies is started again**, at most three times in a minute, by the shell that
+started it; a call that is not answered in five seconds drops the connection so that the tick
+notices and the title bar says so; the picture comes off when the connection does and is
+attached again as the new generation it is.
+
+**What was built.** The scaler stage and the shared kernels header; the presenter's chain at
+the source's size, the pre-fill, and the bilinear fallback; typed rows and the wire's second
+version, with every module's rows saying what they take; the loop's job queue, the persisted
+presenter settings, the daemon's log and crash report; `--vdsp` for `render` and `show`; the
+dialog, the footer, the sockets, the wires, the palette's drag, the auto-restart and the
+bounded call; the snapped visual. 511 test cases pass.
+
 #### Built, and the palette needed a fourth verb
 
 `graph`, `node_settings` / `node_setting_set` and `modules` are on the wire, and
@@ -6830,6 +7000,29 @@ real time.
   with a 128-period ring the decoder is up to three quarters of a second ahead, which against
   a short track is the next track. Only the queue can answer, because it records boundaries on
   the way past; it does, as `index_at` and `start_at`, and `status` carries `item_position`.
+- **A hand-written mirror needs a test that reads the mirror.** Two descriptions of one wire
+  are a cost taken on purpose; what makes them bearable is a test that reads the second
+  description against the first. Two enumerators the other way round in the shell's copy
+  quit the engine when a person pressed *Save*, and nothing but a person pressing it would
+  have found that.
+- **A setting applied on the IPC thread is a data race with a name.** Spinning for a render
+  loop to park and then calling into the module from another thread is a check-then-act
+  whichever way the flag is spelled; the module's state belongs to one thread, and the way to
+  set it from another is a job that thread runs between two frames, with a deadline and an
+  answer when the deadline passes.
+- **A composition surface at a fractional offset is resampled**, and its outermost rows are
+  blended with whatever is behind it. Centring a whole-pixel box in a space that may be an
+  odd number of pixels wide puts it half a pixel off; round the offset in physical pixels
+  and ask the compositor to snap, or the edge of every picture is the page's background.
+- **Two taps are not a filter was the first lesson; negative lobes on a line pattern is the
+  next.** A kernel that is right for going up — an interpolator, sharp because of its lobes
+  — is a kernel that rings when stretched over a field for going down, where the job is an
+  average. The two directions want two kernels, and a person who wants the ringing one gets
+  it with the antiringing clamp beside it.
+- **A rule that said "the ABI cannot" was a rule about the host, not the ABI.** The stage ABI
+  could not say a size only because the host filled `out` with nothing; a pre-fill is a
+  contract, not a field, and it arrived without a struct change. Check what the caller
+  passes before adding to what the callee declares.
 
 ---
 
@@ -6838,7 +7031,7 @@ real time.
 | Risk | Mitigation |
 |---|---|
 | Driver-specific exclusive-mode behaviour that no amount of reading predicts | the device matrix in §12, and treat every negotiation failure as a first-class outcome rather than an assertion |
-| The module ABI ossifies too early and every change becomes a break | `size`-prefixed structs (§4.2) and a v1 that is deliberately small. Do not add an interface until the second implementation of it exists |
+| The module ABI ossifies too early and every change becomes a break | `size`-prefixed structs (§4.2) and a v1 that is deliberately small. Do not add an interface until the second implementation of it exists. **The second implementation of a size-changing video stage arrived** (`vdsp_scale`, §9.11) and the ABI took it without a struct change: the pre-fill contract on `configure`'s `out` (§9.8.3) |
 | Memory-safety bugs in parsers | ~~now that Rust is not doing that job~~ — it is, for the three parsers this tree still writes; see §2's *When to revisit*. The rest of the mitigation stands and does the heavier lifting, because most parsing bytes are somebody else's library: libFuzzer on every parser from M2, ASan/UBSan in CI, `/GS` and `/guard:cf` in release, and `demux_ffmpeg` out of process. **That last one is done, by a route the plan did not name**: the module drives the `ffmpeg` command line rather than linking libavformat, so FFmpeg's parsing surface is already in a process that can die without taking the audio with it, and `mp_host_ffmpeg.exe` (§4) is a thing to build only if a module ever needs to be linked in |
 | The video half quietly becomes the whole project | audio is complete and shippable at M5. Video is M6 onward and is allowed to be late |
 | FFmpeg's licence and binary size make it awkward to ship | it is a module, so ship it separately. The base install still plays music without it -- nine demuxers and eight codecs of this tree's own -- and will play video without it too, because §9.8 puts hardware decode on an `IMFTransform` rather than on anything FFmpeg links |

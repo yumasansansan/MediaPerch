@@ -16,6 +16,8 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <future>
+
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -761,4 +763,112 @@ TEST_CASE("the video engine's own clock counts, pauses and re-anchors like a dev
     followed.configure(filled);
     followed.observe(reading);
     CHECK(followed.audible_frames(counter.now()) == Catch::Approx(5010.0));
+}
+
+TEST_CASE("a job posted to the loop runs on the loop's own thread, between turns",
+          "[display]")
+{
+    // **A setting is a message to the thread that owns the presenter.** The
+    // job is queued from this thread and run by whichever thread takes the
+    // next turn, before that turn decides anything.
+    Standing standing;
+    Dial dial;
+    CountedFrames frames{6, k_tick_rate};
+    mp::DisplayLoop loop{standing.graph, dial, frames};
+    dial.set(48000, k_tick_rate);
+
+    std::thread::id ran_on{};
+    std::uint64_t turns_when_run = 99;
+    std::future<bool> done = loop.post([&] {
+        ran_on = std::this_thread::get_id();
+        turns_when_run = loop.stats().turns;
+    });
+    CHECK(done.wait_for(std::chrono::milliseconds{0}) == std::future_status::timeout);
+
+    std::thread::id turner_id{};
+    bool turned = false;
+    std::thread turner{[&] {
+        turner_id = std::this_thread::get_id();
+        mp::DisplayStep step;
+        turned = loop.once(step);
+    }};
+    turner.join();
+    REQUIRE(turned);
+    REQUIRE(done.wait_for(std::chrono::milliseconds{0}) == std::future_status::ready);
+    CHECK(done.get());
+    CHECK(ran_on == turner_id);
+    CHECK(ran_on != std::this_thread::get_id());
+    // Before the turn was counted, which is before anything was decided.
+    CHECK(turns_when_run == 0u);
+}
+
+TEST_CASE("a job posted to a loop that has stopped is answered false, and never run",
+          "[display]")
+{
+    Standing standing;
+    Dial dial;
+    CountedFrames frames{1, k_tick_rate};
+    mp::DisplayLoop loop{standing.graph, dial, frames};
+    dial.set(48000, k_tick_rate);
+
+    mp::DisplayStep step;
+    REQUIRE(loop.once(step));
+    // The clock has run out: the next turn says stop, and a job queued before
+    // it is answered false rather than run against a loop that is ending.
+    bool ran = false;
+    std::future<bool> before = loop.post([&] { ran = true; });
+    REQUIRE_FALSE(loop.once(step));
+    REQUIRE(before.wait_for(std::chrono::milliseconds{0}) == std::future_status::ready);
+    CHECK_FALSE(before.get());
+    CHECK_FALSE(ran);
+    // And one posted after the end is answered at once.
+    std::future<bool> after = loop.post([&] { ran = true; });
+    REQUIRE(after.wait_for(std::chrono::milliseconds{0}) == std::future_status::ready);
+    CHECK_FALSE(after.get());
+    CHECK_FALSE(ran);
+}
+
+TEST_CASE("a hold is answered for its own serial, and counted", "[display][avsync]")
+{
+    // **The two instructions.** With one flag, a holder that arrived between
+    // the loop reading the flag and writing the answer read the *previous*
+    // hold's acknowledgement as its own and moved the file under a turn that
+    // was deciding. A serial is the answer to one request and no other, and a
+    // count keeps two holders from letting go of each other's hold.
+    Standing standing;
+    Dial dial;
+    CountedFrames frames{12, k_tick_rate};
+    mp::DisplayLoop loop{standing.graph, dial, frames};
+    dial.set(48000, k_tick_rate);
+
+    mp::DisplayStep step;
+    REQUIRE(loop.once(step));
+
+    const std::uint64_t first = loop.hold();
+    CHECK_FALSE(loop.parked(first));
+    REQUIRE(loop.once(step));
+    CHECK(loop.parked(first));
+    CHECK(loop.parked());
+    loop.release();
+
+    // Not yet acknowledged: the loop has not turned since this hold, whatever
+    // it said about the last one.
+    const std::uint64_t second = loop.hold();
+    CHECK_FALSE(loop.parked(second));
+    CHECK_FALSE(loop.parked());
+    REQUIRE(loop.once(step));
+    CHECK(loop.parked(second));
+
+    // A second holder, and the first letting go, leave the loop parked.
+    const std::uint64_t third = loop.hold();
+    REQUIRE(loop.once(step));
+    CHECK(loop.parked(third));
+    loop.release();
+    REQUIRE(loop.once(step));
+    CHECK(loop.parked());
+    CHECK(step.step == mp::VideoGraph::Step::repeated);
+    loop.release();
+    REQUIRE(loop.once(step));
+    CHECK_FALSE(loop.parked());
+    CHECK(step.had_clock);
 }

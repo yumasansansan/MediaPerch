@@ -30,4 +30,5 @@ target_include_directories(mp_video_d3d11 PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 # dcomp for one entry point: DCompositionCreateSurfaceHandle, which is a free
 # function and needs no composition device. §9.7.1 chose this shape precisely so
 # that the engine links that and builds no visual tree.
-target_link_libraries(mp_video_d3d11 PRIVATE d3d11 dxgi d3dcompiler user32 d2d1 dxguid dcomp)
+target_link_libraries(mp_video_d3d11
+    PRIVATE mediaperch_kernels d3d11 dxgi d3dcompiler user32 d2d1 dxguid dcomp)

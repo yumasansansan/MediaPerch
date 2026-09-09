@@ -16,7 +16,8 @@ namespace MediaPerch.Shell.Ipc;
 public static class Protocol
 {
     public const uint Magic = 0x5049504Du;
-    public const ushort Version = 1;
+    // 2: a settings row carries its kind, choices, group, `when` and hints.
+    public const ushort Version = 2;
     public const uint MaxPayload = 1u << 20;
     public const int HeaderBytes = 16;
 
@@ -47,8 +48,12 @@ public enum Kind : ushort
     SettingSet = 14,
     Log = 15,
     Subscribe = 16,
-    Save = 17,
-    Quit = 18,
+    // **Mirrored from protocol.hpp, and held to it by a test** -- the C++ enum
+    // is the one description and tests/protocol_test.cpp reads this file
+    // against it. These two were once the other way round here, and "Save
+    // settings" quit the engine while closing the window asked it to save.
+    Quit = 17,
+    Save = 18,
     Calibrate = 19,
     Profile = 20,
     Display = 21,
@@ -123,6 +128,28 @@ public sealed class Graph
     public List<Edge> Edges { get; } = new();
 }
 
+/// <summary>
+/// What kind of value a settings row takes -- <c>SettingKind</c> in
+/// protocol.hpp, and held to it by the same test that holds <c>Kind</c>.
+/// </summary>
+/// <remarks>
+/// <b>Advice about drawing, not a rule about values.</b> The engine validates
+/// and this shell does not: a choice is an editable drop-down, a number field
+/// has no minimum and no maximum, and whatever was typed is sent. What the
+/// kind decides is which control to draw, which is the one decision a shell
+/// cannot make from the text.
+/// </remarks>
+public enum SettingKind : uint
+{
+    Text = 0,
+    Choice = 1,
+    Integer = 2,
+    Number = 3,
+    Toggle = 4,
+    Size = 5,
+    Path = 6,
+}
+
 /// <summary>One row of a module's own settings.</summary>
 /// <param name="ReadOnly">
 /// A measurement rather than a setting -- a peak, a cost, a latency, a handle.
@@ -130,8 +157,35 @@ public sealed class Graph
 /// <c>describe</c> ends such a row with; a shell that decided by looking for
 /// those two words would be parsing English over a wire.
 /// </param>
+/// <param name="Kind">What the value is, so a control can be chosen.</param>
+/// <param name="Choices">The words a <see cref="SettingKind.Choice"/> offers.</param>
+/// <param name="Group">The heading the row sits under; empty is the top.</param>
+/// <param name="When">
+/// <c>key=value[,value...]</c>: the row matters only while the named row has
+/// one of those values, and is folded away otherwise. Empty is always.
+/// </param>
+/// <param name="Hints">
+/// <c>word=value</c> pairs separated by spaces -- <c>min=</c>, <c>max=</c>,
+/// <c>step=</c>, <c>unit=</c>, <c>pick=folder</c> -- as the module wrote them.
+/// </param>
 public sealed record Setting(string Key, string Value, string Description,
-                               bool ReadOnly);
+                               bool ReadOnly, SettingKind Kind, List<string> Choices,
+                               string Group, string When, string Hints)
+{
+    /// <summary>One hint's value, or null when the module did not give it.</summary>
+    public string? Hint(string name)
+    {
+        foreach (string word in Hints.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        {
+            int equals = word.IndexOf('=');
+            if (equals > 0 && word.AsSpan(0, equals).SequenceEqual(name))
+            {
+                return word[(equals + 1)..];
+            }
+        }
+        return null;
+    }
+}
 
 public sealed record ModuleRow(uint Kind, string Id, string Name, uint Priority,
                                  bool Allowed);
@@ -228,7 +282,21 @@ public static class Decode
         }
         for (uint i = 0; i < n; ++i)
         {
-            out_.Add(new Setting(r.Str(), r.Str(), r.Str(), r.U8() != 0));
+            string key = r.Str();
+            string value = r.Str();
+            string description = r.Str();
+            bool readOnly = r.U8() != 0;
+            uint kind = r.U32();
+            List<string> choices = ReadStrings(r);
+            string group = r.Str();
+            string when = r.Str();
+            string hints = r.Str();
+            // A kind from a newer engine is a box, which is what every row was
+            // drawn as before there were kinds.
+            out_.Add(new Setting(key, value, description, readOnly,
+                                 kind <= (uint)SettingKind.Path ? (SettingKind)kind
+                                                                : SettingKind.Text,
+                                 choices, group, when, hints));
         }
         return out_;
     }

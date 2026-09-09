@@ -58,4 +58,53 @@ internal static class FilePicking
         Ipc.Session.Log($"picker: {paths.Count} file(s) chosen");
         return paths;
     }
+
+    /// <summary>One file, for a setting that names one; null when nothing was chosen.</summary>
+    public static async Task<string?> PickOneAsync()
+    {
+        if (App.Window is null)
+        {
+            return null;
+        }
+        try
+        {
+            var picker = new FileOpenPicker(App.Window.AppWindow.Id)
+            {
+                SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
+                SettingsIdentifier = "mediaperch-setting-file",
+            };
+            picker.FileTypeFilter.Add("*");
+            var picked = await picker.PickSingleFileAsync();
+            return picked is null || string.IsNullOrEmpty(picked.Path) ? null : picked.Path;
+        }
+        catch (Exception e)
+        {
+            Ipc.Session.Log("picker: failed: " + e);
+            return null;
+        }
+    }
+
+    /// <summary>A folder, for a setting that names one -- the modules directory.</summary>
+    public static async Task<string?> PickFolderAsync()
+    {
+        if (App.Window is null)
+        {
+            return null;
+        }
+        try
+        {
+            var picker = new FolderPicker(App.Window.AppWindow.Id)
+            {
+                SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
+                SettingsIdentifier = "mediaperch-setting-folder",
+            };
+            var picked = await picker.PickSingleFolderAsync();
+            return picked is null || string.IsNullOrEmpty(picked.Path) ? null : picked.Path;
+        }
+        catch (Exception e)
+        {
+            Ipc.Session.Log("picker: failed: " + e);
+            return null;
+        }
+    }
 }

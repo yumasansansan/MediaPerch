@@ -138,7 +138,21 @@ struct PlayerConfig {
     /// presenter. **A separate list because it is a separate chain**: they are
     /// not alternatives and a stage cannot move between them -- one takes an
     /// f64 bus of samples and the other takes a texture.
-    std::vector<std::string> video_dsp;
+    ///
+    /// **`scale` by default** (§9.11): the picture's resampling to the window
+    /// is a stage, so that it is a node a person can see, set every parameter
+    /// of, and take out -- and what is left when it is taken out is the
+    /// presenter's own bilinear fetch, softer rather than absent. A machine
+    /// without the module plays, and the log says why the picture is softer.
+    std::vector<std::string> video_dsp{"scale"};
+    /// **What a person set on the presenter**, as `key=value` pairs in the
+    /// order they were said. The presenter is built again at every track
+    /// boundary and remembers nothing, so a key set through the `presenter`
+    /// node is kept here, said again at every open, and written by `save` as
+    /// the `presenter` row. Not its size and not its display: those are the
+    /// window's, and a saved one would be replayed about a window that is
+    /// gone.
+    std::vector<std::pair<std::string, std::string>> presenter;
     bool recover = true;
     unsigned recover_timeout = 30;
 };

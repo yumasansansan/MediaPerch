@@ -175,6 +175,9 @@ struct Options {
     /// `name` or `name:key=value,key=value`, in the order given, which is the
     /// order they run in.
     std::vector<std::string> dsp;
+    /// The same for the picture's chain (§9.8.3): `show` hands them to the
+    /// path and `render` opens them on its presenter.
+    std::vector<std::string> vdsp;
     /// `decode` only: the block the chain is handed, standing in for the period
     /// a device would have named. A setting because the answer must not depend
     /// on it -- two runs at different blocks that hash differently mean a stage
@@ -303,10 +306,16 @@ void usage()
               named, because nothing here resamples or remixes on its own.
   render      draw one frame of a file through the presenter, off screen, at
               the size a window would ask for, and write it as an 8-bit sRGB
-              PPM: --file, --frame N, --size WxH (or native), --out PATH, and
-              --set key=value for any presenter setting (scaler=box,
-              gamut=clip, display=hdr=0). Prints the presenter's rows. No
-              device and no window: what a test pattern is checked with.
+              PPM: --file, --frame N, --size WxH (or native), --out PATH,
+              --set key=value for any presenter setting (chroma=catrom,
+              gamut=clip, display=hdr=0), and --vdsp NAME[:key=value,...] for
+              the picture's chain (--vdsp scale:down=lanczos,antiring=1).
+              Prints the presenter's rows and each stage's. No device and no
+              window: what a test pattern is checked with.
+              --vdsp list says which video stages are loaded and what each
+              takes; without --vdsp the picture reaches the target through
+              the presenter's own bilinear fetch, which is what a chain with
+              no scaler in it leaves.
   calibrate   measure what this machine needs to play these files, and write it
               down. Plays each file, in windows, at one ring size after another.
               TAKES THE ENDPOINT, at real speed, for as long as the windows add
@@ -665,6 +674,12 @@ bool parse(int argc, char** argv, Options& out)
                 return false;
             }
             out.dsp.emplace_back(argv[++i]);
+        } else if (arg == "--vdsp") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "--vdsp takes a video stage name, or `list`\n");
+                return false;
+            }
+            out.vdsp.emplace_back(argv[++i]);
         } else if (arg == "--dither" && i + 1 < argc &&
                    std::string_view{argv[i + 1]} == "list") {
             list_algorithms();
@@ -1433,6 +1448,130 @@ bool add_dsp_stage(const mp::win::ModuleRegistry& registry, const std::string& s
     return true;
 }
 
+/// `name` or `name:key=value,...` for a video stage, opened on a presenter's
+/// device and told its settings -- `VideoPath::open_stages`'s rules, for a
+/// presenter that is not in a path.
+bool add_video_stage(const mp::win::ModuleRegistry& registry, const std::string& spec,
+                     const MpGraphicsDevice* device,
+                     std::vector<std::unique_ptr<mp::VideoStage>>& chain, std::string& why)
+{
+    const std::size_t colon = spec.find(':');
+    std::string id = spec.substr(0, colon);
+    if (id.rfind("vdsp_", 0) != 0) {
+        id = "vdsp_" + id;
+    }
+    const MpVideoDspVtbl* vtbl = registry.video_dsp(id);
+    if (vtbl == nullptr) {
+        why = "no video stage module called " + id + " is loaded; `--vdsp list` says which are";
+        return false;
+    }
+    auto stage = std::make_unique<mp::VideoStage>();
+    if (stage->open(*vtbl, device) != MP_OK) {
+        why = id + " would not open on the presenter's device";
+        return false;
+    }
+    if (colon != std::string::npos) {
+        for (std::size_t at = colon + 1; at <= spec.size();) {
+            const std::size_t comma = std::min(spec.find(',', at), spec.size());
+            const std::string setting = spec.substr(at, comma - at);
+            at = comma + 1;
+            if (setting.empty()) {
+                continue;
+            }
+            const std::size_t equals = setting.find('=');
+            if (equals == std::string::npos) {
+                why = id + ": `" + setting + "` is not key=value";
+                return false;
+            }
+            if (stage->set(setting.substr(0, equals).c_str(),
+                           setting.substr(equals + 1).c_str()) != MP_OK) {
+                why = id + " would not take `" + setting + "`; `--vdsp list` says what it takes";
+                return false;
+            }
+        }
+    }
+    chain.push_back(std::move(stage));
+    return true;
+}
+
+/// A stage's rows, printed the way `list_dsp_modules` prints an audio
+/// stage's: key, current, and the module's own words.
+void print_stage_rows(mp::VideoStage& stage, const char* indent)
+{
+    for (std::uint32_t row = 0;; ++row) {
+        char line[512];
+        if (stage.describe(row, line, sizeof line) != MP_OK) {
+            break;
+        }
+        const std::string text{line};
+        const std::size_t first = text.find('\t');
+        const std::size_t second = first == std::string::npos ? first : text.find('\t', first + 1);
+        if (first == std::string::npos || second == std::string::npos) {
+            std::printf("%s%s\n", indent, text.c_str());
+            continue;
+        }
+        const std::size_t third = text.find('\t', second + 1);
+        std::printf("%s%-14s %-24s %s\n", indent, text.substr(0, first).c_str(),
+                    text.substr(first + 1, second - first - 1).c_str(),
+                    text.substr(second + 1, third == std::string::npos ? std::string::npos
+                                                                       : third - second - 1)
+                        .c_str());
+    }
+}
+
+/// `--vdsp list`: every video stage that is loaded, and every knob it has.
+///
+/// A stage opens on a presenter's device (§9.8.1), so one is opened off
+/// screen, on WARP, with a picture of nothing in particular, to ask them.
+int list_video_dsp_modules(const mp::win::ModuleRegistry& registry)
+{
+    const auto found = registry.video_dsps();
+    if (found.empty()) {
+        std::printf("no video stage modules beside the executable\n");
+        return 1;
+    }
+    const MpModuleDesc* presenter_desc = nullptr;
+    const MpVideoVtbl* presenter_vtbl = registry.video({}, &presenter_desc);
+    mp::Presenter presenter;
+    MpGraphicsDevice device{};
+    bool have_device = false;
+    if (presenter_vtbl != nullptr && presenter.open(*presenter_vtbl, nullptr) == MP_OK &&
+        presenter.set("device", "warp") == MP_OK) {
+        MpVideoInfo picture{};
+        picture.size = sizeof(picture);
+        picture.width = 16;
+        picture.height = 16;
+        picture.display_width = 16;
+        picture.display_height = 16;
+        picture.primaries = 1;
+        picture.transfer = 13;
+        picture.matrix = 1;
+        picture.timescale = 24000;
+        have_device = presenter.configure(picture) == MP_OK &&
+                      presenter.get_device(device) == MP_OK;
+    }
+    for (const MpModuleDesc* desc : found) {
+        std::printf("%-16s %s\n", desc->id, desc->name);
+        const MpVideoDspVtbl* vtbl = registry.video_dsp(desc->id);
+        if (vtbl == nullptr) {
+            std::printf("    (this module does not offer a stage this host can use)\n\n");
+            continue;
+        }
+        mp::VideoStage stage;
+        if (stage.open(*vtbl, have_device ? &device : nullptr) != MP_OK) {
+            std::printf("    (it would not open%s)\n\n",
+                        have_device ? "" : "; there is no presenter device to open it on");
+            continue;
+        }
+        print_stage_rows(stage, "    ");
+        std::printf("\n");
+    }
+    std::printf("--vdsp NAME, or --vdsp NAME:key=value,key=value. Repeat it for a chain;\n"
+                "they run in the order given, in linear light, before the picture reaches\n"
+                "the display. `scale` is what the engine puts there by default.\n");
+    return 0;
+}
+
 /// `--dsp list`: every stage that is loaded, and every knob it has.
 int list_dsp_modules(const mp::win::ModuleRegistry& registry)
 {
@@ -1848,6 +1987,7 @@ int render(const mp::win::ModuleRegistry& registry, const Options& options)
     bool configured = false;
     bool presented = false;
     std::uint64_t index = 0;
+    std::vector<std::unique_ptr<mp::VideoStage>> stages;
     const auto take = [&](const MpVideoFrame& frame) -> int {
         if (!configured) {
             MpVideoInfo said{};
@@ -1884,6 +2024,30 @@ int render(const mp::win::ModuleRegistry& registry, const Options& options)
                 return 1;
             }
             configured = true;
+            // **The chain, after `configure`**, because a stage opens on the
+            // presenter's device and there is none until then -- the order
+            // `VideoPath::open` keeps.
+            if (!options.vdsp.empty()) {
+                MpGraphicsDevice device{};
+                const bool have_device = presenter.get_device(device) == MP_OK;
+                std::string why;
+                for (const std::string& spec : options.vdsp) {
+                    if (!add_video_stage(registry, spec, have_device ? &device : nullptr, stages,
+                                         why)) {
+                        std::fprintf(stderr, "%s\n", why.c_str());
+                        return 1;
+                    }
+                }
+                std::vector<MpVideoStage> handed;
+                for (const auto& stage : stages) {
+                    handed.push_back(stage->handed());
+                }
+                if (presenter.stages(handed.data(), static_cast<std::uint32_t>(handed.size())) !=
+                    MP_OK) {
+                    std::fprintf(stderr, "the presenter would not take the chain\n");
+                    return 1;
+                }
+            }
         }
         if (index++ != options.frame_index) {
             return 0;
@@ -2011,6 +2175,12 @@ int render(const mp::win::ModuleRegistry& registry, const Options& options)
                     line.substr(first + 1, second == std::string::npos ? std::string::npos
                                                                        : second - first - 1)
                         .c_str());
+    }
+    // And each stage's, under its node's name: what it was asked, what it
+    // answered, and what that cost.
+    for (std::size_t i = 0; i < stages.size(); ++i) {
+        std::printf("vdsp.%zu\n", i);
+        print_stage_rows(*stages[i], "  ");
     }
 
     if (options.out_path.empty()) {
@@ -2163,6 +2333,7 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
     (void)demux.stream_config(video_stream, config);
     mp::VideoPath::Config want;
     want.decoder_threads = options.decoder_threads;
+    want.stages = options.vdsp;
     // **The window's client area, because §9.7.1 decided the scale is ours.**
     // The engine renders at the size it is told and the sampling that does it
     // is the same fetch that reconstructs chroma; the window is the only thing
@@ -4128,6 +4299,11 @@ int main(int argc, char** argv)
     for (const std::string& spec : options.dsp) {
         if (spec == "list") {
             return list_dsp_modules(registry);
+        }
+    }
+    for (const std::string& spec : options.vdsp) {
+        if (spec == "list") {
+            return list_video_dsp_modules(registry);
         }
     }
 

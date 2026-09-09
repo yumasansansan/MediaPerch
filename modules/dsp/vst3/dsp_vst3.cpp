@@ -316,21 +316,23 @@ try {
     }
     switch (index) {
     case 0:
-        std::snprintf(out, out_bytes, "file\t%s\tthe .vst3 to load, a DLL or a bundle",
+        std::snprintf(out, out_bytes, "file\t%s\tthe .vst3 to load, a DLL or a bundle\tpath",
                       d->path.empty() ? "none" : d->path.c_str());
         return MP_OK;
     case 1:
         std::snprintf(out, out_bytes,
-                      "class\t%s\twhich audio effect in it: an index, or part of a name",
+                      "class\t%s\twhich audio effect in it: an index, or part of a name\ttext",
                       d->which.empty() ? "(first)" : d->which.c_str());
         return MP_OK;
     case 2:
-        std::snprintf(out, out_bytes, "state\t%s\ta file of plugin state, as setState takes it",
+        std::snprintf(out, out_bytes, "state\t%s\ta file of plugin state, as setState takes it"
+                                      "\tpath",
                       d->state_path.empty() ? "none" : d->state_path.c_str());
         return MP_OK;
     case 3:
         std::snprintf(out, out_bytes,
-                      "param\t(append)\tone knob, as name=value or id=value, normalised 0 to 1");
+                      "param\t(append)\tone knob, as name=value or id=value, normalised 0 to 1"
+                      "\ttext");
         return MP_OK;
     case 4:
         std::snprintf(out, out_bytes, "plugin\t%s\twhat loaded (read only)",

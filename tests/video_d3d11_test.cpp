@@ -16,6 +16,7 @@
 
 #include <mediaperch/module.h>
 
+#include "fake_video.hpp"
 #include "module_loader.hpp"
 
 #include <catch2/catch_approx.hpp>
@@ -1177,4 +1178,82 @@ TEST_CASE("a decoder's own texture is viewed rather than copied", "[video][d3d11
     }
 
     texture->Release();
+}
+
+TEST_CASE("a stage is asked for the target's size, and the scale row credits whoever answers it",
+          "[video][d3d11]")
+{
+    // **The pre-fill contract** (§9.8.3, §9.11). `configure` reaches a stage
+    // with `in` the picture at the source's size and `out` pre-filled with
+    // the target's; what the last stage answers is what the finish pass
+    // draws from, and the row says whether the target's size came from the
+    // chain or from the presenter's own bilinear fetch. Checked with the
+    // fake stage, which answers whatever a test tells it to and hands the
+    // frame back untouched -- so what is being read is the presenter's
+    // bookkeeping, not a resampler.
+    Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
+    const MpVideoVtbl& vtbl = *module.as<MpVideoVtbl>();
+    mp::test::stage_log().reset();
+
+    Presenter presenter{vtbl, 32, 24};
+    REQUIRE(presenter.ok());
+    REQUIRE(vtbl.set(presenter.handle(), "size", "16x12") == MP_OK);
+    REQUIRE(presenter.configure() == "");
+
+    const MpVideoDspVtbl& fake = mp::test::fake_video_stage_vtbl();
+    MpVideoDsp* handle = nullptr;
+    REQUIRE(fake.open(nullptr, &handle) == MP_OK);
+    MpVideoStage one{};
+    one.size = sizeof(one);
+    one.vtbl = &fake;
+    one.handle = handle;
+
+    // A grade: answers what it was given. The target is another size, so
+    // the finish pass is the fallback and the row says so.
+    REQUIRE(vtbl.stages(presenter.handle(), &one, 1) == MP_OK);
+    {
+        const std::lock_guard lock{mp::test::stage_log().mutex};
+        CHECK(mp::test::stage_log().in_width == 32u);
+        CHECK(mp::test::stage_log().in_height == 24u);
+        CHECK(mp::test::stage_log().wanted_width == 16u);
+        CHECK(mp::test::stage_log().wanted_height == 12u);
+    }
+    REQUIRE(presenter.present(flat(32, 24, 0x40, 0x80, 0xC0), 32, 24) == MP_OK);
+    CHECK(presenter.described("scale") == "32x24 -> 16x12, x0.500 by the presenter's bilinear fetch");
+    CHECK(presenter.described("chain") == "1 stage, with an intermediate at 32x24");
+    std::vector<float> shown = presenter.read_back();
+    REQUIRE(shown.size() == 16u * 12u * 4u);
+    // A flat picture is flat through the fallback too.
+    for (std::size_t i = 0; i < shown.size(); i += 4) {
+        CHECK(shown[i] == Catch::Approx(shown[0]).margin(1e-6));
+    }
+
+    // A scaler: answers the size it was asked for. The row credits the chain
+    // -- the frame comes back at the source's size from this fake, and the
+    // presenter draws it as it is told rather than measuring the texture,
+    // because a real stage's answer *is* its texture's size.
+    {
+        const std::lock_guard lock{mp::test::stage_log().mutex};
+        mp::test::stage_log().answer_width = 16;
+        mp::test::stage_log().answer_height = 12;
+    }
+    REQUIRE(vtbl.stages(presenter.handle(), &one, 1) == MP_OK);
+    REQUIRE(presenter.present(flat(32, 24, 0x40, 0x80, 0xC0), 32, 24) == MP_OK);
+    CHECK(presenter.described("scale") == "32x24 -> 16x12, x0.500 by the chain");
+
+    // And the target moving is the chain asked again with the new pre-fill.
+    REQUIRE(vtbl.set(presenter.handle(), "size", "64x48") == MP_OK);
+    {
+        const std::lock_guard lock{mp::test::stage_log().mutex};
+        CHECK(mp::test::stage_log().wanted_width == 64u);
+        CHECK(mp::test::stage_log().wanted_height == 48u);
+    }
+
+    // No chain at another size: the fallback, named.
+    REQUIRE(vtbl.stages(presenter.handle(), nullptr, 0) == MP_OK);
+    REQUIRE(presenter.present(flat(32, 24, 0x40, 0x80, 0xC0), 32, 24) == MP_OK);
+    CHECK(presenter.described("scale") == "32x24 -> 64x48, x2.000 by the presenter's bilinear fetch");
+    CHECK(presenter.described("chain") == "none");
+    fake.close(handle);
 }

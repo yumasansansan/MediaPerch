@@ -2,6 +2,8 @@
 
 #include "mediaperch/protocol.hpp"
 
+#include <algorithm>
+
 #include <cstring>
 
 namespace mp::ipc {
@@ -488,6 +490,11 @@ void write(Writer& w, const std::vector<Setting>& settings)
         w.str(s.value);
         w.str(s.description);
         w.u8(s.read_only ? 1u : 0u);
+        w.u32(static_cast<std::uint32_t>(s.kind));
+        write_strings(w, s.choices);
+        w.str(s.group);
+        w.str(s.when);
+        w.str(s.hints);
     }
 }
 
@@ -505,12 +512,156 @@ bool read(Reader& r, std::vector<Setting>& settings)
         s.value = r.str();
         s.description = r.str();
         s.read_only = r.u8() != 0;
+        // A kind from a newer engine is drawn as a box, which is what it
+        // would have been drawn as before there were kinds.
+        const std::uint32_t kind = r.u32();
+        s.kind = kind <= static_cast<std::uint32_t>(SettingKind::path)
+                     ? static_cast<SettingKind>(kind)
+                     : SettingKind::text;
+        if (!read_strings(r, s.choices)) {
+            return false;
+        }
+        s.group = r.str();
+        s.when = r.str();
+        s.hints = r.str();
         if (!r.ok()) {
             return false;
         }
         settings.push_back(std::move(s));
     }
     return r.ok();
+}
+
+const char* setting_kind_name(SettingKind kind) noexcept
+{
+    switch (kind) {
+    case SettingKind::text:
+        return "text";
+    case SettingKind::choice:
+        return "choice";
+    case SettingKind::integer:
+        return "integer";
+    case SettingKind::number:
+        return "number";
+    case SettingKind::toggle:
+        return "toggle";
+    case SettingKind::size:
+        return "size";
+    case SettingKind::path:
+        return "path";
+    }
+    return "text";
+}
+
+namespace {
+
+void plain_text(Setting& out)
+{
+    out.kind = SettingKind::text;
+    out.choices.clear();
+    out.group.clear();
+    out.when.clear();
+    out.hints.clear();
+}
+
+} // namespace
+
+bool parse_setting_spec(std::string_view spec, Setting& out)
+{
+    plain_text(out);
+    // The words, on spaces; the first is the type and the rest are hints.
+    std::vector<std::string_view> words;
+    for (std::size_t at = 0; at < spec.size();) {
+        const std::size_t end = std::min(spec.find(' ', at), spec.size());
+        if (end > at) {
+            words.push_back(spec.substr(at, end - at));
+        }
+        at = end + 1;
+    }
+    if (words.empty()) {
+        return false;
+    }
+    const std::string_view type = words[0];
+    if (type.rfind("enum:", 0) == 0) {
+        const std::string_view list = type.substr(5);
+        if (list.empty()) {
+            return false;
+        }
+        out.kind = SettingKind::choice;
+        for (std::size_t at = 0; at <= list.size();) {
+            const std::size_t end = std::min(list.find(',', at), list.size());
+            if (end > at) {
+                out.choices.emplace_back(list.substr(at, end - at));
+            }
+            at = end + 1;
+        }
+    } else if (type == "int") {
+        out.kind = SettingKind::integer;
+    } else if (type == "number") {
+        out.kind = SettingKind::number;
+    } else if (type == "bool") {
+        out.kind = SettingKind::toggle;
+    } else if (type == "text") {
+        out.kind = SettingKind::text;
+    } else if (type == "size") {
+        out.kind = SettingKind::size;
+    } else if (type == "path") {
+        out.kind = SettingKind::path;
+    } else {
+        return false;
+    }
+    for (std::size_t i = 1; i < words.size(); ++i) {
+        const std::string_view word = words[i];
+        const std::size_t equals = word.find('=');
+        if (equals == std::string_view::npos || equals == 0 || equals + 1 == word.size()) {
+            plain_text(out);
+            return false;
+        }
+        const std::string_view name = word.substr(0, equals);
+        const std::string_view value = word.substr(equals + 1);
+        if (name == "group") {
+            out.group = std::string{value};
+        } else if (name == "when") {
+            // `key=value`, so the value itself has an equals sign in it.
+            if (value.find('=') == std::string_view::npos || value.front() == '=' ||
+                value.back() == '=') {
+                plain_text(out);
+                return false;
+            }
+            out.when = std::string{value};
+        } else {
+            if (!out.hints.empty()) {
+                out.hints += ' ';
+            }
+            out.hints += std::string{word};
+        }
+    }
+    return true;
+}
+
+bool setting_from_row(std::string_view line, Setting& out)
+{
+    const std::size_t first = line.find('\t');
+    if (first == std::string_view::npos) {
+        return false;
+    }
+    const std::size_t second = line.find('\t', first + 1);
+    const std::size_t third =
+        second == std::string_view::npos ? second : line.find('\t', second + 1);
+    out.key = std::string{line.substr(0, first)};
+    out.value = std::string{line.substr(first + 1, second - first - 1)};
+    out.description = second == std::string_view::npos
+                          ? std::string{}
+                          : std::string{line.substr(second + 1, third - second - 1)};
+    static constexpr std::string_view k_marker = "(read only)";
+    out.read_only = out.description.size() >= k_marker.size() &&
+                    out.description.compare(out.description.size() - k_marker.size(),
+                                            k_marker.size(), k_marker) == 0;
+    // The fourth field, or none: a row without one is a box, as every row was.
+    (void)parse_setting_spec(third == std::string_view::npos ? std::string_view{}
+                                                             : line.substr(third + 1),
+                             out);
+    return true;
 }
 
 void write_strings(Writer& w, const std::vector<std::string>& items)

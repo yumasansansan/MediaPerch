@@ -79,7 +79,8 @@
 // every case, which is the shape that work takes.
 
 #include "colour_plan.hpp"
-#include "kernels.hpp"
+#include "kernels.hpp" // modules/shared/kernels: the chroma kernel
+#include "siting.hpp"
 #include "yuv_matrix.hpp"
 
 #include <mediaperch/module.h>
@@ -175,13 +176,19 @@ private:
 // buffer at all.
 //
 // The pixel shaders are §9's colour pipeline and, since the HDR10 test
-// patterns, the resampling around it: chroma reconstructed at each luma
-// sample by a kernel and the stream's siting, the transfer undone into linear
-// light, the picture resampled one axis at a time in that light when the
-// target is not the source's size, then the roll-off, the gamut and the
-// encoding. Writing it as shaders rather than as lookups is what lets each of
-// those be a formula a test can hold to a standard.
-constexpr char k_shader[] = R"HLSL(
+// patterns, the chroma reconstruction in front of it: chroma reconstructed at
+// each luma sample by a kernel and the stream's siting, the transfer undone
+// into linear light at the source's own size, then -- after §9.8.3's chain,
+// which is where the picture is resampled to the target, by a stage (§9.11)
+// -- the roll-off, the gamut and the encoding. Writing it as shaders rather
+// than as lookups is what lets each of those be a formula a test can hold to
+// a standard.
+//
+// **In two halves, with the kernels between them.** The chroma passes call
+// `kernel_support` and `kernel_weight`, which are `modules/shared/kernels`'s
+// so that this and the scaler stage compile one formula set; the source is
+// the head below, that text, and the tail, joined once by `shader_source`.
+constexpr char k_shader_head[] = R"HLSL(
 Texture2D<float4> rgba     : register(t0);  // the BGRA8 path
 Texture2D<float>  luma     : register(t1);  // Y, semi-planar and planar alike
 Texture2D<float2> chroma   : register(t2);  // semi-planar CbCr, interleaved
@@ -239,23 +246,20 @@ cbuffer Constants : register(b0)
     float4 gamut1;
     float4 gamut2;
 
-    // **The resampling** (kernels.hpp). Where chroma sample 0 sits against
-    // luma sample 0 and how many chroma samples there are per luma sample,
-    // per axis; the chroma plane's picture size, for the edge clamp; and, for
-    // the two scale passes, which axis is being resampled and from what size
-    // to what.
+    // **The chroma reconstruction** (siting.hpp, kernels.hpp). Where chroma
+    // sample 0 sits against luma sample 0 and how many chroma samples there
+    // are per luma sample, per axis; the chroma plane's picture size, for the
+    // edge clamp; and the kernel's own parameters.
     float2 chroma_off;
     float2 chroma_step;
     float2 chroma_size;
-    uint   scale_axis;
-    uint   scale_kernel;
-    float2 scale_src;
-    float2 scale_dst;
+    uint   chroma_lobes;  // Lanczos's
+    float  chroma_b;      // the cubic's
 
+    float  chroma_c;
     uint   chroma_planar; // 1 when Cb and Cr are two planes, 0 when interleaved
     uint   pad_a;
     uint   pad_b;
-    uint   pad_c;
 };
 
 struct Vertex {
@@ -405,90 +409,11 @@ float3 decode(float3 c)
     return sdr_to_linear(c) * sdr_scale;
 }
 
-// --------------------------------------------------------------------------
-// The resampling (kernels.hpp)
-// --------------------------------------------------------------------------
-//
-// **The weights are computed, once per tap, from the kernels' own formulas.**
-// A table would be one more thing to keep in step with a name; a formula is
-// what tests/scaler_test.cpp writes its references from, independently.
+)HLSL";
 
-static const float k_pi = 3.14159265358979;
-
-// Half the width of a kernel, in taps at one to one.
-float kernel_support(uint kind)
-{
-    if (kind == 0) {
-        return 1.0;
-    }
-    if (kind == 3 || kind == 4) {
-        return 2.0;
-    }
-    if (kind == 5) {
-        return 0.5;
-    }
-    return 3.0;
-}
-
-// The kernel's weight at `x` taps from its centre. Lanczos, spline36 and
-// Catmull-Rom are interpolating -- 1 at 0 and 0 at every other integer, so
-// one to one is the identity -- and Mitchell-Netravali is not, by design.
-float kernel_weight(uint kind, float x)
-{
-    x = abs(x);
-    if (kind == 0) {
-        return max(1.0 - x, 0.0);
-    }
-    if (kind == 1) {
-        // Lanczos, three lobes. Snapped at the integers, where sin(pi) in
-        // single precision is a hundred-millionth rather than nought.
-        if (x >= 3.0) {
-            return 0.0;
-        }
-        float n = round(x);
-        if (abs(x - n) < 1e-6) {
-            return n == 0.0 ? 1.0 : 0.0;
-        }
-        float px = k_pi * x;
-        return 3.0 * sin(px) * sin(px / 3.0) / (px * px);
-    }
-    if (kind == 2) {
-        // Spline36, as ImageMagick and mpv spell it.
-        if (x < 1.0) {
-            return ((13.0 / 11.0 * x - 453.0 / 209.0) * x - 3.0 / 209.0) * x + 1.0;
-        }
-        if (x < 2.0) {
-            float t = x - 1.0;
-            return ((-6.0 / 11.0 * t + 270.0 / 209.0) * t - 156.0 / 209.0) * t;
-        }
-        if (x < 3.0) {
-            float t = x - 2.0;
-            return ((1.0 / 11.0 * t - 45.0 / 209.0) * t + 26.0 / 209.0) * t;
-        }
-        return 0.0;
-    }
-    if (kind == 3 || kind == 4) {
-        // Mitchell and Netravali's two-parameter cubic: B=0, C=1/2 is
-        // Catmull-Rom, and B=C=1/3 is their own recommendation.
-        float b = kind == 3 ? 0.0 : 1.0 / 3.0;
-        float c = kind == 3 ? 0.5 : 1.0 / 3.0;
-        float x2 = x * x;
-        float x3 = x2 * x;
-        if (x < 1.0) {
-            return ((12.0 - 9.0 * b - 6.0 * c) * x3 + (-18.0 + 12.0 * b + 6.0 * c) * x2 +
-                    (6.0 - 2.0 * b)) / 6.0;
-        }
-        if (x < 2.0) {
-            return ((-b - 6.0 * c) * x3 + (6.0 * b + 30.0 * c) * x2 +
-                    (-12.0 * b - 48.0 * c) * x + (8.0 * b + 24.0 * c)) / 6.0;
-        }
-        return 0.0;
-    }
-    // The box, with a sample on the boundary shared: an integer downscale
-    // then counts every source sample exactly once.
-    return x < 0.5 ? 1.0 : (x == 0.5 ? 0.5 : 0.0);
-}
-
+/// The second half: the chroma reconstruction, the colour pipeline and the
+/// pixel shaders, after the kernels' text.
+constexpr char k_shader_tail[] = R"HLSL(
 // **Chroma, reconstructed at the luma samples' positions, in two halves.**
 // Chroma sample k of an axis sits at luma sample k / step + off, so the chroma
 // position for luma sample p is (p - off) * step and the kernel is centred
@@ -513,14 +438,14 @@ float2 chroma_across(int2 p)
     } else {
         float k = (float(p.x) - chroma_off.x) * chroma_step.x;
         uint kind = chroma_kernel;
-        float reach = kernel_support(kind);
+        float reach = kernel_support(kind, chroma_lobes);
         int lo = int(ceil(k - reach));
         int hi = int(floor(k + reach));
         int last = int(chroma_size.x) - 1;
         float2 sum = float2(0.0, 0.0);
         float weights = 0.0;
         [loop] for (int i = lo; i <= hi; ++i) {
-            float w = kernel_weight(kind, k - float(i));
+            float w = kernel_weight(kind, chroma_lobes, chroma_b, chroma_c, k - float(i));
             if (w != 0.0) {
                 int ic = clamp(i, 0, last);
                 sum += w * chroma_sample(int2(ic, p.y));
@@ -541,14 +466,14 @@ float2 chroma_at(int2 p)
     } else {
         float k = (float(p.y) - chroma_off.y) * chroma_step.y;
         uint kind = chroma_kernel;
-        float reach = kernel_support(kind);
+        float reach = kernel_support(kind, chroma_lobes);
         int lo = int(ceil(k - reach));
         int hi = int(floor(k + reach));
         int last = int(chroma_size.y) - 1;
         float2 sum = float2(0.0, 0.0);
         float weights = 0.0;
         [loop] for (int j = lo; j <= hi; ++j) {
-            float w = kernel_weight(kind, k - float(j));
+            float w = kernel_weight(kind, chroma_lobes, chroma_b, chroma_c, k - float(j));
             if (w != 0.0) {
                 int jc = clamp(j, 0, last);
                 sum += w * chroma_wide.Load(int3(p.x, jc, 0)).rg;
@@ -708,41 +633,6 @@ float4 ps_chroma_across(Vertex input) : SV_Target
     return float4(chroma_across(int2(input.position.xy)), 0.0, 1.0);
 }
 
-// **One axis of the resampling.** Output sample i of `dst` along the axis
-// sits at source position (i + 0.5) * src / dst - 0.5, in source samples;
-// the kernel is centred there, stretched by the downscale factor so that
-// every source sample under the output is counted, and its weights are
-// normalised so that a flat field stays flat whatever the phase. The other
-// axis is carried across untouched, and the edge is clamped, which is what
-// the sampler did for the bilinear fetch this replaces.
-float4 ps_scale(Vertex input) : SV_Target
-{
-    int2 p = int2(input.position.xy);
-    uint kind = scale_kernel;
-    float src = scale_axis == 0 ? scale_src.x : scale_src.y;
-    float dst = scale_axis == 0 ? scale_dst.x : scale_dst.y;
-    float i = scale_axis == 0 ? float(p.x) : float(p.y);
-    float ratio = src / dst;
-    float stretch = max(ratio, 1.0);
-    float s = (i + 0.5) * ratio - 0.5;
-    float reach = kernel_support(kind) * stretch;
-    int lo = int(ceil(s - reach));
-    int hi = int(floor(s + reach));
-    int last = int(src) - 1;
-    float4 sum = float4(0.0, 0.0, 0.0, 0.0);
-    float weights = 0.0;
-    [loop] for (int j = lo; j <= hi; ++j) {
-        float w = kernel_weight(kind, (s - float(j)) / stretch);
-        if (w == 0.0) {
-            continue;
-        }
-        int jc = clamp(j, 0, last);
-        int3 at = scale_axis == 0 ? int3(jc, p.y, 0) : int3(p.x, jc, 0);
-        sum += w * rgba.Load(at);
-        weights += w;
-    }
-    return sum / max(weights, 1e-6);
-}
 )HLSL";
 
 /// Mirrors the `cbuffer` above, which HLSL packs in four-float rows.
@@ -770,7 +660,7 @@ struct Constants {
     std::uint32_t linear_in = 0;
     float tone_source = 1000.0f;
     std::uint32_t gamut_mode = 1;
-    std::uint32_t chroma_kernel = 1;
+    std::uint32_t chroma_kernel = 9; // kernels.hpp: lanczos
 
     float gamut0[4] = {1.0f, 0.0f, 0.0f, 0.0f};
     float gamut1[4] = {0.0f, 1.0f, 0.0f, 0.0f};
@@ -779,15 +669,13 @@ struct Constants {
     float chroma_off[2] = {0.0f, 0.5f};
     float chroma_step[2] = {0.5f, 0.5f};
     float chroma_size[2] = {1.0f, 1.0f};
-    std::uint32_t scale_axis = 0;
-    std::uint32_t scale_kernel = 1;
-    float scale_src[2] = {1.0f, 1.0f};
-    float scale_dst[2] = {1.0f, 1.0f};
+    std::uint32_t chroma_lobes = 3;
+    float chroma_b = 1.0f / 3.0f;
 
+    float chroma_c = 1.0f / 3.0f;
     std::uint32_t chroma_planar = 0;
     std::uint32_t pad_a = 0;
     std::uint32_t pad_b = 0;
-    std::uint32_t pad_c = 0;
 };
 static_assert(sizeof(Constants) % 16 == 0, "a constant buffer is a whole number of rows");
 
@@ -1094,8 +982,6 @@ struct MpVideo {
     Com<ID3D11PixelShader> pixel_rgba;
     Com<ID3D11PixelShader> pixel_nv12;
     Com<ID3D11PixelShader> pixel_planar;
-    /// One axis of the resampling, run twice (see `ps_scale`).
-    Com<ID3D11PixelShader> pixel_scale;
     /// The horizontal half of the chroma reconstruction (see `ps_chroma_across`).
     Com<ID3D11PixelShader> pixel_chroma_across;
     /// What it writes: the luma's width at the chroma's height, fp32, remade
@@ -1132,28 +1018,14 @@ struct MpVideo {
     std::uint32_t source_height = 0;
     MpPixelLayout source_layout{};
 
-    /// **The resampler's three textures** (see `make_scaled`): linear light
-    /// at the source's size, the target's width at the source's height, and
-    /// the target's size. Null until a frame needs resampling, and remade when
-    /// the frame's size or the target's changes.
-    Com<ID3D11Texture2D> linear_source;
-    Com<ID3D11RenderTargetView> linear_source_view;
-    Com<ID3D11ShaderResourceView> linear_source_srv;
-    Com<ID3D11Texture2D> scaled_h;
-    Com<ID3D11RenderTargetView> scaled_h_view;
-    Com<ID3D11ShaderResourceView> scaled_h_srv;
-    Com<ID3D11Texture2D> scaled;
-    Com<ID3D11RenderTargetView> scaled_view;
-    Com<ID3D11ShaderResourceView> scaled_srv;
-    std::uint32_t scaled_source_width = 0;
-    std::uint32_t scaled_source_height = 0;
-    std::uint32_t scaled_width = 0;
-    std::uint32_t scaled_height = 0;
-
-    /// What a person set, or the defaults: the kernels, the siting and what
-    /// happens past the gamut (kernels.hpp).
-    mp::video::Kernel scaler = mp::video::Kernel::lanczos;
-    mp::video::Kernel chroma_kernel = mp::video::Kernel::lanczos;
+    /// What a person set, or the defaults: the chroma kernel and its
+    /// parameters (kernels.hpp), the siting and what happens past the gamut
+    /// (siting.hpp). The picture's own resampling is a stage's (§9.11), and
+    /// its keys are the stage's.
+    mp::kernels::Kernel chroma_kernel = mp::kernels::Kernel::lanczos;
+    std::uint32_t chroma_lobes = 3;
+    float chroma_b = 1.0f / 3.0f;
+    float chroma_c = 1.0f / 3.0f;
     static constexpr std::uint32_t k_siting_auto = 0xffffffffu;
     /// A person's `siting`, or `k_siting_auto` for the stream's own.
     std::uint32_t siting_asked = k_siting_auto;
@@ -1206,14 +1078,14 @@ struct MpVideo {
     ///
     /// The alternative §9.7.1 weighed was to render at the picture's size and
     /// let the shell's visual carry a transform, which costs no message and no
-    /// resize. This costs one message and puts the scale **in the presenter's
-    /// own passes, beside the chroma reconstruction** (§9.11, kernels.hpp): a
-    /// 4:2:0 frame is already being resampled to reach full-rate RGB, so
-    /// scaling here is one resampling problem where the other way is ours and
-    /// then the compositor's. It is also the only one of the two where the
-    /// filter is ours -- a composition surface's is a fixed bilinear, out of
+    /// resize. This costs one message and keeps the scale **ours**: the
+    /// picture is decoded at the source's own size, §9.8.3's chain runs on
+    /// it, and a scaler stage in that chain (`vdsp_scale`, §9.11) resamples
+    /// it to this size by whatever kernel a person chose, with whatever
+    /// parameters. A composition surface's filter is a fixed bilinear, out of
     /// reach, and the HDR10 test patterns showed what a bilinear does to a
-    /// checkerboard.
+    /// checkerboard. With no scaler in the chain the finish pass's own
+    /// bilinear fetch is what is left -- a softer picture rather than none.
     ///
     /// **The whole picture is drawn into the whole target.** Where black bars
     /// go, if any, is the shell's -- it has the window and the compositor puts
@@ -1268,10 +1140,23 @@ struct MpVideo {
     /// presenter that crashes when the host adds a stage. The stages themselves
     /// belong to whoever opened them and outlive this only by agreement.
     std::vector<MpVideoStage> chain;
-    /// The fp32 linear intermediate the chain runs on. Made only when there is
-    /// a chain: not paying for it is the whole point of the single pass.
-    Com<ID3D11Texture2D> graded_linear;
-    Com<ID3D11RenderTargetView> graded_linear_view;
+    /// **The fp32 linear picture, at the source's own size**
+    /// (`make_linear_picture`): what the first pass stops at when a chain is
+    /// in the path or the target is another size, and what the chain -- or
+    /// the finish pass's fetch -- reads. Made only then: not paying for it is
+    /// the whole point of the single pass.
+    Com<ID3D11Texture2D> linear_picture;
+    Com<ID3D11RenderTargetView> linear_picture_view;
+    Com<ID3D11ShaderResourceView> linear_picture_srv;
+    std::uint32_t linear_width = 0;
+    std::uint32_t linear_height = 0;
+    /// What the chain was told it would be given, and what its last stage
+    /// said it would produce: what the finish pass draws from, and what the
+    /// `scale` row turns on. Zero with no chain.
+    std::uint32_t chain_in_width = 0;
+    std::uint32_t chain_in_height = 0;
+    std::uint32_t chain_out_width = 0;
+    std::uint32_t chain_out_height = 0;
     /// A view over whatever the last stage produced. Remade when that texture
     /// changes, which after the first frame it does not.
     Com<ID3D11ShaderResourceView> chain_out_view;
@@ -1317,10 +1202,20 @@ constexpr UINT k_compile_flags =
 static_assert((k_compile_flags & D3DCOMPILE_PARTIAL_PRECISION) == 0,
               "the colour shader is computed at single precision; see plan.md §9.10");
 
+/// The shader, joined once: the head, the kernels the scaler stage shares,
+/// and the tail.
+const std::string& shader_source()
+{
+    static const std::string source =
+        std::string{k_shader_head} + mp::kernels::k_kernel_hlsl + k_shader_tail;
+    return source;
+}
+
 bool compile(const char* entry, const char* target, Com<ID3DBlob>& out, std::string& why)
 {
     Com<ID3DBlob> errors;
-    const HRESULT hr = ::D3DCompile(k_shader, sizeof(k_shader) - 1, "colour.hlsl", nullptr,
+    const std::string& source = shader_source();
+    const HRESULT hr = ::D3DCompile(source.data(), source.size(), "colour.hlsl", nullptr,
                                     nullptr, entry, target, k_compile_flags, 0, out.put(),
                                     errors.put());
     if (SUCCEEDED(hr)) {
@@ -1378,22 +1273,36 @@ bool maps_elsewhere(const MpVideo* v) noexcept
                                     v->plan.tone_map == mp::video::ToneMap::d2d);
 }
 
-/// Tells every stage what it will be given: the picture's size, RGBA at single
-/// precision, and a transfer that states linear -- because that is what the
-/// intermediate holds and a stage that thought otherwise would grade the wrong
-/// numbers.
+/// Tells every stage what it will be given and asks what it would like back.
+///
+/// **`in` is the picture; `out` arrives pre-filled with what this presenter
+/// would like to come out** -- the target's size -- and a stage answers with
+/// what it will produce, which for a grade is what it was given and for a
+/// scaler is what was asked. The next stage is told the answer. What the last
+/// one says is what the finish pass reads: at the target's size an exact
+/// fetch, at any other the bilinear fallback, and the `scale` row says which.
 bool configure_chain(MpVideo* v)
 {
+    v->chain_in_width = 0;
+    v->chain_in_height = 0;
+    v->chain_out_width = 0;
+    v->chain_out_height = 0;
     if (v->chain.empty()) {
         return true;
     }
+    // The frame in hand when there is one, else what the container said: a
+    // decoder's coded size can differ, and `present` asks again when it does.
+    const std::uint32_t width = v->source_width != 0 ? v->source_width : v->graded.width;
+    const std::uint32_t height = v->source_height != 0 ? v->source_height : v->graded.height;
     MpVideoInfo linear{};
     std::memcpy(&linear, &v->graded, std::min<std::size_t>(v->graded.size, sizeof(linear)));
     linear.size = sizeof(linear);
-    linear.width = v->width;
-    linear.height = v->height;
-    linear.display_width = v->width;
-    linear.display_height = v->height;
+    linear.width = width;
+    linear.height = height;
+    if (width != v->graded.width || height != v->graded.height) {
+        linear.display_width = width;
+        linear.display_height = height;
+    }
     // 8 is ITU-T H.273's "linear transfer characteristics". The primaries stay
     // the source's, which is where the pass above leaves the picture.
     linear.transfer = 8;
@@ -1402,59 +1311,76 @@ bool configure_chain(MpVideo* v)
         if (stage.vtbl->configure == nullptr) {
             continue;
         }
-        MpVideoInfo answered{};
+        MpVideoInfo answered = linear;
         answered.size = sizeof(answered);
+        answered.width = v->width;
+        answered.height = v->height;
+        answered.display_width = v->width;
+        answered.display_height = v->height;
         if (stage.vtbl->configure(stage.handle, &linear, &answered) != MP_OK) {
             v->trouble = "a stage would not take this picture";
             return false;
         }
-        if (answered.width != linear.width || answered.height != linear.height) {
-            // **A stage that resizes is a stage this presenter cannot place.**
-            // §9.7.1 put the scaling in the first pass, beside the chroma
-            // reconstruction; a stage that moved the geometry afterwards would
-            // be a second scaler nobody asked for.
-            v->trouble = "a stage in the chain wants to change the picture's size, "
-                         "which is decided before the chain runs";
+        if (answered.width == 0 || answered.height == 0) {
+            v->trouble = "a stage in the chain answered a size of nothing";
             return false;
         }
+        answered.size = sizeof(answered);
+        linear = answered;
     }
+    v->chain_in_width = width;
+    v->chain_in_height = height;
+    v->chain_out_width = linear.width;
+    v->chain_out_height = linear.height;
     return true;
 }
 
-/// The fp32 linear intermediate §9.8.3's chain runs on, made only when there is
-/// one.
+/// The fp32 linear picture the chain and the finish pass read, at the
+/// source's own size: made when a frame first needs it and remade when the
+/// frame's size changes.
 ///
 /// **Single precision and not half**, whatever the swap chain is: this is where
 /// a grade happens, and §9.10's argument about precision before the last step
 /// applies most exactly to the step that has arithmetic in it.
-bool make_graded_linear(MpVideo* v, std::string& why)
+bool make_linear_picture(MpVideo* v, std::string& why)
 {
-    v->graded_linear_view.reset();
-    v->graded_linear.reset();
-    v->chain_out_view.reset();
-    v->chain_out_texture = nullptr;
-    if (v->chain.empty()) {
+    if (v->linear_picture && v->linear_width == v->source_width &&
+        v->linear_height == v->source_height) {
         return true;
     }
+    v->linear_picture_srv.reset();
+    v->linear_picture_view.reset();
+    v->linear_picture.reset();
+    v->chain_out_view.reset();
+    v->chain_out_texture = nullptr;
+    v->linear_width = 0;
+    v->linear_height = 0;
 
     D3D11_TEXTURE2D_DESC desc{};
-    desc.Width = v->width;
-    desc.Height = v->height;
+    desc.Width = v->source_width;
+    desc.Height = v->source_height;
     desc.MipLevels = 1;
     desc.ArraySize = 1;
     desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
     desc.SampleDesc.Count = 1;
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    if (FAILED(v->device->CreateTexture2D(&desc, nullptr, v->graded_linear.put()))) {
+    if (FAILED(v->device->CreateTexture2D(&desc, nullptr, v->linear_picture.put()))) {
         why = "no linear intermediate, so there is nowhere for a stage to read from";
         return false;
     }
-    if (FAILED(v->device->CreateRenderTargetView(v->graded_linear.get(), nullptr,
-                                                 v->graded_linear_view.put()))) {
+    if (FAILED(v->device->CreateRenderTargetView(v->linear_picture.get(), nullptr,
+                                                 v->linear_picture_view.put()))) {
         why = "the linear intermediate would take no render target view";
         return false;
     }
+    if (FAILED(v->device->CreateShaderResourceView(v->linear_picture.get(), nullptr,
+                                                   v->linear_picture_srv.put()))) {
+        why = "the linear intermediate would take no shader resource view";
+        return false;
+    }
+    v->linear_width = v->source_width;
+    v->linear_height = v->source_height;
     return true;
 }
 
@@ -1898,13 +1824,11 @@ bool make_shaders(MpVideo* v, std::string& why)
     Com<ID3DBlob> rgba;
     Com<ID3DBlob> nv12;
     Com<ID3DBlob> planar;
-    Com<ID3DBlob> scale;
     Com<ID3DBlob> across;
     if (!compile("vs_main", "vs_5_0", vs, why) ||
         !compile("ps_rgba", "ps_5_0", rgba, why) ||
         !compile("ps_nv12", "ps_5_0", nv12, why) ||
         !compile("ps_planar", "ps_5_0", planar, why) ||
-        !compile("ps_scale", "ps_5_0", scale, why) ||
         !compile("ps_chroma_across", "ps_5_0", across, why)) {
         return false;
     }
@@ -1917,8 +1841,6 @@ bool make_shaders(MpVideo* v, std::string& why)
         FAILED(v->device->CreatePixelShader(planar->GetBufferPointer(),
                                             planar->GetBufferSize(), nullptr,
                                             v->pixel_planar.put())) ||
-        FAILED(v->device->CreatePixelShader(scale->GetBufferPointer(), scale->GetBufferSize(),
-                                            nullptr, v->pixel_scale.put())) ||
         FAILED(v->device->CreatePixelShader(across->GetBufferPointer(),
                                             across->GetBufferSize(), nullptr,
                                             v->pixel_chroma_across.put()))) {
@@ -2355,55 +2277,6 @@ bool replan(MpVideo* v)
     return true;
 }
 
-/// **The resampler's three textures**, made at the sizes of the frame in
-/// hand and the target, and remade when either changes: linear light at the
-/// source's size, the target's width at the source's height, and the target's
-/// size. fp32 all three, because §9.10 says the arithmetic is single
-/// precision until DXGI's fp16 at the very end -- and a half-precision
-/// intermediate would put the dark end of a PQ picture into subnormals, which
-/// is exactly the end the black-level patterns are about.
-bool make_scaled(MpVideo* v, std::string& why)
-{
-    if (v->linear_source && v->scaled_source_width == v->source_width &&
-        v->scaled_source_height == v->source_height && v->scaled_width == v->width &&
-        v->scaled_height == v->height) {
-        return true;
-    }
-    const auto make = [v](std::uint32_t width, std::uint32_t height,
-                          Com<ID3D11Texture2D>& texture, Com<ID3D11RenderTargetView>& target,
-                          Com<ID3D11ShaderResourceView>& source) {
-        source.reset();
-        target.reset();
-        texture.reset();
-        D3D11_TEXTURE2D_DESC desc{};
-        desc.Width = width;
-        desc.Height = height;
-        desc.MipLevels = 1;
-        desc.ArraySize = 1;
-        desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-        desc.SampleDesc.Count = 1;
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-        return SUCCEEDED(v->device->CreateTexture2D(&desc, nullptr, texture.put())) &&
-               SUCCEEDED(v->device->CreateRenderTargetView(texture.get(), nullptr,
-                                                           target.put())) &&
-               SUCCEEDED(v->device->CreateShaderResourceView(texture.get(), nullptr,
-                                                             source.put()));
-    };
-    if (!make(v->source_width, v->source_height, v->linear_source, v->linear_source_view,
-              v->linear_source_srv) ||
-        !make(v->width, v->source_height, v->scaled_h, v->scaled_h_view, v->scaled_h_srv) ||
-        !make(v->width, v->height, v->scaled, v->scaled_view, v->scaled_srv)) {
-        why = "no intermediate for the resampler, so the picture cannot be scaled";
-        return false;
-    }
-    v->scaled_source_width = v->source_width;
-    v->scaled_source_height = v->source_height;
-    v->scaled_width = v->width;
-    v->scaled_height = v->height;
-    return true;
-}
-
 /// **The chroma's half-way texture**: the luma's width at the chroma's height,
 /// two channels of fp32, for the frame in hand. Null for a frame with no
 /// chroma to reconstruct.
@@ -2473,6 +2346,9 @@ void fill_resampling(MpVideo* v, Constants& constants) noexcept
     constants.chroma_size[0] = static_cast<float>(chroma_width != 0 ? chroma_width : 1u);
     constants.chroma_size[1] = static_cast<float>(chroma_height != 0 ? chroma_height : 1u);
     constants.chroma_kernel = static_cast<std::uint32_t>(v->chroma_kernel);
+    constants.chroma_lobes = v->chroma_lobes;
+    constants.chroma_b = v->chroma_b;
+    constants.chroma_c = v->chroma_c;
     constants.gamut_mode = static_cast<std::uint32_t>(v->gamut);
 }
 
@@ -2527,13 +2403,11 @@ bool resize_target(MpVideo* v)
     v->height = height;
     v->drawn = false;
 
-    // **And the chain's texture and the chain itself**, which `configure`
-    // makes at the target's size and this used to leave at the old one: a
-    // stage handed a picture of the new size would have written into the
-    // linear intermediate of the old, and the second pass read it back.
+    // **And the chain**, told the new size to answer to: a scaler stage in it
+    // produces the target's size, and the target just changed.
     if (!v->swap_chain) {
         return make_target(v, v->trouble) && make_graded_target(v, v->trouble) &&
-               make_graded_linear(v, v->trouble) && configure_chain(v);
+               configure_chain(v);
     }
 
     // **Every reference to the back buffer, gone first.** `ResizeBuffers`
@@ -2566,7 +2440,7 @@ bool resize_target(MpVideo* v)
         return false;
     }
     return make_target_views(v, v->trouble) && make_graded_target(v, v->trouble) &&
-           make_graded_linear(v, v->trouble) && configure_chain(v);
+           configure_chain(v);
 }
 
 /// A dynamic texture and a view over it, made once and reused while the
@@ -2901,7 +2775,7 @@ try {
     if (!make_graded_target(v, v->trouble)) {
         return MP_ERR_UNSUPPORTED;
     }
-    if (!make_graded_linear(v, v->trouble) || !configure_chain(v)) {
+    if (!configure_chain(v)) {
         return MP_ERR_UNSUPPORTED;
     }
     if (maps_elsewhere(v) && v->plan.tone_map == mp::video::ToneMap::d2d &&
@@ -3046,17 +2920,16 @@ try {
     // the target's size and no chain is in the path: one pass, straight into
     // the target -- or into the HDR10 intermediate a provider that is not
     // ours maps from. Otherwise the first pass stops at linear light on the
-    // source's own primaries, at the source's own size when the picture is
-    // to be resampled so that every sample is read once, exactly where it
-    // is; then the resampling, one axis at a time; then the chain, if there
-    // is one; and then the second half -- tone mapping, the gamut and the
-    // encoding -- from linear.
-    const bool grading = !v->chain.empty() && v->graded_linear_view;
+    // source's own primaries, at the source's own size, so that every sample
+    // is read once, exactly where it is; then the chain, if there is one,
+    // which is where a scaler stage takes the picture to the target's size
+    // (§9.11); and then the second half -- tone mapping, the gamut and the
+    // encoding -- from linear, drawn over the whole target from whatever the
+    // chain produced: an exact fetch at the target's size, and the sampler's
+    // bilinear at any other, which is what a chain with no scaler leaves.
+    const bool chained = !v->chain.empty();
+    const bool fits = !resampling(v);
     const bool second_pass = maps_elsewhere(v) && v->graded_view;
-    const bool scaling = resampling(v);
-    if (scaling && !make_scaled(v, v->trouble)) {
-        return MP_ERR_UNSUPPORTED;
-    }
 
     const auto upload_constants = [&]() {
         D3D11_MAPPED_SUBRESOURCE mapped{};
@@ -3133,49 +3006,29 @@ try {
                                                  v->chroma_view.get(),   v->chroma_u_view.get(),
                                                  v->chroma_v_view.get(), v->chroma_wide_srv.get()};
 
-    if (!scaling && !grading) {
+    if (fits && !chained) {
         upload_constants();
         draw(shader, final_target, v->width, v->height, planes);
     } else {
+        if (!make_linear_picture(v, v->trouble)) {
+            return MP_ERR_UNSUPPORTED;
+        }
+        // A frame of another size than the chain was told: told again, so
+        // that a scaler in it answers for this picture and not the last.
+        if (chained &&
+            (v->chain_in_width != v->source_width || v->chain_in_height != v->source_height) &&
+            !configure_chain(v)) {
+            return MP_ERR_UNSUPPORTED;
+        }
         constants.emit_linear = 1;
         upload_constants();
-        // What the second half reads: the resampled picture, or the chain's.
-        ID3D11ShaderResourceView* light = nullptr;
-        if (scaling) {
-            draw(shader, v->linear_source_view.get(), v->source_width, v->source_height,
-                 planes);
-            // **One axis at a time.** A separable kernel over W by H taps is
-            // W taps and then H, not W times H; the intermediate is the
-            // target's width at the source's height, in the same fp32 as
-            // everything else between the decode and DXGI's fp16 (§9.10).
-            constants.scale_kernel = static_cast<std::uint32_t>(v->scaler);
-            constants.scale_axis = 0;
-            constants.scale_src[0] = static_cast<float>(v->source_width);
-            constants.scale_src[1] = static_cast<float>(v->source_height);
-            constants.scale_dst[0] = static_cast<float>(v->width);
-            constants.scale_dst[1] = static_cast<float>(v->source_height);
-            upload_constants();
-            ID3D11ShaderResourceView* const from_source[6] = {
-                v->linear_source_srv.get(), nullptr, nullptr, nullptr, nullptr, nullptr};
-            draw(v->pixel_scale.get(), v->scaled_h_view.get(), v->width, v->source_height,
-                 from_source);
-            constants.scale_axis = 1;
-            constants.scale_src[0] = static_cast<float>(v->width);
-            constants.scale_dst[1] = static_cast<float>(v->height);
-            upload_constants();
-            ID3D11ShaderResourceView* const from_h[6] = {v->scaled_h_srv.get(), nullptr,
-                                                         nullptr, nullptr, nullptr, nullptr};
-            draw(v->pixel_scale.get(),
-                 grading ? v->graded_linear_view.get() : v->scaled_view.get(), v->width,
-                 v->height, from_h);
-            light = v->scaled_srv.get();
-        } else {
-            draw(shader, v->graded_linear_view.get(), v->width, v->height, planes);
-        }
+        draw(shader, v->linear_picture_view.get(), v->source_width, v->source_height, planes);
 
-        if (grading) {
+        // What the second half reads: the picture, or what the chain made of it.
+        ID3D11ShaderResourceView* light = v->linear_picture_srv.get();
+        if (chained) {
             // **§9.8.3's chain, between the two halves.** The picture is
-            // linear light on the source's own primaries now, at the target's
+            // linear light on the source's own primaries now, at the source's
             // size, which is what a grade is defined on and the only place a
             // lookup table means what its author meant. Unbound first: the
             // intermediate is about to be sampled by somebody else's program.
@@ -3184,11 +3037,11 @@ try {
 
             MpVideoFrame linear{};
             linear.size = sizeof(linear);
-            linear.width = v->width;
-            linear.height = v->height;
+            linear.width = v->source_width;
+            linear.height = v->source_height;
             linear.layout = MP_LAYOUT_RGBA32F;
             linear.pts = frame->pts;
-            linear.texture = v->graded_linear.get();
+            linear.texture = v->linear_picture.get();
 
             MpVideoFrame graded{};
             if (!run_chain(v, linear, graded) || graded.texture == nullptr) {
@@ -3217,6 +3070,9 @@ try {
         // and the output encoding, exactly as they would have run in one pass
         // -- `linear_in` is the only thing that differs, and it is there
         // because decoding a signal that has no transfer would apply one twice.
+        // Drawn over the whole target from the whole of what the chain
+        // produced: the same size is a fetch at every pixel's own texel, and
+        // another size is the sampler's bilinear.
         constants.emit_linear = 0;
         constants.linear_in = 1;
         upload_constants();
@@ -3475,16 +3331,39 @@ try {
         }
         return replan(v) ? MP_OK : MP_ERR_UNSUPPORTED;
     }
-    if (std::strcmp(key, "scaler") == 0 || std::strcmp(key, "chroma") == 0) {
-        // **The kernels, by name** (kernels.hpp): one for the picture and
-        // one for the chroma reconstruction, settable between frames because
-        // both are read per frame.
-        mp::video::Kernel kernel{};
-        if (!mp::video::kernel_from_name(value, kernel)) {
-            v->trouble = "a kernel is bilinear, lanczos, spline36, catrom, mitchell or box";
+    if (std::strcmp(key, "chroma") == 0) {
+        // **The kernel, by name** (kernels.hpp), for the chroma
+        // reconstruction, settable between frames because it is read per
+        // frame. The picture's own resampling is a stage's (§9.11), and its
+        // keys are the stage's.
+        mp::kernels::Kernel kernel{};
+        if (!mp::kernels::kernel_from_name(value, kernel)) {
+            v->trouble = mp::kernels::k_kernel_sentence;
             return MP_ERR_INVALID;
         }
-        (key[0] == 's' ? v->scaler : v->chroma_kernel) = kernel;
+        v->chroma_kernel = kernel;
+        return MP_OK;
+    }
+    if (std::strcmp(key, "chroma_lobes") == 0) {
+        // One is the floor because a kernel with no lobes has no support;
+        // there is no ceiling, for the reason the stage gives.
+        char* end = nullptr;
+        const unsigned long lobes = std::strtoul(value, &end, 10);
+        if (end == value || *end != '\0' || lobes == 0 || lobes > 0xfffffffful) {
+            v->trouble = "chroma_lobes is a whole number from 1 up";
+            return MP_ERR_INVALID;
+        }
+        v->chroma_lobes = static_cast<std::uint32_t>(lobes);
+        return MP_OK;
+    }
+    if (std::strcmp(key, "chroma_b") == 0 || std::strcmp(key, "chroma_c") == 0) {
+        char* end = nullptr;
+        const double number = std::strtod(value, &end);
+        if (end == value || *end != '\0') {
+            v->trouble = std::string{key} + " is a number";
+            return MP_ERR_INVALID;
+        }
+        (key[7] == 'b' ? v->chroma_b : v->chroma_c) = static_cast<float>(number);
         return MP_OK;
     }
     if (std::strcmp(key, "siting") == 0) {
@@ -3609,12 +3488,10 @@ try {
     if (!v->configured) {
         return MP_OK; // `configure` will make what the chain needs
     }
-    // The intermediate is the only thing a chain changes. The target, the swap
-    // chain and the colour plan are all about the display, and a chain does not
-    // move the display.
-    if (!make_graded_linear(v, v->trouble)) {
-        return MP_ERR_UNSUPPORTED;
-    }
+    // The chain is told what it will be given; the intermediate it reads is
+    // made when a frame first needs it. The target, the swap chain and the
+    // colour plan are all about the display, and a chain does not move the
+    // display.
     return configure_chain(v) ? MP_OK : MP_ERR_UNSUPPORTED;
 }
 catch (...) {
@@ -3630,16 +3507,18 @@ try {
     switch (index) {
     case 0:
         std::snprintf(out, out_bytes,
-                      "tonemap\t%s\thow HDR reaches an SDR display: none, driver, d2d, shader",
+                      "tonemap\t%s\thow HDR reaches an SDR display: none, driver, d2d, shader"
+                      "\tenum:none,driver,d2d,shader group=Colour",
                       mp::video::name_of(v->preferred));
         return MP_OK;
     case 1:
-        std::snprintf(out, out_bytes, "device\t%s\thardware or warp; warp is deterministic",
+        std::snprintf(out, out_bytes, "device\t%s\thardware or warp; warp is deterministic"
+                                      "\tenum:hardware,warp group=Device",
                       v->warp ? "warp" : "hardware");
         return MP_OK;
     case 2:
         std::snprintf(out, out_bytes,
-                      "composited\t%d\twhether anything is drawn over the video",
+                      "composited\t%d\twhether anything is drawn over the video\tbool group=Device",
                       v->composited ? 1 : 0);
         return MP_OK;
     case 3:
@@ -3693,7 +3572,7 @@ try {
     case 9:
         std::snprintf(out, out_bytes,
                       "precision\t%s\twhat it renders into; fp16 is what a display gets "
-                      "and all DXGI will present",
+                      "and all DXGI will present\tenum:fp16,fp32 group=Device",
                       off_screen(v) && v->wide_target ? "fp32" : "fp16");
         return MP_OK;
     case 10:
@@ -3713,12 +3592,12 @@ try {
         if (v->asked_width != 0) {
             std::snprintf(out, out_bytes,
                           "size\t%ux%u\twhat it renders at; a shell sets this when its "
-                          "window changes",
+                          "window changes\tsize group=Picture",
                           v->asked_width, v->asked_height);
         } else {
             std::snprintf(out, out_bytes,
                           "size\tnative\twhat it renders at; a shell sets this when its "
-                          "window changes");
+                          "window changes\tsize group=Picture");
         }
         return MP_OK;
     case 13:
@@ -3735,11 +3614,22 @@ try {
         // that was handed over and an intermediate that was made are two
         // things, and a run that says one without the other is a run drawing
         // one pass while somebody believes it is grading.
-        std::snprintf(out, out_bytes,
-                      "chain	%zu stage%s, %s	what runs in linear light (read only)",
-                      v->chain.size(), v->chain.size() == 1 ? "" : "s",
-                      v->graded_linear_view ? "with an intermediate"
-                                            : "so there is one pass");
+        if (v->chain.empty()) {
+            std::snprintf(out, out_bytes,
+                          "chain\tnone\twhat runs in linear light: nothing, so the picture "
+                          "is one pass unless the target is another size (read only)");
+        } else if (v->linear_picture) {
+            std::snprintf(out, out_bytes,
+                          "chain\t%zu stage%s, with an intermediate at %ux%u\twhat runs in "
+                          "linear light, and the picture it is given (read only)",
+                          v->chain.size(), v->chain.size() == 1 ? "" : "s",
+                          v->linear_width, v->linear_height);
+        } else {
+            std::snprintf(out, out_bytes,
+                          "chain\t%zu stage%s, no frame yet\twhat runs in linear light "
+                          "(read only)",
+                          v->chain.size(), v->chain.size() == 1 ? "" : "s");
+        }
         return MP_OK;
     case 14:
         // **Who said what the display is**, which is the difference between a
@@ -3769,53 +3659,79 @@ try {
         return MP_OK;
     case 17:
         std::snprintf(out, out_bytes,
-                      "scaler\t%s\tthe kernel the picture is resampled with: bilinear, "
-                      "lanczos, spline36, catrom, mitchell, box",
-                      mp::video::name_of(v->scaler));
+                      "chroma\t%s\tthe kernel chroma is reconstructed with at the luma's "
+                      "positions\tenum:%s group=Chroma",
+                      mp::kernels::name_of(v->chroma_kernel), mp::kernels::k_kernel_list);
         return MP_OK;
     case 18:
         std::snprintf(out, out_bytes,
-                      "chroma\t%s\tthe kernel chroma is reconstructed with, from the same list",
-                      mp::video::name_of(v->chroma_kernel));
+                      "chroma_lobes\t%u\tLanczos lobes for the chroma reconstruction\tint "
+                      "min=1 step=1 group=Chroma when=chroma=lanczos",
+                      v->chroma_lobes);
         return MP_OK;
     case 19:
+        std::snprintf(out, out_bytes,
+                      "chroma_b\t%.4f\tthe cubic's B, when chroma=bicubic\tnumber step=0.05 "
+                      "group=Chroma when=chroma=bicubic",
+                      static_cast<double>(v->chroma_b));
+        return MP_OK;
+    case 20:
+        std::snprintf(out, out_bytes,
+                      "chroma_c\t%.4f\tthe cubic's C, when chroma=bicubic\tnumber step=0.05 "
+                      "group=Chroma when=chroma=bicubic",
+                      static_cast<double>(v->chroma_c));
+        return MP_OK;
+    case 21:
         // **Which siting, and whose.** A person's, the stream's, or the
         // assumption -- and the row says which, because a quarter-sample
         // shift is invisible in a colour and plain in a test pattern.
         if (v->siting_asked < mp::video::k_siting_types) {
             std::snprintf(out, out_bytes,
                           "siting\t%s\twhere a chroma sample sits against the luma: auto, "
-                          "left, centre, topleft, top, bottomleft, bottom",
+                          "left, centre, topleft, top, bottomleft, bottom"
+                          "\tenum:auto,left,centre,topleft,top,bottomleft,bottom group=Chroma",
                           mp::video::siting_name(v->siting_asked));
         } else {
             std::snprintf(out, out_bytes,
                           "siting\tauto (%s, %s)\twhere a chroma sample sits against the "
-                          "luma: auto, left, centre, topleft, top, bottomleft, bottom",
+                          "luma: auto, left, centre, topleft, top, bottomleft, bottom"
+                          "\tenum:auto,left,centre,topleft,top,bottomleft,bottom group=Chroma",
                           mp::video::siting_name(v->siting),
                           v->stream_siting != 0 ? "the stream's" : "assumed");
         }
         return MP_OK;
-    case 20:
+    case 22:
         std::snprintf(out, out_bytes,
                       "gamut\t%s\twhat a colour past the display's gamut gets: clip, "
-                      "desaturate",
+                      "desaturate\tenum:clip,desaturate group=Colour",
                       mp::video::name_of(v->gamut));
         return MP_OK;
-    case 21:
-        // **Source to target, and the factor**, which is the number that says
-        // whether the resampler is in the path at all.
+    case 23:
+        // **Source to target, the factor, and who scales**: a stage in the
+        // chain that answered the target's size, or the finish pass's own
+        // bilinear fetch, which is what a chain with no scaler leaves.
         if (v->source_width == 0) {
             std::snprintf(out, out_bytes,
-                          "scale\tno frame yet\tsource to target, and the factor (read only)");
+                          "scale\tno frame yet\tsource to target, the factor, and who "
+                          "scales (read only)");
         } else if (!resampling(v)) {
             std::snprintf(out, out_bytes,
-                          "scale\t%ux%u 1:1\tsource to target, and the factor: one to one "
-                          "is one pass, every sample read where it is (read only)",
+                          "scale\t%ux%u 1:1\tsource to target: one to one is every sample "
+                          "read where it is (read only)",
                           v->source_width, v->source_height);
+        } else if (v->chain_out_width == v->width && v->chain_out_height == v->height) {
+            std::snprintf(out, out_bytes,
+                          "scale\t%ux%u -> %ux%u, x%.3f by the chain\tsource to target and "
+                          "the factor; a stage in the chain produces the target's size "
+                          "(read only)",
+                          v->source_width, v->source_height, v->width, v->height,
+                          static_cast<double>(v->width) / static_cast<double>(v->source_width));
         } else {
             std::snprintf(out, out_bytes,
-                          "scale\t%ux%u -> %ux%u, x%.3f\tsource to target, and the factor; "
-                          "the kernel is stretched by it when the picture shrinks (read only)",
+                          "scale\t%ux%u -> %ux%u, x%.3f by the presenter's bilinear "
+                          "fetch\tsource to target and the factor; no stage in the chain "
+                          "scales, so the finish pass samples the picture with two taps -- "
+                          "put `scale` in video_dsp for a kernel (read only)",
                           v->source_width, v->source_height, v->width, v->height,
                           static_cast<double>(v->width) / static_cast<double>(v->source_width));
         }

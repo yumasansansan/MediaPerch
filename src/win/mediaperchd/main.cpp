@@ -80,6 +80,24 @@ std::filesystem::path default_config()
     return base / "MediaPerch" / "settings.ini";
 }
 
+/// `%LOCALAPPDATA%\MediaPerch\mediaperchd.log`: what the engine said, as it
+/// said it, for the day it is not there to be asked. Local rather than
+/// roaming, because a log is this machine's.
+std::filesystem::path default_log()
+{
+    wchar_t* local = nullptr;
+    std::filesystem::path base;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &local)) &&
+        local != nullptr) {
+        base = local;
+    }
+    CoTaskMemFree(local);
+    if (base.empty()) {
+        return {};
+    }
+    return base / "MediaPerch" / "mediaperchd.log";
+}
+
 bool read_file(const std::filesystem::path& path, std::string& out)
 {
     std::ifstream file{path, std::ios::binary};
@@ -119,6 +137,11 @@ void usage()
 
 usage: mediaperchd [options] [FILE...]
 
+  --log PATH        where the engine writes what it says, as it says it.
+                    Default is %%LOCALAPPDATA%%\MediaPerch\mediaperchd.log,
+                    truncated at every start; a crash writes its code and the
+                    last lines to mediaperchd-crash.log beside it.
+  --no-log          write neither.
   --config PATH     the settings file. Default is
                     %%APPDATA%%\MediaPerch\settings.ini, read if it is there.
                     A line it cannot read is complained about in the log rather
@@ -168,6 +191,7 @@ int main(int argc, char** argv)
     std::vector<std::pair<std::string, std::string>> overrides;
     bool quiet = false;
     bool tray = true;
+    std::filesystem::path log_path = default_log();
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -222,6 +246,14 @@ int main(int argc, char** argv)
             } else {
                 overrides.emplace_back("dsp", v);
             }
+        } else if (arg == "--log") {
+            const char* v = value("--log");
+            if (v == nullptr) {
+                return 1;
+            }
+            log_path = v;
+        } else if (arg == "--no-log") {
+            log_path.clear();
         } else if (arg == "--no-tray") {
             tray = false;
         } else if (arg == "--quiet") {
@@ -243,6 +275,14 @@ int main(int argc, char** argv)
     }
 
     mp::LogRing log;
+    if (!log_path.empty()) {
+        std::string trouble;
+        if (!mp::win::log_to_file(log, log_path, trouble)) {
+            std::fprintf(stderr, "%s\n", trouble.c_str());
+        }
+        mp::win::install_crash_report(log, log_path.parent_path() / "mediaperchd-crash.log");
+        log.add("log at " + log_path.string());
+    }
     if (!quiet) {
         // Printed as well as kept. Nothing depends on it.
         (void)log.listen([](const std::string& line) {

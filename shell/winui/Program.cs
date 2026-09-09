@@ -114,6 +114,67 @@ public static partial class Program
         {
             Console.WriteLine($"edge        {edge.From} -> {edge.To}");
         }
+
+        // **The settings verbs, read to the end.** The kinds this shell sends
+        // are a hand-written mirror of protocol.hpp, and a mirror can be wrong
+        // in a way that only shows when a button is pressed: Save and Quit were
+        // once swapped here, and "Save settings" quit the engine. Reading every
+        // settings reply through to `Complete` is what makes this command
+        // notice a row whose fields have moved.
+        var verbs = new (Kind ask, Kind reply, string label, string? node)[]
+        {
+            (Kind.Settings, Kind.SettingsReply, "settings", null),
+            (Kind.EngineSettings, Kind.EngineSettingsReply, "engine", null),
+            (Kind.NodeSettings, Kind.NodeSettingsReply, "presenter", "presenter"),
+        };
+        foreach (var (ask, reply, label, node) in verbs)
+        {
+            byte[]? payload = null;
+            if (node is not null)
+            {
+                var w = new Writer();
+                w.Str(node);
+                payload = w.Bytes();
+            }
+            Answer? rows = await engine.CallAsync(ask, payload);
+            if (rows is null)
+            {
+                Console.Error.WriteLine($"the engine would not answer {label}");
+                return 1;
+            }
+            if (rows.Value.Is(Kind.Error))
+            {
+                // A refusal is an answer: an engine started without a settings
+                // file has no engine settings, and a run with no picture has no
+                // presenter.
+                Console.WriteLine($"{label,-11} refused: {Session.ErrorText(rows.Value)}");
+                continue;
+            }
+            if (!rows.Value.Is(reply))
+            {
+                Console.Error.WriteLine($"the {label} reply is not a settings reply");
+                return 1;
+            }
+            Reader rr = rows.Value.Reader();
+            List<Setting> list = Decode.ReadSettings(rr);
+            if (!rr.Complete)
+            {
+                Console.Error.WriteLine($"the {label} reply has fields this shell does not know");
+                return 1;
+            }
+            Console.WriteLine($"{label,-11} {list.Count} rows");
+            foreach (Setting row in list)
+            {
+                // The kind is what the dialog draws from, so it is what a
+                // person checking the wire wants to see beside each key.
+                string kind = row.ReadOnly ? "read only" : row.Kind.ToString().ToLowerInvariant();
+                string choices = row.Choices.Count == 0
+                    ? ""
+                    : $" ({string.Join(", ", row.Choices)})";
+                string group = row.Group.Length == 0 ? "" : $" [{row.Group}]";
+                Console.WriteLine($"  {row.Key,-18} {kind}{choices}{group}");
+            }
+        }
         return 0;
     }
 }

@@ -26,6 +26,34 @@
 
 namespace {
 
+/// The help, and after it what kind of value the row takes when that is not
+/// simply text: `[choice: a, b, c]`, `[integer, unit=ms]`, `[toggle]`. The same
+/// field a shell draws a control from, printed so that a person can see what
+/// the shell will see.
+std::string kind_text(const mp::ipc::Setting& row)
+{
+    std::string out = row.description;
+    if (row.read_only || row.kind == mp::ipc::SettingKind::text) {
+        return out;
+    }
+    out += "  [";
+    out += mp::ipc::setting_kind_name(row.kind);
+    if (!row.choices.empty()) {
+        out += ": ";
+        for (std::size_t i = 0; i < row.choices.size(); ++i) {
+            out += (i == 0 ? "" : ", ") + row.choices[i];
+        }
+    }
+    if (!row.hints.empty()) {
+        out += ", " + row.hints;
+    }
+    if (!row.when.empty()) {
+        out += ", when " + row.when;
+    }
+    out += "]";
+    return out;
+}
+
 void usage()
 {
     std::printf(R"(mediaperch-cli -- the shell that is always there
@@ -413,7 +441,7 @@ int main(int argc, char** argv)
         }
         for (const mp::ipc::Setting& row : rows) {
             std::printf("%-16s %-24s %s\n", row.key.c_str(), row.value.c_str(),
-                        row.description.c_str());
+                        kind_text(row).c_str());
         }
         return 0;
     }
@@ -475,7 +503,7 @@ int main(int argc, char** argv)
         }
         for (const mp::ipc::Setting& row : rows) {
             std::printf("%-10s %-28s %s\n", row.key.c_str(), row.value.c_str(),
-                        row.description.c_str());
+                        kind_text(row).c_str());
         }
         return 0;
     }
@@ -569,7 +597,7 @@ int main(int argc, char** argv)
         }
         for (const mp::ipc::Setting& s : settings) {
             std::printf("%-16s %-24s %s\n", s.key.c_str(), s.value.c_str(),
-                        s.description.c_str());
+                        kind_text(s).c_str());
         }
         return 0;
     }

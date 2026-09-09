@@ -148,10 +148,25 @@ void DisplayLoop::learn_refresh(std::uint64_t ticks)
 
 bool DisplayLoop::once(DisplayStep& out)
 {
+    const bool going = turn(out);
+    if (!going) {
+        // A loop that has stopped turning answers what was queued for it,
+        // rather than leaving a caller to wait on a turn that never comes.
+        close_posts();
+    }
+    return going;
+}
+
+bool DisplayLoop::turn(DisplayStep& out)
+{
     out = DisplayStep{};
     if (!frames_->wait()) {
         return false;
     }
+    // **What other threads asked this one to do, first**: a setting, a size,
+    // a row read -- on the thread that owns the presenter, between one frame
+    // and the next.
+    drain_posts();
     ++stats_.turns;
     // Once, and used for both: the tick a frame is drawn at is the tick the
     // audio position is extrapolated to, and reading the counter twice would
@@ -159,9 +174,12 @@ bool DisplayLoop::once(DisplayStep& out)
     const std::uint64_t tick = frames_->now();
     learn_refresh(tick);
 
-    // Asked before anything is decided about, and answered by not deciding.
-    const bool holding = holding_.load(std::memory_order_acquire);
-    parked_.store(holding, std::memory_order_release);
+    // Asked before anything is decided about, and answered by not deciding --
+    // with the serial of the latest hold, so a holder knows the answer is to
+    // its own request and not to an earlier one.
+    const bool holding = holders_.load(std::memory_order_acquire) != 0;
+    parked_serial_.store(holding ? hold_serial_.load(std::memory_order_acquire) : 0,
+                         std::memory_order_release);
     if (holding) {
         out.step = VideoGraph::Step::repeated;
         return true;
@@ -198,6 +216,79 @@ std::uint64_t DisplayLoop::run()
     while (once(step)) {
     }
     return stats_.turns;
+}
+
+std::uint64_t DisplayLoop::hold() noexcept
+{
+    holders_.fetch_add(1, std::memory_order_acq_rel);
+    return hold_serial_.fetch_add(1, std::memory_order_acq_rel) + 1;
+}
+
+void DisplayLoop::release() noexcept
+{
+    // Never below nought: a release with no hold outstanding is a caller's
+    // mistake, and leaving the loop held for it would be the worse answer.
+    std::uint64_t holders = holders_.load(std::memory_order_acquire);
+    while (holders != 0 && !holders_.compare_exchange_weak(holders, holders - 1,
+                                                           std::memory_order_acq_rel)) {
+    }
+}
+
+bool DisplayLoop::parked() const noexcept
+{
+    return holders_.load(std::memory_order_acquire) != 0 &&
+           parked_serial_.load(std::memory_order_acquire) >=
+               hold_serial_.load(std::memory_order_acquire);
+}
+
+bool DisplayLoop::parked(std::uint64_t serial) const noexcept
+{
+    return parked_serial_.load(std::memory_order_acquire) >= serial;
+}
+
+std::future<bool> DisplayLoop::post(Job job)
+{
+    std::promise<bool> done;
+    std::future<bool> answer = done.get_future();
+    const std::lock_guard lock{posts_mutex_};
+    if (posts_closed_) {
+        done.set_value(false);
+        return answer;
+    }
+    posts_.emplace_back(std::move(job), std::move(done));
+    return answer;
+}
+
+void DisplayLoop::drain_posts()
+{
+    for (;;) {
+        std::pair<Job, std::promise<bool>> one;
+        {
+            const std::lock_guard lock{posts_mutex_};
+            if (posts_.empty()) {
+                return;
+            }
+            one = std::move(posts_.front());
+            posts_.pop_front();
+        }
+        if (one.first) {
+            one.first();
+        }
+        one.second.set_value(true);
+    }
+}
+
+void DisplayLoop::close_posts() noexcept
+{
+    std::deque<std::pair<Job, std::promise<bool>>> left;
+    {
+        const std::lock_guard lock{posts_mutex_};
+        posts_closed_ = true;
+        left.swap(posts_);
+    }
+    for (auto& one : left) {
+        one.second.set_value(false);
+    }
 }
 
 } // namespace mp

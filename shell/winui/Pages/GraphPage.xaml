@@ -5,78 +5,41 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:canvas="using:MediaPerch.Shell.Canvas"
-    xmlns:controls="using:MediaPerch.Shell.Controls"
     mc:Ignorable="d">
 
-    <Grid RowDefinitions="Auto,*">
+    <Grid RowDefinitions="*,Auto">
 
-        <CommandBar Grid.Row="0" DefaultLabelPosition="Right" Background="Transparent"
-                    HorizontalAlignment="Left" Margin="12,0,0,0">
-            <AppBarButton Label="Refresh" Click="OnRefresh">
-                <AppBarButton.Icon>
-                    <FontIcon Glyph="&#xE72C;" />
-                </AppBarButton.Icon>
-            </AppBarButton>
-            <AppBarButton Label="Save settings" Click="OnSave">
-                <AppBarButton.Icon>
-                    <FontIcon Glyph="&#xE74E;" />
-                </AppBarButton.Icon>
-            </AppBarButton>
-        </CommandBar>
-
-        <ScrollViewer Grid.Row="1" Padding="24,0,24,16">
+        <ScrollViewer Grid.Row="0" Padding="24,16,24,8">
             <StackPanel Spacing="16">
                 <InfoBar x:Name="Note" IsOpen="False" IsClosable="True" />
 
                 <TextBlock Text="The shape it is in"
                            Style="{StaticResource SubtitleTextBlockStyle}" />
                 <!-- Fusion's look over a chain's semantics: §10 says why it is
-                     a row and not a cloud. -->
+                     a row and not a cloud. Every gesture on it ends as one
+                     dsp or video_dsp value, rewritten by this page. -->
                 <ScrollViewer HorizontalScrollMode="Auto"
                               HorizontalScrollBarVisibility="Auto"
                               VerticalScrollMode="Disabled"
                               VerticalScrollBarVisibility="Disabled">
                     <canvas:NodeCanvas x:Name="Shape" />
                 </ScrollViewer>
-                <TextBlock Text="Drag a stage sideways to reorder it; the bin on a stage removes it."
-                           Style="{StaticResource CaptionTextBlockStyle}"
-                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                           TextWrapping="Wrap"
+                           Text="Drag a module from the palette onto the canvas to add it to its chain, or onto a wire to put it there. Drag a wire from a node's output onto another node's input to move a stage. Drag a stage's input wire away to remove it, or select the stage and press Delete. The gear opens a node's settings." />
 
-                <!-- §10's palette: every module loaded, and a way to put one in
-                     a chain. Adding is appending to the dsp or video_dsp value;
-                     where it then sits is the drag above. -->
-                <Grid ColumnDefinitions="Auto,*,Auto,*,Auto" ColumnSpacing="8">
-                    <TextBlock Grid.Column="0" Text="Add a stage" VerticalAlignment="Center"
-                               Style="{StaticResource BodyStrongTextBlockStyle}" />
-                    <ComboBox x:Name="AudioPalette" Grid.Column="1" PlaceholderText="audio (dsp)"
-                              HorizontalAlignment="Stretch" />
-                    <Button Grid.Column="2" Content="Add to audio chain" Click="OnAddAudio" />
-                    <ComboBox x:Name="VideoPalette" Grid.Column="3" PlaceholderText="picture (vdsp)"
-                              HorizontalAlignment="Stretch" />
-                    <Button Grid.Column="4" Content="Add to picture chain" Click="OnAddVideo" />
-                </Grid>
+                <!-- §10's palette: every stage module this engine loaded, to
+                     drag onto a chain. -->
+                <TextBlock Text="Palette" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                <ListView x:Name="Palette"
+                          CanDragItems="True"
+                          SelectionMode="None"
+                          IsItemClickEnabled="False"
+                          MaxHeight="280"
+                          DragItemsStarting="OnPaletteDrag" />
 
-                <!-- One node's settings, opened by the button on it. -->
-                <Expander x:Name="NodePanel" Visibility="Collapsed"
-                          HorizontalAlignment="Stretch" IsExpanded="True">
-                    <Expander.Header>
-                        <TextBlock x:Name="NodeTitle" />
-                    </Expander.Header>
-                    <controls:SettingsEditor x:Name="NodeSettings" />
-                </Expander>
-
-                <!-- Everything else the engine will take, in the two places §11
-                     splits it into: what a run may change, and what was decided
-                     before there was a run. -->
-                <Expander HorizontalAlignment="Stretch" Header="Player settings">
-                    <controls:SettingsEditor x:Name="PlayerSettings" />
-                </Expander>
-
-                <Expander HorizontalAlignment="Stretch" Header="Engine settings">
-                    <controls:SettingsEditor x:Name="EngineSettings" />
-                </Expander>
-
-                <Expander x:Name="ModulePanel" HorizontalAlignment="Stretch" Header="Modules">
+                <Expander x:Name="ModulePanel" HorizontalAlignment="Stretch" Header="Every module">
                     <ItemsControl x:Name="ModuleRows">
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>
@@ -89,5 +52,17 @@
                 </Expander>
             </StackPanel>
         </ScrollViewer>
+
+        <!-- The page's commands, bottom right, the primary one last and
+             accented: where Fluent puts the buttons that act on a page, and
+             where a person who has just changed something looks for them. -->
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8"
+                    HorizontalAlignment="Right" Padding="24,12,24,16">
+            <Button Content="Refresh" Click="OnRefresh" />
+            <Button Content="Player settings…" Click="OnPlayerSettings" />
+            <Button Content="Engine settings…" Click="OnEngineSettings" />
+            <Button Content="Save settings" Style="{StaticResource AccentButtonStyle}"
+                    Click="OnSave" />
+        </StackPanel>
     </Grid>
 </Page>

@@ -20,32 +20,13 @@ namespace mp {
 namespace {
 
 /// One `describe` row, turned into a settings row, or `false` for a line that
-/// is not one.
-///
-/// **Written once because it was written three times** -- for the presenter,
-/// for a video stage and for an audio stage -- and the third copy is where a
-/// difference would have gone unnoticed. Every `describe` in this tree answers
-/// `key<tab>value<tab>description`, and every module that answers with a
-/// measurement rather than a setting ends the description with `(read only)`.
-/// That marker is read here, so that what crosses §10 is a boolean and no shell
-/// has to look for two English words to decide whether to draw a box.
+/// is not one. The reading lives with the wire's type (`ipc::setting_from_row`)
+/// so that the test of the grammar is a test of the wire; this is the name the
+/// three places rows are read under.
 bool describe_row(const std::string& line, ipc::Setting& out)
 {
-    const std::size_t first = line.find('\t');
-    if (first == std::string::npos) {
-        return false;
-    }
-    const std::size_t second = line.find('\t', first + 1);
-    out.key = line.substr(0, first);
-    out.value = line.substr(first + 1, second - first - 1);
-    out.description = second == std::string::npos ? std::string{} : line.substr(second + 1);
-    static constexpr std::string_view k_marker = "(read only)";
-    out.read_only = out.description.size() >= k_marker.size() &&
-                    out.description.compare(out.description.size() - k_marker.size(),
-                                            k_marker.size(), k_marker) == 0;
-    return true;
+    return ipc::setting_from_row(line, out);
 }
-
 
 /// How often the engine thread looks up from the graph. Short enough that
 /// "stop" is not noticeably late, long enough that this is not a spin.
@@ -666,28 +647,52 @@ std::vector<std::string> Player::playlist() const
 // Settings
 // --------------------------------------------------------------------------
 
+namespace {
+
+bool parse_pairs(const std::string& value,
+                 std::vector<std::pair<std::string, std::string>>& out);
+std::string joined_pairs(const std::vector<std::pair<std::string, std::string>>& pairs);
+
+} // namespace
+
 std::vector<ipc::Setting> Player::settings() const
 {
     const std::lock_guard lock{mutex_};
     std::vector<ipc::Setting> out;
-    const auto row = [&out](const char* key, std::string value, std::string what) {
-        out.push_back(ipc::Setting{key, std::move(value), std::move(what)});
+    // The fourth field spelled the way a module spells it, so that the
+    // player's own rows and a module's are one grammar with one reader.
+    const auto row = [&out](const char* key, std::string value, std::string what,
+                            const char* spec) {
+        ipc::Setting setting{key, std::move(value), std::move(what)};
+        (void)ipc::parse_setting_spec(spec, setting);
+        out.push_back(std::move(setting));
     };
     row("device", config_.device,
-        "part of an endpoint's name, or empty for the default one");
+        "part of an endpoint's name, or empty for the default one", "text group=Output");
     row("share", config_.shared ? "shared" : "exclusive",
-        "exclusive takes the device and nothing else can make a sound on it");
+        "exclusive takes the device and nothing else can make a sound on it",
+        "enum:exclusive,shared group=Output");
     row("path", path_policy_name(config_.path),
-        "bitexact, exactonly, auto or processed -- what may happen to the samples");
+        "bitexact, exact, auto or processed -- what may happen to the samples",
+        "enum:bitexact,exact,auto,processed group=Path");
     row("dsp", joined(config_.dsp, '|'),
         "stages in the order they run, separated by |; each `name` or "
-        "`name:key=value,key=value`");
+        "`name:key=value,key=value`",
+        "text group=Path");
     row("video_dsp", joined(config_.video_dsp, '|'),
-        "the same for the picture: stages in linear light inside the presenter");
+        "the same for the picture: stages in linear light inside the presenter",
+        "text group=Path");
+    row("presenter", joined_pairs(config_.presenter),
+        "what was set on the presenter, `key=value,key=value`, said again at every "
+        "open -- the tone mapper, the gamut, the siting; never its size, which is "
+        "the window's",
+        "text group=Path");
     row("gain", std::to_string(config_.conversion.gain),
-        "linear, not decibels. Only on the processed path");
+        "linear, not decibels. Only on the processed path",
+        "number step=0.05 group=Conversion");
     row("dither", dither_kind_name(config_.conversion.dither),
-        "none, rectangular, triangular or gaussian, when a container shrinks");
+        "none, rectangular, triangular, highpass or gaussian, when a container shrinks",
+        "enum:none,rectangular,triangular,highpass,gaussian group=Conversion");
     // The value is what was typed, because this list is also what gets written
     // to the settings file and a file this program cannot read back is not a
     // settings file. What it resolved to goes in the description, where it is
@@ -695,27 +700,34 @@ std::vector<ipc::Setting> Player::settings() const
     row("shaping", config_.shaping_spec,
         "0-9 for a binomial order, `shibata[:N]`, or a named curve -- currently " +
             noise_shaping_describe(config_.conversion.shaping,
-                                   wire_.sample_rate != 0 ? wire_.sample_rate : 44100));
+                                   wire_.sample_rate != 0 ? wire_.sample_rate : 44100),
+        "text group=Conversion");
     row("dither_seed", std::to_string(config_.conversion.seed),
-        "so two runs of one file produce the same bytes");
+        "so two runs of one file produce the same bytes", "int min=0 group=Conversion");
     row("ring_periods", std::to_string(config_.buffering.ring_periods),
         "ring capacity in device periods. Generous by default, because the "
-        "worst stall in a file is not knowable before opening it");
+        "worst stall in a file is not knowable before opening it",
+        "int min=1 group=Buffering");
     row("prefill_periods", std::to_string(config_.buffering.prefill_periods),
         "how much of the ring is filled before the device starts and before a "
-        "seek resumes. Not the whole ring");
+        "seek resumes. Not the whole ring",
+        "int min=1 group=Buffering");
     row("wait_timeout", std::to_string(config_.buffering.wait_timeout_ms),
-        "how long the render thread waits for a device before calling it gone");
+        "how long the render thread waits for a device before calling it gone",
+        "int min=0 unit=ms group=Buffering");
     row("recover", config_.recover ? "1" : "0",
-        "rebuild onto an endpoint that comes back, instead of ending the run");
+        "rebuild onto an endpoint that comes back, instead of ending the run",
+        "bool group=Recovery");
     row("recover_timeout", std::to_string(config_.recover_timeout),
-        "seconds to wait for one");
+        "seconds to wait for one", "int min=0 unit=s group=Recovery when=recover=1");
     return out;
 }
 
 bool Player::set(const std::string& key, const std::string& value, std::string& why)
 {
     bool rebuild = false;
+    bool apply_presenter = false;
+    std::vector<std::pair<std::string, std::string>> presenter_was;
     {
         const std::lock_guard lock{mutex_};
         double number = 0.0;
@@ -748,6 +760,18 @@ bool Player::set(const std::string& key, const std::string& value, std::string& 
             // `process` is a data race rather than a setting.
             config_.video_dsp = split_stages(value);
             rebuild = true;
+        } else if (key == "presenter") {
+            // **Kept, and applied to the picture that is open.** What the
+            // settings file replays at the start, and what `set_node` writes
+            // one key at a time: the same list, read the same way.
+            std::vector<std::pair<std::string, std::string>> pairs;
+            if (!parse_pairs(value, pairs)) {
+                why = "presenter is `key=value,key=value`";
+                return false;
+            }
+            presenter_was = config_.presenter;
+            config_.presenter = std::move(pairs);
+            apply_presenter = true;
         } else if (key == "gain") {
             // Linear and unbounded. Above unity clips, below zero inverts,
             // and both are things somebody may want on purpose.
@@ -836,6 +860,24 @@ bool Player::set(const std::string& key, const std::string& value, std::string& 
     if (rebuild) {
         rebuild_wanted_.store(true, std::memory_order_release);
     }
+    if (apply_presenter) {
+        // **Outside the lock**, because a presenter's setting waits for the
+        // display loop's turn. A refusal puts the list back and says why: the
+        // presenter is the one that knows what its keys mean.
+        const std::shared_ptr<VideoPath> video = picture();
+        std::vector<std::pair<std::string, std::string>> pairs;
+        {
+            const std::lock_guard lock{mutex_};
+            pairs = config_.presenter;
+        }
+        for (const auto& [k, v] : pairs) {
+            if (video != nullptr && !video->set_presenter(k, v, why)) {
+                const std::lock_guard lock{mutex_};
+                config_.presenter = presenter_was;
+                return false;
+            }
+        }
+    }
     return true;
 }
 
@@ -873,6 +915,31 @@ struct StageSpec {
 /// because `;` and `#` start a comment in the settings file. The old form is
 /// still read: a comma-separated piece with an `=` before any `:` is a setting
 /// and belongs to the stage before it, and a stage name never contains `=`.
+/// `key=value,key=value`, which is a stage's own tail without the stage:
+/// what the `presenter` row is spelled in.
+bool parse_pairs(const std::string& value,
+                 std::vector<std::pair<std::string, std::string>>& out)
+{
+    out.clear();
+    for (const std::string& piece : split(value, ',')) {
+        const std::size_t equals = piece.find('=');
+        if (equals == std::string::npos || equals == 0) {
+            return false;
+        }
+        out.emplace_back(piece.substr(0, equals), piece.substr(equals + 1));
+    }
+    return true;
+}
+
+std::string joined_pairs(const std::vector<std::pair<std::string, std::string>>& pairs)
+{
+    std::string out;
+    for (const auto& [key, value] : pairs) {
+        out += (out.empty() ? "" : ",") + key + "=" + value;
+    }
+    return out;
+}
+
 std::vector<std::string> split_stages(const std::string& value)
 {
     std::vector<std::string> out;
@@ -990,20 +1057,24 @@ ipc::Graph Player::graph() const
     // the file one position and §8 gives the run one clock, but the frames and
     // the samples never meet: what joins them is the clock, which is not an
     // edge a canvas should draw as though data flowed along it.
+    // **One copy of the shape, taken under the path's gate**, rather than
+    // four questions asked while the engine thread may be answering none of
+    // them: the module names and the stage list are rewritten by an open.
     const std::shared_ptr<VideoPath> video = picture();
-    if (video && video->opened()) {
-        node("vsource", ipc::NodeKind::video_source, video->modules().decoder,
-             "the video decoder", ipc::MP_NODE_SETTABLE);
+    const VideoPath::Shape shape = video ? video->shape() : VideoPath::Shape{};
+    if (shape.opened) {
+        node("vsource", ipc::NodeKind::video_source, shape.decoder, "the video decoder",
+             ipc::MP_NODE_SETTABLE);
         std::string before = "vsource";
-        for (std::size_t i = 0; i < video->stage_count(); ++i) {
+        for (std::size_t i = 0; i < shape.stages.size(); ++i) {
             const std::string id = "vdsp." + std::to_string(i);
-            const std::string module = video->stage_module(i);
+            const std::string& module = shape.stages[i];
             node(id.c_str(), ipc::NodeKind::video_stage, module, module,
                  ipc::MP_NODE_REMOVABLE | ipc::MP_NODE_SETTABLE);
             edge(before, id);
             before = id;
         }
-        node("presenter", ipc::NodeKind::presenter, video->modules().presenter,
+        node("presenter", ipc::NodeKind::presenter, shape.presenter,
              "the colour pipeline and the display", ipc::MP_NODE_SETTABLE);
         edge(before, "presenter");
     }
@@ -1217,6 +1288,24 @@ bool Player::set_node(const std::string& node, const std::string& key,
             }
             return false;
         }
+        // **Kept, so that the next open and the settings file both say it.**
+        // The size and the display are the window's and are carried on their
+        // own; the surface is decided before the first configure and is not a
+        // person's to set twice.
+        if (key != "size" && key != "display" && key != "surface") {
+            const std::lock_guard lock{mutex_};
+            bool replaced = false;
+            for (auto& pair : config_.presenter) {
+                if (pair.first == key) {
+                    pair.second = value;
+                    replaced = true;
+                    break;
+                }
+            }
+            if (!replaced) {
+                config_.presenter.emplace_back(key, value);
+            }
+        }
         return true;
     }
     if (node.rfind("vdsp.", 0) == 0) {
@@ -1234,9 +1323,12 @@ bool Player::set_node(const std::string& node, const std::string& key,
         if (!video->set_stage(index, key, value, why)) {
             return false;
         }
+        // **The spec the stage was opened from**, which is not the stage's
+        // index when one before it would not open.
+        const std::size_t which = video->stage_spec_index(index);
         const std::lock_guard lock{mutex_};
-        if (index < config_.video_dsp.size()) {
-            std::string& spec = config_.video_dsp[index];
+        if (which < config_.video_dsp.size()) {
+            std::string& spec = config_.video_dsp[which];
             const std::size_t colon = spec.find(':');
             std::string kept = spec.substr(0, colon);
             std::string rest = colon == std::string::npos ? std::string{}
@@ -1252,6 +1344,13 @@ bool Player::set_node(const std::string& node, const std::string& key,
             spec = kept + ":" + built;
         }
         return true;
+    }
+    if (node == "vsource") {
+        // Its rows are measurements -- the decoder's name, what it produced,
+        // what was dropped -- and a canvas that opens them sees that; a set
+        // is answered in words rather than with a node that does not exist.
+        why = "vsource has nothing to set: its rows are what the decoder did";
+        return false;
     }
     if (node.rfind("dsp.", 0) != 0) {
         why = "there is no node called `" + node + "`";
@@ -2151,6 +2250,7 @@ void Player::open_video(IMedia* media, std::uint32_t decoder_threads)
     {
         const std::lock_guard lock{mutex_};
         want.stages = config_.video_dsp;
+        want.presenter_settings = config_.presenter;
         // What a shell last asked for, carried across the boundary.
         want.width = asked_width_;
         want.height = asked_height_;
@@ -2191,6 +2291,11 @@ void Player::open_video(IMedia* media, std::uint32_t decoder_threads)
     // for a guess.
     if (known && !path->set_display(display, why)) {
         note("the display the shell named was refused: " + why);
+    }
+    // What was kept and not taken, said once each: a key a newer presenter
+    // module does not know is not a reason to lose the picture.
+    for (const std::string& refusal : path->refused_settings()) {
+        note(refusal);
     }
     const std::lock_guard lock{mutex_};
     video_ = std::move(path);

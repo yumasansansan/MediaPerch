@@ -39,10 +39,12 @@
 
 #include <mediaperch/module.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <memory>
 #include <string>
 #include <mutex>
@@ -69,6 +71,13 @@ public:
         /// order it runs -- the same grammar the audio chain's `--dsp` uses,
         /// because two grammars for one idea would be one too many.
         std::vector<std::string> stages;
+
+        /// **What a person set on the presenter, said again at every open**
+        /// (§10): `key=value` pairs in the order they were said, from the
+        /// player's `presenter` setting. The presenter is new at every track
+        /// boundary and remembers nothing, so a key that lived only in it was
+        /// forgotten at the next file and never written by `save`.
+        std::vector<std::pair<std::string, std::string>> presenter_settings;
     };
 
     /// **What the shell says the display is** (§9.4, §9.7.1).
@@ -247,7 +256,11 @@ public:
     bool set_presenter(const std::string& key, const std::string& value, std::string& why,
                        std::chrono::milliseconds deadline = std::chrono::milliseconds{500})
     {
-        return tell(key.c_str(), value.c_str(), why, deadline);
+        // A size is a resize, which waits for the swap chain; the frame clocks
+        // block for up to a second, so it gets longer than the rest.
+        return tell(key.c_str(), value.c_str(), why,
+                    key == "size" ? std::max(deadline, std::chrono::milliseconds{1500})
+                                  : deadline);
     }
 
     /// **§9.7.1's message, arriving.** The size to render at; zero for the
@@ -260,7 +273,7 @@ public:
     /// does, for the same reason, and waits to be told the loop has parked
     /// rather than assuming it has.
     bool set_size(std::uint32_t width, std::uint32_t height, std::string& why,
-                  std::chrono::milliseconds deadline = std::chrono::milliseconds{500});
+                  std::chrono::milliseconds deadline = std::chrono::milliseconds{1500});
 
     /// **§9.7.1's other message.** Which display the picture is on, and what it
     /// is. Sent when a shell's window crosses a monitor or somebody toggles
@@ -285,6 +298,30 @@ public:
     /// one thing a chain has that a set does not.
     [[nodiscard]] std::size_t stage_count() const noexcept { return stages_.size(); }
     [[nodiscard]] const std::string& stage_module(std::size_t index) const noexcept;
+
+    /// Which element of `Config::stages` stage `index` was opened from. A
+    /// stage that would not open is skipped, and without this a canvas's
+    /// `vdsp.1` would rewrite the spec of the stage that failed rather than
+    /// the one that is running. Past the end when there is no such stage.
+    [[nodiscard]] std::size_t stage_spec_index(std::size_t index) const;
+
+    /// **The shape, copied under the gate.** What a canvas draws: whether a
+    /// picture is open, which modules it is made of, and the stages in order.
+    /// One call rather than four, because `Player::graph` asked four questions
+    /// from an IPC thread while the engine thread was answering none of them.
+    struct Shape {
+        bool opened = false;
+        std::string presenter;
+        std::string decoder;
+        std::vector<std::string> stages;
+    };
+    [[nodiscard]] Shape shape() const;
+
+    /// The refusals `open` collected applying `Config::presenter_settings`
+    /// and opening `Config::stages`, one sentence each; empty when every key
+    /// was taken and every stage opened. Not fatal, and the caller decides
+    /// whether to log them.
+    [[nodiscard]] std::vector<std::string> refused_settings() const;
 
     /// One stage's own settings, and changing one.
     ///
@@ -319,6 +356,12 @@ private:
     bool tell(const char* key, const char* value, std::string& why,
               std::chrono::milliseconds deadline);
 
+    /// Run `work` on the display loop's thread when the loop is turning, and
+    /// here when it is not, waiting at most `deadline` for it -- see
+    /// `DisplayLoop::post`. The gate is the caller's.
+    bool on_loop(const std::function<bool()>& work, std::string& why,
+                 std::chrono::milliseconds deadline);
+
     /// Opens the chain from `want.stages` and hands it to the presenter.
     /// Never fatal: a stage that will not open is a stage the run says it is
     /// without, and the picture is still a picture.
@@ -329,6 +372,8 @@ private:
     std::unique_ptr<Presenter> presenter_;
     std::vector<std::unique_ptr<VideoStage>> stages_;
     std::vector<std::string> stage_modules_;
+    std::vector<std::size_t> stage_spec_index_;
+    std::vector<std::string> refused_settings_;
     std::unique_ptr<VideoDecoder> decoder_;
     std::unique_ptr<VideoGraph> graph_;
     std::unique_ptr<DisplayLoop> loop_;

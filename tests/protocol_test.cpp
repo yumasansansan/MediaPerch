@@ -12,7 +12,13 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
+#include <cstdlib>
+#include <fstream>
+#include <map>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -98,9 +104,39 @@ TEST_CASE("lists survive the round trip", "[ipc][protocol]")
 
     SECTION("a settings tree")
     {
-        const std::vector<mp::ipc::Setting> sent{
+        // Every kind, with everything a row can carry, because a field added
+        // to a row inside a counted list is exactly what an old reader takes
+        // for the next row.
+        std::vector<mp::ipc::Setting> sent{
             {"path", "bitexact", "what may happen to the samples"},
             {"device", "", "or empty for the default"}};
+        mp::ipc::Setting up;
+        up.key = "up";
+        up.value = "lanczos";
+        up.description = "the kernel";
+        REQUIRE(mp::ipc::parse_setting_spec("enum:bilinear,hermite,lanczos group=Upscaling", up));
+        sent.push_back(up);
+        mp::ipc::Setting lobes;
+        lobes.key = "up_lobes";
+        lobes.value = "3";
+        lobes.description = "how many";
+        REQUIRE(mp::ipc::parse_setting_spec("int min=1 step=1 group=Upscaling when=up=lanczos",
+                                            lobes));
+        sent.push_back(lobes);
+        for (const char* spec : {"number step=0.05 unit=dB", "bool", "size", "path pick=folder"}) {
+            mp::ipc::Setting one;
+            one.key = spec;
+            one.value = "x";
+            REQUIRE(mp::ipc::parse_setting_spec(spec, one));
+            sent.push_back(one);
+        }
+        mp::ipc::Setting cost;
+        cost.key = "cost";
+        cost.value = "12";
+        cost.description = "taps (read only)";
+        cost.read_only = true;
+        sent.push_back(cost);
+
         mp::ipc::Writer w;
         write(w, sent);
         mp::ipc::Reader r{w.bytes()};
@@ -109,9 +145,38 @@ TEST_CASE("lists survive the round trip", "[ipc][protocol]")
         CHECK(r.complete());
         REQUIRE(got.size() == sent.size());
         for (std::size_t i = 0; i < got.size(); ++i) {
+            INFO(sent[i].key);
             CHECK(got[i].key == sent[i].key);
             CHECK(got[i].value == sent[i].value);
             CHECK(got[i].description == sent[i].description);
+            CHECK(got[i].read_only == sent[i].read_only);
+            CHECK(got[i].kind == sent[i].kind);
+            CHECK(got[i].choices == sent[i].choices);
+            CHECK(got[i].group == sent[i].group);
+            CHECK(got[i].when == sent[i].when);
+            CHECK(got[i].hints == sent[i].hints);
+        }
+        CHECK(got[2].kind == mp::ipc::SettingKind::choice);
+        CHECK(got[2].choices == std::vector<std::string>{"bilinear", "hermite", "lanczos"});
+        CHECK(got[3].kind == mp::ipc::SettingKind::integer);
+        CHECK(got[3].when == "up=lanczos");
+        CHECK(got[3].hints == "min=1 step=1");
+        CHECK(got[4].kind == mp::ipc::SettingKind::number);
+        CHECK(got[4].hints == "step=0.05 unit=dB");
+        CHECK(got[5].kind == mp::ipc::SettingKind::toggle);
+        CHECK(got[6].kind == mp::ipc::SettingKind::size);
+        CHECK(got[7].kind == mp::ipc::SettingKind::path);
+        CHECK(got[7].hints == "pick=folder");
+        CHECK(got[8].read_only);
+        CHECK(got[8].kind == mp::ipc::SettingKind::text);
+
+        // A row cut short anywhere inside its new fields is refused, not read
+        // as a shorter row.
+        const std::vector<std::uint8_t>& whole = w.bytes();
+        for (std::size_t cut : {whole.size() - 1, whole.size() - 3, whole.size() - 9}) {
+            mp::ipc::Reader short_r{whole.data(), cut};
+            std::vector<mp::ipc::Setting> partial;
+            CHECK_FALSE(read(short_r, partial));
         }
     }
 }
@@ -337,4 +402,200 @@ TEST_CASE("a truncated calibration is refused rather than half-read", "[protocol
     mp::ipc::Reader r{cut};
     mp::ipc::Calibration got;
     CHECK_FALSE(mp::ipc::read(r, got));
+}
+
+namespace {
+
+std::string slurp(const std::string& path)
+{
+    std::ifstream in{path, std::ios::binary};
+    std::ostringstream text;
+    text << in.rdbuf();
+    return in ? text.str() : std::string{};
+}
+
+/// The `name = number` lines of the enum whose declaration starts with
+/// `heading`, with the names normalised -- lower case, underscores dropped --
+/// so that `node_setting_set` and `NodeSettingSet` are one key.
+std::map<std::string, long> enum_table(const std::string& text, const std::string& heading)
+{
+    std::map<std::string, long> out;
+    const std::size_t start = text.find(heading);
+    if (start == std::string::npos) {
+        return out;
+    }
+    std::istringstream lines{text.substr(start)};
+    std::string line;
+    bool inside = false;
+    while (std::getline(lines, line)) {
+        if (!inside) {
+            inside = line.find('{') != std::string::npos;
+            continue;
+        }
+        const std::size_t close = line.find('}');
+        const std::size_t comment = line.find("//");
+        const std::string code = line.substr(0, std::min(close, comment));
+        const std::size_t equals = code.find('=');
+        if (equals != std::string::npos) {
+            std::string name;
+            for (const char c : code.substr(0, equals)) {
+                if (std::isalnum(static_cast<unsigned char>(c)) != 0) {
+                    name += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                }
+            }
+            const char* digits = code.c_str() + equals + 1;
+            char* end = nullptr;
+            const long value = std::strtol(digits, &end, 10);
+            if (!name.empty() && end != digits) {
+                out[name] = value;
+            }
+        }
+        if (close != std::string::npos) {
+            break;
+        }
+    }
+    return out;
+}
+
+long number_after(const std::string& text, const std::string& what)
+{
+    const std::size_t at = text.find(what);
+    return at == std::string::npos ? -1 : std::strtol(text.c_str() + at + what.size(), nullptr, 10);
+}
+
+} // namespace
+
+TEST_CASE("the shell's C# mirror of the wire agrees with the C++ enum", "[ipc][protocol]")
+{
+    // **A hand-written mirror needs a test that reads the mirror.** The wire
+    // is described twice on purpose -- a serialiser would be a third
+    // description -- and the second description was wrong in the one way a
+    // trace cannot show: `Save` and `Quit` were each other's number in the
+    // shell, so "Save settings" quit the engine and closing the window asked
+    // it to save. This reads both files and holds every enumerator of `Kind`
+    // and `NodeKind`, and the version, to one number.
+    const std::string cpp = slurp(MEDIAPERCH_SOURCE_DIR "/src/player/mediaperch/protocol.hpp");
+    const std::string cs = slurp(MEDIAPERCH_SOURCE_DIR "/shell/winui/Ipc/Protocol.cs");
+    REQUIRE(!cpp.empty());
+    REQUIRE(!cs.empty());
+
+    for (const char* which : {"Kind", "NodeKind", "SettingKind"}) {
+        INFO(which);
+        const auto ours = enum_table(cpp, std::string{"\nenum class "} + which + " :");
+        const auto theirs = enum_table(cs, std::string{"\npublic enum "} + which + " :");
+        REQUIRE(!ours.empty());
+        REQUIRE(!theirs.empty());
+        for (const auto& [name, value] : ours) {
+            INFO(name);
+            const auto it = theirs.find(name);
+            REQUIRE(it != theirs.end());
+            CHECK(it->second == value);
+        }
+        for (const auto& [name, value] : theirs) {
+            INFO(name);
+            CHECK(ours.count(name) == 1u);
+        }
+    }
+    CHECK(number_after(cpp, "k_version = ") == number_after(cs, "Version = "));
+    CHECK(number_after(cpp, "k_version = ") == static_cast<long>(mp::ipc::k_version));
+}
+
+TEST_CASE("a describe row's fourth field says what kind of value it takes", "[ipc][protocol]")
+{
+    // **The grammar every module writes in, read once.** A module's row is
+    // `key\tvalue\thelp[\tspec]`; the spec is a type and then hints. What a
+    // shell draws depends on this being read the same way for every module,
+    // which is why it is read here and not in each of three places.
+    mp::ipc::Setting row;
+
+    SECTION("three fields is a text row, as every row was")
+    {
+        REQUIRE(mp::ipc::setting_from_row("gain\t1.5\tlinear gain", row));
+        CHECK(row.key == "gain");
+        CHECK(row.value == "1.5");
+        CHECK(row.description == "linear gain");
+        CHECK_FALSE(row.read_only);
+        CHECK(row.kind == mp::ipc::SettingKind::text);
+        CHECK(row.choices.empty());
+        CHECK(row.group.empty());
+    }
+    SECTION("two fields is a row with no help")
+    {
+        REQUIRE(mp::ipc::setting_from_row("gain\t1.5", row));
+        CHECK(row.value == "1.5");
+        CHECK(row.description.empty());
+        CHECK(row.kind == mp::ipc::SettingKind::text);
+    }
+    SECTION("one field is not a row")
+    {
+        CHECK_FALSE(mp::ipc::setting_from_row("gain", row));
+    }
+    SECTION("the marker is still read, and the help does not include the spec")
+    {
+        REQUIRE(mp::ipc::setting_from_row("peak\t0.5\tloudest (read only)", row));
+        CHECK(row.read_only);
+        REQUIRE(mp::ipc::setting_from_row("up\tlanczos\tthe kernel\tenum:hermite,lanczos group=Up",
+                                          row));
+        CHECK_FALSE(row.read_only);
+        CHECK(row.description == "the kernel");
+        CHECK(row.kind == mp::ipc::SettingKind::choice);
+        CHECK(row.choices == std::vector<std::string>{"hermite", "lanczos"});
+        CHECK(row.group == "Up");
+    }
+    SECTION("every type")
+    {
+        CHECK(mp::ipc::parse_setting_spec("text", row));
+        CHECK(row.kind == mp::ipc::SettingKind::text);
+        CHECK(mp::ipc::parse_setting_spec("int", row));
+        CHECK(row.kind == mp::ipc::SettingKind::integer);
+        CHECK(mp::ipc::parse_setting_spec("number", row));
+        CHECK(row.kind == mp::ipc::SettingKind::number);
+        CHECK(mp::ipc::parse_setting_spec("bool", row));
+        CHECK(row.kind == mp::ipc::SettingKind::toggle);
+        CHECK(mp::ipc::parse_setting_spec("size", row));
+        CHECK(row.kind == mp::ipc::SettingKind::size);
+        CHECK(mp::ipc::parse_setting_spec("path", row));
+        CHECK(row.kind == mp::ipc::SettingKind::path);
+        CHECK(mp::ipc::parse_setting_spec("enum:a", row));
+        CHECK(row.kind == mp::ipc::SettingKind::choice);
+        CHECK(row.choices == std::vector<std::string>{"a"});
+    }
+    SECTION("hints keep their order and their words; group and when are lifted out")
+    {
+        REQUIRE(mp::ipc::parse_setting_spec(
+            "int  min=1 max=1000 step=1 unit=lobes group=Upscaling when=up=lanczos,spline36",
+            row));
+        CHECK(row.kind == mp::ipc::SettingKind::integer);
+        CHECK(row.hints == "min=1 max=1000 step=1 unit=lobes");
+        CHECK(row.group == "Upscaling");
+        CHECK(row.when == "up=lanczos,spline36");
+    }
+    SECTION("a spec this cannot read is a text row and says so")
+    {
+        // A previous spec's fields do not leak into a row with a bad one.
+        REQUIRE(mp::ipc::parse_setting_spec("enum:a,b group=G", row));
+        for (const char* bad : {"enum", "enum:", "float", "int min", "int =3", "int min=",
+                                "int when=lanczos", "int when==x", "int when=up="}) {
+            INFO(bad);
+            CHECK_FALSE(mp::ipc::parse_setting_spec(bad, row));
+            CHECK(row.kind == mp::ipc::SettingKind::text);
+            CHECK(row.choices.empty());
+            CHECK(row.group.empty());
+            CHECK(row.when.empty());
+            CHECK(row.hints.empty());
+            // Through the row as well: the key, value and help are still read.
+            REQUIRE(mp::ipc::setting_from_row(std::string{"k\tv\th\t"} + bad, row));
+            CHECK(row.key == "k");
+            CHECK(row.description == "h");
+            CHECK(row.kind == mp::ipc::SettingKind::text);
+        }
+        CHECK_FALSE(mp::ipc::parse_setting_spec("", row));
+        CHECK(row.kind == mp::ipc::SettingKind::text);
+    }
+    SECTION("the names a tool prints")
+    {
+        CHECK(std::string{mp::ipc::setting_kind_name(mp::ipc::SettingKind::choice)} == "choice");
+        CHECK(std::string{mp::ipc::setting_kind_name(mp::ipc::SettingKind::toggle)} == "toggle");
+        CHECK(std::string{mp::ipc::setting_kind_name(mp::ipc::SettingKind::text)} == "text");
+    }
 }

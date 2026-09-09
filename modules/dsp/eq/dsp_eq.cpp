@@ -441,17 +441,19 @@ try {
     switch (index) {
     case 0: {
         const std::string text = mp::biquad::bands_text(d->bands);
-        std::snprintf(out, out_bytes, "bands\t%s\tkind:hz:dB:Q, semicolons between; %s",
+        std::snprintf(out, out_bytes, "bands\t%s\tkind:hz:dB:Q, semicolons between; %s"
+                                      "\ttext group=Bands",
                       text.c_str(), mp::biquad::kind_names().c_str());
         return MP_OK;
     }
     case 1:
         std::snprintf(out, out_bytes,
-                      "band\t(append)\tone more band, in the same words as above");
+                      "band\t(append)\tone more band, in the same words as above"
+                      "\ttext group=Bands");
         return MP_OK;
     case 2:
         std::snprintf(out, out_bytes, "curve\t%g:%g:%u\twhere the reported curve is "
-                                      "sampled: low:high:points",
+                                      "sampled: low:high:points\ttext group=Report",
                       d->curve_low_hz, d->curve_high_hz, d->curve_points);
         return MP_OK;
     case 3:
@@ -475,27 +477,30 @@ try {
     case 7:
         std::snprintf(out, out_bytes,
                       "mode\t%s\tiir (no latency), linear (no phase shift) or minimum "
-                      "(no pre-ringing)",
+                      "(no pre-ringing)\tenum:iir,linear,minimum group=Realisation",
                       d->mode == Mode::iir ? "iir"
                                            : (d->mode == Mode::linear ? "linear"
                                                                       : "minimum"));
         return MP_OK;
     case 8:
-        std::snprintf(out, out_bytes, "taps\t%u\tFIR length (mode=linear or minimum)",
+        std::snprintf(out, out_bytes, "taps\t%u\tFIR length (mode=linear or minimum)"
+                                      "\tint min=1 group=Realisation when=mode=linear,minimum",
                       d->taps);
         return MP_OK;
     case 9:
         std::snprintf(out, out_bytes,
-                      "partition\t%u\tconvolution partition; 0 follows the block size",
+                      "partition\t%u\tconvolution partition; 0 follows the block size"
+                      "\tint min=0 group=Realisation when=mode=linear,minimum",
                       d->partition);
         return MP_OK;
     case 10:
-        std::snprintf(out, out_bytes, "preamp\t%+.2f\tdB applied with the curve",
+        std::snprintf(out, out_bytes, "preamp\t%+.2f\tdB applied with the curve"
+                                      "\tnumber step=0.5 unit=dB group=Bands",
                       d->preamp_db);
         return MP_OK;
     case 11:
         std::snprintf(out, out_bytes,
-                      "preset\t%s\tan AutoEq or Equalizer APO file",
+                      "preset\t%s\tan AutoEq or Equalizer APO file\tpath group=Bands",
                       d->profile.kind.empty() ? "none" : d->profile.kind.c_str());
         return MP_OK;
     case 12:

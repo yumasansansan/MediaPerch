@@ -39,10 +39,15 @@ namespace mp::ipc {
 /// finds out immediately rather than after a plausible-looking length.
 inline constexpr std::uint32_t k_magic = 0x5049504Du;
 
-/// Bumped when a field changes meaning, moves, or goes away. Adding a *message*
-/// does not need it: an engine that does not know a kind answers `error`, which
-/// is exactly what a shell from the future should be told.
-inline constexpr std::uint16_t k_version = 1;
+/// Bumped when a field changes meaning, moves, or goes away -- and when a row
+/// inside a counted list grows, because a reader of the old wire would take the
+/// new fields for the next row. Adding a *message* does not need it: an engine
+/// that does not know a kind answers `error`, which is exactly what a shell
+/// from the future should be told.
+///
+/// 2: a settings row carries its kind, its choices, its group, its `when` and
+/// its hints after `read_only`.
+inline constexpr std::uint16_t k_version = 2;
 
 /// Beyond this a length is a mistake or an attack, never a message. The largest
 /// honest payload is a playlist, and a megabyte is some thousands of paths.
@@ -283,6 +288,34 @@ struct Status {
     std::string error;
 };
 
+/// What kind of value a settings row takes, so that a shell can draw the
+/// control that fits rather than a box for everything.
+///
+/// **A hint about drawing, not a rule about values.** The engine validates and
+/// the shell does not (§10): whatever a person types is sent, and the sentence
+/// that comes back is the module's own. What a shell cannot do without this is
+/// choose between a drop-down, a number field and a switch -- the same kind of
+/// decision `read_only` exists for, and made the same way, once, where the
+/// rows are parsed. A kind this build does not know reads as `text`.
+enum class SettingKind : std::uint32_t {
+    /// Anything; a box.
+    text = 0,
+    /// One of `choices`, though any text is still taken.
+    choice = 1,
+    /// A whole number.
+    integer = 2,
+    /// A number.
+    number = 3,
+    /// `0` or `1`.
+    toggle = 4,
+    /// `WxH`.
+    size = 5,
+    /// A file, or a directory when the hints say `pick=folder`.
+    path = 6,
+};
+
+[[nodiscard]] const char* setting_kind_name(SettingKind kind) noexcept;
+
 /// One row of the settings tree: what it is called, what it is set to, and what
 /// it means. The same shape `MpDspVtbl::describe` uses, for the same reason.
 struct Setting {
@@ -300,7 +333,49 @@ struct Setting {
     /// parsing English over a wire. So it is read once, where the rows are
     /// parsed, and crosses as what it is.
     bool read_only = false;
+    /// What the value is, from the row's fourth field (`parse_setting_spec`).
+    SettingKind kind = SettingKind::text;
+    /// The words a `choice` offers, in the module's order.
+    std::vector<std::string> choices;
+    /// The heading this row sits under -- `Upscaling`, `Ringing` -- so that a
+    /// module with thirty keys is a dialog with five sections. Empty is the
+    /// top.
+    std::string group;
+    /// `key=value[,value...]`: this row matters only while the named row of
+    /// the same module has one of those values, and a shell may fold it away
+    /// otherwise. `up_lobes` when `up=lanczos`. Empty is always.
+    std::string when;
+    /// The rest of the spec, `word=value` pairs separated by spaces, as the
+    /// module wrote them: `min=`, `max=`, `step=`, `unit=`, `pick=`. Hints for
+    /// drawing -- a `min` is not a clamp, because the engine is the one that
+    /// says no and says why.
+    std::string hints;
 };
+
+/// The fourth field of a `describe` row, read into `kind`, `choices`, `group`,
+/// `when` and `hints`. The grammar is `MpDspVtbl::describe`'s:
+///
+///     spec := type (" " hint)*
+///     type := "enum:" word ("," word)* | "int" | "number" | "bool" | "text"
+///             | "size" | "path"
+///     hint := "group=" word | "when=" key "=" value ("," value)* | word "=" value
+///
+/// A spec this cannot read leaves the row as `text` with nothing else set and
+/// answers `false`, which is how a module with a typo still gets a box rather
+/// than no row.
+[[nodiscard]] bool parse_setting_spec(std::string_view spec, Setting& out);
+
+/// One `describe` line, `key<tab>value<tab>description[<tab>spec]`, turned
+/// into a row, or `false` for a line that is not one.
+///
+/// **Written once because it was written three times** -- for the presenter,
+/// for a video stage and for an audio stage -- and the third copy is where a
+/// difference would have gone unnoticed. Every `describe` in this tree answers
+/// those fields, and every module that answers with a measurement rather than
+/// a setting ends the description with `(read only)`. Both are read here, so
+/// that what crosses §10 is a boolean and a kind, and no shell has to look for
+/// two English words to decide whether to draw a box.
+[[nodiscard]] bool setting_from_row(std::string_view line, Setting& out);
 
 /// What a node is, on the wire. **Numbers rather than words**, for the reason
 /// `Dimension` and `Sweep` go on as numbers: a word is a second spelling to

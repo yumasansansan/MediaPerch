@@ -327,88 +327,99 @@ try {
     }
     switch (index) {
     case 0:
-        std::snprintf(out, out_bytes, "rate\t%u\ttarget sample rate; 0 leaves it alone",
+        std::snprintf(out, out_bytes, "rate\t%u\ttarget sample rate; 0 leaves it alone"
+                                      "\tint min=0 unit=Hz group=Target",
                       d->rate);
         return MP_OK;
     case 1:
-        std::snprintf(out, out_bytes, "quality\t%s\t%s", d->quality.c_str(),
+        std::snprintf(out, out_bytes,
+                      "quality\t%s\t%s\tenum:fast,good,best,extreme group=Target",
+                      d->quality.c_str(),
                       mp::resample::quality_names().c_str());
         return MP_OK;
     case 2:
         std::snprintf(out, out_bytes,
-                      "attenuation\t%.1f\tstopband, in dB: also the aliasing floor",
+                      "attenuation\t%.1f\tstopband, in dB: also the aliasing floor"
+                      "\tnumber step=6 unit=dB group=Specification",
                       d->design.attenuation_db);
         return MP_OK;
     case 3:
         std::snprintf(out, out_bytes,
-                      "bandwidth\t%.3f\tpassband, as a fraction of the lower Nyquist",
+                      "bandwidth\t%.3f\tpassband, as a fraction of the lower Nyquist"
+                      "\tnumber step=0.005 group=Specification",
                       d->design.bandwidth);
         return MP_OK;
     case 4:
-        std::snprintf(out, out_bytes, "design\t%s\twindow, remez or refine",
+        std::snprintf(out, out_bytes, "design\t%s\twindow, remez or refine"
+                                      "\tenum:window,remez,refine group=Design",
                       mp::resample::method_name(d->design.method));
         return MP_OK;
     case 5:
         std::snprintf(out, out_bytes,
-                      "window\t%s\tkaiser, dpss or dolph (design=window only)",
+                      "window\t%s\tkaiser, dpss or dolph (design=window only)"
+                      "\tenum:kaiser,dpss,dolph group=Design when=design=window",
                       mp::resample::window_name(d->design.window));
         return MP_OK;
     case 14:
         std::snprintf(out, out_bytes,
                       "phase\t%s\tlinear keeps the alignment exact; minimum has no "
-                      "pre-ringing and no exact alignment",
+                      "pre-ringing and no exact alignment\tenum:linear,minimum group=Design",
                       mp::resample::phase_name(d->design.phase));
         return MP_OK;
     case 15:
         if (d->design.stages == 0) {
             std::snprintf(out, out_bytes,
-                          "stages\tauto\thow many steps the conversion may take");
+                          "stages\tauto\thow many steps the conversion may take"
+                          "\tint min=0 group=Design");
         } else {
             std::snprintf(out, out_bytes,
                           "stages\t%u\thow many steps the conversion may take; auto "
-                          "searches for the cheapest",
+                          "searches for the cheapest\tint min=0 group=Design",
                           d->design.stages);
         }
         return MP_OK;
     case 17:
         std::snprintf(out, out_bytes,
                       "cepstrum\t%u\ttransform length as a multiple of the filter "
-                      "(phase=minimum only)",
+                      "(phase=minimum only)\tint min=1 group=Design when=phase=minimum",
                       d->design.cepstrum);
         return MP_OK;
     case 18:
         if (d->design.phase_floor_db < 0.0) {
             std::snprintf(out, out_bytes,
                           "phase_floor\t%.1f\tdB below the peak where the logarithm "
-                          "stops (phase=minimum only)",
+                          "stops (phase=minimum only)"
+                          "\tnumber unit=dB group=Design when=phase=minimum",
                           d->design.phase_floor_db);
         } else {
             std::snprintf(out, out_bytes,
                           "phase_floor\tauto\tdB below the peak where the logarithm "
-                          "stops; auto is 20 under the stopband");
+                          "stops; auto is 20 under the stopband"
+                          "\tnumber unit=dB group=Design when=phase=minimum");
         }
         return MP_OK;
     case 19:
         std::snprintf(out, out_bytes,
                       "remez_max_taps\t%u\tthe longest prototype design=remez will "
-                      "attempt",
+                      "attempt\tint min=1 group=Design when=design=remez",
                       d->design.remez_max_taps);
         return MP_OK;
     case 20:
         std::snprintf(out, out_bytes,
-                      "refine_rounds\t%u\tprojection rounds (design=refine only)",
+                      "refine_rounds\t%u\tprojection rounds (design=refine only)"
+                      "\tint min=1 group=Design when=design=refine",
                       d->design.refine_rounds);
         return MP_OK;
     case 21:
         std::snprintf(out, out_bytes,
                       "refine_patience\t%u\tfruitless rounds before stopping "
-                      "(design=refine only)",
+                      "(design=refine only)\tint min=0 group=Design when=design=refine",
                       d->design.refine_patience);
         return MP_OK;
     case 22:
         std::snprintf(out, out_bytes,
                       "measure_points\t%u\tceiling on the transform the response is "
-                      "read from",
+                      "read from\tint min=1 group=Specification",
                       d->design.measure_points);
         return MP_OK;
     case 16: {
@@ -429,16 +440,19 @@ try {
     }
     case 6:
         std::snprintf(out, out_bytes,
-                      "passband_ripple\t%.4f\tdB; 0 means the same as the stopband",
+                      "passband_ripple\t%.4f\tdB; 0 means the same as the stopband"
+                      "\tnumber step=0.01 unit=dB group=Specification",
                       d->design.passband_ripple_db);
         return MP_OK;
     case 7:
         std::snprintf(out, out_bytes,
-                      "taps\t%u\tper phase; 0 derives it from the specification",
+                      "taps\t%u\tper phase; 0 derives it from the specification"
+                      "\tint min=0 group=Design",
                       d->design.taps);
         return MP_OK;
     case 8:
-        std::snprintf(out, out_bytes, "verify\t%s\trefuse a design that misses its spec",
+        std::snprintf(out, out_bytes, "verify\t%s\trefuse a design that misses its spec"
+                                      "\tbool group=Specification",
                       d->design.verify ? "1" : "0");
         return MP_OK;
     case 9:

@@ -59,6 +59,7 @@ void VideoPath::open_stages(IVideoHost& host, const Config& want)
 {
     stages_.clear();
     stage_modules_.clear();
+    stage_spec_index_.clear();
     if (want.stages.empty() || presenter_ == nullptr) {
         return;
     }
@@ -67,19 +68,31 @@ void VideoPath::open_stages(IVideoHost& host, const Config& want)
     device.size = sizeof(device);
     const bool have_device = presenter_->get_device(device) == MP_OK;
 
-    for (const std::string& spec : want.stages) {
+    for (std::size_t i = 0; i < want.stages.size(); ++i) {
+        const std::string& spec = want.stages[i];
         const auto [id, settings] = split_stage(spec);
+        // **Not fatal, and said once**: a stage that is not there, will not
+        // open or will not take its settings is left out and the picture
+        // plays without it -- ungraded, or through the presenter's own
+        // bilinear fetch when the stage was the scaler -- and the sentence
+        // goes where the presenter's refusals go, for the caller to log.
         const MpVideoDspVtbl* vtbl = host.video_dsp(id);
         if (vtbl == nullptr) {
+            refused_settings_.push_back("no video stage module called `" + id +
+                                        "` is loaded; the picture plays without it");
             continue;
         }
         auto stage = std::make_unique<VideoStage>();
         if (stage->open(*vtbl, have_device ? &device : nullptr) != MP_OK) {
+            refused_settings_.push_back(id + " would not open on the presenter's device; the "
+                                             "picture plays without it");
             continue;
         }
         bool refused = false;
         for (const auto& [key, value] : settings) {
             if (stage->set(key.c_str(), value.c_str()) != MP_OK) {
+                refused_settings_.push_back(id + " refused `" + key + "=" + value +
+                                            "`; the picture plays without it");
                 refused = true;
                 break;
             }
@@ -89,7 +102,32 @@ void VideoPath::open_stages(IVideoHost& host, const Config& want)
         }
         stages_.push_back(std::move(stage));
         stage_modules_.push_back(id);
+        stage_spec_index_.push_back(i);
     }
+}
+
+std::size_t VideoPath::stage_spec_index(std::size_t index) const
+{
+    const std::lock_guard lock{gate_};
+    return index < stage_spec_index_.size() ? stage_spec_index_[index]
+                                            : static_cast<std::size_t>(-1);
+}
+
+VideoPath::Shape VideoPath::shape() const
+{
+    const std::lock_guard lock{gate_};
+    Shape out;
+    out.opened = graph_ != nullptr;
+    out.presenter = modules_.presenter;
+    out.decoder = modules_.decoder;
+    out.stages = stage_modules_;
+    return out;
+}
+
+std::vector<std::string> VideoPath::refused_settings() const
+{
+    const std::lock_guard lock{gate_};
+    return refused_settings_;
 }
 
 bool VideoPath::hand_over(std::string& why)
@@ -125,27 +163,20 @@ std::vector<std::string> VideoPath::stage_describe(std::size_t index,
     if (index >= stages_.size()) {
         return out;
     }
-    const auto ask = [&] {
-        char line[512];
-        for (std::uint32_t row = 0;; ++row) {
-            line[0] = '\0';
-            if (stages_[index]->describe(row, line, sizeof line) != MP_OK) {
-                break;
+    std::string why;
+    (void)on_loop(
+        [&] {
+            char line[512];
+            for (std::uint32_t row = 0;; ++row) {
+                line[0] = '\0';
+                if (stages_[index]->describe(row, line, sizeof line) != MP_OK) {
+                    break;
+                }
+                out.emplace_back(line);
             }
-            out.emplace_back(line);
-        }
-    };
-    if (!running()) {
-        ask();
-        return out;
-    }
-    loop_->hold();
-    const auto give_up_at = std::chrono::steady_clock::now() + deadline;
-    while (!loop_->parked() && std::chrono::steady_clock::now() < give_up_at) {
-        std::this_thread::sleep_for(std::chrono::milliseconds{1});
-    }
-    ask();
-    loop_->release();
+            return true;
+        },
+        why, deadline);
     return out;
 }
 
@@ -158,49 +189,36 @@ bool VideoPath::set_stage(std::size_t index, const std::string& key,
         why = "there is no such stage in the chain";
         return false;
     }
-    const auto say = [&] {
-        const MpResult told = stages_[index]->set(key.c_str(), value.c_str());
-        if (told != MP_OK) {
-            why = stage_modules_[index] + " would not take `" + key + " = " + value +
-                  "`: " + result_name(told);
-            return false;
-        }
-        return true;
-    };
-    if (!running()) {
-        return say();
-    }
-    loop_->hold();
-    const auto give_up_at = std::chrono::steady_clock::now() + deadline;
-    while (!loop_->parked() && std::chrono::steady_clock::now() < give_up_at) {
-        std::this_thread::sleep_for(std::chrono::milliseconds{1});
-    }
-    const bool ok = say();
-    loop_->release();
-    return ok;
+    return on_loop(
+        [&] {
+            const MpResult told = stages_[index]->set(key.c_str(), value.c_str());
+            if (told != MP_OK) {
+                why = stage_modules_[index] + " would not take `" + key + " = " + value +
+                      "`: " + result_name(told);
+                return false;
+            }
+            return true;
+        },
+        why, deadline);
 }
 
 std::uint64_t VideoPath::surface() noexcept
-{
-    const std::lock_guard lock{gate_};
-    if (presenter_ == nullptr) {
-        return 0;
-    }
-    char line[256];
-    for (std::uint32_t row = 0;; ++row) {
-        line[0] = '\0';
-        if (presenter_->describe(row, line, sizeof line) != MP_OK) {
-            break;
-        }
-        if (std::strncmp(line, "surface\t", 8) != 0) {
+try {
+    // Read where the rows are written -- `describe` on the loop's thread --
+    // because `present` writes the row that says what went wrong, and a
+    // string written on one thread and read on another is not a row.
+    for (const std::string& line : presenter_describe()) {
+        if (line.rfind("surface\t", 0) != 0) {
             continue;
         }
-        const char* at = std::strstr(line + 8, "composition 0x");
+        const char* at = std::strstr(line.c_str() + 8, "composition 0x");
         if (at == nullptr) {
             return 0; // a window, or off-screen: there is nothing to hand over
         }
         return std::strtoull(at + 14, nullptr, 16);
     }
+    return 0;
+} catch (...) {
     return 0;
 }
 
@@ -211,14 +229,20 @@ std::vector<std::string> VideoPath::presenter_describe()
     if (presenter_ == nullptr) {
         return out;
     }
-    char line[256];
-    for (std::uint32_t row = 0;; ++row) {
-        line[0] = '\0';
-        if (presenter_->describe(row, line, sizeof line) != MP_OK) {
-            break;
-        }
-        out.emplace_back(line);
-    }
+    std::string why;
+    (void)on_loop(
+        [&] {
+            char line[256];
+            for (std::uint32_t row = 0;; ++row) {
+                line[0] = '\0';
+                if (presenter_->describe(row, line, sizeof line) != MP_OK) {
+                    break;
+                }
+                out.emplace_back(line);
+            }
+            return true;
+        },
+        why, std::chrono::milliseconds{500});
     return out;
 }
 
@@ -254,6 +278,7 @@ bool VideoPath::open(IVideoHost& host, void* window, IPacketFeed& feed,
     // thing that was handed it would be a stage the presenter could still run.
     stages_.clear();
     stage_modules_.clear();
+    stage_spec_index_.clear();
     presenter_.reset();
     modules_ = Modules{};
 
@@ -275,6 +300,18 @@ bool VideoPath::open(IVideoHost& host, void* window, IPacketFeed& feed,
             why = std::string{"the presenter would not render at "} + value + ": " +
                   result_name(told);
             return false;
+        }
+    }
+    // **What a person set, said again** (§10): the presenter is new and
+    // remembers nothing, so the keys the player kept are told to it here,
+    // before `configure` makes the target from them. A refusal is kept for the
+    // caller to log and does not stop the picture.
+    refused_settings_.clear();
+    for (const auto& [key, value] : want.presenter_settings) {
+        const MpResult told = presenter->set(key.c_str(), value.c_str());
+        if (told != MP_OK) {
+            refused_settings_.push_back("the presenter would not take " + key + " = " + value +
+                                        ": " + result_name(told));
         }
     }
     if (presenter->configure(picture) != MP_OK) {
@@ -441,12 +478,12 @@ bool VideoPath::seek_alone(double seconds, const std::function<bool(double)>& mo
     if (!was_paused) {
         own_clock_->pause();
     }
-    loop_->hold();
+    const std::uint64_t held = loop_->hold();
     // The same wait `seek_together` takes, for the same reason: a turn taken
     // while the file moves is a turn deciding about a frame from a place
     // nobody is at any more.
     const auto give_up_at = std::chrono::steady_clock::now() + deadline;
-    while (!loop_->parked() && !ended() && std::chrono::steady_clock::now() < give_up_at) {
+    while (!loop_->parked(held) && !ended() && std::chrono::steady_clock::now() < give_up_at) {
         std::this_thread::sleep_for(std::chrono::milliseconds{1});
     }
     const bool moved = move(seconds);
@@ -481,6 +518,10 @@ void VideoPath::stop() noexcept
     }
     thread_.join();
     frames_ = nullptr;
+    // Whatever was posted to a loop that is now gone is answered, not left.
+    if (loop_ != nullptr) {
+        loop_->close_posts();
+    }
 }
 
 bool VideoPath::tell(const char* key, const char* value, std::string& why,
@@ -491,31 +532,61 @@ bool VideoPath::tell(const char* key, const char* value, std::string& why,
         why = "there is no presenter to tell";
         return false;
     }
-    const auto say = [&] {
-        const MpResult told = presenter_->set(key, value);
-        if (told != MP_OK) {
-            why = std::string{"the presenter would not take "} + key + " = " + value + ": " +
-                  result_name(told);
-            return false;
-        }
-        return true;
-    };
-    if (!running()) {
-        return say();
-    }
+    return on_loop(
+        [&] {
+            const MpResult told = presenter_->set(key, value);
+            if (told != MP_OK) {
+                why = std::string{"the presenter would not take "} + key + " = " + value +
+                      ": " + result_name(told);
+                return false;
+            }
+            return true;
+        },
+        why, deadline);
+}
 
-    loop_->hold();
-    // The same wait `seek_together` takes, and for the same reason it takes a
-    // deadline: a loop whose display has gone away has no turn in which to
-    // answer, and refusing the message because nobody is drawing would be
-    // refusing for the wrong reason.
-    const auto give_up_at = std::chrono::steady_clock::now() + deadline;
-    while (!loop_->parked() && std::chrono::steady_clock::now() < give_up_at) {
-        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+bool VideoPath::on_loop(const std::function<bool()>& work, std::string& why,
+                        std::chrono::milliseconds deadline)
+{
+    // A loop that is not turning has no thread of its own inside the
+    // presenter, and the work runs here, under the caller's gate.
+    if (!running() || loop_ == nullptr) {
+        return work();
     }
-    const bool ok = say();
-    loop_->release();
-    return ok;
+    struct Ticket {
+        std::mutex mutex;
+        bool abandoned = false;
+        bool answered = false;
+    };
+    auto ticket = std::make_shared<Ticket>();
+    std::future<bool> ran = loop_->post([ticket, &work] {
+        // **Checked under the ticket's lock, first.** A caller that gave up
+        // waiting marks the ticket before it returns, and a job that finds the
+        // mark touches nothing: what it was going to read is on a stack that
+        // is gone.
+        const std::lock_guard lock{ticket->mutex};
+        if (ticket->abandoned) {
+            return;
+        }
+        ticket->answered = work();
+    });
+    if (ran.wait_for(deadline) == std::future_status::ready) {
+        if (!ran.get()) {
+            // The loop ended before the job ran, so no thread of it is in the
+            // presenter any more, and this one may be.
+            return work();
+        }
+        return ticket->answered;
+    }
+    const std::lock_guard lock{ticket->mutex};
+    if (ran.wait_for(std::chrono::milliseconds{0}) == std::future_status::ready) {
+        // It ran while this thread was waiting for the lock.
+        return ran.get() ? ticket->answered : work();
+    }
+    ticket->abandoned = true;
+    why = "the display loop did not come round in " + std::to_string(deadline.count()) +
+          " ms; nothing was changed";
+    return false;
 }
 
 bool VideoPath::set_size(std::uint32_t width, std::uint32_t height, std::string& why,

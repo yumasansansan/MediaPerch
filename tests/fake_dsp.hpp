@@ -119,7 +119,8 @@ inline MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
         return MP_ERR_INVALID;
     }
     if (index == 0) {
-        std::snprintf(out, out_bytes, "amount\t%g\twhat every sample is multiplied by",
+        std::snprintf(out, out_bytes,
+                      "amount\t%g\twhat every sample is multiplied by\tnumber min=0 step=0.5",
                       reinterpret_cast<const FakeDsp*>(d)->amount);
         return MP_OK;
     }

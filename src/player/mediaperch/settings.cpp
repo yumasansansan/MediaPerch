@@ -28,19 +28,28 @@ std::vector<ipc::Setting> engine_settings(const Settings& settings)
         }
         return out;
     };
+    const auto row = [](const char* key, std::string value, const char* what,
+                        const char* spec) {
+        ipc::Setting out{key, std::move(value), what};
+        (void)ipc::parse_setting_spec(spec, out);
+        return out;
+    };
     return {
-        ipc::Setting{"pipe", settings.pipe,
-                     "where the engine listens; empty is this platform's usual name"},
-        ipc::Setting{"modules", settings.modules,
-                     "where modules are loaded from; empty is beside the executable"},
-        ipc::Setting{"allow", joined(settings.allow),
-                     "module ids that may load; empty is all of them"},
-        ipc::Setting{"decoders", joined(settings.decoders),
-                     "container readers to try before the scores decide, in this order. "
-                     "A reordering and not a veto (\u00a77)"},
-        ipc::Setting{"profile", settings.profile,
-                     "this machine's buffering profile; empty is profile.ini beside the "
-                     "settings file"},
+        row("pipe", settings.pipe,
+            "where the engine listens; empty is this platform's usual name", "text"),
+        row("modules", settings.modules,
+            "where modules are loaded from; empty is beside the executable",
+            "path pick=folder"),
+        row("allow", joined(settings.allow), "module ids that may load; empty is all of them",
+            "text"),
+        row("decoders", joined(settings.decoders),
+            "container readers to try before the scores decide, in this order. "
+            "A reordering and not a veto (\u00a77)",
+            "text"),
+        row("profile", settings.profile,
+            "this machine's buffering profile; empty is profile.ini beside the "
+            "settings file",
+            "path"),
     };
 }
 

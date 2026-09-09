@@ -170,11 +170,13 @@ try {
     }
     switch (index) {
     case 0:
-        std::snprintf(out, out_bytes, "gain_db\t%.4f\tgain in decibels, -144 to 24",
+        std::snprintf(out, out_bytes, "gain_db\t%.4f\tgain in decibels, -144 to 24"
+                                      "\tnumber step=0.5 unit=dB",
                       d->gain_db);
         return MP_OK;
     case 1:
-        std::snprintf(out, out_bytes, "gain\t%.6f\tlinear gain, 0 to 16", d->gain);
+        std::snprintf(out, out_bytes, "gain\t%.6f\tlinear gain, 0 to 16\tnumber step=0.05",
+                      d->gain);
         return MP_OK;
     case 2:
         std::snprintf(out, out_bytes, "peak\t%.6f\tloudest sample seen (read only)",

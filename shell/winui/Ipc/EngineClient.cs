@@ -36,6 +36,19 @@ internal sealed class EngineClient : IDisposable
     private uint _nextId = 1;
     private readonly SemaphoreSlim _one = new(1, 1);
 
+    /// <summary>
+    /// How long one answer may take. **Bounded, because a shell that waits
+    /// for ever on a pipe is a shell that has to be killed.** The engine
+    /// answers a setting under its display loop's hold with a deadline of
+    /// its own (1.5 s for a size), so five seconds is an engine that is not
+    /// answering at all, and the connection is dropped so that the tick
+    /// notices and says so.
+    /// </summary>
+    private static readonly TimeSpan AnswerWithin = TimeSpan.FromSeconds(5);
+
+    /// <summary>Why the last call ended without an answer, or empty.</summary>
+    public string Trouble { get; private set; } = string.Empty;
+
     public EngineClient(string pipe = Protocol.DefaultPipe)
     {
         _pipe = pipe;
@@ -64,6 +77,7 @@ internal sealed class EngineClient : IDisposable
             return false;
         }
         _stream = stream;
+        Trouble = string.Empty;
         return true;
     }
 
@@ -96,7 +110,18 @@ internal sealed class EngineClient : IDisposable
             return null;
         }
 
-        await _one.WaitAsync(token).ConfigureAwait(false);
+        using var bounded = CancellationTokenSource.CreateLinkedTokenSource(token);
+        bounded.CancelAfter(AnswerWithin);
+        try
+        {
+            await _one.WaitAsync(bounded.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Another call has held the pipe for the whole of the allowance:
+            // that one will report, and this one simply did not happen.
+            return null;
+        }
         try
         {
             uint id = _nextId++;
@@ -104,11 +129,11 @@ internal sealed class EngineClient : IDisposable
             {
                 _nextId = 1; // zero means an event, so it is never a request's
             }
-            await WriteFrameAsync(stream, kind, id, payload, token).ConfigureAwait(false);
+            await WriteFrameAsync(stream, kind, id, payload, bounded.Token).ConfigureAwait(false);
 
             for (;;)
             {
-                Answer? answer = await ReadFrameAsync(stream, token).ConfigureAwait(false);
+                Answer? answer = await ReadFrameAsync(stream, bounded.Token).ConfigureAwait(false);
                 if (answer is null)
                 {
                     Close();
@@ -121,6 +146,12 @@ internal sealed class EngineClient : IDisposable
                 }
                 return answer.Value.Header.Id == id ? answer : null;
             }
+        }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested)
+        {
+            Trouble = $"the engine did not answer {kind} within {AnswerWithin.TotalSeconds:0} s";
+            Close();
+            return null;
         }
         catch (Exception)
         {

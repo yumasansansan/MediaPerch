@@ -57,10 +57,11 @@ internal sealed unsafe class SurfaceHost
     /// </summary>
     /// <remarks>
     /// This is the box the engine was asked to render at, converted back to
-    /// device-independent pixels, and centred by the caller: the surface then
-    /// maps onto the visual one to one and the compositor scales nothing,
-    /// which is the whole point of §9.7.1's size message. Remembered, so an
-    /// attach that comes after a resize lands in the right place too.
+    /// device-independent pixels, and centred by the caller **on a whole
+    /// physical pixel**: the surface then maps onto the visual one to one and
+    /// the compositor scales nothing and shifts nothing, which is the whole
+    /// point of §9.7.1's size message. Remembered, so an attach that comes
+    /// after a resize lands in the right place too.
     /// </remarks>
     public void Place(double x, double y, double width, double height)
     {
@@ -178,6 +179,17 @@ internal sealed unsafe class SurfaceHost
 
             SpriteVisual visual = compositor.CreateSpriteVisual();
             visual.Brush = brush;
+            // **On whole pixels, always.** The visual is exactly the box the
+            // engine renders at, so the surface maps onto it one to one --
+            // but a visual at a fractional physical position is resampled
+            // by the compositor with a bilinear at a half-pixel shift, and
+            // its outermost rows are blended with the transparent outside:
+            // on the aspect-ratio patterns that was the page's own background
+            // eating a row into the field at the top and the bottom while the
+            // one-pixel rulers, being brighter, still showed through it. The
+            // page rounds the offset to a physical pixel; this is the
+            // compositor's own promise that the position it lands on is one.
+            visual.IsPixelSnappingEnabled = true;
             // **Sized by `Place`, and by nothing else.** `Size` and
             // `RelativeSizeAdjustment` add: a visual given the host's size *and*
             // a relative adjustment of one is twice the host, and a picture

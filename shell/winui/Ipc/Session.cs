@@ -38,11 +38,13 @@ internal sealed class Session
     /// an engine that would not start, an exception nothing observed -- are
     /// the ones a person cannot see on the window.
     /// </summary>
+    public static string LogPath => Path.Combine(Path.GetTempPath(), "mediaperch-shell.log");
+
     public static void Log(string line)
     {
         try
         {
-            File.AppendAllText(Path.Combine(Path.GetTempPath(), "mediaperch-shell.log"),
+            File.AppendAllText(LogPath,
                                $"{DateTime.Now:HH:mm:ss.fff} {line}{Environment.NewLine}");
         }
         catch (IOException)
@@ -101,8 +103,18 @@ internal sealed class Session
     /// </remarks>
     private Process? _started;
 
+    /// <summary>
+    /// When this shell started the engine again after it died, for the rule
+    /// that it does so at most three times in a minute: an engine that dies
+    /// at every start is a fault to read the log about, not a loop to sit in.
+    /// </summary>
+    private readonly List<DateTime> _restarts = new();
+
     /// <summary>What the last attempt to find or start an engine said, for the title bar.</summary>
     public string EngineNote { get; private set; } = string.Empty;
+
+    /// <summary>Whether the engine that is (or was) running is one this shell started.</summary>
+    public bool StartedHere => _started is not null;
 
     /// <summary>
     /// Connects, and when nothing is listening, starts <c>mediaperchd</c> from
@@ -239,6 +251,95 @@ internal sealed class Session
         }
     }
 
+    /// <summary>
+    /// Stops the engine this shell started and starts it again -- what an
+    /// engine setting that takes effect at the next start asks for. An engine
+    /// this shell did not start is somebody else's and is left alone, and the
+    /// answer says so.
+    /// </summary>
+    /// <returns>Empty when the engine came back, else why not.</returns>
+    public async Task<string> RestartEngineAsync()
+    {
+        if (_started is null)
+        {
+            return "this shell did not start the engine that is running, so it will not "
+                   + "restart it; stop it yourself and press Reconnect";
+        }
+        Log("engine: restarting at a person's request");
+        if (!_started.HasExited)
+        {
+            try
+            {
+                await Engine.CallAsync(Kind.Quit).WaitAsync(TimeSpan.FromSeconds(1));
+            }
+            catch (TimeoutException)
+            {
+                // Then it is stopped below.
+            }
+            if (!_started.WaitForExit(2000))
+            {
+                try
+                {
+                    _started.Kill();
+                }
+                catch (Exception e) when (e is InvalidOperationException
+                                                 or System.ComponentModel.Win32Exception)
+                {
+                    // Already gone.
+                    _ = e;
+                }
+            }
+        }
+        Engine.Close();
+        _started = null;
+        _restarts.Clear();
+        Announce();
+        await EnsureEngineAsync();
+        Announce();
+        if (Engine.Connected)
+        {
+            await RefreshAsync();
+            return string.Empty;
+        }
+        return EngineNote.Length == 0 ? "the engine did not come back" : EngineNote;
+    }
+
+    /// <summary>
+    /// An engine this shell started and that has exited is started again --
+    /// at most three times in a minute -- and the title bar says what happened
+    /// meanwhile. The picture re-attaches by itself: the new engine's surface
+    /// is a new generation.
+    /// </summary>
+    private async Task RestartIfDeadAsync()
+    {
+        if (_started is not { HasExited: true } || Engine.Connected)
+        {
+            return;
+        }
+        int code = _started.ExitCode;
+        _started = null;
+        Engine.Close();
+        Log($"engine: the engine this shell started exited with code {code}");
+        DateTime now = DateTime.UtcNow;
+        _restarts.RemoveAll(then => now - then > TimeSpan.FromMinutes(1));
+        if (_restarts.Count >= 3)
+        {
+            EngineNote = $"the engine exited with code {code} three times in a minute; not "
+                         + $"starting it again -- see {LogPath} and the engine's own log";
+            ConnectionChanged?.Invoke();
+            return;
+        }
+        _restarts.Add(now);
+        EngineNote = $"the engine exited with code {code}; starting it again";
+        ConnectionChanged?.Invoke();
+        await EnsureEngineAsync();
+        if (Engine.Connected)
+        {
+            EngineNote = $"the engine exited with code {code} and was started again";
+        }
+        ConnectionChanged?.Invoke();
+    }
+
     /// <summary>Starts the tick on the UI thread's queue. Once.</summary>
     public void Start(DispatcherQueue queue)
     {
@@ -295,8 +396,15 @@ internal sealed class Session
         _ticking = true;
         try
         {
+            await RestartIfDeadAsync();
             if (!Engine.Connected)
             {
+                // What ended the last call, if the client knows: an answer
+                // that never came is worth a sentence in the title bar.
+                if (Engine.Trouble.Length != 0)
+                {
+                    EngineNote = Engine.Trouble;
+                }
                 // Quietly, and briefly: a tick must not hang on a pipe that is
                 // not there, and an engine that appears is noticed within a
                 // second or two.
@@ -336,6 +444,14 @@ internal sealed class Session
         if (Engine.Connected != _wasConnected)
         {
             _wasConnected = Engine.Connected;
+            if (Engine.Connected)
+            {
+                EngineNote = string.Empty;
+            }
+            else if (EngineNote.Length == 0 && Engine.Trouble.Length != 0)
+            {
+                EngineNote = Engine.Trouble;
+            }
             ConnectionChanged?.Invoke();
         }
     }

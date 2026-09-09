@@ -294,31 +294,33 @@ try {
                                                                           : "energy"));
     switch (index) {
     case 0:
-        std::snprintf(out, out_bytes, "file\t%s\tthe impulse response to convolve with",
+        std::snprintf(out, out_bytes, "file\t%s\tthe impulse response to convolve with\tpath",
                       d->path.empty() ? "none" : d->path.c_str());
         return MP_OK;
     case 1:
         std::snprintf(out, out_bytes,
-                      "normalise\t%s\tnone (as measured), dc, peak or energy",
+                      "normalise\t%s\tnone (as measured), dc, peak or energy"
+                      "\tenum:none,dc,peak,energy",
                       normalise);
         return MP_OK;
     case 2:
-        std::snprintf(out, out_bytes, "gain_db\t%+.2f\tdB applied on top of that",
+        std::snprintf(out, out_bytes, "gain_db\t%+.2f\tdB applied on top of that"
+                                      "\tnumber step=0.5 unit=dB",
                       d->gain_db);
         return MP_OK;
     case 3:
         std::snprintf(out, out_bytes,
-                      "max_taps\t%u\ttruncate past this, with a fade; 0 keeps it all",
+                      "max_taps\t%u\ttruncate past this, with a fade; 0 keeps it all\tint min=0",
                       d->max_taps);
         return MP_OK;
     case 4:
         std::snprintf(out, out_bytes,
-                      "partition\t%u\tconvolution partition; 0 follows the block size",
+                      "partition\t%u\tconvolution partition; 0 follows the block size\tint min=0",
                       d->partition);
         return MP_OK;
     case 5:
         std::snprintf(out, out_bytes,
-                      "resample\t%s\tconvert the response to the stream's rate",
+                      "resample\t%s\tconvert the response to the stream's rate\tbool",
                       d->resample ? "1" : "0");
         return MP_OK;
     case 6:

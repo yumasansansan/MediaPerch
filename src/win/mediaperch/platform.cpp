@@ -9,6 +9,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 
 namespace mp::win {
 namespace {
@@ -323,6 +324,17 @@ std::vector<const MpModuleDesc*> ModuleRegistry::dsps() const
     return out;
 }
 
+std::vector<const MpModuleDesc*> ModuleRegistry::video_dsps() const
+{
+    std::vector<const MpModuleDesc*> out;
+    for (const auto& module : modules_) {
+        if (module->desc().kind == MP_KIND_VDSP) {
+            out.push_back(&module->desc());
+        }
+    }
+    return out;
+}
+
 const MpSinkVtbl* ModuleRegistry::sink(std::string_view id) const
 {
     const MpSinkVtbl* best = nullptr;
@@ -544,6 +556,93 @@ const MpCodecVtbl* ModuleRegistry::codec_for(MpCodec codec, const std::uint8_t* 
         }
     }
     return best;
+}
+
+std::FILE* open_utf8(const std::string& path, const wchar_t* mode) noexcept;
+
+namespace {
+
+std::FILE* g_log_file = nullptr;
+std::string g_crash_path;
+LogRing* g_crash_log = nullptr;
+
+std::string utf8_of(const std::filesystem::path& path)
+{
+    const std::wstring wide = path.wstring();
+    const int bytes =
+        WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string out(static_cast<std::size_t>(bytes > 0 ? bytes - 1 : 0), '\0');
+    if (bytes > 0) {
+        WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, out.data(), bytes, nullptr, nullptr);
+    }
+    return out;
+}
+
+void write_crash_report(const char* what)
+{
+    if (g_crash_path.empty()) {
+        return;
+    }
+    std::FILE* file = open_utf8(g_crash_path, L"ab");
+    if (file == nullptr) {
+        return;
+    }
+    std::fprintf(file, "---- %s\n", what);
+    if (g_crash_log != nullptr) {
+        for (const std::string& line : g_crash_log->tail(64)) {
+            std::fprintf(file, "%s\n", line.c_str());
+        }
+    }
+    std::fclose(file);
+    std::fprintf(stderr, "mediaperchd: %s -- see %s\n", what, g_crash_path.c_str());
+    std::fflush(stderr);
+}
+
+LONG WINAPI on_unhandled_exception(EXCEPTION_POINTERS* pointers)
+{
+    const bool known = pointers != nullptr && pointers->ExceptionRecord != nullptr;
+    const unsigned long code = known ? pointers->ExceptionRecord->ExceptionCode : 0ul;
+    const void* at = known ? pointers->ExceptionRecord->ExceptionAddress : nullptr;
+    char what[128];
+    std::snprintf(what, sizeof what, "unhandled exception 0x%08lx at %p", code, at);
+    write_crash_report(what);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+void on_terminate()
+{
+    write_crash_report("std::terminate: an exception nobody caught, or a noexcept that threw");
+    std::abort();
+}
+
+} // namespace
+
+bool log_to_file(LogRing& log, const std::filesystem::path& path, std::string& why)
+{
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    const std::string where = utf8_of(path);
+    g_log_file = open_utf8(where, L"wb");
+    if (g_log_file == nullptr) {
+        why = "could not open " + where + " for the log";
+        return false;
+    }
+    (void)log.listen([](const std::string& line) {
+        if (g_log_file != nullptr) {
+            std::fputs(line.c_str(), g_log_file);
+            std::fputc('\n', g_log_file);
+            std::fflush(g_log_file);
+        }
+    });
+    return true;
+}
+
+void install_crash_report(LogRing& log, const std::filesystem::path& path)
+{
+    g_crash_log = &log;
+    g_crash_path = utf8_of(path);
+    SetUnhandledExceptionFilter(&on_unhandled_exception);
+    std::set_terminate(&on_terminate);
 }
 
 std::FILE* open_utf8(const std::string& path, const wchar_t* mode) noexcept

@@ -1247,7 +1247,9 @@ typedef struct MpVideoDspVtbl {
     /* MP_ANY. `key=value`, as MpDspVtbl means it, and the same `trouble`
      * convention for a stage that knows why it refused. */
     MpResult(MP_CALL *set)(MpVideoDsp *d, const char *key, const char *value);
-    /* MP_ANY. One `key\tcurrent\tdescription` per index, MP_END past the last. */
+    /* MP_ANY. One `key\tcurrent\tdescription[\tspec]` per index, MP_END past
+     * the last -- the fourth field and the "(read only)" convention exactly as
+     * MpDspVtbl::describe spells them. */
     MpResult(MP_CALL *describe)(MpVideoDsp *d, uint32_t index, char *out,
                                 uint32_t out_bytes);
 } MpVideoDspVtbl;
@@ -1289,7 +1291,9 @@ typedef struct MpVideoVtbl {
     /* MP_ANY. `key=value`, as MpDspVtbl means it, and the same `trouble`
      * convention for a stage that knows why it refused. */
     MpResult(MP_CALL *set)(MpVideo *v, const char *key, const char *value);
-    /* MP_ANY. One `key\tcurrent\tdescription` per index, MP_END past the last. */
+    /* MP_ANY. One `key\tcurrent\tdescription[\tspec]` per index, MP_END past
+     * the last -- the fourth field and the "(read only)" convention exactly as
+     * MpDspVtbl::describe spells them. */
     MpResult(MP_CALL *describe)(MpVideo *v, uint32_t index, char *out,
                                 uint32_t out_bytes);
 
@@ -1512,10 +1516,34 @@ typedef struct MpDspVtbl {
 
     /*
      * The settings this stage has, as one UTF-8 line per key:
-     *   "key\tcurrent\tdescription\n"
+     *   "key\tcurrent\tdescription[\tspec]"
      * Returns MP_END when `index` is past the last one. This is how `--dsp
      * list` and a settings dialogue both find out what a stage can do without
      * either of them knowing what the stage is.
+     *
+     * A row that is a measurement rather than a setting -- a peak, a cost, a
+     * latency, what was built -- ends its description with "(read only)", and
+     * the host reads that so that no shell has to.
+     *
+     * The optional fourth field says what kind of value the key takes, so
+     * that a shell can draw a drop-down, a number field or a switch instead
+     * of a box for everything:
+     *   spec := type (" " hint)*
+     *   type := "enum:" word ("," word)* | "int" | "number" | "bool" | "text"
+     *           | "size" | "path"
+     *   hint := "group=" word                 the heading this row sits under
+     *         | "when=" key "=" value ("," value)*
+     *                                         shown while that row has one of
+     *                                         those values (up_lobes when
+     *                                         up=lanczos)
+     *         | "min=" n | "max=" n | "step=" n | "unit=" word
+     *         | "pick=folder"                 a path that is a directory
+     * The field is advice about drawing and nothing else: whatever a person
+     * types is sent, and `set` is where a value is refused and why. A "min"
+     * is not a clamp. A current value that is not a number ("auto", "none",
+     * "off") is still a row of that kind; a shell shows the word and takes a
+     * number. A row with no fourth field is text, which every row was before
+     * there were kinds.
      */
     MpResult(MP_CALL *describe)(MpDsp *d, uint32_t index, char *out, uint32_t out_bytes);
 

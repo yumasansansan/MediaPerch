@@ -1253,17 +1253,30 @@ modules/             everything that can be loaded and unloaded at runtime, sort
                      and `describe` says which.
   dsp/*/             crossfeed, and whatever else. Never present in passthrough.
   video/d3d11/       presentation: the flip model, scRGB, the three tone-map
-                     providers, and the resampling -- chroma reconstructed
-                     where the stream sites it, the picture scaled one axis at
-                     a time in linear light by a kernel named in kernels.hpp,
-                     and a colour past the display's gamut desaturated at its
-                     own luminance (plan.md §9.11). Renders off-screen when
-                     there is no window -- not a degraded mode but the one that
-                     can be hashed, which is how a colour pipeline gets held to
-                     anything at all. colour_plan.hpp is the deciding, apart
-                     from the drawing, so §9's argument is testable without a
-                     display.
-shell/windows/       the WinUI 3 window. C#, Native AOT, **optional**: the engine runs
+                     providers, chroma reconstructed where the stream sites it
+                     (siting.hpp) by a kernel from shared/kernels, the chain
+                     run at the source's size with the target pre-filled for
+                     any stage that scales, a bilinear fetch for a chain that
+                     has none, and a colour past the display's gamut
+                     desaturated at its own luminance (plan.md §9.11). Renders
+                     off-screen when there is no window -- not a degraded mode
+                     but the one that can be hashed, which is how a colour
+                     pipeline gets held to anything at all. colour_plan.hpp is
+                     the deciding, apart from the drawing, so §9's argument is
+                     testable without a display.
+  shared/kernels/    the resampling kernels: names, numbers, support, and the
+                     HLSL that computes their weights, so that the scaler
+                     stage and the presenter's chroma passes compile one
+                     formula set. Every parameter a parameter, none capped.
+  vdsp/lut/          a .cube lookup table applied in linear light on the
+                     presenter's device: the first stage of §9.8.3's kind.
+  vdsp/scale/        the scaler, as a stage (plan.md §9.11): the picture
+                     resampled to the size the presenter asks for, one axis at
+                     a time, Lanczos up and Hermite down by default, any kernel
+                     and any parameter by name, antiringing, and the light the
+                     passes average chosen. In the default chain; taking it out
+                     leaves the presenter's fetch.
+shell/winui/         the WinUI 3 window. C#, Native AOT, **optional**: the engine runs
                      with none of it on disk, the same way DragonPerch's daemon does.
 shell/cli/           the shell that is always there. Same IPC, no toolkit.
 tests/               Catch2. The graph, the negotiation and the ring, with no device.

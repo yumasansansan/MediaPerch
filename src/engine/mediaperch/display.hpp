@@ -25,7 +25,12 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <deque>
+#include <functional>
+#include <future>
+#include <mutex>
 #include <thread>
+#include <utility>
 
 namespace mp {
 
@@ -117,17 +122,47 @@ public:
 
     /// Stop deciding. The picture already up stays up, which is the duplicate
     /// §8 describes and costs nothing to perform.
-    void hold() noexcept { holding_.store(true, std::memory_order_release); }
-    /// Decide again.
-    void release() noexcept { holding_.store(false, std::memory_order_release); }
+    ///
+    /// **Counted, and numbered.** Two holders at once -- a seek on the engine
+    /// thread and a setting on an IPC thread -- must each keep the loop parked
+    /// until *both* have let go, so a hold is a count. And the number handed
+    /// back is this hold's serial, which `parked(serial)` answers for, so that
+    /// a holder cannot take the acknowledgement of somebody's earlier hold for
+    /// its own: a single flag let that happen in the two instructions between
+    /// the loop reading it and writing the answer.
+    std::uint64_t hold() noexcept;
+    /// Decide again, once every holder has.
+    void release() noexcept;
     /// Whether a turn has been taken under the hold. **The answer a mover
     /// waits for**: `hold` is a request and this is the acknowledgement, and
     /// resetting a decoder underneath a thread that is inside `pump` is how a
-    /// seek becomes a crash rather than a seek.
-    [[nodiscard]] bool parked() const noexcept
-    {
-        return parked_.load(std::memory_order_acquire);
-    }
+    /// seek becomes a crash rather than a seek. Without a serial: whether the
+    /// loop is parked for the latest hold there is.
+    [[nodiscard]] bool parked() const noexcept;
+    [[nodiscard]] bool parked(std::uint64_t serial) const noexcept;
+
+    // --- work that belongs to the loop's own thread ---------------------------
+    //
+    // **A setting is a message to the thread that owns the presenter.** Once
+    // the loop has started it is the one thread inside the presenter's
+    // graphics context, and a presenter's `set` or `describe` from any other
+    // thread -- an IPC thread carrying a shell's message -- was two threads in
+    // one context: a resize that reset the target's views under a draw was a
+    // use-after-free with a five-hundred-millisecond spin in front of it, and
+    // "Set" was the button that took the engine down. So a job is posted, the
+    // loop runs it between two frames on its own thread, and the caller waits
+    // on the future with a deadline -- and when the loop does not come round
+    // it is told so, never served concurrently.
+
+    using Job = std::function<void()>;
+    /// Queue `job` for the loop's next turn. The future is `true` once it has
+    /// run and `false` if the loop ended first; a job posted after the end is
+    /// answered `false` at once rather than left hanging.
+    [[nodiscard]] std::future<bool> post(Job job);
+    /// Answer every queued job `false`, and every later one too. What the loop
+    /// does when a turn says stop, and what `VideoPath::stop` does after the
+    /// join, so that nobody waits on a loop that is gone.
+    void close_posts() noexcept;
 
     /// Where this track began on the clock being followed. See the constructor.
     [[nodiscard]] double origin_seconds() const noexcept { return origin_seconds_; }
@@ -187,8 +222,16 @@ private:
     /// shortest gap until then.
     [[nodiscard]] double interval_now() const noexcept;
 
-    std::atomic<bool> holding_{false};
-    std::atomic<bool> parked_{false};
+    bool turn(DisplayStep& out);
+    void drain_posts();
+
+    std::atomic<std::uint64_t> holders_{0};
+    std::atomic<std::uint64_t> hold_serial_{0};
+    std::atomic<std::uint64_t> parked_serial_{0};
+
+    std::mutex posts_mutex_;
+    std::deque<std::pair<Job, std::promise<bool>>> posts_;
+    bool posts_closed_ = false;
 
     VideoGraph* graph_;
     IMediaClock* follow_;
@@ -246,9 +289,9 @@ bool seek_together(AudioGraph& audio, VideoGraph& video, DisplayLoop& loop,
                    std::uint64_t frame,
                    std::chrono::milliseconds deadline = std::chrono::milliseconds{500})
 {
-    loop.hold();
+    const std::uint64_t held = loop.hold();
     const auto give_up_at = std::chrono::steady_clock::now() + deadline;
-    while (!loop.parked() && std::chrono::steady_clock::now() < give_up_at) {
+    while (!loop.parked(held) && std::chrono::steady_clock::now() < give_up_at) {
         std::this_thread::sleep_for(std::chrono::milliseconds{1});
     }
 

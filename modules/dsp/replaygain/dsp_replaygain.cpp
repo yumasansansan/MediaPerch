@@ -207,31 +207,34 @@ try {
     switch (index) {
     case 0:
         if (d->has_gain) {
-            std::snprintf(out, out_bytes, "gain_db\t%+.2f\tdB to apply, from a scan or a tag",
+            std::snprintf(out, out_bytes, "gain_db\t%+.2f\tdB to apply, from a scan or a tag"
+                                          "\tnumber step=0.5 unit=dB",
                           d->gain_db);
         } else {
             std::snprintf(out, out_bytes,
                           "gain_db\tnone\tdB to apply, from a scan or a tag; nothing "
-                          "is applied without one");
+                          "is applied without one\tnumber step=0.5 unit=dB");
         }
         return MP_OK;
     case 1:
         std::snprintf(out, out_bytes, "target\t%.1f\tLUFS the gain aims at (-18 is "
-                                      "ReplayGain 2.0's own)",
+                                      "ReplayGain 2.0's own)\tnumber step=0.5 unit=LUFS",
                       d->target_lufs);
         return MP_OK;
     case 2:
-        std::snprintf(out, out_bytes, "preamp\t%+.2f\tdB added to whatever gain is applied",
+        std::snprintf(out, out_bytes, "preamp\t%+.2f\tdB added to whatever gain is applied"
+                                      "\tnumber step=0.5 unit=dB",
                       d->preamp_db);
         return MP_OK;
     case 3:
         std::snprintf(out, out_bytes,
-                      "peak\t%.6f\tthe track's known peak, so the gain can be limited",
+                      "peak\t%.6f\tthe track's known peak, so the gain can be limited"
+                      "\tnumber step=0.01",
                       d->known_peak);
         return MP_OK;
     case 4:
         std::snprintf(out, out_bytes,
-                      "prevent_clipping\t%s\tnever apply more than the known peak allows",
+                      "prevent_clipping\t%s\tnever apply more than the known peak allows\tbool",
                       d->prevent_clipping ? "1" : "0");
         return MP_OK;
     case 5:

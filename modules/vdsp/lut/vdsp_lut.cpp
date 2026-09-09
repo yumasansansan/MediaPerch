@@ -620,13 +620,13 @@ MpResult MP_CALL lut_describe(MpVideoDsp* d, std::uint32_t index, char* out,
     switch (index) {
     case 0:
         std::snprintf(out, out_bytes,
-                      "file\t%s\ta .cube lookup table; empty is the identity",
+                      "file\t%s\ta .cube lookup table; empty is the identity\tpath",
                       d->file.empty() ? "" : d->file.c_str());
         return MP_OK;
     case 1:
         std::snprintf(out, out_bytes,
                       "strength\t%.4f\t0 is the picture, 1 is the table, and either "
-                      "side of that extrapolates",
+                      "side of that extrapolates\tnumber step=0.05",
                       static_cast<double>(d->strength));
         return MP_OK;
     case 2:
