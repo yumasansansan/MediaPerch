@@ -331,7 +331,7 @@ std::vector<Stage> plan_stages(std::uint32_t in_rate, std::uint32_t out_rate,
     const std::uint32_t total_up = out_rate / g;
     const std::uint32_t total_down = in_rate / g;
 
-    const Stage single{total_up, total_down, design.bandwidth};
+    const Stage single{.up = total_up, .down = total_down, .bandwidth = design.bandwidth};
     std::vector<Stage> best{single};
     if (max_stages <= 1 || (total_up == 1 && total_down == 1)) {
         return best;
@@ -345,6 +345,10 @@ std::vector<Stage> plan_stages(std::uint32_t in_rate, std::uint32_t out_rate,
     const double ceiling = 8.0 * std::max(in_rate, out_rate);
 
     std::vector<Stage> current;
+    // Recursive because the search is: a plan is a stage and then the rest of
+    // the plan, and `depth` is what bounds it -- it starts at `max_stages`,
+    // which is small.
+    // NOLINTNEXTLINE(misc-no-recursion)
     const auto consider = [&](auto&& self, std::uint32_t up, std::uint32_t down,
                               double rate, std::uint32_t depth) -> void {
         if (up == 1 && down == 1) {
@@ -384,7 +388,7 @@ std::vector<Stage> plan_stages(std::uint32_t in_rate, std::uint32_t out_rate,
                 if (taps == 0 || taps * su + 1 > design.max_taps) {
                     continue;
                 }
-                current.push_back(Stage{su, sd, bandwidth});
+                current.push_back(Stage{.up = su, .down = sd, .bandwidth = bandwidth});
                 self(self, up / u, down / d, next, depth - 1);
                 current.pop_back();
             }
@@ -447,9 +451,17 @@ bool Cascade::configure(std::uint32_t in_rate, std::uint32_t out_rate,
 
         if (!stages_[i].configure(stage_in, stage_out, channels, stage_design, why)) {
             if (plan.size() > 1) {
-                why = "stage " + std::to_string(i + 1) + " of " +
-                      std::to_string(plan.size()) + " (" + std::to_string(stage_in) +
-                      " -> " + std::to_string(stage_out) + "): " + why;
+                std::string where = "stage ";
+                where += std::to_string(i + 1);
+                where += " of ";
+                where += std::to_string(plan.size());
+                where += " (";
+                where += std::to_string(stage_in);
+                where += " -> ";
+                where += std::to_string(stage_out);
+                where += "): ";
+                where += why;
+                why = std::move(where);
             }
             return false;
         }
