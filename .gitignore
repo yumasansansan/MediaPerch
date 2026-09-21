@@ -50,3 +50,6 @@ hm_cross_*.265
 # The shell's managed build output. `dotnet` puts it beside the project.
 shell/winui/bin/
 shell/winui/obj/
+
+# Commit message drafts handed over for manual signing
+/COMMIT_MSG.txt

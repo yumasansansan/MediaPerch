@@ -71,6 +71,15 @@ public:
     /// What the design actually achieved, measured rather than assumed.
     [[nodiscard]] const Response& response() const noexcept { return response_; }
 
+    /// Makes room for a block of `frames` of input, so that `process` does not
+    /// allocate when one arrives. The history grows as input is handed over and
+    /// is trimmed from the front, so it reaches its size in the first few calls
+    /// -- on whichever thread those are, which for an audio plugin is the one
+    /// thread that must not allocate. A caller that cares says the largest block
+    /// it will hand over, once, here; `Cascade::configure` does that for its
+    /// stages from the `max_frames` it is given.
+    void reserve(std::uint32_t frames);
+
     /// Room a caller must have for `in_frames` of input.
     [[nodiscard]] std::uint32_t max_output(std::uint32_t in_frames) const noexcept;
 

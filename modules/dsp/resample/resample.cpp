@@ -190,6 +190,13 @@ void Resampler::produce(std::uint64_t limit, double* const* out, std::uint32_t c
     }
 }
 
+void Resampler::reserve(std::uint32_t frames)
+{
+    for (auto& channel : hist_) {
+        channel.reserve(held_ + frames + 1);
+    }
+}
+
 void Resampler::discard()
 {
     const std::uint64_t m = out_k_ * down_ + centre_;
@@ -479,6 +486,11 @@ bool Cascade::configure(std::uint32_t in_rate, std::uint32_t out_rate,
             std::max(response_.stopband_db, stages_[i].response().stopband_db);
         response_.passband_ripple_db += stages_[i].response().passband_ripple_db;
         response_.points = std::max(response_.points, stages_[i].response().points);
+
+        // The largest block this stage will be handed, which is what its
+        // history has to have room for: `process` on a real-time thread cannot
+        // be the place that allocates it.
+        stages_[i].reserve(frames);
 
         frames = stages_[i].max_output(frames);
         buffers_[i].resize(channels, frames + 2);
