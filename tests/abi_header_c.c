@@ -5,9 +5,10 @@
  * include/mediaperch/module.h is the only place two languages meet, and a header
  * that has only ever been through a C++ compiler has not been tested for the job
  * it was written for. Everything interesting happens at compile time: the
- * MP_STATIC_ASSERT block in the header fires here under C rules, with C's
- * alignment and C's enum sizes, and disagreement with the C++ side is a build
- * failure rather than a runtime surprise on somebody else's machine.
+ * static_assert block in the header fires here under C23's rules, with C's
+ * alignment and C's enum sizes -- every enumeration's underlying type fixed at
+ * uint32_t -- and disagreement with the C++ side is a build failure rather than
+ * a runtime surprise on somebody else's machine.
  */
 #include <mediaperch/module.h>
 

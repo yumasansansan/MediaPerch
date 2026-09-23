@@ -58,10 +58,6 @@ mediaperch_add_module(mp_codec_opus
     LINK Opus::opus)
 
 if(TARGET opus)
-    if(MSVC)
-        target_compile_options(opus PRIVATE /W0)
-    else()
-        target_compile_options(opus PRIVATE -w)
-    endif()
+    target_compile_options(opus PRIVATE -w)
     set_target_properties(opus PROPERTIES FOLDER "external")
 endif()

@@ -39,6 +39,14 @@ that this is now a standing check rather than a one-off: the file is compiled as
 build with the probes on, so a C++-only construct sneaking into the header is a build error
 rather than a discovery somebody makes in two years.
 
+**It is C23 now, like the header.** When the tree moved to Clang the header moved to C23 --
+every enumeration with a fixed underlying type, `static_assert`, `bool` and `nullptr` as
+keywords -- and the probe with it. Compiling it then found the probe had fallen behind:
+`MpDspVtbl` had gained `get_latency` since it last built, and its own assertion still said
+eight function pointers. It says nine and fills the ninth now. A standing check that is off
+by default stands only while somebody builds it; `tests/abi_header_c.c` is the half of it
+that every build compiles.
+
 ### What the Rust probe caught, and it was the interesting one
 
 Layout and calling convention were uneventful — `#[repr(C)]` structs transcribed by hand
@@ -71,8 +79,8 @@ option is now known to be open rather than assumed to be.
 ## Running them
 
 ```bash
-cmake --preset ninja-msvc -DMEDIAPERCH_BUILD_ABI_PROBES=ON
-cmake --build --preset ninja-msvc-release
+cmake --preset llvm -DMEDIAPERCH_BUILD_ABI_PROBES=ON
+cmake --build --preset llvm-release
 ```
 
 ```bash

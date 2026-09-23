@@ -92,7 +92,9 @@ ExternalProject_Add(aom_external
         "-DCMAKE_BUILD_TYPE=Release"
         "-DCMAKE_INSTALL_PREFIX=${aom_install}"
         "-DCMAKE_ASM_NASM_COMPILER=${MEDIAPERCH_NASM}"
-        "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL"
+        # The toolchain, the linker and the dynamic C runtime: an external
+        # project inherits none of them (cmake/CompilerOptions.cmake).
+        ${MEDIAPERCH_EXTERNAL_CMAKE_ARGS}
         "-DCONFIG_AV1_DECODER=1"
         "-DCONFIG_AV1_ENCODER=0"
         "-DENABLE_EXAMPLES=OFF"

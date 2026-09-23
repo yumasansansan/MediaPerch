@@ -64,8 +64,8 @@ include(ExternalProject)
 
 set(dav1d_prefix "${CMAKE_BINARY_DIR}/external/dav1d")
 set(dav1d_install "${dav1d_prefix}/install")
-# Meson names the archive by the platform's convention: `libdav1d.a` even under
-# MSVC, which links it perfectly well.
+# Meson names the archive by the platform's convention: `libdav1d.a`, which
+# lld-link links like any other archive.
 set(dav1d_library "${dav1d_install}/lib/libdav1d.a")
 
 ExternalProject_Add(dav1d_external
@@ -79,6 +79,8 @@ ExternalProject_Add(dav1d_external
         "-Dsrc=${dav1d_src}"
         "-Dbuild=${dav1d_prefix}/build"
         "-Dprefix=${dav1d_install}"
+        "-Dcc=${CMAKE_C_COMPILER}"
+        "-Dar=${CMAKE_AR}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/meson_setup.cmake"
     BUILD_COMMAND "${MEDIAPERCH_MESON}" compile -C "${dav1d_prefix}/build"
     INSTALL_COMMAND "${MEDIAPERCH_MESON}" install -C "${dav1d_prefix}/build"

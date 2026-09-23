@@ -42,7 +42,7 @@ include(ExternalProject)
 set(de265_prefix "${CMAKE_BINARY_DIR}/external/libde265")
 set(de265_install "${de265_prefix}/install")
 # libde265 keeps the `lib` prefix on Windows -- `libde265.lib`, not `de265.lib`
-# -- which MSVC links perfectly well and CMake will not guess at.
+# -- which lld-link links perfectly well and CMake will not guess at.
 set(de265_library "${de265_install}/lib/libde265.lib")
 
 ExternalProject_Add(de265_external
@@ -53,7 +53,9 @@ ExternalProject_Add(de265_external
     CMAKE_ARGS
         "-DCMAKE_BUILD_TYPE=Release"
         "-DCMAKE_INSTALL_PREFIX=${de265_install}"
-        "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL"
+        # The toolchain, the linker and the dynamic C runtime: an external
+        # project inherits none of them (cmake/CompilerOptions.cmake).
+        ${MEDIAPERCH_EXTERNAL_CMAKE_ARGS}
         "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
         # Static, because the point of a module is that it is one file. The
         # sample applications and the decoder tests are the parts that are MIT

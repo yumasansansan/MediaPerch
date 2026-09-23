@@ -393,11 +393,10 @@ try {
         // Read the way every other `set` here reads a number -- strtod and
         // strtoul with the end pointer checked -- rather than sscanf, which
         // the CRT deprecates and /WX therefore refuses.
-        double low = d->curve_low_hz;
         double high = d->curve_high_hz;
         unsigned long points = d->curve_points;
         char* end = nullptr;
-        low = std::strtod(value, &end);
+        const double low = std::strtod(value, &end);
         if (end == value) {
             return MP_ERR_INVALID;
         }

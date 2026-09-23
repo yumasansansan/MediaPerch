@@ -2220,7 +2220,7 @@ The same property is asserted against fake stages in `dsp_test.cpp`, including
 one that holds sixteen frames and one that produces twice what it is given, so
 a regression fails a test rather than waiting to be noticed.
 
-### The two baselines produce the same Path B
+### The two baselines, and the one thing that separates them
 
 The measurement [docs/building.md](building.md) was waiting on. `MEDIAPERCH_ARCH`
 builds the tree twice -- x86-64 with SSE2, and x86-64-v3 with AVX2 and FMA -- and
@@ -2228,7 +2228,11 @@ FMA is the reason this is a real question: it computes a multiply and an add wit
 one rounding where two instructions round twice, so a resampler's inner loop has
 every opportunity to disagree with itself.
 
-**144 comparisons: 12 files x 12 chains, every one identical.**
+**Under MSVC it never did: 144 comparisons, 12 files x 12 chains, every one
+identical.** MSVC 19.51 contracts nothing unless it is told to (`/fp:contract`), so
+its AVX2 build had no fused multiply-add in it that anybody had not written by
+hand -- libopus's sixteen, from its own intrinsics. The table is that
+measurement.
 
 | Chain | Files | Baseline vs AVX2 |
 |---|---|---|
@@ -2255,6 +2259,57 @@ It says that on this machine, over these files, through these stages, nothing
 rounded differently. FMA contraction is the compiler's choice and a different
 version may make it elsewhere; the answer is measured rather than argued, which
 is why the measurement is written down with the files it was taken over.
+
+#### Under Clang, and it made the choice
+
+The tree builds with LLVM now ([building.md](building.md)), and Clang contracts
+`a * b + c` into one instruction wherever a single expression allows it -- what C
+and C++ permit by default, and more accurate rather than less. Nothing in this
+tree turns it off. So the same 144 were measured again, and the 22 files of the
+format corpus decoded as they are, over three builds:
+
+| | Path A, 22 files | Path B, 144 runs |
+|---|---|---|
+| Clang baseline against MSVC | **22 identical** | **144 identical** |
+| Clang baseline against Clang AVX2 | 17 identical | 97 identical |
+| MSVC AVX2 against Clang AVX2 | 17 identical | 97 identical, the same 47 apart |
+
+Measured with LLVM 23.1.1 and again with 23.1.2, which CI pins: every hash in
+every cell the same under both.
+
+**Changing the compiler changed nothing; the AVX2 build's contraction changed
+47.** They are where float arithmetic can contract and nowhere else, and they fall
+into three groups:
+
+| What differs | Runs | How much |
+|---|---|---|
+| libmpg123, libvorbis and libopus -- MP3, Vorbis and Opus, in every chain | 36 | at most 1.1e-7 on a float sample; the two builds agree to 132.1 dB (MP3), 137.7 dB (Vorbis) and 135.8 dB (Opus), with 16 to 22 percent of samples identical |
+| `--gain` with `--shape 9`, on the five 16-bit stereo files | 5 | identical up to sample 4733, then 96.7 % of samples differ, by up to 358 LSB |
+| `dsp_eq` in both FFT modes, on the three files that end as float | 6 | at most 4.4e-16, 314 dB; a 16- or 24-bit output quantises it away |
+
+The fused instructions are there to be counted. MSVC's AVX2 build has none in
+libvorbis, libmpg123, `dsp_eq` or the probe; Clang's has 138, 1,147, 56 and 37,
+and 675 in libopus against MSVC's 16.
+
+**The noise shaper is the one to understand.** `--shape 9` is the ninth-order
+binomial shaper, an error-feedback filter that carries every rounding into every
+later sample, so the first
+disagreement -- one LSB, at sample 4733 -- never heals: from there the two builds
+produce two realisations of the same shaped noise, which is loud at the top of
+the band by design and so differs by hundreds of LSB there. It is not an error in
+either build, and it is not less deterministic than it was: each build gives the
+same bytes every time, for a given `dither_seed`. On every file whose decoder
+agrees, the Shibata shaper came out identical, and so did the gain with no
+shaping at all.
+
+**So the rule this leaves is narrower than before and still simple.** A lossless
+path is the same bytes in either build: Path A of every lossless file, and Path B
+at unity on it. What goes through float arithmetic that can contract is the
+same *audio* and a different *hash*, and a hash of it is a hash of one build. The
+MP3 hash `69dca145…` recorded above is the baseline's, and MSVC's; the AVX2
+build's is `53d94b95…`. The lossy decoders of the three C libraries are the whole
+of Path A that differs -- the AAC decoder is Rust, which contracts nothing, and
+`demux_mf` is Media Foundation's.
 
 ### Three bugs it found on the first run
 
@@ -2418,7 +2473,8 @@ person to hit one should not have to read the source to know it was deliberate.
   module says yes and relies on the host noticing the position stop, which is the
   path a lost WASAPI device already takes. It has not been provoked.
 - ~~**Path B under `/arch:AVX2`.**~~ Stale: `decode` runs the chain now, and
-  the two builds are compared over it in *Path B, hashed* above.
+  the two builds are compared over it in *Path B, hashed* above -- under MSVC
+  and again under Clang, where the AVX2 build's contraction separates them.
 - **A VST3 effect that does something audible.** Every plugin installed on this
   machine is an instrument. Five have no audio input and `dsp_vst3` refuses them
   for the right reason; the sixth, BFD Player, has one and runs the whole cycle

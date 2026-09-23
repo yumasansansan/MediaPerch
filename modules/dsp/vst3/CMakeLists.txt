@@ -39,7 +39,8 @@ endif()
 # and as somebody else's code.** They used to be listed in three targets --
 # this module, the test plugin and the test binary -- and compiled with this
 # tree's warnings each time. MEDIAPERCH_EXTERNAL is the whole of their
-# treatment: see mediaperch_flags_everywhere in cmake/CompilerOptions.cmake.
+# treatment -- no flags of ours, and `-w` -- see mediaperch_flags_everywhere in
+# cmake/CompilerOptions.cmake.
 #
 # `SYSTEM` on the include path, as before: somebody else's headers, and their
 # warnings are not this tree's to fix. The VST3 headers have unscoped enums, a

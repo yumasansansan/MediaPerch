@@ -435,6 +435,9 @@ const MpModuleDesc g_desc = {
     /* init        */ &module_init,
     /* shutdown    */ &module_shutdown,
     /* vtbl        */ &g_vtbl,
+    /* codecs      */ nullptr,
+    /* codec_count */ 0,
+    /* reserved    */ 0,
 };
 
 } // namespace

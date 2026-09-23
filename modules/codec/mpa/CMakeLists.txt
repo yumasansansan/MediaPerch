@@ -77,11 +77,7 @@ mediaperch_add_module(mp_codec_mpa
 # Not ours, and not held to our warning set.
 foreach(_ext IN ITEMS libmpg123 libsyn123 compat compat_str)
     if(TARGET ${_ext})
-        if(MSVC)
-            target_compile_options(${_ext} PRIVATE /W0)
-        else()
-            target_compile_options(${_ext} PRIVATE -w)
-        endif()
+        target_compile_options(${_ext} PRIVATE -w)
         set_target_properties(${_ext} PROPERTIES FOLDER "external")
     endif()
 endforeach()

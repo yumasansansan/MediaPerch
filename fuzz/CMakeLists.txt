@@ -2,9 +2,8 @@
 #
 # libFuzzer targets for every parser that reads a file somebody else wrote.
 #
-# Clang only: MSVC has no libFuzzer. That is not a limitation to work around --
-# the project already builds on both compilers for other reasons, and fuzzing on
-# one of them finds the same bugs.
+# Clang, as the whole tree is: libFuzzer is LLVM's, and so is every compiler
+# this project uses (cmake/LLVMToolchain.cmake).
 #
 #   cmake --preset fuzz
 #   cmake --build --preset fuzz
@@ -28,10 +27,19 @@ endif()
 # ASan on Windows links its runtime dynamically, so the DLL has to sit beside the
 # binary or the fuzzer exits before main with no message at all. Finding it is a
 # one-line glob; not finding it costs an afternoon.
+#
+# **In the resource directory of the Clang this build uses**, asked of that
+# Clang. It used to be looked for under Program Files, which is where the LLVM
+# installer puts one -- and where CI's runner image keeps an LLVM of its own,
+# of whatever version, beside the pinned one ci/setup.sh unpacks elsewhere. A
+# runtime from another version of the compiler is another ABI.
+execute_process(COMMAND "${CMAKE_CXX_COMPILER}" --print-resource-dir
+    OUTPUT_VARIABLE mediaperch_clang_resources OUTPUT_STRIP_TRAILING_WHITESPACE)
+file(TO_CMAKE_PATH "${mediaperch_clang_resources}" mediaperch_clang_resources)
 file(GLOB mediaperch_asan_runtime
-     "$ENV{ProgramFiles}/LLVM/lib/clang/*/lib/windows/clang_rt.asan_dynamic-x86_64.dll")
+     "${mediaperch_clang_resources}/lib/windows/clang_rt.asan_dynamic-x86_64.dll")
 if(mediaperch_asan_runtime)
-    list(GET mediaperch_asan_runtime -1 mediaperch_asan_runtime) # the newest Clang
+    list(GET mediaperch_asan_runtime 0 mediaperch_asan_runtime)
     message(STATUS "fuzzers: ASan runtime from ${mediaperch_asan_runtime}")
 else()
     message(WARNING
@@ -183,9 +191,26 @@ function(mediaperch_add_rust_fuzzer name manifest corpus)
         list(APPEND sancov "-Clink-arg=/ENTRY:mainCRTStartup")
     endif()
     string(JOIN " " sancov_flags ${sancov})
+    # **libFuzzer itself is C++, compiled by the cc crate, and it is given the
+    # Clang this build was checked against.** libfuzzer-sys builds it from
+    # source. The presets put `CC=clang` in the environment, which the cc crate
+    # takes where it used to find cl.exe -- and Clang's GNU driver, unlike cl,
+    # compiles for no C runtime unless it is told one, so the objects named
+    # neither `msvcrt` nor `oldnames`, and libFuzzer's `putenv`, which only
+    # oldnames maps to `_putenv`, did not link. The compilers are named here by
+    # path rather than inherited, and the runtime is rustc's own: the dynamic
+    # one.
+    set(rust_cc_env "")
+    if(WIN32)
+        set(rust_cc_env
+            "CC=${CMAKE_C_COMPILER}" "CXX=${CMAKE_CXX_COMPILER}"
+            "CFLAGS=-fms-runtime-lib=dll" "CXXFLAGS=-fms-runtime-lib=dll")
+    endif()
     add_custom_target(${name} ALL
         COMMAND "${CMAKE_COMMAND}" -E env "CARGO_TARGET_DIR=${rust_target_dir}"
                 "RUSTFLAGS=${sancov_flags}"
+                ${rust_cc_env}
+                ${MEDIAPERCH_CARGO_ENV}
                 "${MEDIAPERCH_CARGO}" build --quiet --release --target "${rust_host}"
                 --manifest-path "${manifest}"
         COMMENT "cargo: ${name} (libFuzzer, coverage on stable)"
@@ -225,6 +250,9 @@ endif()
 # is why this is expected to find nothing -- and is not a reason to leave it
 # out, for the reasons wavpack_fuzzer.cpp gives.
 if(NOT TARGET wavpack AND EXISTS "${CMAKE_SOURCE_DIR}/external/wavpack/CMakeLists.txt")
+    # No assembly under the sanitizer, and no GNU as found for it either: see
+    # modules/demux/wavpack/CMakeLists.txt for what libwavpack does otherwise.
+    set(CMAKE_ASM-ATT_COMPILER "")
     set(WAVPACK_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
     set(WAVPACK_INSTALL_CMAKE_MODULE OFF CACHE BOOL "" FORCE)
     set(WAVPACK_INSTALL_PKGCONFIG_MODULE OFF CACHE BOOL "" FORCE)

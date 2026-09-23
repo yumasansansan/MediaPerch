@@ -42,8 +42,8 @@ are Rust — ALAC, AAC-LC and raw ADTS, bit-identical to the C++ they replaced, 
 `unsafe` the C ABI forces confined to one shared crate and none in the decoders. Format negotiation against real drivers; the passthrough graph on two threads;
 WASAPI exclusive down to a 2 ms period, and ASIO beside it for the one thing Windows has no
 wire format for — DSD512 native, on a DAC that refuses it as DoP; 768 kHz / 32-bit on a USB DAC; a headless engine
-with a shell that can be killed mid-track without the audio noticing. 247 tests plus
-libFuzzer targets, on MSVC.
+with a shell that can be killed mid-track without the audio noticing. 518 tests plus
+libFuzzer targets, all built with LLVM — Clang, LLD and the MSVC STL.
 
 ## What reads what
 

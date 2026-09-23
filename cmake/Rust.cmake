@@ -24,6 +24,29 @@
 
 find_program(MEDIAPERCH_CARGO cargo)
 
+# **cargo links with LLD too.** rustc's MSVC target runs link.exe unless it is
+# told otherwise, and a build whose linker is LLD everywhere else should not
+# have one corner where it is Microsoft's. So cargo is given the lld-link Clang
+# runs (cmake/LLVMToolchain.cmake) as the host target's linker, through the
+# environment variable cargo reads for it. rustc still finds the C runtime's
+# and the SDK's import libraries in the Visual Studio installation, which it
+# asks the system for by itself, exactly as Clang does.
+set(MEDIAPERCH_CARGO_ENV "")
+if(MEDIAPERCH_CARGO AND WIN32)
+    get_filename_component(mediaperch_cargo_dir "${MEDIAPERCH_CARGO}" DIRECTORY)
+    find_program(MEDIAPERCH_RUSTC rustc HINTS "${mediaperch_cargo_dir}")
+    execute_process(COMMAND "${MEDIAPERCH_RUSTC}" -vV
+        OUTPUT_VARIABLE mediaperch_rustc_info ERROR_QUIET)
+    if(mediaperch_rustc_info MATCHES "host: ([^\n]+)")
+        set(MEDIAPERCH_RUST_HOST "${CMAKE_MATCH_1}")
+        string(TOUPPER "${MEDIAPERCH_RUST_HOST}" mediaperch_host_var)
+        string(REPLACE "-" "_" mediaperch_host_var "${mediaperch_host_var}")
+        set(MEDIAPERCH_CARGO_ENV "CARGO_TARGET_${mediaperch_host_var}_LINKER=${MEDIAPERCH_LLD}")
+    else()
+        message(FATAL_ERROR "rustc -vV did not say which target it is for:\n${mediaperch_rustc_info}")
+    endif()
+endif()
+
 function(mediaperch_add_rust_module name)
     cmake_parse_arguments(M "" "KIND;MANIFEST" "" ${ARGN})
     if(NOT M_KIND OR NOT M_MANIFEST)
@@ -69,6 +92,7 @@ function(mediaperch_add_rust_module name)
     # in a moment when nothing changed.
     add_custom_target(${name} ALL
         COMMAND "${CMAKE_COMMAND}" -E env "CARGO_TARGET_DIR=${target_dir}"
+                ${MEDIAPERCH_CARGO_ENV}
                 "${MEDIAPERCH_CARGO}" build --quiet ${profile_flag}
                 --manifest-path "${manifest}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${out_dir}"
@@ -100,6 +124,7 @@ function(mediaperch_add_rust_tests)
     endif()
     add_test(NAME rust_modules
              COMMAND "${CMAKE_COMMAND}" -E env "CARGO_TARGET_DIR=${CMAKE_BINARY_DIR}/cargo"
+                     ${MEDIAPERCH_CARGO_ENV}
                      "${MEDIAPERCH_CARGO}" test --quiet --workspace
                      --manifest-path "${CMAKE_SOURCE_DIR}/modules/Cargo.toml")
     set_tests_properties(rust_modules PROPERTIES TIMEOUT 600)

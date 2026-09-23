@@ -7,17 +7,17 @@
 # letter. Deleting it would delete the evidence, and an off-by-default target
 # costs the same as a deleted one until somebody turns it on:
 #
-#   cmake --preset ninja-msvc -DMEDIAPERCH_BUILD_ABI_PROBES=ON
-#   cmake --build --preset ninja-msvc-release
+#   cmake --preset llvm -DMEDIAPERCH_BUILD_ABI_PROBES=ON
+#   cmake --build --preset llvm-release
 #   mediaperch-probe --dsp list        # it is there
 #   mediaperch-probe play --file X --dsp probe_c --verbose
 #
-# Compiled as C, deliberately and with no fallback to C++. A header that has
+# Compiled as C23, deliberately and with no fallback to C++. A header that has
 # only ever been compiled by a C++ compiler has not been shown to be a C header.
 
 add_library(mp_probe_c MODULE probe_c.c)
 set_target_properties(mp_probe_c PROPERTIES
-    C_STANDARD 11
+    C_STANDARD 23
     C_STANDARD_REQUIRED ON
     C_EXTENSIONS OFF)
 # MediaPerch::abi is the include path and nothing else, which is the point: a

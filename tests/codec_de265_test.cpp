@@ -62,17 +62,30 @@ TEST_CASE("libde265 claims HEVC and declines what it does not decode",
     Module module{MEDIAPERCH_CODEC_DE265, MP_KIND_VCODEC};
     REQUIRE(module.vtbl != nullptr);
     const auto* codec = static_cast<const MpVideoCodecVtbl*>(module.vtbl);
-    REQUIRE(codec->probe != nullptr);
+    // **Checked with an ending the static analyzer can see** (ci/tidy.sh).
+    // Catch2's REQUIRE throws from inside its library, so to the analyzer a
+    // pointer REQUIRE checked is still possibly null on the next line -- and
+    // printing a function pointer, which REQUIRE would try, is a Microsoft
+    // extension to Clang. FAIL throws before the `return` is reached.
+    const auto probe = codec->probe;
+    if (probe == nullptr) {
+        FAIL("codec_de265 has no probe");
+        return;
+    }
 
     Module demux_module{MEDIAPERCH_DEMUX_MP4, MP_KIND_DEMUX};
+    const auto* demux = static_cast<const MpDemuxVtbl*>(demux_module.vtbl);
+    if (demux == nullptr) {
+        FAIL("demux_mp4 did not load");
+        return;
+    }
     Opened file;
-    open_video(*static_cast<const MpDemuxVtbl*>(demux_module.vtbl), MEDIAPERCH_TEST_HEVC,
-               file);
+    open_video(*demux, MEDIAPERCH_TEST_HEVC, file);
     REQUIRE(file.info.codec == MP_CODEC_HEVC);
     const auto config_bytes = static_cast<std::uint32_t>(file.config.size());
 
     std::uint32_t score = 0;
-    REQUIRE(codec->probe(MP_CODEC_HEVC, MP_GRAPHICS_NONE, file.config.data(), config_bytes,
+    REQUIRE(probe(MP_CODEC_HEVC, MP_GRAPHICS_NONE, file.config.data(), config_bytes,
                          &score) == MP_OK);
     CHECK(score > 0u);
 
@@ -82,14 +95,14 @@ TEST_CASE("libde265 claims HEVC and declines what it does not decode",
     // would be better, not that this one cannot be used. dav1d scores the same
     // shape for the same reason.
     std::uint32_t with_device = 0;
-    REQUIRE(codec->probe(MP_CODEC_HEVC, MP_GRAPHICS_D3D11, file.config.data(),
+    REQUIRE(probe(MP_CODEC_HEVC, MP_GRAPHICS_D3D11, file.config.data(),
                          config_bytes, &with_device) == MP_OK);
     CHECK(with_device > 0u);
     CHECK(with_device < score);
 
     // Another codec is not this module's.
     std::uint32_t other = 1;
-    codec->probe(MP_CODEC_AV1, MP_GRAPHICS_NONE, file.config.data(), config_bytes, &other);
+    probe(MP_CODEC_AV1, MP_GRAPHICS_NONE, file.config.data(), config_bytes, &other);
     CHECK(other == 0u);
 
     // **An HEVC stream with no `hvcC` is declined rather than attempted.** The
@@ -97,13 +110,13 @@ TEST_CASE("libde265 claims HEVC and declines what it does not decode",
     // a seek has to push them again and the record is where they are kept,
     // and §7 says a decoder must not discover mid-file what it cannot do.
     std::uint32_t bare = 1;
-    codec->probe(MP_CODEC_HEVC, MP_GRAPHICS_NONE, nullptr, 0, &bare);
+    probe(MP_CODEC_HEVC, MP_GRAPHICS_NONE, nullptr, 0, &bare);
     CHECK(bare == 0u);
 
     // And a record that is not one.
     const std::uint8_t nonsense[] = {0x00, 0x01, 0x02};
     std::uint32_t rubbish = 1;
-    codec->probe(MP_CODEC_HEVC, MP_GRAPHICS_NONE, nonsense, sizeof(nonsense), &rubbish);
+    probe(MP_CODEC_HEVC, MP_GRAPHICS_NONE, nonsense, sizeof(nonsense), &rubbish);
     CHECK(rubbish == 0u);
 }
 

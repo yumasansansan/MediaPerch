@@ -376,6 +376,12 @@ private:
 /// found. external/patches/libebml-msvc-swap_big32.patch is the one-line fix
 /// for the submodule; this reads the bytes itself so the tree is right
 /// whether or not the patch is applied. Declared here, before the first use.
+///
+/// **The fault is MSVC's branch of that header, and this tree builds with Clang
+/// now**, which takes the `__builtin_bswap32` one above it and never had it. The
+/// reading-back stays: it is one read per float element, and it keeps the
+/// answer independent of which branch of somebody else's header a compiler
+/// takes.
 double float_of(MpDemux* d, const libebml::EbmlFloat& e);
 
 /// What a track's last block says about where its audio stops. Filled by

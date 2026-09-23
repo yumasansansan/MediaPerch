@@ -41,7 +41,7 @@ inline constexpr std::array<std::uint8_t, 256> make_reversed()
         std::uint8_t remaining = value;
         std::uint8_t reversed = 0;
         for (int bit = 0; bit < 8; ++bit) {
-            reversed = static_cast<std::uint8_t>((reversed << 1) | (remaining & 1u));
+            reversed = static_cast<std::uint8_t>((reversed << 1) | (remaining & 1));
             remaining = static_cast<std::uint8_t>(remaining >> 1);
         }
         slot = reversed;

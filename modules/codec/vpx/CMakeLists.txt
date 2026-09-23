@@ -14,13 +14,17 @@
 # opinion the day someone wants one -- the way libaom is dav1d's.
 #
 # **MSYS2, and it is a real dependency.** libvpx has neither CMake nor Meson:
-# `configure` is a POSIX shell script, `make` generates Visual Studio projects
-# from what it produced, and MSBuild builds them. That much is only awkward. The
-# part that is not optional is *which* Unix: a native Windows make runs the
-# generator through cmd.exe and its 8191-character limit silently truncates the
-# source list, producing an archive that cannot resolve its own `vpx_calloc`.
-# vpx_build.sh carries the measurement. MSYS2's make runs the same command
-# through its own bash and the list fits.
+# `configure` is a POSIX shell script and the build is its own makefiles. For
+# 64-bit Windows it knows two ways -- `-vs` targets, which generate Visual
+# Studio projects for MSBuild and MSVC, and `x86_64-win64-gcc`, which is its
+# makefiles driving whatever CC names -- and the second takes Clang as it takes
+# GCC. Clang's GNU driver targets the MSVC ABI on Windows, so what comes out is
+# COFF for the same C runtime as everything else here; vpx_build.sh has the
+# rest. The part that is not optional is *which* Unix: libvpx's scripts are
+# written against MSYS2's sed, cut and make, and a native Windows make runs
+# commands through cmd.exe, whose 8191-character limit once truncated this
+# build's source list into an archive that could not resolve its own
+# `vpx_calloc`. MSYS2's make runs them through its own bash and they fit.
 #
 # So this is the one submodule whose build wants a second Unix userland rather
 # than one more tool. It is skipped, loudly, when that is not there, and the
@@ -36,10 +40,9 @@ if(NOT EXISTS "${vpx_src}/configure")
     return()
 endif()
 
-if(NOT MSVC)
-    # The `-vs` targets and MSBuild are the whole of this file's build. A Linux
-    # head would use libvpx's own makefiles, which is a different twenty lines
-    # and belongs with the head that needs them.
+if(NOT WIN32)
+    # The Windows build of libvpx's own makefiles. A Linux head would run the
+    # same configure with its own target and belongs with the head that needs it.
     return()
 endif()
 
@@ -56,7 +59,7 @@ find_program(MEDIAPERCH_MSYS_MAKE
     NAMES make.exe
     HINTS "C:/msys64/usr/bin" "C:/msys32/usr/bin" "$ENV{MSYS2_ROOT}/usr/bin"
     NO_DEFAULT_PATH
-    DOC "MSYS2's make. A native Windows make truncates libvpx's project generation.")
+    DOC "MSYS2's make. A native Windows make runs libvpx's long command lines through cmd.exe, which cuts them short.")
 find_program(MEDIAPERCH_NASM NAMES nasm nasm.exe
     DOC "NASM, which assembles libvpx. external/dav1d and external/aom need it too.")
 
@@ -70,22 +73,16 @@ if(NOT MEDIAPERCH_MSYS_BASH OR NOT MEDIAPERCH_MSYS_MAKE OR NOT MEDIAPERCH_NASM)
     return()
 endif()
 
-# **The Visual Studio generation libvpx targets, from the compiler in hand.**
-# Named rather than guessed, because a `-vs17` project opened by a v18 toolchain
-# is a retarget prompt rather than a build. MSVC 19.5x is Visual Studio 2026,
-# which libvpx calls vs18.
-if(MSVC_VERSION GREATER_EQUAL 1950)
-    set(vpx_target "x86_64-win64-vs18")
-elseif(MSVC_VERSION GREATER_EQUAL 1930)
-    set(vpx_target "x86_64-win64-vs17")
-else()
-    set(vpx_target "x86_64-win64-vs16")
-endif()
-
 include(ExternalProject)
 
 set(vpx_prefix "${CMAKE_BINARY_DIR}/external/libvpx")
-set(vpx_library "${vpx_prefix}/x64/Release/vpxmd.lib")
+set(vpx_library "${vpx_prefix}/libvpx.a")
+
+# The tools by path, from the toolchain this build was checked against: the
+# makefiles run under MSYS2 and would otherwise find whatever its PATH offers.
+# vpx_build.sh puts their directory first on PATH and names them bare.
+get_filename_component(mediaperch_llvm_strip "${CMAKE_AR}" DIRECTORY)
+set(mediaperch_llvm_strip "${mediaperch_llvm_strip}/llvm-strip${CMAKE_EXECUTABLE_SUFFIX}")
 
 ExternalProject_Add(vpx_external
     SOURCE_DIR "${vpx_src}"
@@ -93,8 +90,10 @@ ExternalProject_Add(vpx_external
     CONFIGURE_COMMAND "${CMAKE_COMMAND}" -E true
     BUILD_COMMAND "${MEDIAPERCH_MSYS_BASH}"
         "${CMAKE_CURRENT_SOURCE_DIR}/vpx_build.sh"
-        "${vpx_src}" "${vpx_prefix}" "${vpx_target}"
+        "${vpx_src}" "${vpx_prefix}"
         "$<IF:$<BOOL:${MEDIAPERCH_DECODER_CHECKS}>,1,0>"
+        "${CMAKE_C_COMPILER}" "${CMAKE_CXX_COMPILER}" "${CMAKE_AR}"
+        "${mediaperch_llvm_strip}" "${MEDIAPERCH_NASM}"
     INSTALL_COMMAND "${CMAKE_COMMAND}" -E true
     BUILD_BYPRODUCTS "${vpx_library}"
     # Everything is in the build step, so it is the one that has to run -- and
@@ -119,10 +118,11 @@ mediaperch_add_module(mp_codec_vpx
     SOURCES codec_vpx.cpp
     LINK vpx::vpx)
 
-# `vpxmd.lib` is the dynamic release CRT by libvpx's own naming, and the module
-# is pinned to match -- §4's rule that nothing is allocated across the module
-# boundary is what makes one release library safe for every configuration. The
-# same argument external/dav1d's build records at more length.
+# The archive is compiled for the dynamic release CRT (vpx_build.sh says so to
+# Clang), and the module is pinned to match -- §4's rule that nothing is
+# allocated across the module boundary is what makes one release library safe
+# for every configuration. The same argument external/dav1d's build records at
+# more length.
 set_target_properties(mp_codec_vpx PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
 

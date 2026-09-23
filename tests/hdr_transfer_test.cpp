@@ -155,12 +155,12 @@ Mat3 rgb_to_xyz(double xr, double yr, double xg, double yg, double xb, double yb
     const double det = p[0][0] * (p[1][1] * p[2][2] - p[1][2] * p[2][1]) -
                        p[0][1] * (p[1][0] * p[2][2] - p[1][2] * p[2][0]) +
                        p[0][2] * (p[1][0] * p[2][1] - p[1][1] * p[2][0]);
-    const auto minor = [&](int r0, int c0) {
-        int rows[2];
-        int cols[2];
+    const auto minor = [&](std::size_t r0, std::size_t c0) {
+        std::size_t rows[2];
+        std::size_t cols[2];
         int ri = 0;
         int ci = 0;
-        for (int i = 0; i < 3; ++i) {
+        for (std::size_t i = 0; i < 3; ++i) {
             if (i != r0) {
                 rows[ri++] = i;
             }
@@ -172,8 +172,8 @@ Mat3 rgb_to_xyz(double xr, double yr, double xg, double yg, double xb, double yb
                p[rows[0]][cols[1]] * p[rows[1]][cols[0]];
     };
     Mat3 inv{};
-    for (int i = 0; i < 3; ++i) {
-        for (int j = 0; j < 3; ++j) {
+    for (std::size_t i = 0; i < 3; ++i) {
+        for (std::size_t j = 0; j < 3; ++j) {
             inv[j][i] = ((i + j) % 2 == 0 ? 1.0 : -1.0) * minor(i, j) / det;
         }
     }
@@ -181,7 +181,7 @@ Mat3 rgb_to_xyz(double xr, double yr, double xg, double yg, double xb, double yb
     const double s1 = inv[1][0] * wx + inv[1][1] * 1.0 + inv[1][2] * wz;
     const double s2 = inv[2][0] * wx + inv[2][1] * 1.0 + inv[2][2] * wz;
     Mat3 m{};
-    for (int i = 0; i < 3; ++i) {
+    for (std::size_t i = 0; i < 3; ++i) {
         m[i][0] = p[i][0] * s0;
         m[i][1] = p[i][1] * s1;
         m[i][2] = p[i][2] * s2;
@@ -216,8 +216,8 @@ Mat3 bt2020_to_bt709_derived()
     const Mat3 from_xyz =
         invert(rgb_to_xyz(0.640, 0.330, 0.300, 0.600, 0.150, 0.060, 0.3127, 0.3290));
     Mat3 out{};
-    for (int i = 0; i < 3; ++i) {
-        for (int j = 0; j < 3; ++j) {
+    for (std::size_t i = 0; i < 3; ++i) {
+        for (std::size_t j = 0; j < 3; ++j) {
             out[i][j] = from_xyz[i][0] * to_xyz[0][j] + from_xyz[i][1] * to_xyz[1][j] +
                         from_xyz[i][2] * to_xyz[2][j];
         }
@@ -1010,7 +1010,10 @@ TEST_CASE("the reference curves land on the numbers the standards publish",
     CHECK(tone_map_bt2390(source, source, target) == Approx(target).epsilon(1e-6));
     CHECK(tone_map_bt2390(4000.0, source, target) == Approx(target).epsilon(1e-6));
     double previous = 0.0;
-    for (double nits = 0.0; nits <= 1200.0; nits += 1.0) {
+    // An integer counter, so that how many steps are taken is not a question
+    // about rounding (CERT FLP30-C; the static analyzer asks it).
+    for (int step = 0; step <= 1200; ++step) {
+        const double nits = static_cast<double>(step);
         const double mapped = tone_map_bt2390(nits, source, target);
         CHECK(mapped >= previous - 1e-9);
         CHECK(mapped <= target + 1e-9);

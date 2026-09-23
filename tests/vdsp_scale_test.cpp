@@ -569,8 +569,11 @@ TEST_CASE("the kernels are what the literature says they are", "[vdsp][scale]")
     }
     CHECK(weight(Params{Kind::mitchell}, 0.0) == Approx(8.0 / 9.0));
     CHECK(weight(Params{Kind::mitchell}, 1.0) == Approx(1.0 / 18.0));
-    // The parameterised cubic is the named ones at their parameters.
-    for (double x = 0.0; x < 2.5; x += 0.13) {
+    // The parameterised cubic is the named ones at their parameters. Integer
+    // counters in these loops, so that how many points are taken is not a
+    // question about rounding (CERT FLP30-C; the static analyzer asks it).
+    for (int i = 0; i * 13 < 250; ++i) {
+        const double x = 0.13 * i;
         CHECK(weight(Params{Kind::bicubic, 3, 0.0, 0.5}, x) == Approx(weight(Params{Kind::catrom}, x)));
         CHECK(weight(Params{Kind::bicubic, 3, 1.0 / 3.0, 1.0 / 3.0}, x) ==
               Approx(weight(Params{Kind::mitchell}, x)));
@@ -581,7 +584,8 @@ TEST_CASE("the kernels are what the literature says they are", "[vdsp][scale]")
     CHECK(weight(Params{Kind::box}, 0.6) == 0.0);
     // Hermite and the box are never negative, which is the whole reason one
     // of them is the downscaling default.
-    for (double x = -1.5; x < 1.5; x += 0.01) {
+    for (int i = -150; i < 150; ++i) {
+        const double x = 0.01 * i;
         CHECK(weight(Params{Kind::hermite}, x) >= 0.0);
         CHECK(weight(Params{Kind::box}, x) >= 0.0);
     }
@@ -589,7 +593,8 @@ TEST_CASE("the kernels are what the literature says they are", "[vdsp][scale]")
     for (const Kind k : k_kinds) {
         INFO(name_of(k));
         const Params p{k};
-        for (double x = 0.0; x < 4.5; x += 0.37) {
+        for (int i = 0; i * 37 < 450; ++i) {
+            const double x = 0.37 * i;
             CHECK(weight(p, x) == Approx(weight(p, -x)));
         }
         CHECK(weight(p, support_of(p) + 0.01) == 0.0);

@@ -42,11 +42,7 @@ mediaperch_add_module(mp_codec_flac
 
 # libFLAC is not ours and is not held to our warning set.
 if(TARGET FLAC)
-    if(MSVC)
-        target_compile_options(FLAC PRIVATE /W0)
-    else()
-        target_compile_options(FLAC PRIVATE -w)
-    endif()
+    target_compile_options(FLAC PRIVATE -w)
     set_target_properties(FLAC PROPERTIES FOLDER "external")
 endif()
 

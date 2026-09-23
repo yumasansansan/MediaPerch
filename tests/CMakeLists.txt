@@ -46,9 +46,6 @@ add_executable(mediaperch_tests
     repack_test.cpp
     ring_test.cpp
     calibrate_test.cpp
-    # The Cube LUT reader, which §9.8.3's stage needs and which needs no GPU --
-    # so it runs in CI and can be fuzzed, which is where a parser belongs.
-    cube_test.cpp
     profile_test.cpp
     settings_test.cpp
     sine_test.cpp
@@ -133,7 +130,12 @@ if(TARGET mediaperch_win)
     target_link_libraries(mediaperch_tests PRIVATE MediaPerch::win)
 endif()
 
+# The Cube LUT reader, which §9.8.3's stage needs and which needs no GPU -- so
+# it runs in CI and can be fuzzed, which is where a parser belongs. Its test
+# comes with the library: a tree built without the modules (the `asan` preset)
+# has neither, and listing the test above them had it look for `cube.hpp` there.
 if(TARGET mediaperch_cube)
+    target_sources(mediaperch_tests PRIVATE cube_test.cpp)
     target_link_libraries(mediaperch_tests PRIVATE mediaperch_cube)
 endif()
 
@@ -360,18 +362,6 @@ add_test(NAME shader_precision
     COMMAND "${CMAKE_COMMAND}"
             -D "MEDIAPERCH_SHADER_DIR=${CMAKE_SOURCE_DIR}/modules/video/d3d11;${CMAKE_SOURCE_DIR}/modules/vdsp;${CMAKE_SOURCE_DIR}/modules/shared/kernels"
             -P "${CMAKE_SOURCE_DIR}/cmake/ShaderPrecision.cmake")
-
-# Also not a unit test: a second compiler front end over the portable sources.
-# Both Clang presets in this tree turn the modules off, so most of the code has
-# only ever been read by MSVC -- and that hid a constant that was quietly -1, a
-# host pointer three modules kept and never read, and two loops that mixed
-# signedness in a build that treats -Wconversion as a rule. Syntax-only, so it
-# links nothing and takes about a second. See cmake/ClangSyntax.cmake.
-add_test(NAME clang_syntax
-    COMMAND "${CMAKE_COMMAND}"
-            -D "MEDIAPERCH_ROOT=${CMAKE_SOURCE_DIR}"
-            -D "MEDIAPERCH_BUILD_DIR=${CMAKE_BINARY_DIR}"
-            -P "${CMAKE_SOURCE_DIR}/cmake/ClangSyntax.cmake")
 
 # Also not a unit test: the decoders held against the audio that was encoded,
 # which needs FFmpeg to build the corpus and so cannot be a Catch2 case. It

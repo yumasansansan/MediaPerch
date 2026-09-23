@@ -1357,6 +1357,10 @@ int loudness(mp::ISource& input, const Options& options)
 }
 #endif
 
+#if MEDIAPERCH_DIAGNOSTICS
+// `compare`'s two helpers, compiled where `compare` is. A build without the
+// measuring apparatus has no caller for either, and Clang says so.
+
 /// A module id with its kind trimmed off, for a column heading: `demux_ffmpeg`
 /// is "ffmpeg" to somebody reading a table.
 const char* rival_label(const std::string& id)
@@ -1370,11 +1374,13 @@ const char* rival_label(const std::string& id)
 /// Opens a file the way the engine does: the container first, then the v1
 /// decoders that are still being moved across.
 ///
-/// **Every command that reads a file goes through this**, and that is the point
-/// rather than a convenience. `decode` prints a hash, `compare` measures against
-/// the source, `verify` sends the bytes to a device and reads them back, and
-/// `loudness` meters them -- four answers about one file that would be worth
-/// nothing if they were answers about four different ways of opening it.
+/// **Every command that reads a file opens it through `open_media`**, and that
+/// is the point rather than a convenience. `decode` prints a hash, `compare`
+/// measures against the source, `verify` sends the bytes to a device and reads
+/// them back, and `loudness` meters them -- four answers about one file that
+/// would be worth nothing if they were answers about four different ways of
+/// opening it. `compare` opens two files and has this for them; the others open
+/// one, in `main`, the same way.
 std::unique_ptr<mp::IMedia> open_file(mp::win::EngineHost& host, const std::string& path,
                                       std::string_view prefer, const char* what)
 {
@@ -1387,6 +1393,7 @@ std::unique_ptr<mp::IMedia> open_file(mp::win::EngineHost& host, const std::stri
     }
     return media;
 }
+#endif // MEDIAPERCH_DIAGNOSTICS
 
 /// The two numbers that decide how much slack the decode thread has.
 mp::PassthroughConfig buffering(const Options& options)
@@ -3363,7 +3370,8 @@ bool read_as_float(mp::ISource& input, mp::Format& format, std::vector<float>& o
         if (got == 0) {
             break;
         }
-        raw.insert(raw.end(), chunk.begin(), chunk.begin() + got);
+        raw.insert(raw.end(), chunk.begin(),
+                   chunk.begin() + static_cast<std::ptrdiff_t>(got));
     }
 
     const std::size_t samples = raw.size() / mp::container_bytes(format.sample_type);

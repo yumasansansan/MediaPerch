@@ -3,20 +3,27 @@
  * MediaPerch module ABI, version 4.
  *
  * The only file a third-party module has to read, and the only place where two
- * languages meet. Everything here is deliberately restricted to the C11 common
- * subset of C and C++:
+ * languages meet. It is written in the common subset of C23 and C++:
  *
- *   - no fixed-underlying-type enums (`enum E : uint32_t`) -- C23 has them and
- *     MSVC 19.51 /std:clatest still does not, and this header must compile with
- *     a toolchain we do not control. `typedef uint32_t` plus untyped enumerators
- *     gives the same guaranteed 32-bit field everywhere;
- *   - no `bool`, no `nullptr`, no `static_assert` keyword, same reason;
+ *   - **every enumeration has a fixed underlying type** (`enum E : uint32_t`),
+ *     so each is a 32-bit field by the language's own word rather than by a
+ *     typedef beside it, and an enumerator of 0xFFFFFFFF is 0xFFFFFFFF. This
+ *     header was held to C11 while MSVC compiled C, because its C compiler had
+ *     no such enums; Clang has all of C23, and the typedef-plus-untyped-
+ *     enumerator pattern that stood in for them is gone. What a C++ caller
+ *     notices is that an integer no longer converts to an MpResult without a
+ *     cast -- which is how `true` once became MP_END unseen;
+ *   - `static_assert`, `bool` and `nullptr` are the keywords, in both
+ *     languages, and a C compiler older than C23 is told so rather than left
+ *     to fail on the first of them;
  *   - no allocation across the boundary: the caller owns every buffer;
  *   - nothing that can unwind. C++ implementations use `noexcept` shims, Rust
  *     implementations wrap their bodies in `catch_unwind`.
  *
- * What actually guarantees the layout is the MP_STATIC_ASSERT block at the end
- * of this file, not the language version.
+ * The binary layout is what it was: an enumeration with a uint32_t underlying
+ * type is a uint32_t in every struct and in every call, and what guarantees
+ * that is the static_assert block at the end of this file, not the language
+ * version.
  *
  * Thread classes appear on every entry point and are part of the contract:
  *
@@ -31,6 +38,10 @@
 
 #include <stddef.h>
 #include <stdint.h>
+
+#if !defined(__cplusplus) && (!defined(__STDC_VERSION__) || __STDC_VERSION__ < 202311L)
+#  error "include/mediaperch/module.h is C23: compile C with -std=c23 (Clang 18 or later, GCC 14 or later)"
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -71,14 +82,6 @@ extern "C" {
 #  define MP_CAST(type, value) ((type)(value))
 #endif
 
-#if defined(__cplusplus)
-#  define MP_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
-#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-#  define MP_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
-#else
-#  define MP_STATIC_ASSERT(cond, msg) /* pre-C11: layout is checked by the host */
-#endif
-
 /* The versions, and what each one could not reach by appending:
  *
  *   2  containers and codecs are separate kinds. v1 had one MP_KIND_DECODER
@@ -98,8 +101,7 @@ extern "C" {
 /* Results                                                             */
 /* ------------------------------------------------------------------ */
 
-typedef uint32_t MpResult;
-enum {
+typedef enum MpResult : uint32_t {
     MP_OK = 0u,
     MP_END = 1u,              /* end of stream. Not an error. */
     MP_ERR_INVALID = 2u,      /* a caller passed nonsense */
@@ -112,14 +114,13 @@ enum {
     MP_ERR_NO_MEMORY = 9u,
     MP_ERR_INTERNAL = 10u,
     MP_TIMEOUT = 11u          /* a wait expired. Also not an error by itself. */
-};
+} MpResult;
 
 /* ------------------------------------------------------------------ */
 /* Formats                                                             */
 /* ------------------------------------------------------------------ */
 
-typedef uint32_t MpSampleType;
-enum {
+typedef enum MpSampleType : uint32_t {
     MP_SAMPLE_NONE = 0u,
     MP_SAMPLE_S16 = 1u,        /* 16 bits in 2 bytes */
     MP_SAMPLE_S24_PACKED = 2u, /* 24 bits in 3 bytes */
@@ -141,18 +142,17 @@ enum {
      * silence -- the narrowing then happens in the graph, where it is visible
      * and where somebody chose it. */
     MP_SAMPLE_F64 = 7u
-};
+} MpSampleType;
 
-typedef uint32_t MpEncoding;
-enum {
+typedef enum MpEncoding : uint32_t {
     MP_ENCODING_PCM = 0u,
     MP_ENCODING_DOP = 1u,      /* DSD carried in 24-bit PCM frames (0x05/0xFA) */
     MP_ENCODING_IEC61937 = 2u  /* a compressed bitstream, for a receiver to decode */
-};
+} MpEncoding;
 
 /* Standard speaker positions, matching KSAUDIO's SPEAKER_* bits so that a
  * Windows sink can pass the mask straight through. */
-enum {
+enum : uint32_t {
     MP_SPEAKER_FRONT_LEFT = 0x1u,
     MP_SPEAKER_FRONT_RIGHT = 0x2u,
     MP_SPEAKER_FRONT_CENTER = 0x4u,
@@ -188,8 +188,7 @@ typedef struct MpFormat {
 /* The host, as a module sees it                                       */
 /* ------------------------------------------------------------------ */
 
-typedef uint32_t MpLogLevel;
-enum { MP_LOG_ERROR = 0u, MP_LOG_WARN = 1u, MP_LOG_INFO = 2u, MP_LOG_DEBUG = 3u };
+typedef enum MpLogLevel : uint32_t { MP_LOG_ERROR = 0u, MP_LOG_WARN = 1u, MP_LOG_INFO = 2u, MP_LOG_DEBUG = 3u } MpLogLevel;
 
 typedef struct MpHost {
     uint32_t size;
@@ -218,8 +217,7 @@ typedef struct MpHost {
  * The split adds no conversion. Bit-exactness is a property of a codec and a
  * container has none of it to lose. */
 
-typedef uint32_t MpStreamKind;
-enum {
+typedef enum MpStreamKind : uint32_t {
     MP_STREAM_AUDIO = 1u,
     MP_STREAM_VIDEO = 2u,
     MP_STREAM_SUBTITLE = 3u,
@@ -227,7 +225,7 @@ enum {
      * described, because a host that hides what it does not understand is a
      * host that cannot tell you why a track is missing. */
     MP_STREAM_OTHER = 4u
-};
+} MpStreamKind;
 
 /* Codec identifiers.
  *
@@ -239,8 +237,7 @@ enum {
  * Numbered, not four-character-coded, because a fourcc invites a demuxer to
  * pass a container's bytes through unmapped -- and then two containers spelling
  * one codec differently become two codecs. */
-typedef uint32_t MpCodec;
-enum {
+typedef enum MpCodec : uint32_t {
     MP_CODEC_UNKNOWN = 0u,
 
     /* Uncompressed. The "codec" is a memcpy or a container repack, which is an
@@ -290,8 +287,12 @@ enum {
      * fast decoder yet is still a codec, and the enumerator costs nothing;
      * what it buys is that `demux_mkv` can say what a V_AV2 track holds
      * instead of calling it unknown. See plan.md §9.8.4. */
-    MP_CODEC_AV2 = 69u
-};
+    MP_CODEC_AV2 = 69u,
+    /* The demuxer decodes this stream itself: see below, where what it means
+     * is written out. The whole of the range, and an enumerator now that the
+     * enumeration's type says so. */
+    MP_CODEC_INTERNAL = 0xFFFFFFFFu
+} MpCodec;
 
 /* **What the configuration blob is, per codec.** A codec module is handed the
  * container's blob verbatim, so the two have to agree about what it contains,
@@ -337,16 +338,14 @@ enum {
  *
  * A stream with this codec always carries MP_STREAM_SELF_DECODES.
  *
- * A macro rather than an enumerator, and that is not a style choice: MSVC types
- * an unscoped enum as `int` regardless of its values, and clang does the same
- * in its MSVC-compatible mode, so 0xFFFFFFFF written inside the enum above
- * becomes -1 there, and a `switch` over an MpCodec will not compile against it.
- * The field is a uint32_t either way, so the value on the wire was never in
- * doubt -- only the constant's own type, and a macro has the type its suffix
- * says on every compiler. */
-#define MP_CODEC_INTERNAL 0xFFFFFFFFu
+ * It was a macro until MpCodec had a fixed underlying type, and that was not a
+ * style choice: MSVC typed an unscoped enum as `int` whatever its values, and
+ * Clang does the same in its MSVC-compatible mode, so 0xFFFFFFFF written as an
+ * enumerator became -1 and a `switch` over an MpCodec would not compile against
+ * it. With `: uint32_t` the language says what the value is, so
+ * MP_CODEC_INTERNAL is an enumerator of MpCodec again, the last one above. */
 
-enum {
+enum : uint32_t {
     /* The demuxer decodes this stream. `MpDemuxVtbl::read_frames` is used
      * instead of a codec module. */
     MP_STREAM_SELF_DECODES = 1u << 0,
@@ -463,7 +462,7 @@ typedef struct MpPacket {
     uint64_t frame;
 } MpPacket;
 
-enum {
+enum : uint32_t {
     /* This packet begins a point the stream can be seeked to and decoded from
      * with no earlier packet. Every audio packet of most codecs is one; AAC and
      * MP3 are not, which is why seeking needs pre-roll. */
@@ -603,14 +602,14 @@ typedef struct MpVideoInfo {
  * One question in one place: a white point of zero is the tell, because
  * ST.2086 has no mastering display without one and every real value is far
  * from zero. */
-MP_INLINE int mp_video_has_mastering(const MpVideoInfo *info)
+MP_INLINE bool mp_video_has_mastering(const MpVideoInfo *info)
 {
     /* Up to and including the light levels, which is what the struct was
      * when the mastering display was the last thing in it: a caller of that
      * size states one as well as anybody. */
-    if (info == NULL ||
+    if (info == nullptr ||
         info->size < offsetof(MpVideoInfo, max_frame_average_light_level) + sizeof(uint32_t)) {
-        return 0;
+        return false;
     }
     return info->mastering_white_x != 0u && info->mastering_white_y != 0u;
 }
@@ -619,13 +618,13 @@ MP_INLINE int mp_video_has_mastering(const MpVideoInfo *info)
  * before the field existed, whose struct ends before it. */
 MP_INLINE uint32_t mp_video_chroma_siting(const MpVideoInfo *info)
 {
-    if (info == NULL || info->size < sizeof(MpVideoInfo)) {
+    if (info == nullptr || info->size < sizeof(MpVideoInfo)) {
         return 0u;
     }
     return info->chroma_siting;
 }
 
-enum {
+enum : uint32_t {
     /* The samples use the full range of their container rather than the studio
      * range, which for 8-bit means 0..255 instead of 16..235. A container that
      * does not say leaves this clear, and studio range is the convention that
@@ -814,8 +813,7 @@ typedef struct MpCodecVtbl {
  * to live on. A host that loads a D3D12 presenter and a D3D11 decoder has two
  * devices and a copy between them, which is the whole cost hardware decoding
  * exists to avoid. */
-typedef uint32_t MpGraphicsApi;
-enum {
+typedef enum MpGraphicsApi : uint32_t {
     /* No device: frames come back in system memory. Every decoder can do this
      * and it is what a machine with no usable adapter falls back to. */
     MP_GRAPHICS_NONE = 0u,
@@ -823,7 +821,7 @@ enum {
     MP_GRAPHICS_D3D12 = 2u,
     MP_GRAPHICS_VULKAN = 3u,
     MP_GRAPHICS_METAL = 4u
-};
+} MpGraphicsApi;
 
 /* A device one module made and another is handed.
  *
@@ -866,8 +864,7 @@ typedef struct MpVideo MpVideo; /* opaque, module-owned */
  * HEVC's range extensions reach sixteen bits, AV1 stops at twelve, and this
  * tree decodes neither yet. */
 
-typedef uint32_t MpChroma;
-enum {
+typedef enum MpChroma : uint32_t {
     /* 4:0:0. One plane and no chroma at all -- HEVC has monochrome profiles
      * and AV1 has I400, and a grey picture through a colour path is a bug
      * that looks like a decision. */
@@ -878,10 +875,9 @@ enum {
     /* Not a subsampling: the value that turns the YUV matrix off. RGB frames
      * are what a presenter renders into and what a test pattern is. */
     MP_CHROMA_RGB = 4u
-};
+} MpChroma;
 
-typedef uint32_t MpPacking;
-enum {
+typedef enum MpPacking : uint32_t {
     /* One plane per component. What every software decoder produces. */
     MP_PACK_PLANAR = 0u,
     /* Luma in one plane, the two chroma components interleaved in a second.
@@ -890,7 +886,7 @@ enum {
     MP_PACK_SEMI_PLANAR = 1u,
     /* One plane with the components adjacent. BGRA8 and every render target. */
     MP_PACK_INTERLEAVED = 2u
-};
+} MpPacking;
 
 /* MpPixelLayout::flags */
 #define MP_PIXEL_FLOAT 0x1u     /* IEEE floats; `bits` is then 16 or 32 */
@@ -1347,10 +1343,9 @@ typedef struct MpVideoVtbl {
 
 typedef struct MpSink MpSink; /* opaque, module-owned */
 
-typedef uint32_t MpShareMode;
-enum { MP_SHARE_EXCLUSIVE = 0u, MP_SHARE_SHARED = 1u };
+typedef enum MpShareMode : uint32_t { MP_SHARE_EXCLUSIVE = 0u, MP_SHARE_SHARED = 1u } MpShareMode;
 
-enum {
+enum : uint32_t {
     MP_DEVICE_IS_DEFAULT = 1u << 0,
 
     /* The endpoint has a volume control that the Windows audio engine does not
@@ -1386,7 +1381,7 @@ typedef struct MpDeviceInfo {
 } MpDeviceInfo;
 
 /* Flags for MpSinkVtbl::commit. */
-enum { MP_COMMIT_SILENT = 1u << 0 };
+enum : uint32_t { MP_COMMIT_SILENT = 1u << 0 };
 
 typedef struct MpSinkVtbl {
     uint32_t size;
@@ -1589,8 +1584,7 @@ typedef struct MpDspVtbl {
 /* The module itself                                                   */
 /* ------------------------------------------------------------------ */
 
-typedef uint32_t MpKind;
-enum {
+typedef enum MpKind : uint32_t {
     /* 1 was MP_KIND_DECODER: a container reader and a codec in one object, and
      * the reason the host used to try modules in order. It is not reused. An id
      * that meant something else once is an id a host can get wrong, and the
@@ -1603,9 +1597,9 @@ enum {
     MP_KIND_CODEC = 7u, /* MpCodecVtbl -- audio */
     MP_KIND_VCODEC = 8u, /* MpVideoCodecVtbl */
     MP_KIND_VDSP = 9u   /* MpVideoDspVtbl -- video, between a presenter's halves */
-};
+} MpKind;
 
-enum {
+enum : uint32_t {
     /* The module started threads, registered COM classes, or otherwise cannot be
      * FreeLibrary'd honestly. The host keeps it for the process lifetime rather
      * than pretending to unload it. */
@@ -1668,79 +1662,79 @@ MP_EXPORT const MpModuleDesc *MP_CALL mp_module_entry(uint32_t host_abi_version)
 /* Layout, asserted rather than assumed                                */
 /* ------------------------------------------------------------------ */
 
-MP_STATIC_ASSERT(sizeof(uint32_t) == 4, "u32");
-MP_STATIC_ASSERT(sizeof(MpResult) == 4, "MpResult is a u32 field");
-MP_STATIC_ASSERT(sizeof(MpSampleType) == 4, "MpSampleType is a u32 field");
-MP_STATIC_ASSERT(sizeof(MpEncoding) == 4, "MpEncoding is a u32 field");
-MP_STATIC_ASSERT(sizeof(MpKind) == 4, "MpKind is a u32 field");
-MP_STATIC_ASSERT(offsetof(MpDspVtbl, size) == 0, "MpDspVtbl::size leads");
-MP_STATIC_ASSERT(offsetof(MpDspVtbl, open) == 8, "MpDspVtbl::open follows the header");
+static_assert(sizeof(uint32_t) == 4, "u32");
+static_assert(sizeof(MpResult) == 4, "MpResult is a u32 field");
+static_assert(sizeof(MpSampleType) == 4, "MpSampleType is a u32 field");
+static_assert(sizeof(MpEncoding) == 4, "MpEncoding is a u32 field");
+static_assert(sizeof(MpKind) == 4, "MpKind is a u32 field");
+static_assert(offsetof(MpDspVtbl, size) == 0, "MpDspVtbl::size leads");
+static_assert(offsetof(MpDspVtbl, open) == 8, "MpDspVtbl::open follows the header");
 /* `reset` was added after the first six modules were written. It is at the end
  * because that is the only place a vtable may grow: a host checks `size` and
  * reads no further than what it says, so a module built against the older
  * header keeps working and simply has no reset. */
-MP_STATIC_ASSERT(offsetof(MpDspVtbl, describe) < offsetof(MpDspVtbl, reset),
+static_assert(offsetof(MpDspVtbl, describe) < offsetof(MpDspVtbl, reset),
                  "MpDspVtbl only ever grows at the end");
-MP_STATIC_ASSERT(offsetof(MpDspVtbl, reset) < offsetof(MpDspVtbl, get_latency),
+static_assert(offsetof(MpDspVtbl, reset) < offsetof(MpDspVtbl, get_latency),
                  "MpDspVtbl only ever grows at the end");
 
-MP_STATIC_ASSERT(offsetof(MpVideoCodecVtbl, reset) < offsetof(MpVideoCodecVtbl, set),
+static_assert(offsetof(MpVideoCodecVtbl, reset) < offsetof(MpVideoCodecVtbl, set),
                  "MpVideoCodecVtbl only ever grows at the end");
 
-MP_STATIC_ASSERT(sizeof(MpFormat) == 32, "MpFormat layout is ABI");
-MP_STATIC_ASSERT(offsetof(MpFormat, sample_rate) == 0, "MpFormat layout is ABI");
-MP_STATIC_ASSERT(offsetof(MpFormat, channels) == 4, "MpFormat layout is ABI");
-MP_STATIC_ASSERT(offsetof(MpFormat, channel_mask) == 8, "MpFormat layout is ABI");
-MP_STATIC_ASSERT(offsetof(MpFormat, sample_type) == 12, "MpFormat layout is ABI");
-MP_STATIC_ASSERT(offsetof(MpFormat, encoding) == 16, "MpFormat layout is ABI");
-MP_STATIC_ASSERT(offsetof(MpFormat, valid_bits) == 20, "MpFormat layout is ABI");
+static_assert(sizeof(MpFormat) == 32, "MpFormat layout is ABI");
+static_assert(offsetof(MpFormat, sample_rate) == 0, "MpFormat layout is ABI");
+static_assert(offsetof(MpFormat, channels) == 4, "MpFormat layout is ABI");
+static_assert(offsetof(MpFormat, channel_mask) == 8, "MpFormat layout is ABI");
+static_assert(offsetof(MpFormat, sample_type) == 12, "MpFormat layout is ABI");
+static_assert(offsetof(MpFormat, encoding) == 16, "MpFormat layout is ABI");
+static_assert(offsetof(MpFormat, valid_bits) == 20, "MpFormat layout is ABI");
 
-MP_STATIC_ASSERT(offsetof(MpDeviceInfo, id) == 8, "MpDeviceInfo layout is ABI");
-MP_STATIC_ASSERT(offsetof(MpDeviceInfo, name) == 264, "MpDeviceInfo layout is ABI");
-MP_STATIC_ASSERT(sizeof(MpDeviceInfo) == 520, "MpDeviceInfo layout is ABI");
+static_assert(offsetof(MpDeviceInfo, id) == 8, "MpDeviceInfo layout is ABI");
+static_assert(offsetof(MpDeviceInfo, name) == 264, "MpDeviceInfo layout is ABI");
+static_assert(sizeof(MpDeviceInfo) == 520, "MpDeviceInfo layout is ABI");
 
 /* Every vtable and descriptor opens with a u32 size, so a host reading an older
  * module clamps at `size` and a newer field simply is not there. */
-MP_STATIC_ASSERT(offsetof(MpHost, size) == 0, "size must lead");
-MP_STATIC_ASSERT(offsetof(MpDemuxVtbl, size) == 0, "size must lead");
-MP_STATIC_ASSERT(offsetof(MpCodecVtbl, size) == 0, "size must lead");
-MP_STATIC_ASSERT(offsetof(MpSinkVtbl, size) == 0, "size must lead");
-MP_STATIC_ASSERT(offsetof(MpDspVtbl, size) == 0, "size must lead");
-MP_STATIC_ASSERT(offsetof(MpModuleDesc, size) == 0, "size must lead");
-MP_STATIC_ASSERT(sizeof(MpStreamKind) == 4, "MpStreamKind is a u32 field");
-MP_STATIC_ASSERT(sizeof(MpCodec) == 4, "MpCodec is a u32 field");
-MP_STATIC_ASSERT(offsetof(MpStreamInfo, size) == 0, "size must lead");
-MP_STATIC_ASSERT(offsetof(MpStreamInfo, format) == 24, "MpStreamInfo layout is ABI");
-MP_STATIC_ASSERT(offsetof(MpPacket, size) == 0, "size must lead");
-MP_STATIC_ASSERT(offsetof(MpPacket, stream) == 12, "MpPacket::stream took reserved's slot");
-MP_STATIC_ASSERT(sizeof(MpPacket) == 24, "MpPacket layout is ABI");
-MP_STATIC_ASSERT(offsetof(MpVideoInfo, size) == 0, "size must lead");
-MP_STATIC_ASSERT(offsetof(MpVideoFrame, size) == 0, "size must lead");
-MP_STATIC_ASSERT(offsetof(MpPixelLayout, size) == 0, "size must lead");
-MP_STATIC_ASSERT(sizeof(MpPixelLayout) == 32, "MpPixelLayout layout is ABI");
-MP_STATIC_ASSERT(sizeof(MpChroma) == 4, "MpChroma is a u32 field");
-MP_STATIC_ASSERT(sizeof(MpPacking) == 4, "MpPacking is a u32 field");
+static_assert(offsetof(MpHost, size) == 0, "size must lead");
+static_assert(offsetof(MpDemuxVtbl, size) == 0, "size must lead");
+static_assert(offsetof(MpCodecVtbl, size) == 0, "size must lead");
+static_assert(offsetof(MpSinkVtbl, size) == 0, "size must lead");
+static_assert(offsetof(MpDspVtbl, size) == 0, "size must lead");
+static_assert(offsetof(MpModuleDesc, size) == 0, "size must lead");
+static_assert(sizeof(MpStreamKind) == 4, "MpStreamKind is a u32 field");
+static_assert(sizeof(MpCodec) == 4, "MpCodec is a u32 field");
+static_assert(offsetof(MpStreamInfo, size) == 0, "size must lead");
+static_assert(offsetof(MpStreamInfo, format) == 24, "MpStreamInfo layout is ABI");
+static_assert(offsetof(MpPacket, size) == 0, "size must lead");
+static_assert(offsetof(MpPacket, stream) == 12, "MpPacket::stream took reserved's slot");
+static_assert(sizeof(MpPacket) == 24, "MpPacket layout is ABI");
+static_assert(offsetof(MpVideoInfo, size) == 0, "size must lead");
+static_assert(offsetof(MpVideoFrame, size) == 0, "size must lead");
+static_assert(offsetof(MpPixelLayout, size) == 0, "size must lead");
+static_assert(sizeof(MpPixelLayout) == 32, "MpPixelLayout layout is ABI");
+static_assert(sizeof(MpChroma) == 4, "MpChroma is a u32 field");
+static_assert(sizeof(MpPacking) == 4, "MpPacking is a u32 field");
 /* No implicit padding: eight u32 then a 32-byte struct then the pointers, so
  * every producer in every language agrees without being told twice. */
-MP_STATIC_ASSERT(offsetof(MpVideoFrame, layout) == 16, "MpVideoFrame layout is ABI");
-MP_STATIC_ASSERT(offsetof(MpVideoFrame, plane) == 48, "MpVideoFrame layout is ABI");
-MP_STATIC_ASSERT(sizeof(MpVideoFrame) == 112, "MpVideoFrame layout is ABI");
-MP_STATIC_ASSERT(offsetof(MpGraphicsDevice, size) == 0, "size must lead");
-MP_STATIC_ASSERT(offsetof(MpVideoCodecVtbl, size) == 0, "size must lead");
-MP_STATIC_ASSERT(offsetof(MpVideoVtbl, size) == 0, "size must lead");
+static_assert(offsetof(MpVideoFrame, layout) == 16, "MpVideoFrame layout is ABI");
+static_assert(offsetof(MpVideoFrame, plane) == 48, "MpVideoFrame layout is ABI");
+static_assert(sizeof(MpVideoFrame) == 112, "MpVideoFrame layout is ABI");
+static_assert(offsetof(MpGraphicsDevice, size) == 0, "size must lead");
+static_assert(offsetof(MpVideoCodecVtbl, size) == 0, "size must lead");
+static_assert(offsetof(MpVideoVtbl, size) == 0, "size must lead");
 /* 48 until the mastering display was appended, and the assertion is here so
  * that a change to what precedes it is a build failure rather than a picture
  * that is wrong on somebody else's machine. Ten uint32 more: three primaries in
  * x and y, a white point, two luminances and the two light levels. */
-MP_STATIC_ASSERT(offsetof(MpVideoInfo, mastering_primaries_x) == 48,
+static_assert(offsetof(MpVideoInfo, mastering_primaries_x) == 48,
                  "MpVideoInfo only ever grows at the end");
 /* And the chroma siting after those ten, appended the same way. */
-MP_STATIC_ASSERT(offsetof(MpVideoInfo, chroma_siting) == 96,
+static_assert(offsetof(MpVideoInfo, chroma_siting) == 96,
                  "MpVideoInfo only ever grows at the end");
-MP_STATIC_ASSERT(sizeof(MpVideoInfo) == 100, "MpVideoInfo layout is ABI");
-MP_STATIC_ASSERT(offsetof(MpVideoInfo, flags) < offsetof(MpVideoInfo, timescale),
+static_assert(sizeof(MpVideoInfo) == 100, "MpVideoInfo layout is ABI");
+static_assert(offsetof(MpVideoInfo, flags) < offsetof(MpVideoInfo, timescale),
                  "MpVideoInfo only ever grows at the end");
-MP_STATIC_ASSERT(offsetof(MpVideoInfo, timescale) <
+static_assert(offsetof(MpVideoInfo, timescale) <
                      offsetof(MpVideoInfo, mastering_white_x),
                  "MpVideoInfo only ever grows at the end");
 
@@ -1748,7 +1742,7 @@ MP_STATIC_ASSERT(offsetof(MpVideoInfo, timescale) <
  * `select_streams` and `seek` kept their slots, so the diff a reader has to
  * check is two signatures rather than a reordering; `stream_video_info` is
  * after `close`, because the end is still the only place a vtable may grow. */
-MP_STATIC_ASSERT(offsetof(MpDemuxVtbl, close) < offsetof(MpDemuxVtbl, stream_video_info),
+static_assert(offsetof(MpDemuxVtbl, close) < offsetof(MpDemuxVtbl, stream_video_info),
                  "MpDemuxVtbl only ever grows at the end");
 
 

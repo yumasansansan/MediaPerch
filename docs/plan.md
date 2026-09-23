@@ -17,7 +17,7 @@ twice.
 |---|---|
 | Core language | C++23 (C++20 as the guaranteed floor for library features) |
 | Module language | **anything that can export a C symbol.** v1 is C and C++ only; the ABI has this shape so that a second language stays a cheap option rather than a rewrite — see §2 |
-| Toolchains | MSVC on Windows; Clang, GNU driver, for the fuzzers and for Linux when there is a Linux head. **GCC is not supported anywhere**, and neither is clang-cl — a compiler that accepts MSVC's spellings and means different things by several of them costs a second reading of every flag in the build. Configuration refuses both rather than drifting into either |
+| Toolchain | **LLVM, one version of it, everywhere**: Clang's GNU driver, LLD and the LLVM tools, with the MSVC STL as the C++ library on Windows, linked dynamically. **MSVC, GCC and clang-cl are all refused** — MSVC because two compilers meant most of the code was read only by the one that found less (§14), clang-cl because a compiler that accepts MSVC's spellings and means different things by several of them costs a second reading of every flag in the build. Configuration refuses all three rather than drifting into any |
 | Layer | as low as practical. Prefer the platform API over a wrapper when the wrapper adds no capability we need |
 | Audio | WASAPI **exclusive**, event-driven, MMCSS `Pro Audio`. Shared mode is a fallback, not the design centre |
 | Bit-exactness | a testable property, not a marketing word. §12 says how it is tested |
@@ -25,7 +25,7 @@ twice.
 | Modularity | decoders, sinks, DSP and the video presenter are runtime-loaded shared libraries behind one C ABI |
 | Shell | separate process, optional, replaceable. The engine is complete without it |
 | Windows floor | Windows 10 2004 for audio; Windows 11 22H2 for Advanced Color; Windows 11 24H2 for the desktop HDR-state APIs, degrading gracefully below each |
-| IDE | Visual Studio 2026, opened as a folder: one CMake generator, Ninja, and `CMakePresets.json` is what the IDE reads |
+| IDE | Visual Studio 2026, opened as a folder: one CMake generator, Ninja, and `CMakePresets.json` -- which names LLVM's tools -- is what the IDE reads |
 | Licence | `GPL-3.0-or-later`. Compatible with FFmpeg in either its LGPL or GPL configuration |
 
 Non-goals for v1: macOS, a scripting language, network streaming clients, a library
@@ -100,7 +100,7 @@ The rest follows:
   to Rust, where the *first* bullet's argument -- that this is a small surface -- is what made
   it cheap. `dr_wav.h` is the only one still in the tree.
 - The safety gap is closed the way DragonPerch already closes it: libFuzzer on every parser,
-  ASan/UBSan in CI, `/GS` and `/guard:cf` in release. That machinery exists and the
+  ASan/UBSan in CI, the stack protector and Control Flow Guard in release. That machinery exists and the
   maintainer already runs it.
 - For one maintainer, the cost that does not appear in a CI log — switching between two
   languages, two dependency ecosystems, two fuzzing setups — is the one that actually bites.
@@ -455,7 +455,10 @@ using it happened to be compiled into a fuzzer. `ctest -R clang_syntax` now runs
 `clang++ -fsyntax-only` with the project's warning set over every portable
 source; it takes about a second, links nothing, and found three modules keeping a
 host pointer they never read and two loops mixing signed and unsigned in a tree
-that compiles with `-Wconversion` on purpose. See `cmake/ClangSyntax.cmake`.
+that compiles with `-Wconversion` on purpose. It was `cmake/ClangSyntax.cmake`, and
+**it is gone because the gap is**: the whole tree builds with Clang now (§14), so the
+second front end became the only one and every file it read is compiled, not only
+parsed, with the same warnings.
 
 **Step 7 was not optional and was not "later".** A migration that leaves both structures in
 the tree has not replaced anything: it has added a second way to do the same thing, and the
@@ -4633,7 +4636,10 @@ Three things the build had to be told, none of them HM's fault:
 
 - **HM turns warnings into errors under MSVC**, in its own `bb_enable_warnings`, against a
   compiler generations newer than the one it was written for. `/WX-` after their `/WX`. The
-  warnings in somebody else's reference implementation are not this tree's to fix.
+  warnings in somebody else's reference implementation are not this tree's to fix. Under
+  Clang the same answer is `-w`, and HM's habit of wrapping every compile in `ccache` when
+  one is on `PATH` is switched off with it: a cache outside the build directory is a tool
+  outside the toolchain.
 - **It builds an encoder, two analysers and three utilities** beside the decoder. The build
   step names `TAppDecoder` and nothing else.
 - **It writes the executable into its own source tree**, under
@@ -4903,6 +4909,17 @@ which is the arrangement this wants anyway: `modules/codec/vpx` finds that bash 
 by name, with `NO_DEFAULT_PATH` so that finding Git for Windows' bash instead is impossible
 rather than unlikely. `make` is the one thing the image does not carry, and one `pacman` line
 is the whole difference.
+
+**It builds with Clang now, through the other half of the same `configure`.** The
+`-vs` targets above were how libvpx builds with MSVC; `x86_64-win64-gcc` is its own
+makefiles driving whatever `CC` names, and it takes Clang as it takes GCC -- Clang's GNU
+driver targets the MSVC ABI on Windows, so the archive is COFF for the same C runtime as
+everything else, with `-fms-runtime-lib=dll` said rather than left to the link. No MSBuild,
+no project generation, and no change to libvpx. MSYS2 stays, because the scripts still use
+its `sed` and `cut` and its make still runs the long lines through bash. One thing had to be
+learnt: the makefiles expand `$(CC)` unquoted, and LLVM's directory is usually under
+`C:\Program Files`, so `vpx_build.sh` puts that directory first on `PATH` and names the tools
+bare rather than handing over a compiler called `/c/Program`.
 
 **Configured for what this tree can describe rather than for what libvpx defaults to.**
 `--enable-vp9-highbitdepth` is off by default and is what makes VP9 profiles 2 and 3 -- ten
@@ -6518,6 +6535,7 @@ HDR state.
 | M6 | Video: D3D11, DirectComposition, hardware decode, A/V sync off the audio clock | 4K HEVC plays with frames dropped against audio, never the reverse. **Measured, and met at the default**: 3840x2160 HEVC with an audio track, 0 underruns and 0 silent frames while 1 to 4 frames of 71 were dropped. It was first met at `--ring-periods 32` against a default of 8 that underran; the default is 128 now, and the sections above are the measurements that moved it and what they do and do not say. Getting there took worker threads in `codec_de265` (one thread was a comment rather than a decision) and the ring. DirectComposition is still §9.7.1's shell case and unbuilt; hardware decode is `codec_mft` where the machine has a transform |
 | M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled. **All six steps of §9.7.2 are built**: the SDR white level, the output the window is on, PQ, HLG, BT.2390 in the shader, and the ABI append that carries what the content was graded on, filled from Matroska, from MP4's `mdcv`/`clli`, and from an HEVC prefix SEI where the container says nothing. Steps 3, 4 and 5 are formulas and are tested against them off-screen on WARP, so they run in CI on a machine with no display. **What is left is the half that is not a formula**: steps 1, 2 and 6 on real HDR hardware, written into [devices.md](devices.md) -- there is no HDR display here, and asserting they work without one is the exact failure §9.2 is the record of |
 | M8 | WinUI 3 shell | **most of it.** The project builds and its own reader decodes §10's wire against a running engine -- `MediaPerch.Shell.exe --check` prints the status and the graph, which is how the two descriptions of one format are held together. The canvas is drawn, the composition surface is composited, and the transport, playlist, module palette and settings screens are there -- every key the engine will take, per node and for the player and the engine, as something to type into, with the module's own refusal shown when it will not take it. Killing it mid-track changes nothing audible. **C#, WinUI 3, Native AOT**, `net10.0-windows10.0.26100.0` with a minimum of 22000, to Fluent 2, dependencies at their newest. Its settings screen is a **node canvas** in the shape of ComfyUI's and Fusion's: the chain as a topology, dragged to reorder, with a settings button per node. §10 says what that asks of the engine -- three verbs and no more -- and why the canvas is Fusion's look over a chain's semantics rather than a free-form DAG. The engine half of §9.7.1 is standing: the composition surface handle, the compositor's clock (not the swap chain's waitable, which was a black window until it was measured), the size message and the display message. The shell's half is done through WinUI's own compositor rather than DirectComposition, and *a shell that dies holding the picture* is a test rather than a claim. The picture survives a track boundary as the audio device does, and both it and `status` follow what is being heard rather than what is being decoded. The window is three pages behind a navigation pane, acrylic into the title bar, the picture filling the first with a Fluent transport and a scrubber under it; a click on a track is `play_at`. The canvas edits the chain -- drag to reorder, a bin to remove, a palette to add -- and the system picker opens files; the chain's grammar had to grow an unambiguous separator first, because it could not round-trip a stage with two settings. The scrubber moves between samples, the keys every player answers are answered, the queue can be dragged (the engine allows what its decoder has not reached), and a mixed-format playlist plays through -- it had stopped at its first boundary. Files can be dropped on the window and the picker is the App SDK's (the WinRT one shows nothing in an unpackaged app); an entry that will not open is walked past, and the refusing module's own reason is what the shell shows -- three video-only WebMs had produced *nothing at 0* and a log line that was wrong. Then the rule behind that was found to be nobody's: the audio engine and the video engine are two libraries that never include each other, each with its own clock, a file with no audio plays its picture on the video engine's clock with no device opened, and the shell counts in whatever the engine's clock counts in. **Done, polish included** |
+| M8.5 | One toolchain, LLVM's, and the ABI header in C23 | **done.** Clang's GNU driver compiles every file, LLD links every image and every Rust module, llvm-ar, llvm-rc and llvm-ml do the rest, and the MSVC STL is the one part of Visual Studio left, as a library. `cmake/LLVMToolchain.cmake` checks each tool at configure time -- LLVM's, of one version, pinned to a full path -- and CI downloads one pinned LLVM and checks its SHA-256, with no developer prompt anywhere. Every enumeration in `module.h` has a fixed underlying type. Clang's first reading of the parts only MSVC had compiled found a dozen things, none of which changed a result; the baseline build is MSVC's to the byte over 22 files and 144 Path B runs, and the AVX2 build's FMA contraction is measured and written down in [formats.md](formats.md) |
 | M9 | Linux head | ALSA or PipeWire in an exclusive-equivalent mode, proving the core was actually portable |
 
 M1 and M2 are the ones that de-risk the project. If exclusive-mode negotiation and the
@@ -6582,7 +6600,11 @@ real time.
   those is the one an ABI header actually wants. clang has all of it. So: build C as C23,
   and keep `include/mediaperch/module.h` in the C11 common subset, because that header's
   whole job is to be read by a toolchain we do not control. `typedef uint32_t` plus untyped
-  enumerators gives the same guaranteed field width everywhere.
+  enumerators gives the same guaranteed field width everywhere. **Superseded when the tree
+  moved to Clang**: the header is C23 now, every enumeration `enum X : uint32_t`, with
+  `static_assert`, `bool` and `nullptr` as keywords and an `#error` for a C compiler older
+  than C23. Nothing in C++ needed changing for it -- no integer was being passed where an
+  enumeration was expected -- and the layout assertions held without an edit.
 - **What guarantees an ABI is `static_assert`, not the language version.** Every struct size
   and every member offset is asserted in the header itself, so the check fires in whichever
   language is compiling it — and `tests/abi_header_c.c` exists to make sure one of those
@@ -6590,7 +6612,8 @@ real time.
 - **CMake already knows MSVC spells both standards "latest".** `CXX_STANDARD 23` emits
   `/std:c++latest` and `C_STANDARD 23` emits `/std:clatest`; there is no `/std:c++23` and no
   `/std:c23` to ask for. Setting the flags by hand only earns a D9025 for overriding what
-  CMake put there first.
+  CMake put there first. (Clang is given `-std=c++23` and `-std=c23`, which name what they
+  mean.)
 - **The Ninja generator does not go looking for Visual Studio, and the failure is silent.**
   The VS generator locates the toolset itself; Ninja takes whatever `cc` and `c++` are on
   `PATH`. Outside a developer prompt that is MinGW GCC on a GitHub runner and Strawberry
@@ -6600,7 +6623,11 @@ real time.
   at the top of `CMakeLists.txt`, turns it into a configuration error that says what to do;
   the GCC rejection in `cmake/CompilerOptions.cmake` catches the same thing without a
   preset. Both exist because they catch different mistakes: `ninja-msvc` picking Clang is
-  wrong even though Clang is supported.
+  wrong even though Clang is supported. **Replaced with the move to LLVM** by a check of every
+  tool rather than of one compiler's ID: `cmake/LLVMToolchain.cmake` holds the compilers, the
+  dependency scanner, LLD, the archivers, the resource compiler, the MASM assembler and the
+  binary tools to LLVM's and to one version, and writes what it found to
+  `llvm-toolchain.txt`, which CI prints.
 - **The reference implementation was worth reading and not worth linking.** Writing an
   ALAC decoder from Apple's source produced a working, bit-exact decoder in one sitting and
   found five things the reference does not check on the way: `1 << (denshift - 1)` with a
@@ -7023,6 +7050,80 @@ real time.
   could not say a size only because the host filled `out` with nothing; a pre-fill is a
   contract, not a field, and it arrived without a struct change. Check what the caller
   passes before adding to what the callee declares.
+- **One compiler reads more than two do, when it is the stricter one.** Clang's first
+  complete reading of the parts only MSVC had compiled -- the Windows head, the D3D11
+  presenter, the sinks, the tests -- found a dozen things, none of which changed a result:
+  four module descriptors, a codec vtable and three test vtables that left their trailing
+  members to aggregate initialisation, a `compare` helper and its label that a build without
+  the diagnostics had no caller for, an `int` and an `unsigned` mixed in the ASIO sink's
+  bit-reversal table, `int` indices into `std::array` in a test, a function pointer that
+  Catch2 could print only through a Microsoft extension, and a sign conversion in the
+  diagnostics that only Debug compiles. MSVC had accepted all of it, every time.
+- **An off-by-default target rots, and the one here had.** `abi/probe_c` had not been
+  compiled since `MpDspVtbl` gained `get_latency`; its own assertion still said eight
+  pointers, and C23 compiled it only once it said nine and filled the ninth. The evidence a
+  probe is kept for is only evidence while somebody builds it.
+- **`-mguard=cf` is MinGW's.** For `x86_64-pc-windows-msvc` the GNU driver calls it an
+  unsupported option; Control Flow Guard and the exception-continuation table are
+  `-Xclang -cfguard` and `-Xclang -ehcontguard`, which is what clang-cl's `/guard:` turns
+  into. The dependency scanner said so first, once for every C++ file, before a single
+  object was compiled.
+- **A bare tool name is looked up again by everything that runs it.** The presets say
+  `llvm-ar`; Ninja finds that on PATH, and the fresh CMake inside each external project takes
+  a relative FILEPATH to be a file in its own build directory -- libde265, libaom, avm and
+  HM all failed to archive that way. The toolchain check pins each name to the full path
+  beside the compilers. And a tree that was configured once with the wrong value keeps it:
+  CMake writes the tools into `CMakeFiles/<version>/` on the first configure and loads them
+  from there, so a fix reaches an existing build directory only once that is removed.
+- **A submodule that asks `if(MSVC)` is asking which compiler, not which ABI.** libwavpack
+  chose MASM by that question, so under Clang it went on to look for an AT&T assembler as
+  well, found Strawberry Perl's `as.exe`, and handed it the MASM -- the language enabled last
+  claims `.asm`. HM, avm and libFLAC take their other branches too, harmlessly as it turned
+  out. Read a submodule's `MSVC` tests before trusting a switch of compiler not to reach
+  them.
+- **A developer prompt supplied more than a compiler, and some of it was being used.** The
+  `asan` preset's programs found `clang_rt.asan_dynamic-x86_64.dll` only because
+  `vcvars64.bat` put MSVC's own copy of a DLL by that name on PATH; without it they stopped
+  before `main`, with a Windows dialog each. The runtime of the Clang in use is copied beside
+  the programs now. And Clang's AddressSanitizer does not support the debug C runtime -- the
+  first `free` of every program went to a heap it had not allocated from -- so a sanitized
+  build uses the release runtime in Debug too. The same preset had a test listed that needs a
+  module the preset does not build; nothing outside CI had built it since.
+- **A sanitizer resumes from its exception handler, and the hardening forbade it.** ASan on
+  Windows commits its shadow memory a page at a time, from a vectored exception handler that
+  resumes the faulting instruction. With Control Flow Guard, the EH continuation table and a
+  CET-compatible image, the mp4 fuzzer reported a read of its own HighShadow as "access-violation
+  on unknown address" in Bento4's atom destructor and died printing the report, with no stack
+  and no crash input -- which reads exactly like a Bento4 bug. The address against ASan's
+  printed layout said otherwise, and the same seed ran to the end with the three flags off.
+  The `asan` and `fuzz` builds do without them, as they did before; what ships keeps them.
+- **An LLVM updated in place leaves every build directory describing the old one.** CMake asks
+  the compiler its version once and keeps it, and the installer replaces the programs at the
+  same paths, so the toolchain check would have reported every tool as disagreeing with a
+  number nobody now had. It says instead what happened and to configure with `--fresh`.
+- **The Clang driver does not pass an LTO level to lld-link.** For ELF it forwards the
+  optimisation level to the linker's LTO backend; for the MSVC target it passes nothing, and
+  LLD's backend runs at its own default of 2. `/opt:lldlto=3,/opt:lldltocgo=3` says it.
+- **FMA contraction is a compiler's choice, and the second compiler made it.** MSVC fuses a
+  multiply and an add only when told to, so its two builds hashed alike; Clang fuses them
+  wherever one expression allows, so its AVX2 build differs from its baseline in the lossy
+  decoders of three C libraries, one noise shaper and a float FFT -- 47 of 144 Path B runs --
+  while its baseline build is MSVC's to the byte. The rule the project states did not move:
+  a lossless path is the same bytes in both builds. What moved is which hashes are one
+  build's, and [formats.md](formats.md) lists them.
+- **The analyzer moved out of the compile.** MSVC ran `/analyze` inside every compile,
+  its findings errors under `/WX`; Clang's analyzer is a separate pass, so `ci/tidy.sh` runs
+  it over the Debug build's compile commands in CI, every finding an error. Its first reading
+  of this tree reported 86: 76 from the opt-in checks, left out with the reason written in
+  the script; one dead store; four floating-point loop counters in tests; and five that were
+  the analyzer unable to see a test harness end a test -- Catch2's `REQUIRE` throws from its
+  library, and the MSVC STL's `future::get` moves `*this`. None was a fault in what ships,
+  which is what a tree that has been through one analyzer looks like to a second.
+- **An error-feedback shaper is chaotic in its own rounding.** One LSB of disagreement at
+  sample 4733 and 96.7 % of the rest differ, by up to 358 LSB at the top of the band: two
+  realisations of the same shaped noise. Any change that moves a rounding -- a compiler, an
+  instruction set, a reordered sum -- will move every sample after it, and a test that hashes
+  shaped output hashes one build.
 
 ---
 
@@ -7032,6 +7133,6 @@ real time.
 |---|---|
 | Driver-specific exclusive-mode behaviour that no amount of reading predicts | the device matrix in §12, and treat every negotiation failure as a first-class outcome rather than an assertion |
 | The module ABI ossifies too early and every change becomes a break | `size`-prefixed structs (§4.2) and a v1 that is deliberately small. Do not add an interface until the second implementation of it exists. **The second implementation of a size-changing video stage arrived** (`vdsp_scale`, §9.11) and the ABI took it without a struct change: the pre-fill contract on `configure`'s `out` (§9.8.3) |
-| Memory-safety bugs in parsers | ~~now that Rust is not doing that job~~ — it is, for the three parsers this tree still writes; see §2's *When to revisit*. The rest of the mitigation stands and does the heavier lifting, because most parsing bytes are somebody else's library: libFuzzer on every parser from M2, ASan/UBSan in CI, `/GS` and `/guard:cf` in release, and `demux_ffmpeg` out of process. **That last one is done, by a route the plan did not name**: the module drives the `ffmpeg` command line rather than linking libavformat, so FFmpeg's parsing surface is already in a process that can die without taking the audio with it, and `mp_host_ffmpeg.exe` (§4) is a thing to build only if a module ever needs to be linked in |
+| Memory-safety bugs in parsers | ~~now that Rust is not doing that job~~ — it is, for the three parsers this tree still writes; see §2's *When to revisit*. The rest of the mitigation stands and does the heavier lifting, because most parsing bytes are somebody else's library: libFuzzer on every parser from M2, ASan/UBSan in CI, the stack protector and Control Flow Guard in release, and `demux_ffmpeg` out of process. **That last one is done, by a route the plan did not name**: the module drives the `ffmpeg` command line rather than linking libavformat, so FFmpeg's parsing surface is already in a process that can die without taking the audio with it, and `mp_host_ffmpeg.exe` (§4) is a thing to build only if a module ever needs to be linked in |
 | The video half quietly becomes the whole project | audio is complete and shippable at M5. Video is M6 onward and is allowed to be late |
 | FFmpeg's licence and binary size make it awkward to ship | it is a module, so ship it separately. The base install still plays music without it -- nine demuxers and eight codecs of this tree's own -- and will play video without it too, because §9.8 puts hardware decode on an `IMFTransform` rather than on anything FFmpeg links |

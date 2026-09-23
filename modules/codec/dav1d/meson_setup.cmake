@@ -12,11 +12,21 @@
 # Driven by modules/codec/dav1d/CMakeLists.txt; see the comment there for why
 # this tree has a Meson dependency at all.
 
-foreach(required meson src build prefix)
+foreach(required meson src build prefix cc ar)
     if(NOT DEFINED ${required})
         message(FATAL_ERROR "meson_setup.cmake needs -D${required}=")
     endif()
 endforeach()
+
+# **The compiler, the linker and the archiver, by name.** Meson looks for a C
+# compiler the way any fresh configure does, which on a machine with Visual
+# Studio is cl.exe; these are the ones the parent build was checked against.
+# CC_LD=lld is Meson's word for -fuse-ld=lld, which on Windows is lld-link.
+# Meson passes the dynamic release C runtime to Clang by itself (b_vscrt, from
+# the build type), which is what the module links.
+set(ENV{CC} "${cc}")
+set(ENV{CC_LD} "lld")
+set(ENV{AR} "${ar}")
 
 set(extra)
 if(EXISTS "${build}/meson-private/coredata.dat")

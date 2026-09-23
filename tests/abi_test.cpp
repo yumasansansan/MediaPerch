@@ -10,7 +10,7 @@ extern "C" unsigned int mp_abi_probe_from_c(void);
 
 TEST_CASE("the ABI header agrees with itself across C and C++", "[abi]")
 {
-    // abi_header_c.c is compiled as C. If its MP_STATIC_ASSERT block disagreed
+    // abi_header_c.c is compiled as C23. If its static_assert block disagreed
     // with the C++ one the build would already have failed; this checks that the
     // two objects also link and see the same constant.
     REQUIRE(mp_abi_probe_from_c() == MP_ABI_VERSION);

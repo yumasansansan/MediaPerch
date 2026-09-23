@@ -6,9 +6,10 @@
 | | |
 |---|---|
 | Windows | 10 version 2004 or later. Windows 11 24H2 for the HDR paths, when they exist |
-| Compiler | Visual Studio 2026 (MSVC 19.51 or later) on Windows; LLVM Clang, GNU driver, for the fuzzers and for Linux when there is a Linux head. **Neither GCC nor clang-cl is supported** — configuration fails on purpose for both |
-| CMake | 3.28 or later |
-| Ninja | for every preset except `vs` |
+| Toolchain | **LLVM, all of it and one version of it**: Clang's GNU driver compiles, LLD links, `llvm-ar` archives, `llvm-rc` and `llvm-ml` do the rest. CI pins 23.1.2 (`ci/setup.sh`), as ADLplug-Next does; the LLVM installer's `C:\Program Files\LLVM\bin` on `PATH` is how a person gets it. **MSVC, GCC and clang-cl are all refused** — configuration fails on purpose for each |
+| C++ library | the **MSVC STL**, linked dynamically, from Visual Studio 2026 or its Build Tools. Clang finds it and the Windows SDK by itself, so there is **no developer prompt**: nothing here needs `vcvars64.bat` |
+| CMake | 3.29 or later |
+| Ninja | for every preset |
 
 ## Checking out
 
@@ -76,7 +77,9 @@ somebody can check -- and `d3dcompiler_47.dll` has shipped in Windows since 10.
 tree's pinned revisions would want and does not apply them: the code reads around each fault
 so that a clean checkout is right, and the patch is there for whoever updates the submodule.
 One so far: libebml's MSVC byte swap for 32-bit values returns sixteen of them, which the
-Matroska demuxer sidesteps by reading four-byte floats from the file itself.
+Matroska demuxer sidesteps by reading four-byte floats from the file itself. Clang takes the
+other branch of that header, `__builtin_bswap32`, so the fault is not compiled into this tree
+any more; the demuxer reads the bytes itself all the same.
 
 **Each submodule sits with the one module that needs it**, which is a property of the
 container/codec split rather than a tidying. One module used to bring in four of the Xiph
@@ -156,12 +159,14 @@ choice between an LGPL and a GPL build.
 
 ## The presets
 
-**From a developer prompt** — `VC\Auxiliary\Build\vcvars64.bat`, once per shell.
-Every preset here is Ninja, and Ninja does not go looking for Visual Studio; the
-section below is about what happens when you forget.
+**From any shell.** The presets name every tool -- `clang`, `clang++`, LLD,
+`llvm-ar`, `llvm-rc` -- and Clang finds the MSVC STL and the Windows SDK in the
+Visual Studio installation by itself, so there is nothing to run first. LLVM's
+`bin` has to be on `PATH`; the section below is about what happens when some
+other compiler is found there instead.
 
 ```bash
-cmake --preset ninja-msvc && cmake --build --preset ninja-msvc-release && ctest --preset ninja-msvc-release
+cmake --preset llvm && cmake --build --preset llvm-release && ctest --preset llvm-release
 ```
 
 **And AVX2, not baseline, when the answer matters.** Both are shipped, but the
@@ -170,7 +175,7 @@ libopus's run-time dispatch is compiled out, so it is the build a change is
 checked in:
 
 ```bash
-cmake --preset ninja-msvc-avx2 && cmake --build build/ninja-msvc-avx2 --config Release && ctest --test-dir build/ninja-msvc-avx2 -C Release
+cmake --preset llvm-avx2 && cmake --build build/llvm-avx2 --config Release && ctest --test-dir build/llvm-avx2 -C Release
 ```
 
 **Release, not Debug, unless you are debugging.** The decoders do real arithmetic
@@ -178,24 +183,38 @@ on real amounts of audio, and a Debug build is five to ten times slower at it:
 the whole test suite takes **177 seconds in Debug and 41 in Release**, and the
 decode-quality check inside it goes from 174 to 39.
 
-| Preset | Toolchain | For |
-|---|---|---|
-| `ninja-msvc` | MSVC | day to day. `-debug`, `-release` and `-relwithdebinfo` build presets |
-| `ninja-msvc-avx2` | MSVC | the x86-64-v3 half of what ships, and **where a change is validated** — see below |
-| `measure` | MSVC | Release **with the measuring apparatus kept** — see below |
-| `core-only` | MSVC | what CI builds to keep `src/engine` and `src/player` portable, and the engine free of the player |
-| `asan` | Clang | the parsers under ASan and UBSan |
-| `fuzz` | Clang | the libFuzzer targets |
+| Preset | For |
+|---|---|
+| `llvm` | day to day. `llvm-debug`, `llvm-release` and `llvm-relwithdebinfo` build presets |
+| `llvm-avx2` | the x86-64-v3 half of what ships, and **where a change is validated** — see below |
+| `measure` | Release **with the measuring apparatus kept** — see below |
+| `core-only` | what CI builds to keep `src/engine` and `src/player` portable, and the engine free of the player |
+| `asan` | the parsers under ASan and UBSan |
+| `fuzz` | the libFuzzer targets |
+
+There is no toolchain column because there is one toolchain. `llvm-tools`, a
+hidden preset every other one inherits, names each tool once.
+
+**A build directory MSVC configured is not reused; remove it.** `llvm` and
+`llvm-avx2` are new directories, but `measure`, `core-only`, `asan` and `fuzz`
+kept their names, and a tree configured with MSVC keeps MSVC's choices where
+`cmake --fresh` does not reach: in each external project's own cache and
+`CMakeFiles/`, where libde265 went on building its sample decoder and HM went
+on compiling through ccache. Everything in a build directory is generated, so
+deleting it once costs one build. libvpx is the exception that looks after
+itself: `vpx_build.sh` keeps the options and compilers it configured with, and
+starts its directory again when they differ.
 
 **There is one generator, and it is Ninja.** A Visual Studio generator was here
 and is not any more, because keeping both meant two of everything: two build
 trees, two sets of build and test presets, and a `compile_commands.json` that
 existed in one of them and not the other — which `.clang-tidy` and clangd both
-need. The fuzzers and the sanitized build settle the question on their own: both
-drive Clang's GNU driver with libFuzzer, which no Visual Studio generator can do,
-so Ninja was never removable and the only choice was whether to keep a second
-one. Visual Studio opens this tree with **File ▸ Open ▸ Folder**, which reads
-`CMakePresets.json` directly and debugs the same binaries.
+need. The fuzzers and the sanitized build settled the question before the rest
+of the tree moved to Clang: both drive Clang's GNU driver with libFuzzer, which
+no Visual Studio generator can do, so Ninja was never removable and the only
+choice was whether to keep a second one. Visual Studio opens this tree with
+**File ▸ Open ▸ Folder**, which reads `CMakePresets.json` directly, the tool
+names included.
 
 ## What a Release build leaves out
 
@@ -230,7 +249,7 @@ one distinction:
 
 - **Policy** — the warning dialect, the exception model — attaches to the
   `mediaperch_flags` interface target, which only this project's own targets
-  link. Imposing `/W4` on libvorbis fails a build that has nothing wrong with it.
+  link. Imposing `-Werror` on libvorbis fails a build that has nothing wrong with it.
 - **Optimisation** goes through `add_compile_options` at directory scope, so it
   reaches everything the build compiles, submodules included. libFLAC, libvorbis
   and libopus are most of the bytes that ship; optimising only the tenth of the
@@ -240,22 +259,30 @@ one distinction:
 to take fewer.** A per-flag switch is a promise to keep every combination of
 them working, and the only combination anybody ships is the one where they are
 all on; the rest would be untested configurations wearing the same name. So
-Release is `/O2 /Oi /Ot /Gy /Gw /Ob3` with `/OPT:REF /OPT:ICF` and link-time
-optimisation, and asking for less means editing the file.
+Release is `-O3`, one section per function and per datum
+(`-ffunction-sections -fdata-sections`, MSVC's `/Gy /Gw` in Clang's words),
+`-fno-math-errno`, `-ffinite-loops` and `-fomit-frame-pointer`, with
+`/OPT:REF /OPT:ICF` at the link and link-time optimisation, and asking for less
+means editing the file.
 
-**Except anything that trades accuracy for speed.** `/fp:fast` is the obvious
-one, and it is deliberately absent: it lets the compiler reassociate floating
-point, which is precisely the transformation the measurements in
-[formats.md](formats.md) exist to prove did not happen. Speed that costs a digit
-is not speed this project wants.
+**Except anything that trades accuracy for speed.** `-ffast-math` is the obvious
+one, and it and every part of it that changes what an operation computes are
+deliberately absent: it lets the compiler reassociate floating point, which is
+precisely the transformation the measurements in [formats.md](formats.md) exist
+to prove did not happen. Speed that costs a digit is not speed this project
+wants. `-fno-math-errno` is not one of those parts -- it says only that `sqrt`
+need not set `errno`, which lets it be an instruction.
 
-**A Release build prints `D9025: '/Ob3' takes precedence over '/Ob2'` once per
-file of libFLAC, and that is correct.** libFLAC's own CMakeLists prepends
-`/O2 /Ob2 /Oi /Ot /Oy` to the Release flags; `/Ob3` is added after them and
-wins, which is the intent. Silencing it would mean either patching a submodule
-or inlining less.
+**libFLAC asks for `-O3` itself**, in its own CMakeLists, and ours follows it on
+the command line to the same effect. Under MSVC that pair was `/Ob2` and this
+tree's `/Ob3`, and every file of libFLAC printed `D9025` to say the second won;
+Clang has nothing to reconcile.
 
 Link-time optimisation is not a switch either: it is part of what Release *is*.
+With Clang it is **ThinLTO** -- what CMake asks Clang for -- and LLD runs the
+cross-module optimisation and the code generation at link time. LLD uses levels
+of its own there, 2 unless told, and does not take them from the compile's
+`-O3` when the output is COFF, so `/opt:lldlto=3,/opt:lldltocgo=3` states them.
 The two builds that do without it are the sanitized one and the fuzzers, which
 exist to observe the program rather than to be fast -- cross-module inlining
 moves the frames a sanitizer report and a fuzzer crash both point at. Everything
@@ -270,18 +297,44 @@ Three options remain, and none of them changes the arithmetic:
 |---|---|---|
 | `MEDIAPERCH_DIAGNOSTICS` | OFF | keep the measuring commands in an optimised build |
 | `MEDIAPERCH_LINK_MAP` | OFF | a `.map` beside every binary, for `tools/mapsize.py` |
-| `MEDIAPERCH_SANITIZE` | OFF | ASan and UBSan, and no LTO with them |
+| `MEDIAPERCH_SANITIZE` | OFF | ASan and UBSan, and no LTO with them. The release C runtime in every configuration, because Clang's ASan on Windows does not support the debug one; the ASan runtime DLL of the Clang in use copied beside the programs; and no Control Flow Guard, EH continuation table or CET compatibility, which stop ASan committing its own shadow memory (below) |
 
-`cmake/CompilerOptions.cmake` is one block per toolchain, and there are two:
-**MSVC** on Windows and **Clang's GNU driver** everywhere else. Each lists its
-own warnings, hardening and optimisation in full, and they share no spelling.
+`cmake/CompilerOptions.cmake` is **one block for one toolchain**: Clang's GNU
+driver, which produces COFF on Windows and ELF on Linux from the same words. The
+link options are the only place the two object formats differ, and the file
+asks which one it has once. It used to be two blocks, MSVC on Windows and Clang
+everywhere else, sharing no spelling, with Clang reaching only the fuzzers and a
+sanitized build -- and Clang kept finding what MSVC accepted: an enumerator of
+0xFFFFFFFF that MSVC made -1, a default argument the standard does not allow, a
+settings row a brace list left short. Two compilers meant most of the code was
+read only by the one that found less, so there is one, and it is the one that
+found more.
 
-That is why **clang-cl is refused rather than supported**. It is Clang wearing
-MSVC's words and meaning different things by several of them — `/Ob3` maps to a
-different inliner, `/Zc:preprocessor` is a no-op it warns about, MSVC warning
-numbers name nothing — so every flag in the file needed a second reading to work
-out which compilers it reached. Two toolchains that share nothing are simpler
-than three that share most things, and Linux arrives with a real Clang anyway.
+That is also why **clang-cl is refused rather than supported**. It is Clang
+wearing MSVC's words and meaning different things by several of them -- `/Ob3`
+maps to a different inliner, `/Zc:preprocessor` is a no-op it warns about, MSVC
+warning numbers name nothing -- so every flag in the file would need a second
+reading to work out what it meant. The GNU driver has one set of words on every
+platform.
+
+**Hardening is the same set MSVC's flags gave, in Clang's words**: the stack
+cookie (`-fstack-protector-strong`), Control Flow Guard's checks and tables and
+the table of valid exception-handling continuations a CET shadow stack needs
+(`-Xclang -cfguard`, `-Xclang -ehcontguard`), and lld-link's `/guard:cf`,
+`/guard:ehcont` and `/cetcompat`. The first two are the compiler's own options
+through `-Xclang` because the GNU driver's `-mguard=cf` is MinGW's: for
+`x86_64-pc-windows-msvc` it is an unsupported option, which is what the first
+build said, once for every file the dependency scanner read.
+
+**Except under the sanitizers.** The `asan` and `fuzz` builds keep the stack
+cookie and the address-space flags and do without the other three, as they did
+while MSVC built the rest. AddressSanitizer on Windows commits its shadow memory
+a page at a time from an exception handler and resumes the instruction that
+touched it, and inside an image with Control Flow Guard, the continuation table
+and CET compatibility, the mp4 fuzzer reported a read of its own shadow as an
+access violation and died printing the report -- no stack, no crash input. The
+address was in ASan's HighShadow; the same seed ran to the end without the
+flags, and without ASan handling the exception.
 
 ## Rust, for the modules that are Rust
 
@@ -293,6 +346,15 @@ the way they are built is written down here rather than left in
 nightly, including the fuzzer (below). `cargo` has to be on PATH when CMake
 configures; if it is not, the modules are skipped with a warning the way a
 missing submodule is, and ALAC, AAC-LC and raw ADTS fall to the next reader.
+
+**cargo links with LLD too.** rustc's MSVC target runs `link.exe` unless it is
+told otherwise, and a build that is LLVM's everywhere else should not have one
+corner that is Microsoft's. `cmake/Rust.cmake` asks `rustc -vV` for the host
+target and hands cargo the `lld-link` Clang runs through
+`CARGO_TARGET_<TRIPLE>_LINKER`; rustc still finds the C runtime's and the SDK's
+import libraries in the Visual Studio installation, by itself, as Clang does.
+The link errors in the list below were measured with `link.exe` and are kept as
+they were found.
 
 **Nothing links across the language boundary.** A module is a `.dll` on disk
 that exports `mp_module_entry`, and the host cannot tell which compiler made
@@ -494,11 +556,13 @@ twice and upload both**, which costs a CI job and no code:
 
 | | `MEDIAPERCH_ARCH` | Preset | Runs on |
 |---|---|---|---|
-| baseline | `baseline` | `ninja-msvc` | anything x86-64 |
-| AVX2 | `avx2` | `ninja-msvc-avx2` | Haswell, Zen, and later |
+| baseline | `baseline` | `llvm` | anything x86-64 |
+| AVX2 | `avx2` | `llvm-avx2` | Haswell, Zen, and later |
 
-`avx2` is x86-64-v3 -- AVX2, FMA, BMI1 and BMI2, LZCNT, MOVBE, F16C. MSVC spells
-the set `/arch:AVX2` and Clang spells it `-march=x86-64-v3`.
+`avx2` is x86-64-v3 -- AVX2, FMA, BMI1 and BMI2, LZCNT, MOVBE, F16C. Clang spells
+the whole set `-march=x86-64-v3`, and the baseline `-march=x86-64`, given as well
+so that a Clang built with some other default still builds this one. (MSVC's
+`/arch:AVX2` was the same set under another name.)
 
 **In the AVX2 build, libopus is told to stop checking.** It compiles an SSE, an
 SSE2, an SSE4.1 and an AVX2 path and asks the CPU which to use; in a binary that
@@ -510,9 +574,19 @@ off with -- FLAC's is not an option and mpg123's `OPT_MULTI` is a local `set()`
 in its own list file -- so their checks stay.
 
 **Does it change the bytes?** FMA computes a multiply and an add with one
-rounding where two instructions round twice, so it can. Measured across the
-whole format corpus -- 22 files, every container and codec this tree reads,
-DSD and WavPack included -- the two builds produce **identical hashes**.
+rounding where two instructions round twice, so it can. Under MSVC it did not:
+measured across the whole format corpus -- 22 files, every container and codec
+this tree reads, DSD and WavPack included -- the two builds produced **identical
+hashes**, because MSVC fuses nothing it is not told to.
+
+**Under Clang it does, and only in the AVX2 build.** Clang contracts `a * b + c`
+wherever one expression allows it, which C and C++ permit and which is more
+accurate rather than less, and nothing here turns it off. Clang's baseline build
+produces MSVC's bytes for all 22 files and all 144 Path B runs below, so the
+change of compiler changed nothing; its AVX2 build differs in MP3, Vorbis and
+Opus -- the three lossy decoders that are C libraries, by at most 1.1e-7 -- and
+in two places of Path B that are float arithmetic too. Every lossless path is the
+same bytes in both. [formats.md](formats.md) has the measurement.
 
 That covered the decoders and not Path B, which is the half AVX2 was raised for,
 and for a while there was no way to run the DSP chain without a device at all.
@@ -564,20 +638,37 @@ its command line and is as unhelpful a message as this build has produced. Every
 global option in `cmake/CompilerOptions.cmake` now says
 `$<COMPILE_LANGUAGE:C,CXX>`, which is what each of them always meant.
 
+**The MASM is `llvm-ml`'s now**, the MASM-compatible assembler that ships beside
+Clang, and three things stood between libwavpack's two x64 files and it, all met
+in `modules/demux/wavpack/CMakeLists.txt` rather than in the submodule:
+
+- `include <ksamd64.inc>` is the Windows SDK's, and `llvm-ml` expands its prologue
+  macros once it is told where the SDK keeps them.
+- `proc public frame` opens no unwind frame in `llvm-ml`, which wants `frame`
+  straight after `proc`. ml64 makes every procedure public anyway, so the build
+  assembles copies with the word taken out; both procedures still come out
+  external, each with its unwind data.
+- libwavpack chooses MASM by asking `if(MSVC)`, which a GNU-driver Clang is not,
+  so it went on to look for an AT&T assembler too -- and found Strawberry Perl's
+  `as.exe`, whose language also claims `.asm`. Enabled after MASM, it won the
+  extension, and the first build handed it the MASM. An empty
+  `CMAKE_ASM-ATT_COMPILER` tells its `check_language` there is none, and the
+  copies name their language rather than leaving it to the extension.
+
 ### `CMP0194`, and a Perl distribution holding up a configure
 
-mpg123's `project(... LANGUAGES C ASM)` makes CMake look for an assembler, and
-on Windows it settles for `cl.exe` and warns that MSVC is not one. It is right,
-and it does not matter: nothing is assembled with `CMAKE_ASM_COMPILER` --
-mpg123 spells `${CMAKE_C_COMPILER}` out where it preprocesses a `.S`, and yasm
-does the assembling.
+mpg123's `project(... LANGUAGES C ASM)` makes CMake look for an assembler. While
+MSVC was the compiler, CMake settled for `cl.exe` and warned that MSVC is not
+one -- right, and beside the point, because nothing is assembled with
+`CMAKE_ASM_COMPILER`: mpg123 spells `${CMAKE_C_COMPILER}` out where it
+preprocesses a `.S`, and yasm does the assembling. `NEW` was the worse answer
+then: CMake declined `cl.exe`, kept looking, and found Strawberry Perl's
+`gcc.exe`, so this tree set `CMAKE_POLICY_DEFAULT_CMP0194 OLD`.
 
-`NEW` is the worse answer and that took trying. With it CMake declines `cl.exe`
-and keeps looking -- and on this machine it found `C:/Strawberry/c/bin/gcc.exe`
-and was satisfied, which is a Perl distribution being load-bearing for a
-configure a second time. On a machine with neither, `project(... ASM)` would
-fail outright. `CMAKE_POLICY_DEFAULT_CMP0194 OLD` keeps the behaviour that works
-anywhere and states the reason where the policy is set.
+**With Clang the question answers itself.** Clang is an assembler, CMake takes
+it for `ASM` under either setting, and the configure log says so -- `The ASM
+compiler identification is Clang with GNU-like command-line`. The policy setting
+went with MSVC.
 
 ## What makes a binary big
 
@@ -611,11 +702,19 @@ every binary — and it charges every byte of a linked image to the object that
 brought it:
 
 ```bash
-python tools/mapsize.py --symbols build/vs/bin/Release/mp_codec_vorbis.map
+python tools/mapsize.py --symbols build/llvm/bin/Release/modules/codec/mp_codec_vorbis.map
 ```
 
+lld-link's `/MAP` is written in `link.exe`'s format, so the tool reads either. With
+ThinLTO the code arrives from the link-time backend rather than from the object
+that was compiled, and LLD names each backend object after the one it came from --
+`mp_codec_vorbis.dll.lto.vorbis.libpsy.c.obj` for `psy.c.obj` in `vorbis.lib` --
+so the attribution is still by source file, blurred only by what was inlined
+across files.
+
 **What that found.** The largest single object in the largest module is
-libvorbis's `psy.obj`, 48 KB of psychoacoustic model — which only an *encoder*
+libvorbis's `psy.obj` -- 48 KB of psychoacoustic model under MSVC, 73 KB of
+`psy.c.obj` under Clang, `setup_tone_curves` and `tonemasks` the most of it — which only an *encoder*
 uses, in a module that only decodes. It is there because `_vds_shared_init`
 serves both directions and calls `_vp_psy_init` inside `if(encp)`: the branch
 never runs in a decoder, the reference is unconditional, and **a linker keeps
@@ -626,48 +725,94 @@ under "libvorbis is big".
 
 ## If it configures with the wrong compiler
 
-It will not any more, and that is worth explaining because the failure it replaces
-was silent.
+It will not, and that is worth explaining because the failure it replaces was
+silent.
 
-**The Ninja generator does not go looking for Visual Studio.** It takes whatever `cc` and
-`c++` are on `PATH`. Outside a developer prompt that is MinGW GCC on a GitHub runner,
-Strawberry Perl's `gcc` or LLVM's `clang++` on a typical developer machine — and then the
-whole project builds, cleanly, with nothing in the log admitting the toolchain was not the
-one the preset is named after. **This is the price of having one generator**, and it is
-paid with two guards rather than with a second build tree.
+**The Ninja generator does not go looking for a compiler.** It takes whatever `cc`
+and `c++` are on `PATH`, which is MinGW GCC on a GitHub runner and Strawberry
+Perl's `gcc` on a typical developer machine -- and this tree once built cleanly,
+for a whole CI run, with the first of those, nothing in the log admitting the
+toolchain was not the one the preset was named after.
 
-Two guards, because they catch different mistakes:
+So **the presets name every tool, and `cmake/LLVMToolchain.cmake` checks each one**
+at configure time, before anything is built: the compilers, the dependency
+scanner CMake runs over C++23 sources, the LLD that Clang runs, the archivers
+including the ones link-time optimisation uses, the resource compiler, the MASM
+assembler and the binary tools. Each has to be LLVM's and of the compilers'
+exact version, or -- for the three that report none, `llvm-rc`, `llvm-ml` and
+`llvm-dlltool` -- lie beside the compilers. A name is **pinned to its full path**
+there too, found in the compilers' own directory, because a bare `llvm-ar` is
+looked up again by everything that runs it, and the fresh CMake inside each
+external project takes a relative path to be a file in its own build directory:
+libde265, libaom, avm and HM all failed to archive that way before it was
+pinned. The C++ library is compiled against and linked, and named. What was
+found is written to `llvm-toolchain.txt` in the build directory, which CI prints.
 
-- **`MEDIAPERCH_EXPECT_TOOLSET`**, set by each preset that means a particular compiler.
-  `ninja-msvc` configuring with Clang fails here even though Clang is a supported compiler.
-- **The GCC rejection** in `cmake/CompilerOptions.cmake`, which fires however you got
-  there, preset or not.
+`cmake/CompilerOptions.cmake` refuses MSVC, clang-cl and GCC by name, with a
+sentence saying what to do instead, which is to configure through a preset. When
+`MEDIAPERCH_LLVM_MAJOR` is set in the environment, as CI sets it, the compilers
+have to be of that major version as well, so a runner image whose own LLVM
+changes cannot move the build with it.
 
-Either way the fix is the same: run `VC\Auxiliary\Build\vcvars64.bat` first. To build
-with some other compiler deliberately, configure with `-D MEDIAPERCH_EXPECT_TOOLSET=`.
+**An LLVM updated in place is a build directory to configure again.** CMake asks
+the compiler its version on the first configure and keeps the answer, and the
+installer replaces the programs at the same paths -- so after an update every
+tool would disagree with the number CMake kept. The check says that instead, once,
+naming both versions: configure again with `--fresh`, or remove the directory if
+it has external projects in it, whose own caches `--fresh` does not reach.
 
 ## Standards, and the one thing to know about them
 
 `CMAKE_CXX_STANDARD 23` and `CMAKE_C_STANDARD 23` are set once at the top of
-`CMakeLists.txt`. There is no `/std:c++23` and no `/std:c23` in MSVC — both are spelled
-`latest` — and CMake already knows that, emitting `/std:c++latest` and `/std:clatest`.
-Setting those flags by hand only earns a `D9025` for overriding what CMake put there first.
+`CMakeLists.txt`, and Clang is given `-std=c++23` and `-std=c23`: the standards
+themselves, where MSVC offered `/std:c++latest` and `/std:clatest` -- most of each,
+under a name that meant something different every year.
 
-`include/mediaperch/module.h` is a deliberate exception: it stays inside the C11 common
-subset of C and C++, because the whole point of that file is to be readable by a toolchain
-we do not control. See §14 of [the plan](plan.md) for exactly which C23 features MSVC 19.51
-has and which it does not.
+**`include/mediaperch/module.h` is C23 too, whole.** It was held to the C11 common
+subset of C and C++ for as long as MSVC compiled C, because its C compiler had no
+enums with a fixed underlying type -- the one C23 feature an ABI header most wants
+-- nor `bool` or `nullptr` as keywords. Every enumeration in it is `enum X :
+uint32_t` now, `static_assert`, `bool` and `nullptr` are the keywords in both
+languages, and a C compiler older than C23 is told so by an `#error` rather than
+left to fail on the first of them. The layout did not move: an enumeration with a
+`uint32_t` underlying type is a `uint32_t` in every struct and every call, and the
+header's own `static_assert` block, which fires in whichever language is
+compiling it, is what says so. §14 of [the plan](plan.md) has what MSVC had and
+lacked.
 
 ## The checks that are not unit tests
 
-All of them run as part of `ctest`, so they cannot be skipped by not remembering them.
+All of them run as part of `ctest`, so they cannot be skipped by not remembering them --
+except the static analysis, which CI runs beside `ctest` because it needs a whole build's
+compile commands:
+
+- **`ci/tidy.sh`** is Clang's static analyzer over every file of this project, with the
+  options the build compiled it with, and a failure for anything it reports. It is what
+  MSVC's `/analyze` was while MSVC compiled this tree, when the analyzer ran inside every
+  compile under `/WX`; Clang's runs beside the compile instead, once per push, on the Debug
+  build because that is the one with the measuring code in it. The checks are the
+  analyzer's, less its opt-in set, and the script says why:
+
+  ```bash
+  bash ci/tidy.sh build/llvm-avx2
+  ```
+
+  Its first run over this tree reported 86 things. Seventy-six were the opt-in checks -- a
+  struct's padding, and values outside an enumeration's enumerators, which a fixed underlying
+  type makes legal -- and are left out. Of the ten left, one was a dead store in `dsp_eq`'s
+  curve parser; four were floating-point loop counters in tests, which are integers now;
+  and five were the analyzer reading a test harness it cannot see into -- Catch2's `REQUIRE`
+  throws from inside its library, so a pointer it checked is still "maybe null" on the next
+  line, and the MSVC STL's `future::get` moves the future into a local, which inside a
+  Catch2 macro reads as a call on a moved-from object. Those were written around, so that
+  the check ends where the analyzer can see it end.
 
 - **`core_purity`** greps `src/engine` and `src/player` for OS headers and platform
   conditionals and fails the test run if either appears. The engine's three libraries
   (`mediaperch_core`, `mediaperch_audio`, `mediaperch_video`) are built alone in CI as well,
   so the rule is enforced from two directions. That second build checks a second rule for
   free: none of them has `src/player` on its include path, so an engine file reaching for
-  the transport or the playlist is a `C1083`, not a review comment. And the same script
+  the transport or the playlist is a missing-header error, not a review comment. And the same script
   reads every include in `src/engine` against the three lists, so the audio engine and the
   video engine cannot come to include each other without a failed test.
 - **`audio_alone`** and **`video_alone`** each link one engine and not the other, and run
@@ -680,9 +825,9 @@ All of them run as part of `ctest`, so they cannot be skipped by not remembering
   without failing the build -- and the third is a measurement, in `hdr_transfer_test.cpp`,
   that resolves one step of a twelve-bit code. Each guards what only it can: the compiler the
   flag, the grep the types, the test the result.
-- **`tests/abi_header_c.c`** is compiled as C rather than C++. The ABI header exists to be
+- **`tests/abi_header_c.c`** is compiled as C23 rather than C++. The ABI header exists to be
   read by another language; a header that has only ever been through a C++ compiler has not
-  been tested for that job. The `MP_STATIC_ASSERT` block in the header fires there under C's
+  been tested for that job. The `static_assert` block in the header fires there under C's
   rules, so a layout disagreement between the two languages is a build failure here rather
   than a runtime surprise on somebody else's machine.
 - **`decode_quality`** builds a dozen files with FFmpeg and holds every decoder against the

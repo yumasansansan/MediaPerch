@@ -90,7 +90,8 @@ FILE* open_utf8(const char* path) noexcept
 // --------------------------------------------------------------- our I/O
 //
 // The 64-bit reader interface, `mpg123_reader64`, rather than the `off_t` one:
-// on MSVC `off_t` is 32 bits and mpg123 renames its symbols around that, which
+// in the MSVC C runtime `off_t` is 32 bits -- whichever compiler includes its
+// headers, Clang too -- and mpg123 renames its symbols around that, which
 // is a trap that only shows up on files past two gigabytes. `int64_t` is
 // `int64_t` everywhere.
 

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-cmake_minimum_required(VERSION 3.28)
+cmake_minimum_required(VERSION 3.29)
 
 project(MediaPerch
     VERSION 0.1.0
@@ -8,30 +8,15 @@ project(MediaPerch
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
 
-# A preset with "msvc" in its name that quietly configures with whatever `cc` is
-# on PATH is a trap, and it is not a hypothetical one: the Ninja generator does
-# not go looking for Visual Studio the way the VS generator does, so outside a
-# developer prompt it finds MinGW GCC on a GitHub runner and Strawberry Perl's
-# gcc on a typical developer machine -- and then builds cleanly, with nothing in
-# the log saying the toolchain was wrong.
-#
-# Presets that mean a particular compiler say so, and this checks them.
-set(MEDIAPERCH_EXPECT_TOOLSET "" CACHE STRING
-    "Fail configuration unless CMAKE_CXX_COMPILER_ID matches this (MSVC, Clang, GNU)")
-
-if(MEDIAPERCH_EXPECT_TOOLSET AND NOT CMAKE_CXX_COMPILER_ID STREQUAL MEDIAPERCH_EXPECT_TOOLSET)
-    message(FATAL_ERROR
-        "This preset expects ${MEDIAPERCH_EXPECT_TOOLSET} and got "
-        "${CMAKE_CXX_COMPILER_ID} at ${CMAKE_CXX_COMPILER}.\n"
-        "On Windows the Ninja generator only finds MSVC inside a developer "
-        "prompt: run VC/Auxiliary/Build/vcvars64.bat first, or use the `vs` "
-        "preset, which locates the toolset by itself.\n"
-        "To build with this compiler on purpose, configure with "
-        "-D MEDIAPERCH_EXPECT_TOOLSET=.")
-endif()
+# **The presets name every tool, and cmake/CompilerOptions.cmake holds a
+# configure to them.** The toolchain is LLVM's on every platform -- Clang's GNU
+# driver, LLD, llvm-ar -- and a configure that found anything else, MSVC or a
+# MinGW GCC that happened to be on PATH, stops with a sentence saying what to do
+# instead. That used to be a cache variable a preset could set; it is a rule
+# now, because there is one toolchain to hold a build to.
 
 option(MEDIAPERCH_BUILD_TESTS "Build the test suite" ON)
-option(MEDIAPERCH_BUILD_FUZZERS "Build the libFuzzer targets (Clang only)" OFF)
+option(MEDIAPERCH_BUILD_FUZZERS "Build the libFuzzer targets" OFF)
 
 # **The reference decoders' own validity checks, off by default.**
 #
@@ -52,8 +37,10 @@ option(MEDIAPERCH_BUILD_PLATFORM "Build the platform head and the modules" ON)
 # abi/README.md for what they measured.
 option(MEDIAPERCH_BUILD_ABI_PROBES "Build the throwaway ABI probe modules" OFF)
 
-# There is no /std:c++23 in MSVC and no /std:c23 either; both are spelled
-# "latest". CMake knows this, so CXX_STANDARD 23 is the portable way to ask.
+# **C++23 and C23, asked for by name.** Clang is given `-std=c++23` and
+# `-std=c23`, where MSVC offered a `latest` that stood for most of each and
+# meant something different every year -- and the ABI header is compiled as C23
+# by a C compiler that has C23's enums (tests/abi_header_c.c).
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -116,21 +103,6 @@ add_subdirectory(src/player)
 # which cmake_minimum_required at the top sets.
 set(CMAKE_POLICY_VERSION_MINIMUM 3.10)
 set(CMAKE_POLICY_DEFAULT_CMP0183 NEW)
-
-# **CMP0194: MSVC is not an assembler, and CMake 4.4 is right about that.**
-#
-# mpg123's `project(... LANGUAGES C ASM)` makes CMake look for one, and on
-# Windows it settles for `cl.exe` and warns. Nothing is ever assembled with it:
-# mpg123 spells `${CMAKE_C_COMPILER}` out in the one place it preprocesses a
-# `.S` file, and the assembling is a separate tool. So the warning is about a
-# variable with no reader.
-#
-# NEW is worse here, and that took measuring. With it CMake declines `cl.exe`
-# and looks further -- and on this machine it found `C:/Strawberry/c/bin/gcc.exe`
-# and was happy, which is a *Perl distribution* being load-bearing for a
-# configure. On a machine without one, `project(... ASM)` would fail outright.
-# OLD keeps the behaviour that works everywhere and says so out loud.
-set(CMAKE_POLICY_DEFAULT_CMP0194 OLD)
 
 # Portable modules build wherever the core does.
 if(MEDIAPERCH_BUILD_PLATFORM)

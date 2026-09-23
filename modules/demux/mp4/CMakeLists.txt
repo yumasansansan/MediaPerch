@@ -46,11 +46,7 @@ mediaperch_add_module(mp_demux_mp4
 
 # Not ours, and not held to our warning set.
 if(TARGET ap4)
-    if(MSVC)
-        target_compile_options(ap4 PRIVATE /W0)
-    else()
-        target_compile_options(ap4 PRIVATE -w)
-    endif()
+    target_compile_options(ap4 PRIVATE -w)
     set_target_properties(ap4 PROPERTIES FOLDER "external")
 endif()
 

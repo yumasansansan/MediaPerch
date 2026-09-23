@@ -35,11 +35,7 @@ mediaperch_add_module(mp_demux_ogg
     LINK Ogg::ogg)
 
 if(TARGET ogg)
-    if(MSVC)
-        target_compile_options(ogg PRIVATE /W0)
-    else()
-        target_compile_options(ogg PRIVATE -w)
-    endif()
+    target_compile_options(ogg PRIVATE -w)
     set_target_properties(ogg PROPERTIES FOLDER "external")
 endif()
 

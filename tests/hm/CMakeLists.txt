@@ -54,12 +54,19 @@ ExternalProject_Add(hm_external
     CMAKE_ARGS
         "-DCMAKE_BUILD_TYPE=Release"
         "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
-        # **HM turns warnings into errors for MSVC**, in its own
-        # `bb_enable_warnings`, against a compiler generations newer than the
-        # one it was written for. This is somebody else's code built for one
-        # purpose; the warnings in it are not this tree's to fix, and /WX- after
-        # their /WX is how that is said.
-        "-DCMAKE_CXX_FLAGS=/WX- /wd4996 /wd4267 /wd4244 /wd4018"
+        # The toolchain, the linker and the dynamic C runtime: an external
+        # project inherits none of them (cmake/CompilerOptions.cmake).
+        ${MEDIAPERCH_EXTERNAL_CMAKE_ARGS}
+        # HM wraps every compile and link in ccache when it finds one on PATH,
+        # which puts a cache outside this build directory and a tool outside
+        # the toolchain into it. Defined, and false, is how its find_program is
+        # told not to look.
+        "-DCCACHE_FOUND=OFF"
+        # **HM turns warnings into errors**, in its own `bb_enable_warnings`,
+        # against a compiler generations newer than the one it was written for.
+        # This is somebody else's code built for one purpose; the warnings in it
+        # are not this tree's to fix, and -w is how that is said.
+        "-DCMAKE_CXX_FLAGS=-w"
     # Only the decoder. HM builds an encoder, two analysers and three utilities
     # besides, and none of them is what the reference is being asked for.
     BUILD_COMMAND "${CMAKE_COMMAND}" --build "${hm_prefix}/build" --target TAppDecoder

@@ -337,8 +337,9 @@ struct Setting {
     SettingKind kind = SettingKind::text;
     // **Every field past the first three has a default**, so that the rows
     // written as `Setting{key, value, help}` -- which is most of them -- are
-    // complete to Clang's -Wmissing-field-initializers as well as to MSVC.
-    // The fuzz build compiles this with -Werror and was the one that said so.
+    // complete to Clang's -Wmissing-field-initializers, which counts a member
+    // with no default initializer as missing. The fuzz build was the first to
+    // compile this with -Werror under Clang, and the one that said so.
 
     /// The words a `choice` offers, in the module's order.
     std::vector<std::string> choices{};

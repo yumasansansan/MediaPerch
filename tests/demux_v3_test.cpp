@@ -1060,7 +1060,13 @@ TEST_CASE("a video packet says what its timestamp is counted in", "[abi][v3][vid
         // mp::Demux always asks for the size it was compiled with.
         Module module{mp4_module(), MP_KIND_DEMUX};
         REQUIRE(module.as<MpDemuxVtbl>() != nullptr);
-        REQUIRE(module.as<MpDemuxVtbl>()->stream_video_info != nullptr);
+        // Checked where the static analyzer can see the check end the test,
+        // and not printed: see codec_de265_test.cpp.
+        const auto stream_video_info = module.as<MpDemuxVtbl>()->stream_video_info;
+        if (stream_video_info == nullptr) {
+            FAIL("demux_mp4 has no stream_video_info");
+            return;
+        }
 
         MpDemux* handle = nullptr;
         REQUIRE(module.as<MpDemuxVtbl>()->open(av_path(), &handle) == MP_OK);
@@ -1082,7 +1088,7 @@ TEST_CASE("a video packet says what its timestamp is counted in", "[abi][v3][vid
 
         // Stream 0 is the video track in this file, which the sections above
         // establish; asking the vtable directly means saying so here.
-        REQUIRE(module.as<MpDemuxVtbl>()->stream_video_info(handle, 0, &guarded.info) == MP_OK);
+        REQUIRE(stream_video_info(handle, 0, &guarded.info) == MP_OK);
         CHECK(guarded.info.width == 128);
         // Not written, because the caller said its struct stops before it.
         CHECK(guarded.info.timescale == 0u);

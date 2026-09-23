@@ -11,25 +11,15 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Every job here uses a Ninja preset, and the Ninja generator does not go looking
-# for Visual Studio the way the VS generator does. Without a developer
-# environment CMake takes whatever `cc` is on PATH, which on this image is MinGW
-# GCC at C:\mingw64\bin -- and then everything builds, cleanly, with nothing in
-# the log admitting the toolchain was wrong.
-#
-# So each job sets the environment up first, using vswhere and vcvars64.bat, both
-# of which ship with the image. MEDIAPERCH_EXPECT_TOOLSET in the presets is the
-# backstop: if this step ever silently stops working, configuration fails loudly
-# instead of quietly building with the wrong compiler.
-env:
-  VS_DEV_ENV: |
-    for /f "usebackq tokens=*" %%i in (`vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSPATH=%%i"
-    if not defined VSPATH exit /b 1
-    call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" >nul || exit /b 1
-    >>"%GITHUB_ENV%" echo PATH=%PATH%
-    >>"%GITHUB_ENV%" echo INCLUDE=%INCLUDE%
-    >>"%GITHUB_ENV%" echo LIB=%LIB%
-    >>"%GITHUB_ENV%" echo LIBPATH=%LIBPATH%
+# **Every job builds with LLVM, and with one pinned version of it.** Clang's GNU
+# driver compiles, LLD links, llvm-ar archives; on Windows the C++ library is
+# the MSVC STL, linked dynamically, which Clang finds in the Visual Studio the
+# image already has -- by itself, with no developer prompt, which is why there is
+# no vcvars64.bat step anywhere below. `ci/setup.sh` downloads LLVM's own release
+# archive, checks its SHA-256, puts it first on PATH and exports
+# MEDIAPERCH_LLVM_MAJOR, and cmake/LLVMToolchain.cmake then refuses a configure
+# whose compiler, linker or archiver is anything else -- the runner image's own
+# LLVM included, whose version moves when the image does.
 
 jobs:
   # The rule that the portable half is portable is only worth something if
@@ -54,12 +44,15 @@ jobs:
         with:
           submodules: true
 
-      - name: MSVC developer environment
-        shell: cmd
-        run: ${{ env.VS_DEV_ENV }}
+      - name: LLVM, pinned
+        shell: bash
+        run: bash ci/setup.sh
 
       - name: Configure
         run: cmake --preset core-only
+
+      - name: Report the toolchain
+        run: Get-Content build/core-only/llvm-toolchain.txt
 
       - name: Build the engine, and nothing else
         run: cmake --build --preset core-only --target mediaperch_core mediaperch_audio mediaperch_video
@@ -72,7 +65,7 @@ jobs:
           cmake "-D MEDIAPERCH_CORE_DIR=${{ github.workspace }}/src/engine;${{ github.workspace }}/src/player"
           -P cmake/CorePurity.cmake
 
-  # The ABI header is compiled as C here as well as C++ (tests/abi_header_c.c),
+  # The ABI header is compiled as C23 here as well as C++ (tests/abi_header_c.c),
   # so a C++-ism creeping into it fails the build rather than a third party's.
   # **Two instruction-set baselines, both shipped.**
   #
@@ -83,8 +76,8 @@ jobs:
   # SSE2 and 2003. `avx2` is x86-64-v3 -- Haswell and Zen and later -- and a
   # binary built that way does not start without it, which is why both are built
   # and both are uploaded rather than one being chosen for everybody.
-  msvc:
-    name: MSVC, build and test
+  llvm:
+    name: LLVM, build and test
     runs-on: windows-2025-vs2026
     strategy:
       fail-fast: false
@@ -93,9 +86,9 @@ jobs:
         arch: [baseline, avx2]
         include:
           - arch: baseline
-            preset: ninja-msvc
+            preset: llvm
           - arch: avx2
-            preset: ninja-msvc-avx2
+            preset: llvm-avx2
     steps:
       - uses: actions/checkout@v7
         with:
@@ -115,10 +108,6 @@ jobs:
       # person would: base is shared, and a job that installs into it has an
       # opinion about every other job on the image. The name is the one
       # modules/codec/dav1d/CMakeLists.txt tells a person to create.
-      # Before the developer environment on purpose -- that step captures PATH
-      # into GITHUB_ENV, and a PATH captured before an install is a PATH
-      # without it, which is the same reason the FFmpeg step in `quality` sits
-      # where it does.
       - name: Meson and nasm, which build external/dav1d
         run: |
           & "$env:CONDA\Scripts\conda.exe" create -y -n mediaperch-build -c conda-forge meson nasm
@@ -151,9 +140,9 @@ jobs:
               & $pacman -S --noconfirm --needed --disable-download-timeout make
           }
 
-      - name: MSVC developer environment
-        shell: cmd
-        run: ${{ env.VS_DEV_ENV }}
+      - name: LLVM, pinned
+        shell: bash
+        run: bash ci/setup.sh
 
       # Stated out loud, because these modules skip themselves silently when a
       # tool is absent and a skipped decoder looks exactly like a passing build.
@@ -167,11 +156,12 @@ jobs:
       - name: Configure
         run: cmake --preset ${{ matrix.preset }}
 
-      - name: Report which compiler and which baseline were actually used
-        run: >
-          cmake -N -L build/${{ matrix.preset }} |
-          Select-String -Pattern
-          'CMAKE_CXX_COMPILER|MEDIAPERCH_EXPECT_TOOLSET|MEDIAPERCH_ARCH'
+      # What the configure checked -- every tool with its version, and the C++
+      # library -- and the instruction set it was asked for.
+      - name: Report the toolchain and the baseline
+        run: |
+          Get-Content build/${{ matrix.preset }}/llvm-toolchain.txt
+          cmake -N -L build/${{ matrix.preset }} | Select-String -Pattern 'MEDIAPERCH_ARCH'
 
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }} --config ${{ matrix.configuration }}
@@ -180,6 +170,17 @@ jobs:
         run: >
           ctest --preset ${{ matrix.preset }} --build-config ${{ matrix.configuration }}
           --output-on-failure --no-tests=error
+
+      # **What MSVC's /analyze was**: Clang's static analyzer over every file of
+      # this project, with the options the build compiled it with, and a failure
+      # for anything it reports (ci/tidy.sh says which checks and why). Once, on
+      # the Debug build, because that is the one with the measuring code in it --
+      # and after the build, because several modules include headers an external
+      # project generates.
+      - name: Static analysis
+        if: matrix.configuration == 'Debug' && matrix.arch == 'baseline'
+        shell: bash
+        run: bash ci/tidy.sh build/${{ matrix.preset }}
 
       # The Release build of each baseline, so a person can take the one their
       # machine runs. The AVX2 one refuses to start on anything before Haswell,
@@ -207,12 +208,15 @@ jobs:
         with:
           submodules: true
 
-      - name: MSVC developer environment
-        shell: cmd
-        run: ${{ env.VS_DEV_ENV }}
+      - name: LLVM, pinned
+        shell: bash
+        run: bash ci/setup.sh
 
       - name: Configure
         run: cmake --preset fuzz
+
+      - name: Report the toolchain
+        run: Get-Content build/fuzz/llvm-toolchain.txt
 
       - name: Build
         run: cmake --build --preset fuzz
@@ -257,9 +261,7 @@ jobs:
       # FFmpeg is a test tool here and nothing else: it builds the corpus and it
       # is the second opinion. Nothing in the product links it, and
       # demux_ffmpeg looks for it at run time rather than being built against
-      # it -- so this installs a tool, not a dependency. It goes before the
-      # developer environment because that step captures PATH into GITHUB_ENV,
-      # and a PATH captured before an install is a PATH without it.
+      # it -- so this installs a tool, not a dependency.
       - name: FFmpeg, for the corpus and the second opinion
         run: |
           if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
@@ -270,9 +272,9 @@ jobs:
           # day a row moves, the first question is whether this line changed.
           ffmpeg -version | Select-Object -First 1
 
-      - name: MSVC developer environment
-        shell: cmd
-        run: ${{ env.VS_DEV_ENV }}
+      - name: LLVM, pinned
+        shell: bash
+        run: bash ci/setup.sh
 
       # Release, and with MEDIAPERCH_DIAGNOSTICS on so the measuring commands
       # are actually in the binary: a shipping build leaves them out, and this
@@ -286,12 +288,15 @@ jobs:
       # behaviour is code in this repository is still held to the table.
       - name: Configure
         run: >
-          cmake --preset ninja-msvc
+          cmake --preset llvm
           -D MEDIAPERCH_REQUIRE_FFMPEG=ON -D MEDIAPERCH_DIAGNOSTICS=ON
           -D MEDIAPERCH_MATRIX_STRICT=OFF
 
+      - name: Report the toolchain
+        run: Get-Content build/llvm/llvm-toolchain.txt
+
       - name: Build
-        run: cmake --build --preset ninja-msvc --config Release
+        run: cmake --build --preset llvm --config Release
 
       # MEDIAPERCH_REQUIRE_FFMPEG turns a missing FFmpeg -- or a build without
       # the measuring commands -- from a skip into a failure, so the day either
@@ -308,7 +313,7 @@ jobs:
       # it turns out to be.
       - name: Measure
         run: >
-          ctest --preset ninja-msvc --build-config Release
+          ctest --preset llvm --build-config Release
           -L quality --output-on-failure --no-tests=error
 
   # What actually ships: optimised, link-time optimised, no test suite and no
@@ -327,9 +332,9 @@ jobs:
         with:
           submodules: true
 
-      # See the `msvc` job for why this is here and why it is before the
-      # developer environment. Without it the shipping build has no AV1
-      # decoder, and a size report that leaves one out is the wrong report.
+      # See the `llvm` job for why this is here. Without it the shipping build
+      # has no AV1 decoder, and a size report that leaves one out is the wrong
+      # report.
       - name: Meson and nasm, which build external/dav1d
         run: |
           & "$env:CONDA\Scripts\conda.exe" create -y -n mediaperch-build -c conda-forge meson nasm
@@ -362,24 +367,27 @@ jobs:
               & $pacman -S --noconfirm --needed --disable-download-timeout make
           }
 
-      - name: MSVC developer environment
-        shell: cmd
-        run: ${{ env.VS_DEV_ENV }}
+      - name: LLVM, pinned
+        shell: bash
+        run: bash ci/setup.sh
 
       - name: Configure
         run: >
-          cmake --preset ninja-msvc
+          cmake --preset llvm
           -D MEDIAPERCH_BUILD_TESTS=OFF -D MEDIAPERCH_LINK_MAP=ON
 
+      - name: Report the toolchain
+        run: Get-Content build/llvm/llvm-toolchain.txt
+
       - name: Build
-        run: cmake --build --preset ninja-msvc --config Release
+        run: cmake --build --preset llvm --config Release
 
       - name: What it weighs
         run: |
-          Get-ChildItem build/ninja-msvc/bin/Release -Include *.exe,*.dll -Recurse |
+          Get-ChildItem build/llvm/bin/Release -Include *.exe,*.dll -Recurse |
             Sort-Object Length -Descending |
             Format-Table @{n='KB';e={'{0,8:N1}' -f ($_.Length/1KB)}}, Name -AutoSize
-          '{0:N1} KB total' -f ((Get-ChildItem build/ninja-msvc/bin/Release -Include *.exe,*.dll -Recurse |
+          '{0:N1} KB total' -f ((Get-ChildItem build/llvm/bin/Release -Include *.exe,*.dll -Recurse |
             Measure-Object Length -Sum).Sum / 1KB)
 
       # Where those bytes came from, attributed to the object files that brought
@@ -387,5 +395,5 @@ jobs:
       # name.
       - name: Where the bytes are
         run: |
-          $maps = (Get-ChildItem build/ninja-msvc/bin/Release/*.map).FullName
+          $maps = (Get-ChildItem build/llvm/bin/Release/*.map).FullName
           python tools/mapsize.py --top 8 @maps

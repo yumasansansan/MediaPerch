@@ -181,8 +181,9 @@ const MpDspVtbl& fake_vtbl()
 {
     // No `reset` and no `get_latency`: this is a module built against the older
     // header, which the host has to keep working with. The trailing slots are
-    // zero because aggregate initialisation says so, and null means "cannot be
-    // asked".
+    // null -- what aggregate initialisation gives a module that leaves them
+    // out, written out because Clang's -Wmissing-field-initializers asks -- and
+    // null means "cannot be asked".
     static const MpDspVtbl vtbl{sizeof(MpDspVtbl),
                                 0,
                                 &fake_open<K>,
@@ -191,7 +192,9 @@ const MpDspVtbl& fake_vtbl()
                                 &fake_process,
                                 &fake_flush,
                                 &fake_set,
-                                &fake_describe};
+                                &fake_describe,
+                                nullptr, /* reset */
+                                nullptr /* get_latency */};
     return vtbl;
 }
 
@@ -223,7 +226,8 @@ const MpDspVtbl& resetting_vtbl()
                                 &fake_flush,
                                 &fake_set,
                                 &fake_describe,
-                                &fake_reset};
+                                &fake_reset,
+                                nullptr /* get_latency */};
     return vtbl;
 }
 

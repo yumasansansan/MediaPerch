@@ -2,32 +2,49 @@
   "version": 6,
   "cmakeMinimumRequired": {
     "major": 3,
-    "minor": 28,
+    "minor": 29,
     "patch": 0
   },
   "configurePresets": [
     {
-      "name": "base",
+      "name": "llvm-tools",
       "hidden": true,
       "binaryDir": "${sourceDir}/build/${presetName}",
+      "environment": {
+        "CC": "clang",
+        "CXX": "clang++",
+        "RC": "llvm-rc",
+        "LDFLAGS": "-fuse-ld=lld"
+      },
       "cacheVariables": {
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_LINKER_TYPE": "LLD",
+        "CMAKE_EXE_LINKER_FLAGS": "-fuse-ld=lld",
+        "CMAKE_MODULE_LINKER_FLAGS": "-fuse-ld=lld",
+        "CMAKE_SHARED_LINKER_FLAGS": "-fuse-ld=lld",
+        "CMAKE_AR": "llvm-ar",
+        "CMAKE_RANLIB": "llvm-ranlib",
+        "CMAKE_NM": "llvm-nm",
+        "CMAKE_OBJCOPY": "llvm-objcopy",
+        "CMAKE_OBJDUMP": "llvm-objdump",
+        "CMAKE_STRIP": "llvm-strip",
+        "CMAKE_DLLTOOL": "llvm-dlltool",
+        "CMAKE_RC_COMPILER": "llvm-rc"
       }
     },
     {
-      "name": "ninja-msvc",
-      "inherits": "base",
-      "displayName": "Ninja + MSVC",
-      "description": "Faster than the .sln, but run it from a developer prompt.",
-      "generator": "Ninja Multi-Config",
-      "cacheVariables": {
-        "MEDIAPERCH_EXPECT_TOOLSET": "MSVC"
-      }
+      "name": "llvm",
+      "inherits": "llvm-tools",
+      "displayName": "Ninja + LLVM",
+      "description": "Day to day: Clang, LLD and the LLVM tools, the MSVC STL as the C++ library on Windows. No developer prompt: Clang finds Visual Studio's STL and the Windows SDK by itself.",
+      "generator": "Ninja Multi-Config"
     },
     {
-      "name": "ninja-msvc-avx2",
-      "inherits": "ninja-msvc",
-      "displayName": "Ninja + MSVC, AVX2",
+      "name": "llvm-avx2",
+      "inherits": "llvm",
+      "displayName": "Ninja + LLVM, AVX2",
       "description": "The same build raised to x86-64-v3. Needs a Haswell or Zen and refuses to start without one; CI ships this beside the baseline so a person can pick.",
       "cacheVariables": {
         "MEDIAPERCH_ARCH": "avx2"
@@ -35,16 +52,16 @@
     },
     {
       "name": "core-only",
-      "inherits": "ninja-msvc",
+      "inherits": "llvm",
       "displayName": "Engine and player alone",
-      "description": "What CI builds to keep the portable half portable, and to keep the engine free of the player. No platform head, no modules. Ninja rather than the .sln so CI does not care which Visual Studio the runner has.",
+      "description": "What CI builds to keep the portable half portable, and to keep the engine free of the player. No platform head, no modules.",
       "cacheVariables": {
         "MEDIAPERCH_BUILD_PLATFORM": "OFF"
       }
     },
     {
       "name": "measure",
-      "inherits": "ninja-msvc",
+      "inherits": "llvm",
       "displayName": "Release, with the measuring apparatus kept",
       "description": "An optimised build that still has `compare` and `verify`, so the decode-quality check can run at Release speed rather than Debug speed.",
       "cacheVariables": {
@@ -53,58 +70,52 @@
     },
     {
       "name": "asan",
-      "inherits": "base",
+      "inherits": "llvm-tools",
       "displayName": "Clang, sanitized",
-      "description": "The parsers under ASan and UBSan. Clang's GNU driver, like the fuzzers, and like them it builds the core and the modules without the Windows head.",
+      "description": "The parsers under ASan and UBSan, without the Windows head.",
       "generator": "Ninja",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_C_COMPILER": "clang",
-        "CMAKE_CXX_COMPILER": "clang++",
-        "MEDIAPERCH_EXPECT_TOOLSET": "Clang",
         "MEDIAPERCH_BUILD_PLATFORM": "OFF",
         "MEDIAPERCH_SANITIZE": "ON"
       }
     },
     {
       "name": "fuzz",
+      "inherits": "llvm-tools",
       "displayName": "Fuzzers (Clang + libFuzzer)",
-      "description": "libFuzzer over every parser that reads somebody else's file. Uses the GNU-driver clang++ rather than clang-cl: CMake drives lld-link directly for clang-cl, so -fsanitize never reaches the link and the sanitizer runtimes come out undefined.",
+      "description": "libFuzzer over every parser that reads somebody else's file, with the static C runtime libFuzzer is built against.",
+      "generator": "Ninja",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "CMAKE_C_COMPILER": "clang",
-        "CMAKE_CXX_COMPILER": "clang++",
-        "MEDIAPERCH_EXPECT_TOOLSET": "Clang",
         "MEDIAPERCH_BUILD_FUZZERS": "ON",
         "MEDIAPERCH_BUILD_TESTS": "OFF",
         "MEDIAPERCH_BUILD_PLATFORM": "OFF"
-      },
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/${presetName}"
+      }
     }
   ],
   "buildPresets": [
     {
-      "name": "ninja-msvc",
-      "configurePreset": "ninja-msvc"
+      "name": "llvm",
+      "configurePreset": "llvm"
     },
     {
-      "name": "ninja-msvc-avx2",
-      "configurePreset": "ninja-msvc-avx2"
+      "name": "llvm-avx2",
+      "configurePreset": "llvm-avx2"
     },
     {
-      "name": "ninja-msvc-debug",
-      "configurePreset": "ninja-msvc",
+      "name": "llvm-debug",
+      "configurePreset": "llvm",
       "configuration": "Debug"
     },
     {
-      "name": "ninja-msvc-release",
-      "configurePreset": "ninja-msvc",
+      "name": "llvm-release",
+      "configurePreset": "llvm",
       "configuration": "Release"
     },
     {
-      "name": "ninja-msvc-relwithdebinfo",
-      "configurePreset": "ninja-msvc",
+      "name": "llvm-relwithdebinfo",
+      "configurePreset": "llvm",
       "configuration": "RelWithDebInfo"
     },
     {
@@ -135,8 +146,8 @@
       }
     },
     {
-      "name": "ninja-msvc",
-      "configurePreset": "ninja-msvc",
+      "name": "llvm",
+      "configurePreset": "llvm",
       "output": {
         "outputOnFailure": true
       },
@@ -145,15 +156,18 @@
       }
     },
     {
-      "name": "ninja-msvc-avx2",
-      "configurePreset": "ninja-msvc-avx2",
+      "name": "llvm-avx2",
+      "configurePreset": "llvm-avx2",
       "output": {
         "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
       }
     },
     {
-      "name": "ninja-msvc-release",
-      "configurePreset": "ninja-msvc",
+      "name": "llvm-release",
+      "configurePreset": "llvm",
       "configuration": "Release",
       "output": {
         "outputOnFailure": true

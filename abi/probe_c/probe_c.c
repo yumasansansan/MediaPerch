@@ -44,32 +44,34 @@
 /* The layout claims, made again by a C compiler. The header makes these for
  * C++; a second opinion from the other language is the whole point of being
  * here. */
-MP_STATIC_ASSERT(sizeof(MpFormat) == 32, "MpFormat is not what C++ thinks it is");
-MP_STATIC_ASSERT(offsetof(MpFormat, sample_rate) == 0, "MpFormat.sample_rate moved");
-MP_STATIC_ASSERT(offsetof(MpFormat, channels) == 4, "MpFormat.channels moved");
-MP_STATIC_ASSERT(offsetof(MpFormat, channel_mask) == 8, "MpFormat.channel_mask moved");
-MP_STATIC_ASSERT(offsetof(MpFormat, sample_type) == 12, "MpFormat.sample_type moved");
-MP_STATIC_ASSERT(offsetof(MpFormat, encoding) == 16, "MpFormat.encoding moved");
-MP_STATIC_ASSERT(offsetof(MpFormat, valid_bits) == 20, "MpFormat.valid_bits moved");
-/* Two uint32s and eight function pointers, with nothing in between. */
-MP_STATIC_ASSERT(sizeof(MpDspVtbl) == 8 + 8 * sizeof(void *),
+static_assert(sizeof(MpFormat) == 32, "MpFormat is not what C++ thinks it is");
+static_assert(offsetof(MpFormat, sample_rate) == 0, "MpFormat.sample_rate moved");
+static_assert(offsetof(MpFormat, channels) == 4, "MpFormat.channels moved");
+static_assert(offsetof(MpFormat, channel_mask) == 8, "MpFormat.channel_mask moved");
+static_assert(offsetof(MpFormat, sample_type) == 12, "MpFormat.sample_type moved");
+static_assert(offsetof(MpFormat, encoding) == 16, "MpFormat.encoding moved");
+static_assert(offsetof(MpFormat, valid_bits) == 20, "MpFormat.valid_bits moved");
+/* Two uint32s and nine function pointers, with nothing in between. Eight
+ * until `get_latency` was appended, and this said so for as long as the probe
+ * went unbuilt -- which is what an off-by-default target costs. */
+static_assert(sizeof(MpDspVtbl) == 8 + 9 * sizeof(void *),
                  "MpDspVtbl has grown or shrunk somewhere C cannot see");
 
 /* An enum's underlying type is the other thing two languages can disagree
  * about. The ABI pins it by giving every enum a value that needs 32 bits. */
-MP_STATIC_ASSERT(sizeof(MpResult) == 4, "MpResult is not 32 bits in C");
-MP_STATIC_ASSERT(sizeof(MpSampleType) == 4, "MpSampleType is not 32 bits in C");
+static_assert(sizeof(MpResult) == 4, "MpResult is not 32 bits in C");
+static_assert(sizeof(MpSampleType) == 4, "MpSampleType is not 32 bits in C");
 
 /* v2's containers and codecs, from the other language. The descriptor grew two
  * fields and a pad when capability declaration arrived; a probe that did not
  * check would find out by reading a vtable pointer out of the wrong slot. */
-MP_STATIC_ASSERT(sizeof(MpCodec) == 4, "MpCodec is not 32 bits in C");
-MP_STATIC_ASSERT(sizeof(MpStreamKind) == 4, "MpStreamKind is not 32 bits in C");
-MP_STATIC_ASSERT(sizeof(MpPacket) == 24, "MpPacket is not what C++ thinks it is");
-MP_STATIC_ASSERT(offsetof(MpStreamInfo, format) == 24, "MpStreamInfo.format moved");
-MP_STATIC_ASSERT(offsetof(MpModuleDesc, vtbl) == 24 + 4 * sizeof(void *),
+static_assert(sizeof(MpCodec) == 4, "MpCodec is not 32 bits in C");
+static_assert(sizeof(MpStreamKind) == 4, "MpStreamKind is not 32 bits in C");
+static_assert(sizeof(MpPacket) == 24, "MpPacket is not what C++ thinks it is");
+static_assert(offsetof(MpStreamInfo, format) == 24, "MpStreamInfo.format moved");
+static_assert(offsetof(MpModuleDesc, vtbl) == 24 + 4 * sizeof(void *),
                  "MpModuleDesc.vtbl moved");
-MP_STATIC_ASSERT(offsetof(MpModuleDesc, codecs) == 24 + 5 * sizeof(void *),
+static_assert(offsetof(MpModuleDesc, codecs) == 24 + 5 * sizeof(void *),
                  "MpModuleDesc.codecs is not where the descriptor grew");
 
 struct MpDsp {
@@ -230,9 +232,20 @@ static MpResult MP_CALL probe_reset(MpDsp *d)
     return MP_OK;
 }
 
+/* Samples pass through untouched, so nothing is older than it was. */
+static MpResult MP_CALL probe_get_latency(MpDsp *d, uint32_t *out_frames)
+{
+    if (d == NULL || out_frames == NULL) {
+        return MP_ERR_INVALID;
+    }
+    *out_frames = 0;
+    return MP_OK;
+}
+
 static const MpDspVtbl g_vtbl = {
     sizeof(MpDspVtbl), 0,           &probe_open,     &probe_close, &probe_configure,
     &probe_process,    &probe_flush, &probe_set,     &probe_describe, &probe_reset,
+    &probe_get_latency,
 };
 
 static MpResult MP_CALL probe_init(const MpHost *host)

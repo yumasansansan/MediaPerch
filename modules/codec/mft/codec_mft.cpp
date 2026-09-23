@@ -1073,6 +1073,9 @@ const MpVideoCodecVtbl g_vtbl = {
     /* next_frame */ &codec_next_frame,
     /* flush      */ &codec_flush,
     /* reset      */ &codec_reset,
+    // No settings yet: a null `set` is how a codec says it cannot be told
+    // anything, and the host checks for one before it calls.
+    /* set        */ nullptr,
 };
 
 MpResult MP_CALL module_init(const MpHost* host) noexcept

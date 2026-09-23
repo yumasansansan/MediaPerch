@@ -237,7 +237,8 @@ const MpVideoCodecVtbl& fake_vtbl()
                                        &fake_decode,
                                        &fake_next_frame,
                                        &fake_flush,
-                                       &fake_reset};
+                                       &fake_reset,
+                                       nullptr /* set */};
     return vtbl;
 }
 
@@ -795,7 +796,11 @@ TEST_CASE("a job posted to the loop runs on the loop's own thread, between turns
     turner.join();
     REQUIRE(turned);
     REQUIRE(done.wait_for(std::chrono::milliseconds{0}) == std::future_status::ready);
-    CHECK(done.get());
+    // Taken out of the future before it is checked: the MSVC STL's `get` moves
+    // the future into a local, and inside a Catch2 macro the static analyzer
+    // reads that as a call on a moved-from object (ci/tidy.sh).
+    const bool done_ran = done.get();
+    CHECK(done_ran);
     CHECK(ran_on == turner_id);
     CHECK(ran_on != std::this_thread::get_id());
     // Before the turn was counted, which is before anything was decided.
@@ -819,12 +824,14 @@ TEST_CASE("a job posted to a loop that has stopped is answered false, and never 
     std::future<bool> before = loop.post([&] { ran = true; });
     REQUIRE_FALSE(loop.once(step));
     REQUIRE(before.wait_for(std::chrono::milliseconds{0}) == std::future_status::ready);
-    CHECK_FALSE(before.get());
+    const bool before_ran = before.get();
+    CHECK_FALSE(before_ran);
     CHECK_FALSE(ran);
     // And one posted after the end is answered at once.
     std::future<bool> after = loop.post([&] { ran = true; });
     REQUIRE(after.wait_for(std::chrono::milliseconds{0}) == std::future_status::ready);
-    CHECK_FALSE(after.get());
+    const bool after_ran = after.get();
+    CHECK_FALSE(after_ran);
     CHECK_FALSE(ran);
 }
 
