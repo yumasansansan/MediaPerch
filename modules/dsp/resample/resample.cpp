@@ -2,9 +2,16 @@
 
 #include "resample.hpp"
 
+#include "design.hpp"
+
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace mp::resample {
@@ -53,6 +60,125 @@ std::string quality_names()
            "extreme (180 dB, 99%)";
 }
 
+/// Everything a design is: the prototype, the same taps per phase and reversed
+/// for the inner loop, and the numbers that go with them. `filter_for` makes one
+/// and nothing changes it after.
+struct Resampler::Filter {
+    std::uint32_t up = 1;
+    std::uint32_t down = 1;
+    /// The design's own tap count: even, and what the group delay is half of.
+    std::uint32_t taps = 0;
+    /// What the inner loop runs over: `taps + 1` (see `phase_taps_`).
+    std::uint32_t phase_taps = 1;
+    /// Where in the prototype the output is sampled from (see `centre_`).
+    std::uint64_t centre = 0;
+    bool minimum_phase = false;
+    double latency = 0.0;
+    Response response{};
+    std::vector<double> proto; ///< as designed, for inspection
+    std::vector<double> coef;  ///< the same numbers, per phase, reversed
+};
+
+const std::vector<double>& Resampler::prototype() const noexcept
+{
+    static const std::vector<double> none;
+    return proto_ != nullptr ? *proto_ : none;
+}
+
+std::shared_ptr<const Resampler::Filter> Resampler::filter_for(std::uint32_t up,
+                                                               std::uint32_t down,
+                                                               const Design& design,
+                                                               std::string& why)
+{
+    // The filters of this process, by the ratio and the design they are for,
+    // which is all a design depends on: 44100 -> 48000 and 88200 -> 96000 share
+    // one. A filter stays listed for as long as a stage holds it, through a weak
+    // pointer, and the last one handed out is held outright besides, so that a
+    // program that closes its last stage and opens one alike -- a plugin that
+    // its host prepares again -- does not design it again. Finding one is a lock
+    // and a comparison. Making one is the design, which is done outside the lock
+    // so that one stage's design keeps no other stage waiting.
+    struct Known {
+        std::uint32_t up = 1;
+        std::uint32_t down = 1;
+        Design design{};
+        std::weak_ptr<const Filter> filter;
+    };
+    static std::mutex mutex;
+    static std::vector<Known> known;
+    static std::shared_ptr<const Filter> last;
+
+    const auto find = [&] {
+        std::erase_if(known, [](const Known& k) { return k.filter.expired(); });
+        for (const Known& k : known) {
+            if (k.up == up && k.down == down && k.design == design) {
+                return k.filter.lock();
+            }
+        }
+        return std::shared_ptr<const Filter>{};
+    };
+
+    {
+        const std::scoped_lock lock(mutex);
+        std::shared_ptr<const Filter> found = find();
+        if (found != nullptr) {
+            last = found;
+            return found;
+        }
+    }
+
+    auto made = std::make_shared<Filter>();
+    made->up = up;
+    made->down = down;
+    if (!design_prototype(design, up, down, made->proto, made->taps, made->response, why)) {
+        return nullptr;
+    }
+    made->phase_taps = made->taps + 1;
+    made->minimum_phase = design.phase == Phase::minimum;
+    // A linear-phase filter's delay is exactly half of it, and sampling the
+    // output from there removes it. A minimum-phase filter's energy is already
+    // at the front, so there is nothing to skip past -- and nothing to remove
+    // either, because its delay is a different number at every frequency. What
+    // is reported instead is where the energy is.
+    made->centre = made->minimum_phase ? 0 : (made->proto.size() - 1) / 2;
+    {
+        double weight = 0.0;
+        double moment = 0.0;
+        for (std::size_t i = 0; i < made->proto.size(); ++i) {
+            const double energy = made->proto[i] * made->proto[i];
+            weight += energy;
+            moment += energy * static_cast<double>(i);
+        }
+        const double centroid = weight > 0.0 ? moment / weight : 0.0;
+        made->latency = made->minimum_phase ? centroid / static_cast<double>(up) : 0.0;
+    }
+
+    // Per phase, and reversed, so the inner loop walks both arrays forwards.
+    // Phase 0 is the one that reaches the prototype's last coefficient; the
+    // others are padded with the zero that keeps every phase the same length.
+    const std::uint32_t phase_taps = made->phase_taps;
+    made->coef.assign(static_cast<std::size_t>(up) * phase_taps, 0.0);
+    for (std::uint32_t p = 0; p < up; ++p) {
+        for (std::uint32_t j = 0; j < phase_taps; ++j) {
+            const std::size_t index = p + static_cast<std::size_t>(phase_taps - 1 - j) * up;
+            if (index < made->proto.size()) {
+                made->coef[static_cast<std::size_t>(p) * phase_taps + j] = made->proto[index];
+            }
+        }
+    }
+
+    const std::scoped_lock lock(mutex);
+    // Another stage may have designed the same filter while this one did; the
+    // one listed first is the one every stage shares.
+    std::shared_ptr<const Filter> found = find();
+    if (found == nullptr) {
+        found = std::move(made);
+        known.push_back(Known{.up = up, .down = down, .design = design, .filter = found});
+    }
+    last = found;
+    return found;
+}
+
 bool Resampler::configure(std::uint32_t in_rate, std::uint32_t out_rate,
                           std::uint32_t channels, const Design& design, std::string& why)
 {
@@ -62,70 +188,30 @@ bool Resampler::configure(std::uint32_t in_rate, std::uint32_t out_rate,
         return false;
     }
 
-    channels_ = channels;
-    const std::uint32_t g = gcd(in_rate, out_rate);
-    up_ = out_rate / g;
-    down_ = in_rate / g;
-
     // The 1:1 case is designed like any other rather than special-cased away.
     // What comes out is a unit impulse -- an integer centre and a cutoff at
     // Nyquist put every other tap on a zero of the sinc -- and a test asserts
     // exactly that, because "resampling to the same rate changes nothing" is a
     // claim about the filter and not about a branch. `process` still takes the
     // branch: doing the arithmetic to rediscover it per sample would be silly.
-    const bool same = designed_ && last_ == design && last_in_rate_ == in_rate &&
-                      last_out_rate_ == out_rate;
-    if (!same) {
-        if (!design_prototype(design, up_, down_, proto_, taps_, response_, why)) {
-            designed_ = false;
-            return false;
-        }
-        last_ = design;
-        last_in_rate_ = in_rate;
-        last_out_rate_ = out_rate;
-        designed_ = true;
-    }
-    phase_taps_ = taps_ + 1;
-    minimum_phase_ = design.phase == Phase::minimum;
-    // A linear-phase filter's delay is exactly half of it, and sampling the
-    // output from there removes it. A minimum-phase filter's energy is already
-    // at the front, so there is nothing to skip past -- and nothing to remove
-    // either, because its delay is a different number at every frequency. What
-    // is reported instead is where the energy is.
-    centre_ = minimum_phase_ ? 0 : (proto_.size() - 1) / 2;
-    {
-        double weight = 0.0;
-        double moment = 0.0;
-        for (std::size_t i = 0; i < proto_.size(); ++i) {
-            const double energy = proto_[i] * proto_[i];
-            weight += energy;
-            moment += energy * static_cast<double>(i);
-        }
-        const double centroid = weight > 0.0 ? moment / weight : 0.0;
-        latency_ = minimum_phase_ ? centroid / static_cast<double>(up_) : 0.0;
+    const std::uint32_t g = gcd(in_rate, out_rate);
+    std::shared_ptr<const Filter> filter = filter_for(out_rate / g, in_rate / g, design, why);
+    if (filter == nullptr) {
+        return false;
     }
 
-    if (same) {
-        // Same filter, same phases: only the stream state has to start again.
-        held_ = phase_taps_ - 1;
-        hist_.assign(channels_, std::vector<double>(held_, 0.0));
-        base_ = -static_cast<std::int64_t>(held_);
-        return true;
-    }
-
-    // Per phase, and reversed, so the inner loop walks both arrays forwards.
-    // Phase 0 is the one that reaches the prototype's last coefficient; the
-    // others are padded with the zero that keeps every phase the same length.
-    coef_.assign(static_cast<std::size_t>(up_) * phase_taps_, 0.0);
-    for (std::uint32_t p = 0; p < up_; ++p) {
-        for (std::uint32_t j = 0; j < phase_taps_; ++j) {
-            const std::size_t index =
-                p + static_cast<std::size_t>(phase_taps_ - 1 - j) * up_;
-            if (index < proto_.size()) {
-                coef_[static_cast<std::size_t>(p) * phase_taps_ + j] = proto_[index];
-            }
-        }
-    }
+    filter_ = std::move(filter);
+    channels_ = channels;
+    up_ = filter_->up;
+    down_ = filter_->down;
+    taps_ = filter_->taps;
+    phase_taps_ = filter_->phase_taps;
+    centre_ = filter_->centre;
+    minimum_phase_ = filter_->minimum_phase;
+    latency_ = filter_->latency;
+    coef_ = filter_->coef.data();
+    proto_ = &filter_->proto;
+    response_ = filter_->response;
 
     // The stream starts with the filter half full of silence, which is what
     // makes output frame 0 line up with input frame 0.
@@ -175,7 +261,7 @@ void Resampler::produce(std::uint64_t limit, double* const* out, std::uint32_t c
         if (at + 1 < phase_taps_) {
             break; // the oldest tap was discarded, which would be a bug here
         }
-        const double* co = coef_.data() + static_cast<std::size_t>(p) * phase_taps_;
+        const double* co = coef_ + static_cast<std::size_t>(p) * phase_taps_;
 
         for (std::uint32_t c = 0; c < channels_; ++c) {
             const double* x = hist_[c].data() + at + 1 - phase_taps_;

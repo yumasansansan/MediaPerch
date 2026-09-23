@@ -22,6 +22,7 @@
 #include "design.hpp"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -99,20 +100,44 @@ public:
 
     /// The designed prototype, for a test that wants to look at the filter
     /// rather than at what it did.
-    [[nodiscard]] const std::vector<double>& prototype() const noexcept { return proto_; }
-    /// Phase `p`, its taps in the order the inner loop reads them.
+    [[nodiscard]] const std::vector<double>& prototype() const noexcept;
+    /// Phase `p`, its taps in the order the inner loop reads them. The same
+    /// memory for every stage that shares the filter (`configure`).
     [[nodiscard]] const double* phase(std::uint32_t p) const noexcept
     {
-        return coef_.data() + static_cast<std::size_t>(p) * phase_taps_;
+        return coef_ + static_cast<std::size_t>(p) * phase_taps_;
     }
 
 private:
+    /// One design: the filter for one ratio and one `Design`, which does not
+    /// change once it is made.
+    struct Filter;
+
+    /// The filter for the ratio `up`/`down` and for `design`. One that a stage
+    /// in this process still holds, or the last one handed out, is handed out
+    /// again; anything else is designed. Null, with `why` filled, when the
+    /// design cannot be done.
+    [[nodiscard]] static std::shared_ptr<const Filter> filter_for(std::uint32_t up,
+                                                                  std::uint32_t down,
+                                                                  const Design& design,
+                                                                  std::string& why);
+
     /// Produces while there is input for it and room for it, up to `limit`.
     void produce(std::uint64_t limit, double* const* out, std::uint32_t capacity,
                  std::uint32_t& produced);
     /// Forgets input no output can still need.
     void discard();
 
+    /// The filter this stage runs, which every stage of the same ratio and the
+    /// same design shares. Designing is expensive -- seconds, with
+    /// `design=refine` on a long prototype -- and it is done where a stage is
+    /// configured: a host configures a stage twice, once to find out what format
+    /// comes out and once with the block size the device settled on, a plugin
+    /// is prepared again whenever its host says so, and a host may hold several
+    /// instances of one. None of those designs the same filter a second time.
+    std::shared_ptr<const Filter> filter_;
+
+    // What the inner loop reads, copied out of the filter.
     std::uint32_t up_ = 1;
     std::uint32_t down_ = 1;
     std::uint32_t channels_ = 0;
@@ -129,20 +154,12 @@ private:
     std::uint64_t centre_ = 0;
     bool minimum_phase_ = false;
     double latency_ = 0.0;
-
-    /// What the last design was for. Designing is expensive -- seconds, with
-    /// `design=refine` on a long prototype -- and a host configures a stage
-    /// twice: once to find out what format comes out, and once with the block
-    /// size the device settled on. The filter does not depend on the block
-    /// size, so the second one is free.
-    Design last_{};
-    std::uint32_t last_in_rate_ = 0;
-    std::uint32_t last_out_rate_ = 0;
-    bool designed_ = false;
-
+    /// The taps of each phase, reversed: the filter's, and there for as long as
+    /// `filter_` is.
+    const double* coef_ = nullptr;
+    /// The prototype they come from, likewise.
+    const std::vector<double>* proto_ = nullptr;
     Response response_{};
-    std::vector<double> proto_; ///< as designed, for inspection
-    std::vector<double> coef_;  ///< the same numbers, per phase, reversed
 
     /// One run of history per channel. Grown once and then reused: the decode
     /// thread may allocate, but there is no reason to make it a habit.

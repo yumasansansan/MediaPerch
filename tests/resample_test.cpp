@@ -18,6 +18,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <complex>
@@ -929,4 +930,79 @@ TEST_CASE("the cepstrum's own truncation is a setting, and it shows",
     INFO("floor -60 dB gives " << shallow << " dB");
     CHECK(shallow > -62.0);
     CHECK(shallow < -58.0);
+}
+
+TEST_CASE("stages of one ratio and one design share one filter", "[resample]")
+{
+    // Designing is the expensive part, and a filter depends on nothing but the
+    // ratio and the design. Two stages alike hold the same taps rather than two
+    // copies of them, and so do two stages of the same ratio at other rates.
+    const mp::resample::Design design = quality("good");
+    std::string why;
+    mp::resample::Resampler a;
+    mp::resample::Resampler b;
+    REQUIRE(a.configure(44100, 48000, 2, design, why));
+    REQUIRE(b.configure(88200, 96000, 1, design, why));
+    CHECK(a.phase(0) == b.phase(0));
+    CHECK(&a.prototype() == &b.prototype());
+
+    // Another design is another filter.
+    mp::resample::Design other = design;
+    other.attenuation_db += 6.0;
+    mp::resample::Resampler c;
+    REQUIRE(c.configure(44100, 48000, 2, other, why));
+    CHECK(c.phase(0) != a.phase(0));
+
+    // Two cascades configured alike share the filters of their stages, which is
+    // what a plugin that its host prepares again gets.
+    mp::resample::Design planned = design;
+    planned.stages = 0;
+    mp::resample::Cascade first;
+    mp::resample::Cascade second;
+    REQUIRE(first.configure(192000, 48000, 1, 4096, planned, why));
+    REQUIRE(second.configure(192000, 48000, 1, 4096, planned, why));
+    REQUIRE(first.size() > 1);
+    REQUIRE(first.size() == second.size());
+    for (std::size_t i = 0; i < first.size(); ++i) {
+        CHECK(first.stage(i).phase(0) == second.stage(i).phase(0));
+    }
+}
+
+TEST_CASE("a stage that shares its filter plays what a stage alone would",
+          "[resample]")
+{
+    // What is shared is the taps. Where each stream is stays each stage's own,
+    // so a stage configured beside another alike, and run after it, comes out
+    // sample for sample as a stage that was the only one.
+    const mp::resample::Design design = quality("good");
+    const std::vector<double> x = sine(4410, 1000.0, 44100, 0.5);
+    const auto through = [&x](mp::resample::Resampler& r) {
+        std::vector<double> out(r.max_output(static_cast<std::uint32_t>(x.size())));
+        const std::array<const double*, 1> in{x.data()};
+        const std::array<double*, 1> planes{out.data()};
+        std::uint32_t produced = 0;
+        REQUIRE(r.process(in.data(), static_cast<std::uint32_t>(x.size()), planes.data(),
+                          static_cast<std::uint32_t>(out.size()), produced));
+        out.resize(produced);
+        return out;
+    };
+
+    std::string why;
+    std::vector<double> alone;
+    {
+        mp::resample::Resampler r;
+        REQUIRE(r.configure(44100, 48000, 1, design, why));
+        alone = through(r);
+    }
+    REQUIRE(!alone.empty());
+
+    mp::resample::Resampler a;
+    mp::resample::Resampler b;
+    REQUIRE(a.configure(44100, 48000, 1, design, why));
+    REQUIRE(b.configure(44100, 48000, 1, design, why));
+    REQUIRE(a.phase(0) == b.phase(0));
+    const std::vector<double> from_a = through(a);
+    const std::vector<double> from_b = through(b);
+    CHECK(from_a == alone);
+    CHECK(from_b == alone);
 }
