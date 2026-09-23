@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <functional>
 #include <map>
@@ -244,6 +245,17 @@ public:
     std::unique_ptr<Presenter> open_presenter(void* window, std::string& module,
                                               std::string& why) override
     {
+        {
+            // Held here while a test has asked it to be: see
+            // `hold_next_presenter`.
+            std::unique_lock lock{hold_mutex_};
+            if (hold_) {
+                holding_ = true;
+                hold_changed_.notify_all();
+                hold_changed_.wait(lock, [this] { return !hold_; });
+                holding_ = false;
+            }
+        }
         if (!presenter_) {
             why = "no presenter module is loaded";
             return nullptr;
@@ -276,6 +288,29 @@ public:
         }
         module = "vcodec_test";
         return decoder;
+    }
+
+    /// **Holds the next presenter being opened until `release_presenter`**, so
+    /// that a test can act in the window between a run naming its track and
+    /// the picture being there -- the window a slow machine lives in for a
+    /// while and a fast one for no time at all, which is why a test cannot
+    /// wait for it and has to make it.
+    void hold_next_presenter()
+    {
+        const std::lock_guard lock{hold_mutex_};
+        hold_ = true;
+    }
+    /// Whether an open is waiting on the hold now.
+    [[nodiscard]] bool presenter_held()
+    {
+        const std::lock_guard lock{hold_mutex_};
+        return holding_;
+    }
+    void release_presenter()
+    {
+        const std::lock_guard lock{hold_mutex_};
+        hold_ = false;
+        hold_changed_.notify_all();
     }
 
     /// A machine with no presenter, or none that decodes this. Both are real
@@ -362,6 +397,10 @@ private:
     bool present_ = true;
     bool presenter_ = true;
     bool video_codec_ = true;
+    std::mutex hold_mutex_;
+    std::condition_variable hold_changed_;
+    bool hold_ = false;
+    bool holding_ = false;
     mutable std::mutex mutex_;
     std::vector<std::string> lines_;
 };

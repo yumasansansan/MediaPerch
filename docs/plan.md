@@ -7027,6 +7027,14 @@ real time.
   with a 128-period ring the decoder is up to three quarters of a second ahead, which against
   a short track is the next track. Only the queue can answer, because it records boundaries on
   the way past; it does, as `index_at` and `start_at`, and `status` carries `item_position`.
+- **A status that names the next thing before it exists invites a command it cannot take.**
+  A picture's run said which track it was, so `status` named it at once, and set the pointer
+  the transport steps through only once the picture had opened -- so a next or a previous
+  pressed in between found neither a graph nor a picture and was dropped without a word. A
+  fast machine closed the window before anyone could press; CI's Debug build held it open
+  long enough for a test to fall in, where it looked like a timing flake in the test. The
+  step is kept now and the run takes it on its first turn, and the test that proves it makes
+  the window with a host that holds the opening, rather than hoping to land in it.
 - **A hand-written mirror needs a test that reads the mirror.** Two descriptions of one wire
   are a cost taken on purpose; what makes them bearable is a test that reads the second
   description against the first. Two enumerators the other way round in the shell's copy

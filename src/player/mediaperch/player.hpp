@@ -411,6 +411,14 @@ private:
     /// cleared under the mutex by the engine thread, as the graphs are.
     VideoPath* alone_ = nullptr;
     IMedia* alone_media_ = nullptr;
+    /// **A picture being opened for a run of its own.** The run says which
+    /// track it is before the picture is there -- `status` names it, as a
+    /// person would expect -- and `alone_` is set only once the picture has
+    /// opened and started, so between the two neither a graph nor `alone_` can
+    /// take a step. Without this, a next or a previous pressed in that window
+    /// was dropped without a word; with it, the step waits for the run, which
+    /// takes it on its first turn. Under the mutex, with the rest.
+    bool alone_opening_ = false;
     /// Its length in `VideoPath::k_own_rate`, from the container.
     std::uint64_t alone_length_ = 0;
     /// What `status.position` counts in for the current run: the source's

@@ -238,6 +238,57 @@ TEST_CASE("a picture on its own clock pauses, seeks, and steps between entries",
     player.shutdown();
 }
 
+TEST_CASE("a step asked for while a picture is still opening is taken, not dropped",
+          "[player][video]")
+{
+    // A run names its track before its picture is there, and `status` says so
+    // at once; a person who sees the name and presses a button is in the
+    // window between the two. Both steps used to be dropped there without a
+    // word -- CI's Debug build found it, a previous that never came back. The
+    // host holds the picture's opening so that the window is made, not waited
+    // for.
+    mp::test::presenter_log().reset();
+    mp::test::decoder_log().reset();
+    {
+        const std::lock_guard lock{mp::test::decoder_log().mutex};
+        mp::test::decoder_log().frames = 1'000'000;
+    }
+    Host host;
+    host.add_silent("first", 60'000);
+    host.add_silent("second", 60'000);
+    host.add_silent("third", 60'000);
+    host.pace_with([] { return std::make_unique<Endless>(); });
+
+    mp::Player player{host};
+    player.start();
+    player.play({"first", "second", "third"});
+    REQUIRE(wait_for([&] { return player.status().item_position >= 50u; }));
+
+    // Previous while "second" opens: the entry before, as for any arrival.
+    host.hold_next_presenter();
+    player.next();
+    REQUIRE(wait_for([&] { return host.presenter_held(); }));
+    CHECK(player.status().track == "second");
+    player.previous();
+    host.release_presenter();
+    REQUIRE(wait_for([&] { return player.status().track == "first"; }));
+    REQUIRE(wait_for([&] { return player.status().item_position >= 50u; }));
+
+    // Next while "second" opens: on to "third", not stuck on "second".
+    host.hold_next_presenter();
+    player.next();
+    REQUIRE(wait_for([&] { return host.presenter_held(); }));
+    CHECK(player.status().track == "second");
+    player.next();
+    host.release_presenter();
+    REQUIRE(wait_for([&] { return player.status().track == "third"; }));
+
+    player.stop();
+    REQUIRE(wait_for_state(player, mp::ipc::State::stopped));
+    CHECK(player.status().error.empty());
+    player.shutdown();
+}
+
 TEST_CASE("a file with no picture plays exactly as it did", "[player][video]")
 {
     // The ordinary case, and the one that must not have changed: nothing is

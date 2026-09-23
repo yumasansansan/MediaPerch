@@ -508,10 +508,11 @@ void Player::next()
     // destroyed underneath this, and the engine thread clears these pointers
     // under the same lock before it destroys anything.
     const std::lock_guard lock{mutex_};
-    if (alone_ != nullptr) {
+    if (alone_ != nullptr || alone_opening_) {
         // **A picture on its own is one entry, so next is the entry after
         // it.** Its run ends and `play_request` walks on; there is no ring to
-        // throw away and no listener to count from.
+        // throw away and no listener to count from. A picture still opening
+        // takes the step on its run's first turn.
         step_wanted_.store(1, std::memory_order_release);
         return;
     }
@@ -547,6 +548,13 @@ void Player::next()
 void Player::previous()
 {
     const std::lock_guard lock{mutex_};
+    if (alone_opening_) {
+        // A picture still opening has not moved from its start, which is as
+        // "only just got here" as it gets: the entry before it, taken on the
+        // run's first turn.
+        step_wanted_.store(-1, std::memory_order_release);
+        return;
+    }
     if (alone_ != nullptr && alone_->own_clock() != nullptr) {
         // The rule below, for a picture on its own: its start, unless you have
         // only just got here, in which case the entry before it.
@@ -1921,6 +1929,7 @@ Player::RunEnd Player::play_alone(Playlist& playlist, std::size_t index, std::ui
         clock_rate_ = VideoPath::k_own_rate;
         alone_length_ = media->picture().duration_ms * VideoPath::k_own_rate / 1000;
         state_ = ipc::State::playing;
+        alone_opening_ = true;
     }
     note("playing " + playlist.path(index) + " on the picture's own clock (no audio in it)");
     // A flag raised for a run that has not started describes nothing, exactly
@@ -1941,6 +1950,7 @@ Player::RunEnd Player::play_alone(Playlist& playlist, std::size_t index, std::ui
         note(why);
         forget_video();
         const std::lock_guard lock{mutex_};
+        alone_opening_ = false;
         error_ = why;
         return RunEnd::failed;
     }
@@ -1954,6 +1964,7 @@ Player::RunEnd Player::play_alone(Playlist& playlist, std::size_t index, std::ui
         const std::lock_guard lock{mutex_};
         alone_ = video.get();
         alone_media_ = media;
+        alone_opening_ = false;
     }
 
     RunEnd end = RunEnd::finished;
