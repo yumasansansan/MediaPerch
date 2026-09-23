@@ -335,21 +335,26 @@ struct Setting {
     bool read_only = false;
     /// What the value is, from the row's fourth field (`parse_setting_spec`).
     SettingKind kind = SettingKind::text;
+    // **Every field past the first three has a default**, so that the rows
+    // written as `Setting{key, value, help}` -- which is most of them -- are
+    // complete to Clang's -Wmissing-field-initializers as well as to MSVC.
+    // The fuzz build compiles this with -Werror and was the one that said so.
+
     /// The words a `choice` offers, in the module's order.
-    std::vector<std::string> choices;
+    std::vector<std::string> choices{};
     /// The heading this row sits under -- `Upscaling`, `Ringing` -- so that a
     /// module with thirty keys is a dialog with five sections. Empty is the
     /// top.
-    std::string group;
+    std::string group{};
     /// `key=value[,value...]`: this row matters only while the named row of
     /// the same module has one of those values, and a shell may fold it away
     /// otherwise. `up_lobes` when `up=lanczos`. Empty is always.
-    std::string when;
+    std::string when{};
     /// The rest of the spec, `word=value` pairs separated by spaces, as the
     /// module wrote them: `min=`, `max=`, `step=`, `unit=`, `pick=`. Hints for
     /// drawing -- a `min` is not a clamp, because the engine is the one that
     /// says no and says why.
-    std::string hints;
+    std::string hints{};
 };
 
 /// The fourth field of a `describe` row, read into `kind`, `choices`, `group`,

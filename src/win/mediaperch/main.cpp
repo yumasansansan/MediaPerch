@@ -3438,7 +3438,16 @@ int compare_command(mp::win::EngineHost& host, const Options& options)
     }
     mp::Format source_format;
     std::vector<float> source;
-    if (!read_as_float(source_input->audio(), source_format, source)) {
+    // **A file with no sound opens now** -- it plays its picture on the video
+    // engine's own clock -- so the half this compares may not be there, and
+    // that is said rather than dereferenced.
+    mp::ISource* const source_audio = source_input->audio();
+    if (source_audio == nullptr) {
+        std::fprintf(stderr, "the source %s has no audio to compare against\n",
+                     options.source.c_str());
+        return 1;
+    }
+    if (!read_as_float(*source_audio, source_format, source)) {
         std::fprintf(stderr, "cannot read the source %s\n", options.source.c_str());
         return 1;
     }
@@ -3449,7 +3458,12 @@ int compare_command(mp::win::EngineHost& host, const Options& options)
     }
     mp::Format subject_format;
     std::vector<float> subject;
-    if (!read_as_float(subject_input->audio(), subject_format, subject)) {
+    mp::ISource* const subject_audio = subject_input->audio();
+    if (subject_audio == nullptr) {
+        std::fprintf(stderr, "%s has no audio to compare\n", options.file.c_str());
+        return 1;
+    }
+    if (!read_as_float(*subject_audio, subject_format, subject)) {
         std::fprintf(stderr, "cannot decode %s\n", options.file.c_str());
         return 1;
     }
@@ -3487,7 +3501,8 @@ int compare_command(mp::win::EngineHost& host, const Options& options)
             const std::string rival_id = rival_input->decoder();
             mp::Format rival_format;
             std::vector<float> other;
-            if (read_as_float(rival_input->audio(), rival_format, other) &&
+            mp::ISource* const rival_audio = rival_input->audio();
+            if (rival_audio != nullptr && read_as_float(*rival_audio, rival_format, other) &&
                 rival_format.channels == channels) {
                 const mp::Comparison theirs = mp::compare(
                     source.data(), source_frames, other.data(), other.size() / channels, channels,

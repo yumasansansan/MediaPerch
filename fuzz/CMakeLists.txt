@@ -285,7 +285,10 @@ endif()
 # The settings file, on DragonPerch's INI corpus rather than a second one of
 # ours. The parser is shared as a submodule for the same reason: two INI parsers
 # in one house would have two sets of edge cases and only one would be fuzzed.
+# protocol.cpp comes along because settings.cpp describes its rows with the
+# spec grammar parse_setting_spec reads, and that lives with the wire format.
 mediaperch_add_fuzzer(settings_fuzzer settings_fuzzer.cpp
                       "${CMAKE_SOURCE_DIR}/external/dragonperch/fuzz/corpus/ini"
                       "${CMAKE_SOURCE_DIR}/src/player/mediaperch/settings.cpp"
+                      "${CMAKE_SOURCE_DIR}/src/player/mediaperch/protocol.cpp"
                       "${CMAKE_SOURCE_DIR}/external/dragonperch/src/core/dragonperch/ini.cpp")

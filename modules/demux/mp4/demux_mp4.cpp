@@ -34,7 +34,9 @@
 
 #include "h264.hpp"
 #include "module_log.hpp"
-#include "win_path.hpp"
+#if defined(_WIN32)
+#    include "win_path.hpp" // a path past MAX_PATH; see the header
+#endif
 
 #include <Ap4.h>
 #include <Ap4ColrAtom.h>

@@ -17,11 +17,26 @@
 
 #pragma once
 
+// **Windows only, and included only under `_WIN32`**: the demuxers that use
+// it are portable and open with `std::fopen` everywhere else, so each one
+// guards the include as well as the call.
+#if !defined(_WIN32)
+#    error "win_path.hpp is the Windows file functions; include it under _WIN32"
+#endif
+
 #include <cstdio>
 #include <string>
 
+// **No `min` and `max` macros**, whatever the includer's build defines. The
+// tree's own targets define NOMINMAX globally, but a header that includes
+// <windows.h> is included by files other people's headers follow -- libebml's
+// `std::numeric_limits<>::max()` stops compiling under the macro -- and
+// clang's syntax check reads these files without the tree's definitions.
 #ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#    define NOMINMAX
 #endif
 #include <windows.h>
 
@@ -62,7 +77,7 @@ inline std::wstring for_open(const char* utf8)
         }
     }
     if (wide.find(L"\\.\\") != std::wstring::npos || wide.find(L"\\..\\") != std::wstring::npos ||
-        wide.size() >= 2 && wide.compare(wide.size() - 2, 2, L"\\.") == 0) {
+        (wide.size() >= 2 && wide.compare(wide.size() - 2, 2, L"\\.") == 0)) {
         return wide;
     }
     if (wide.size() >= 3 && wide[1] == L':' && wide[2] == L'\\') {

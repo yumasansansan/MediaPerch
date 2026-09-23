@@ -25,7 +25,9 @@
 #include <mediaperch/module.h>
 
 #include "module_log.hpp"
-#include "win_path.hpp"
+#if defined(_WIN32)
+#    include "win_path.hpp" // a path past MAX_PATH; see the header
+#endif
 
 #include "pcm_format.hpp"
 
