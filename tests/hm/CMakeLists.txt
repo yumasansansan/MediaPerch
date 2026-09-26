@@ -65,8 +65,10 @@ ExternalProject_Add(hm_external
         # **HM turns warnings into errors**, in its own `bb_enable_warnings`,
         # against a compiler generations newer than the one it was written for.
         # This is somebody else's code built for one purpose; the warnings in it
-        # are not this tree's to fix, and -w is how that is said.
-        "-DCMAKE_CXX_FLAGS=-w"
+        # are not this tree's to fix, and -w is how that is said -- after the
+        # instruction set every external project is given, since this takes
+        # the place of the CMAKE_CXX_FLAGS that list sets.
+        "-DCMAKE_CXX_FLAGS=${MEDIAPERCH_ARCH_CFLAGS} -w"
     # Only the decoder. HM builds an encoder, two analysers and three utilities
     # besides, and none of them is what the reference is being asked for.
     BUILD_COMMAND "${CMAKE_COMMAND}" --build "${hm_prefix}/build" --target TAppDecoder

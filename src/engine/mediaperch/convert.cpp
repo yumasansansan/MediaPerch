@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <type_traits>
 
 namespace mp {
 namespace {
@@ -102,6 +103,117 @@ bool is_float(SampleType t) noexcept
     return t == SampleType::f32 || t == SampleType::f64;
 }
 
+/// Calls `f` with `t` as a compile-time constant, so that a loop over samples is
+/// compiled once for each sample type -- with `read_sample` and `write_sample`
+/// folded down to the one case -- rather than asking which type at every
+/// sample.
+template <class F>
+void with_type(SampleType t, F&& f)
+{
+    switch (t) {
+    case SampleType::u8:
+        f(std::integral_constant<SampleType, SampleType::u8>{});
+        return;
+    case SampleType::s16:
+        f(std::integral_constant<SampleType, SampleType::s16>{});
+        return;
+    case SampleType::s24_packed:
+        f(std::integral_constant<SampleType, SampleType::s24_packed>{});
+        return;
+    case SampleType::s24_in_32:
+        f(std::integral_constant<SampleType, SampleType::s24_in_32>{});
+        return;
+    case SampleType::s32:
+        f(std::integral_constant<SampleType, SampleType::s32>{});
+        return;
+    case SampleType::f32:
+        f(std::integral_constant<SampleType, SampleType::f32>{});
+        return;
+    case SampleType::f64:
+        f(std::integral_constant<SampleType, SampleType::f64>{});
+        return;
+    case SampleType::none:
+        return;
+    }
+}
+
+/// What the quantiser needs, read once per call into locals: the bytes it
+/// writes may be any object at all as far as the compiler knows, members of
+/// the converter included, so a member read in the loop is read again after
+/// every sample written.
+struct Quantiser {
+    double gain = 1.0;
+    double scale = 1.0;
+    double step = 1.0;
+    /// 1 / step, exactly: the step is a power of two, so multiplying by this
+    /// is the same division, without dividing.
+    double per_step = 1.0;
+    double floor = -1.0;
+    double ceiling = 1.0;
+};
+
+/// Into a float destination: no quantiser, nothing to dither.
+template <SampleType From, SampleType To>
+void convert_to_float(const std::uint8_t* in, std::uint8_t* out, std::size_t samples,
+                      double gain) noexcept
+{
+    const std::size_t in_step = container_bytes(From);
+    const std::size_t out_step = container_bytes(To);
+    for (std::size_t i = 0; i < samples; ++i) {
+        write_sample(out + i * out_step, To, read_sample(in + i * in_step, From) * gain);
+    }
+}
+
+/// Into an integer destination. `noise` is one generator per channel when the
+/// conversion is quantising, and null when it is not.
+template <SampleType From, SampleType To>
+void convert_to_integer(const std::uint8_t* in, std::uint8_t* out, std::size_t frames,
+                        unsigned channels, const Quantiser& q, Dither* noise) noexcept
+{
+    const std::size_t in_step = container_bytes(From);
+    const std::size_t out_step = container_bytes(To);
+    const double gain = q.gain;
+    const double scale = q.scale;
+    const double step = q.step;
+    const double per_step = q.per_step;
+    const double floor = q.floor;
+    const double ceiling = q.ceiling;
+    std::size_t i = 0;
+    for (std::size_t f = 0; f < frames; ++f) {
+        for (unsigned c = 0; c < channels; ++c, ++i) {
+            const double v = read_sample(in + i * in_step, From) * gain;
+
+            // In LSBs of the destination from here down, which is the unit
+            // dither and noise shaping are both defined in.
+            const double lsb = v * scale * per_step;
+
+            double clamped = 0.0;
+            if (noise != nullptr) {
+                Dither& dither = noise[c];
+                // Add what the filter says this sample owes for the errors
+                // before it, quantise, and hand back what this one cost. Adding
+                // rather than subtracting is SSRC's convention and the one its
+                // curves are written for; the other way round the same numbers
+                // shape the noise *into* the midband.
+                const double shaped = lsb + dither.feedback();
+                const double quantised = std::round(shaped + dither.next());
+
+                // The clamp is not paranoia: a gain above unity, a float source
+                // that legitimately exceeds full scale -- which float WAV
+                // routinely does -- and a shaper handed a transient all land
+                // outside.
+                clamped = std::clamp(quantised * step, floor, ceiling);
+                const bool clipped = clamped != quantised * step;
+                dither.accept(clamped * per_step - shaped, clipped);
+            } else {
+                clamped = std::clamp(std::round(lsb) * step, floor, ceiling);
+            }
+
+            write_sample(out + i * out_step, To, clamped);
+        }
+    }
+}
+
 } // namespace
 
 std::uint32_t Converter::shaping_taps() const noexcept
@@ -196,9 +308,6 @@ void Converter::run(const void* src, void* dst, std::size_t frames) noexcept
 
     const auto* in = static_cast<const std::uint8_t*>(src);
     auto* out = static_cast<std::uint8_t*>(dst);
-    const std::size_t in_step = container_bytes(from_.sample_type);
-    const std::size_t out_step = container_bytes(to_.sample_type);
-    const std::size_t samples = frames * from_.channels;
     const unsigned channels = from_.channels;
 
     // Reading is exact for every type this handles and needs no comment beyond
@@ -207,46 +316,31 @@ void Converter::run(const void* src, void* dst, std::size_t frames) noexcept
     // which moves the exponent and leaves the significand alone. The only
     // rounding in this function is the one at the bottom of it.
     if (is_float(to_.sample_type)) {
-        for (std::size_t i = 0; i < samples; ++i) {
-            const double v = read_sample(in + i * in_step, from_.sample_type) * config_.gain;
-            write_sample(out + i * out_step, to_.sample_type, v);
-        }
+        const double gain = config_.gain;
+        with_type(from_.sample_type, [&](auto from) {
+            with_type(to_.sample_type, [&](auto to) {
+                convert_to_float<decltype(from)::value, decltype(to)::value>(in, out,
+                                                                             frames * channels,
+                                                                             gain);
+            });
+        });
         return;
     }
 
-    for (std::size_t i = 0; i < samples; ++i) {
-        const double v = read_sample(in + i * in_step, from_.sample_type) * config_.gain;
-
-        // In LSBs of the destination from here down, which is the unit dither
-        // and noise shaping are both defined in.
-        const double lsb = v * scale_ / step_;
-
-        double quantised = 0.0;
-        double clamped = 0.0;
-        bool clipped = false;
-        if (quantising_) {
-            Dither& noise = dither_[i % channels];
-            // Add what the filter says this sample owes for the errors before
-            // it, quantise, and hand back what this one cost. Adding rather
-            // than subtracting is SSRC's convention and the one its curves are
-            // written for; the other way round the same numbers shape the noise
-            // *into* the midband.
-            const double shaped = lsb + noise.feedback();
-            quantised = std::round(shaped + noise.next());
-
-            // The clamp is not paranoia: a gain above unity, a float source
-            // that legitimately exceeds full scale -- which float WAV routinely
-            // does -- and a shaper handed a transient all land outside.
-            clamped = std::clamp(quantised * step_, floor_, ceiling_);
-            clipped = clamped != quantised * step_;
-            noise.accept(clamped / step_ - shaped, clipped);
-        } else {
-            quantised = std::round(lsb);
-            clamped = std::clamp(quantised * step_, floor_, ceiling_);
-        }
-
-        write_sample(out + i * out_step, to_.sample_type, clamped);
-    }
+    Quantiser q;
+    q.gain = config_.gain;
+    q.scale = scale_;
+    q.step = step_;
+    q.per_step = 1.0 / step_;
+    q.floor = floor_;
+    q.ceiling = ceiling_;
+    Dither* noise = quantising_ ? dither_.data() : nullptr;
+    with_type(from_.sample_type, [&](auto from) {
+        with_type(to_.sample_type, [&](auto to) {
+            convert_to_integer<decltype(from)::value, decltype(to)::value>(in, out, frames,
+                                                                           channels, q, noise);
+        });
+    });
 }
 
 } // namespace mp

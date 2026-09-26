@@ -26,6 +26,8 @@
 #ifndef MEDIAPERCH_CONVOLVE_HPP
 #define MEDIAPERCH_CONVOLVE_HPP
 
+#include <transform.hpp>
+
 #include <complex>
 #include <cstdint>
 #include <string>
@@ -84,9 +86,16 @@ private:
     std::uint32_t partition_ = 0;
     std::uint32_t partitions_ = 0;
     std::uint32_t transform_ = 0; ///< twice the partition
+    /// The bins of a spectrum: `transform / 2 + 1`. Everything transformed here
+    /// is real, so the other half of every spectrum is the mirror image of this
+    /// one and is neither kept nor multiplied.
+    std::uint32_t bins_ = 0;
     std::uint32_t channels_ = 0;
     std::size_t taps_ = 0;
 
+    /// The transform, planned at configure: what `run_block` transforms with
+    /// allocates nothing.
+    mp::transform::RealFft plan_;
     /// The impulse, one transformed partition after another, per channel.
     std::vector<std::complex<double>> spectra_;
     /// The frequency-domain delay line: `partitions` spectra per channel.
@@ -103,7 +112,8 @@ private:
     std::uint64_t taken_ = 0;
     std::uint64_t emitted_ = 0;
 
-    std::vector<std::complex<double>> scratch_;
+    /// The block being transformed, and the block coming back.
+    std::vector<double> scratch_;
     std::vector<std::complex<double>> sum_;
 };
 

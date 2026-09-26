@@ -190,6 +190,12 @@ function(mediaperch_add_rust_fuzzer name manifest corpus)
     if(MSVC OR WIN32)
         list(APPEND sancov "-Clink-arg=/ENTRY:mainCRTStartup")
     endif()
+    # The instruction set the modules are built for (cmake/Rust.cmake), in the
+    # same RUSTFLAGS, since cargo reads only one. With `--target` spelled out
+    # it reaches the fuzzers and not libfuzzer-sys's build script.
+    if(MEDIAPERCH_RUSTFLAGS)
+        list(APPEND sancov "${MEDIAPERCH_RUSTFLAGS}")
+    endif()
     string(JOIN " " sancov_flags ${sancov})
     # **libFuzzer itself is C++, compiled by the cc crate, and it is given the
     # Clang this build was checked against.** libfuzzer-sys builds it from

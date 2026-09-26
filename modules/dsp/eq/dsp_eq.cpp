@@ -92,52 +92,36 @@ std::vector<double> design_fir(const MpDsp& d, double rate, std::uint32_t taps,
     // the fix; capping the input was the symptom's.
     const std::size_t points = mp::transform::next_power_of_two(
         std::max<std::size_t>(static_cast<std::size_t>(taps) * 8, 4096));
-    std::vector<std::complex<double>> spectrum(points, {0.0, 0.0});
+    // Real and even -- zero phase -- so the impulse it transforms back to is
+    // real too: a real transform, of the bins up to half the rate, which is half
+    // the arithmetic of transforming the whole spectrum as a complex one.
+    std::vector<std::complex<double>> spectrum(points / 2 + 1);
     for (std::size_t k = 0; k <= points / 2; ++k) {
         const double hz = static_cast<double>(k) * rate / static_cast<double>(points);
-        const double magnitude = std::pow(10.0, target_db(d, hz) / 20.0);
-        spectrum[k] = {magnitude, 0.0};
-        if (k != 0 && k != points / 2) {
-            spectrum[points - k] = {magnitude, 0.0}; // real and even: zero phase
-        }
+        spectrum[k] = {std::pow(10.0, target_db(d, hz) / 20.0), 0.0};
     }
-    mp::transform::fft(spectrum, true);
+    std::vector<double> impulse(points);
+    mp::transform::RealFft(points).inverse(spectrum.data(), impulse.data());
 
     // The zero-phase impulse is centred on zero and wraps; taking `taps` of it
     // centred on the middle is the truncation, and the window is what stops the
-    // truncation ringing.
+    // truncation ringing -- the resampler's Kaiser window, from the module both
+    // share, at the beta of 90 dB.
+    //
+    // **A window of one point has nothing to taper**, and `kaiser_window` makes
+    // it 1. Worked out here it once divided 0 by 0, which reached the Bessel
+    // series as a NaN and came back as `i0(0) / i0(beta)` -- sixty decibels of
+    // attenuation on a filter that was asked to be a gain. Unreachable while
+    // `taps` had a floor of 16 under it, and reachable the moment that floor
+    // came off, which is the shape of most of what a range hides.
     std::vector<double> h(taps, 0.0);
     const std::size_t centre = taps / 2;
-    const double beta = 0.1102 * (90.0 - 8.7);
-    const double half = static_cast<double>(taps - 1) / 2.0;
-    // A small Bessel series, the same one the resampler's window uses.
-    const auto i0 = [](double x) {
-        double sum = 1.0;
-        double term = 1.0;
-        for (int i = 1; i < 64; ++i) {
-            term *= (x / (2.0 * i)) * (x / (2.0 * i));
-            sum += term;
-            if (term < sum * 1e-18) {
-                break;
-            }
-        }
-        return sum;
-    };
-    const double denominator = i0(beta);
+    const std::vector<double> window =
+        mp::transform::kaiser_window(taps, mp::transform::kaiser_beta(90.0));
     for (std::size_t n = 0; n < taps; ++n) {
-        const std::size_t from = (n + points - centre) % points;
-        // **A window of one point has nothing to taper.** `half` is zero there
-        // and the ratio would be 0/0, which reaches `i0` as a NaN and comes
-        // back as `i0(0) / i0(beta)` -- sixty decibels of attenuation on a
-        // filter that was asked to be a gain. Unreachable while `taps` had a
-        // floor of 16 under it, and reachable the moment that floor came off,
-        // which is the shape of most of what a range hides.
-        double window = 1.0;
-        if (half > 0.0) {
-            const double ratio = (static_cast<double>(n) - half) / half;
-            window = i0(beta * std::sqrt(std::max(0.0, 1.0 - ratio * ratio))) / denominator;
-        }
-        h[n] = spectrum[from].real() * window;
+        // Where tap n comes from in the impulse, which wraps round zero.
+        const std::size_t from = n >= centre ? n - centre : n + points - centre;
+        h[n] = impulse[from] * window[n];
     }
     if (minimum) {
         // 20 dB under the deepest cut the curve asks for is far enough to be a

@@ -437,9 +437,17 @@ private:
     bool drained_ = false;
 
     std::vector<std::uint8_t> packet_;
-    /// Decoded bytes not yet handed to the caller.
+    /// Decoded bytes not yet handed to the caller: those from `pcm_at_` to
+    /// `pcm_end_`.
+    ///
+    /// **The buffer stays the size of the room a decode is given**, and the end
+    /// of what it holds is kept apart. Sized to what each packet decoded to, it
+    /// had to grow back to a megabyte before the next decode, and a vector that
+    /// grows sets every new byte to zero: a megabyte written for every packet,
+    /// forty-odd times a second of AAC or MP3, before a decoder wrote over it.
     std::vector<std::uint8_t> pcm_;
     std::size_t pcm_at_ = 0;
+    std::size_t pcm_end_ = 0;
 
     /// The last `trim_` frames decoded, held back rather than emitted, because
     /// until another packet arrives they may be the end of the stream. Rides at

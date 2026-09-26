@@ -51,6 +51,24 @@
       }
     },
     {
+      "name": "llvm-avx512",
+      "inherits": "llvm",
+      "displayName": "Ninja + LLVM, AVX-512",
+      "description": "The same build raised to x86-64-v4, with 512-bit vectors. Needs Skylake-SP, Ice Lake, Sapphire Rapids, Zen 4 or later, and refuses to start without AVX-512.",
+      "cacheVariables": {
+        "MEDIAPERCH_ARCH": "avx512"
+      }
+    },
+    {
+      "name": "llvm-native",
+      "inherits": "llvm",
+      "displayName": "Ninja + LLVM, this machine",
+      "description": "The same build for exactly the processor it is built on, with 512-bit vectors where it has AVX-512. For that machine alone: another may refuse to start it.",
+      "cacheVariables": {
+        "MEDIAPERCH_ARCH": "native"
+      }
+    },
+    {
       "name": "core-only",
       "inherits": "llvm",
       "displayName": "Engine and player alone",
@@ -102,6 +120,14 @@
     {
       "name": "llvm-avx2",
       "configurePreset": "llvm-avx2"
+    },
+    {
+      "name": "llvm-avx512",
+      "configurePreset": "llvm-avx512"
+    },
+    {
+      "name": "llvm-native",
+      "configurePreset": "llvm-native"
     },
     {
       "name": "llvm-debug",
@@ -158,6 +184,26 @@
     {
       "name": "llvm-avx2",
       "configurePreset": "llvm-avx2",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "llvm-avx512",
+      "configurePreset": "llvm-avx512",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "llvm-native",
+      "configurePreset": "llvm-native",
       "output": {
         "outputOnFailure": true
       },

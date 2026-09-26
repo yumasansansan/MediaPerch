@@ -71,6 +71,25 @@ add_library(mediaperch_flags INTERFACE)
 # `-march=x86-64-v3`, and the baseline `-march=x86-64`, which is given as well
 # so that a compiler built with some other default still builds this one.
 #
+# `avx512` is x86-64-v4: AVX-512 F, BW, CD, DQ and VL on top of all of that --
+# Skylake-SP and Ice Lake, Sapphire Rapids, Zen 4 and later. `native` is the
+# machine the build runs on, whatever it has, for a build that stays on it.
+#
+# **Wherever there is AVX-512, its whole width is used**, with
+# `-mprefer-vector-width=512`, because otherwise it is not. Measured with
+# Clang 23 and rustc 1.98, which share LLVM's choice: for x86-64-v4 and for
+# every Intel processor with AVX-512 -- Skylake-SP, Ice Lake-SP, Sapphire
+# Rapids, Granite Rapids -- it is 256-bit vectors, and a loop it vectorises
+# never touches a zmm register; only Zen 4 and Zen 5 get 512 without being
+# asked. The option changes the width the vectoriser works in, and each
+# operation is still the operation it was. `avx512` always has it. `native`
+# asks the compiler whether this machine has AVX-512 -- whether `-march=native`
+# defines `__AVX512F__` -- and has it only then, since a machine without
+# AVX-512 has no 512-bit registers to ask for. And wherever it is asked for,
+# the configure compiles a loop that wants 512-bit vectors with the flags it is
+# about to use, and stops if no zmm register appears in the assembly: a build
+# that uses half of AVX-512 is not what either option is for.
+#
 # **This changes floating-point results**, because FMA computes a multiply and
 # an add with one rounding where two instructions round twice, and Clang
 # contracts `a * b + c` into one wherever a single expression allows it -- which
@@ -83,10 +102,11 @@ add_library(mediaperch_flags INTERFACE)
 # add if the two builds should hash alike again, as MSVC's did -- unmeasured,
 # because nothing here asks for it.
 set(MEDIAPERCH_ARCH "baseline" CACHE STRING
-    "Instruction-set baseline: baseline (x86-64, SSE2) or avx2 (x86-64-v3)")
-set_property(CACHE MEDIAPERCH_ARCH PROPERTY STRINGS baseline avx2)
-if(NOT MEDIAPERCH_ARCH MATCHES "^(baseline|avx2)$")
-    message(FATAL_ERROR "MEDIAPERCH_ARCH must be baseline or avx2, not ${MEDIAPERCH_ARCH}")
+    "Instruction-set baseline: baseline (x86-64, SSE2), avx2 (x86-64-v3), avx512 (x86-64-v4) or native (this machine)")
+set_property(CACHE MEDIAPERCH_ARCH PROPERTY STRINGS baseline avx2 avx512 native)
+if(NOT MEDIAPERCH_ARCH MATCHES "^(baseline|avx2|avx512|native)$")
+    message(FATAL_ERROR
+        "MEDIAPERCH_ARCH must be baseline, avx2, avx512 or native, not ${MEDIAPERCH_ARCH}")
 endif()
 
 # ---------------------------------------------------------------------------
@@ -209,18 +229,87 @@ else()
                      LINKER:/dynamicbase LINKER:/nxcompat LINKER:/highentropyva)
 endif()
 
-# The instruction set, for the whole build including the submodules. A library
-# that dispatches internally still works: its baseline path simply becomes
+# The instruction set, for the whole build: the submodules, and the external
+# projects too (see what an external project is told, below). A library that
+# dispatches internally still works: its baseline path simply becomes
 # x86-64-v3 too, and this binary requires it regardless.
+#
+# MEDIAPERCH_ARCH_FLAGS is the list, and MEDIAPERCH_ARCH_CFLAGS the same as one
+# string, for the builds this one starts by hand. MEDIAPERCH_WIDE_VECTORS says
+# whether 512-bit vectors are asked for, which cmake/Rust.cmake asks of rustc
+# in its own words.
+set(MEDIAPERCH_ARCH_FLAGS "")
+set(MEDIAPERCH_WIDE_VECTORS OFF)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
-    if(MEDIAPERCH_ARCH STREQUAL "avx2")
-        add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-march=x86-64-v3>")
-    else()
-        add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-march=x86-64>")
+    # A loop that wants the widest vectors there are, for the two questions
+    # below to be asked of: which macros `-march=native` defines, and whether
+    # the flags chosen make zmm registers of it.
+    set(mediaperch_vector_probe "${CMAKE_BINARY_DIR}/CMakeFiles/mediaperch_vector_probe.c")
+    file(WRITE "${mediaperch_vector_probe}"
+        "void mediaperch_vector_probe(double* restrict x, double g, long n)\n"
+        "{\n"
+        "    for (long i = 0; i < n; ++i) {\n"
+        "        x[i] *= g;\n"
+        "    }\n"
+        "}\n")
+    set(mediaperch_vector_target "")
+    if(CMAKE_C_COMPILER_TARGET)
+        set(mediaperch_vector_target "--target=${CMAKE_C_COMPILER_TARGET}")
     endif()
+
+    if(MEDIAPERCH_ARCH STREQUAL "avx2")
+        set(mediaperch_arch_flags -march=x86-64-v3)
+    elseif(MEDIAPERCH_ARCH STREQUAL "avx512")
+        set(mediaperch_arch_flags -march=x86-64-v4 -mprefer-vector-width=512)
+        set(MEDIAPERCH_WIDE_VECTORS ON)
+    elseif(MEDIAPERCH_ARCH STREQUAL "native")
+        set(mediaperch_arch_flags -march=native)
+        execute_process(
+            COMMAND "${CMAKE_C_COMPILER}" ${mediaperch_vector_target} -march=native
+                    -dM -E "${mediaperch_vector_probe}"
+            OUTPUT_VARIABLE mediaperch_native_macros
+            ERROR_VARIABLE mediaperch_native_errors
+            RESULT_VARIABLE mediaperch_native_status)
+        if(NOT mediaperch_native_status EQUAL 0)
+            message(FATAL_ERROR "${CMAKE_C_COMPILER} could not say what -march=native "
+                "is on this machine:\n${mediaperch_native_errors}")
+        endif()
+        if(mediaperch_native_macros MATCHES "#define __AVX512F__ ")
+            list(APPEND mediaperch_arch_flags -mprefer-vector-width=512)
+            set(MEDIAPERCH_WIDE_VECTORS ON)
+            message(STATUS "MEDIAPERCH_ARCH=native: this machine has AVX-512, "
+                "and its whole width is asked for")
+        else()
+            message(STATUS "MEDIAPERCH_ARCH=native: this machine has no AVX-512, "
+                "so there is no wider vector to ask for")
+        endif()
+    else()
+        set(mediaperch_arch_flags -march=x86-64)
+    endif()
+
+    if(MEDIAPERCH_WIDE_VECTORS)
+        execute_process(
+            COMMAND "${CMAKE_C_COMPILER}" ${mediaperch_vector_target} ${mediaperch_arch_flags}
+                    -O3 -S -o - "${mediaperch_vector_probe}"
+            OUTPUT_VARIABLE mediaperch_vector_listing
+            ERROR_VARIABLE mediaperch_vector_errors
+            RESULT_VARIABLE mediaperch_vector_status)
+        if(NOT mediaperch_vector_status EQUAL 0 OR NOT mediaperch_vector_listing MATCHES "zmm")
+            message(FATAL_ERROR "MEDIAPERCH_ARCH=${MEDIAPERCH_ARCH} asks for 512-bit vectors, "
+                "and ${CMAKE_C_COMPILER} with ${mediaperch_arch_flags} made no zmm register "
+                "of a loop that wants them (${mediaperch_vector_probe}).\n"
+                "${mediaperch_vector_errors}")
+        endif()
+    endif()
+
+    foreach(flag IN LISTS mediaperch_arch_flags)
+        add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:${flag}>")
+    endforeach()
+    set(MEDIAPERCH_ARCH_FLAGS ${mediaperch_arch_flags})
 elseif(NOT MEDIAPERCH_ARCH STREQUAL "baseline")
     message(FATAL_ERROR "MEDIAPERCH_ARCH=${MEDIAPERCH_ARCH} is for x86-64 builds only")
 endif()
+string(JOIN " " MEDIAPERCH_ARCH_CFLAGS ${MEDIAPERCH_ARCH_FLAGS})
 
 # ---------------------------------------------------------------------------
 # Optimisation, global, Release
@@ -384,13 +473,23 @@ endif()
 # libde265 and HM are configured by their own CMake as external projects, and an
 # external project inherits nothing: left alone it looks for a compiler the way
 # any fresh configure does, which on a machine with Visual Studio is cl.exe. So
-# every one of them is handed this list -- the compilers, LLD, the archivers and
-# the dynamic C runtime -- and cmake/LLVMToolchain.cmake's check has nothing to
-# be different from. The instruction set and the optimisation flags are not in
-# it: those libraries choose their own, and dispatch on the CPU.
+# every one of them is handed this list -- the compilers, LLD, the archivers,
+# the dynamic C runtime and the instruction set -- and
+# cmake/LLVMToolchain.cmake's check has nothing to be different from.
+#
+# **The instruction set is everybody's**: the flags everything else here is
+# compiled with, in CMAKE_C_FLAGS and CMAKE_CXX_FLAGS, which none of them sets
+# (HM, which sets -w there, adds it after them). dav1d is given them through
+# Meson and libvpx through its configure, in their own list files. Those
+# libraries still pick their hand-written SIMD with CPUID, whatever they are
+# compiled with; what the flags change is the code the compiler writes for the
+# rest of them, and one set of flags for everything is simpler than a line
+# drawn around some of it. The optimisation flags stay theirs.
 set(MEDIAPERCH_EXTERNAL_CMAKE_ARGS
     "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}"
     "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+    "-DCMAKE_C_FLAGS=${MEDIAPERCH_ARCH_CFLAGS}"
+    "-DCMAKE_CXX_FLAGS=${MEDIAPERCH_ARCH_CFLAGS}"
     "-DCMAKE_LINKER_TYPE=LLD"
     "-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld"
     "-DCMAKE_MODULE_LINKER_FLAGS=-fuse-ld=lld"

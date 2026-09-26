@@ -226,7 +226,7 @@ std::string noise_shaping_describe(const NoiseShaping& shaping, std::uint32_t sa
 Dither::Dither(DitherKind kind, NoiseShaping shaping, std::uint32_t sample_rate,
                std::uint32_t seed)
     : kind_(kind), seed_(seed), rng_(seed), taps_(shaper_taps(shaping, sample_rate)),
-      history_(taps_.size(), 0.0)
+      history_(2 * taps_.size(), 0.0)
 {
 }
 
@@ -235,6 +235,7 @@ void Dither::reset() noexcept
     rng_ = seed_;
     previous_ = 0.0;
     std::fill(history_.begin(), history_.end(), 0.0);
+    head_ = 0;
 }
 
 double Dither::uniform() noexcept
@@ -283,9 +284,10 @@ double Dither::next() noexcept
 
 double Dither::feedback() const noexcept
 {
+    const double* newest = history_.data() + head_;
     double sum = 0.0;
     for (std::size_t k = 0; k < taps_.size(); ++k) {
-        sum += taps_[k] * history_[k];
+        sum += taps_[k] * newest[k];
     }
     return sum;
 }
@@ -304,10 +306,13 @@ void Dither::accept(double error, bool clipped) noexcept
         error = std::clamp(error, -1.0, 1.0);
     }
 
-    for (std::size_t k = history_.size(); k > 1; --k) {
-        history_[k - 1] = history_[k - 2];
-    }
-    history_[0] = error;
+    // One place earlier, wrapping, and the error in both copies (see
+    // `history_`): the window from the new head is this error and then the ones
+    // the window before it began with.
+    const std::size_t n = taps_.size();
+    head_ = head_ == 0 ? n - 1 : head_ - 1;
+    history_[head_] = error;
+    history_[head_ + n] = error;
 }
 
 } // namespace mp

@@ -19,6 +19,11 @@
 # not tell it; -fms-runtime-lib=dll is /MD, which defines _DLL for the headers
 # and names msvcrt for the linker, and is what the module links.
 #
+# **The instruction set is the rest of the build's** (MEDIAPERCH_ARCH, the
+# flags cmake/CompilerOptions.cmake hands every external project), added to the
+# same extra flags. libvpx still picks its own assembly at run time; what the
+# flags change is the code the compiler writes for its C.
+#
 # **This runs under MSYS2 and that is not a preference.** libvpx's scripts use
 # MSYS2's sed and cut, and its rules put long lists on one command line. A
 # native Windows GNU make runs a command through cmd.exe, whose limit is 8191
@@ -30,7 +35,7 @@
 # objects, with nothing reporting it. MSYS2's make runs commands through its
 # own bash, so the limit is CreateProcess's 32767 and the lists fit.
 #
-# Arguments: <src> <build> <checks> <cc> <cxx> <ar> <strip> <nasm>
+# Arguments: <src> <build> <checks> <cc> <cxx> <ar> <strip> <nasm> <arch flags>
 set -e
 
 # **MSYS2's own tools first, before anything else runs.** This script is started
@@ -41,6 +46,7 @@ export PATH="/usr/bin:$PATH"
 src=$(/usr/bin/cygpath -u "$1")
 build=$(/usr/bin/cygpath -u "$2")
 checks=$3
+arch=$9
 
 # **The toolchain the parent build was checked against**, found by putting its
 # directory first on PATH and naming each tool bare. Not by path: libvpx's
@@ -76,7 +82,7 @@ cd "$build"
 options=(
     --target=x86_64-win64-gcc
     --as=nasm
-    --extra-cflags=-fms-runtime-lib=dll
+    "--extra-cflags=-fms-runtime-lib=dll${arch:+ $arch}"
     --enable-vp9-highbitdepth
     --disable-vp8-encoder
     --disable-vp9-encoder

@@ -378,14 +378,20 @@ struct Tables {
     sine_short: Vec<f32>,
     kbd_long: Vec<f32>,
     kbd_short: Vec<f32>,
-    /// cos(pi * m / (4N)) for m < 4N, the argument the IMDCT needs. Double,
-    /// and the accumulator is too: a float table costs about ten decibels
-    /// against FFmpeg -- 123 rather than 135 -- because a thousand products
-    /// are summed per output sample and the table's own rounding is inside
-    /// every one of them.
-    cos_long: Box<[f64; 8 * FRAME_LEN]>,
-    cos_short: Box<[f64; 8 * SHORT_LEN]>,
+    /// The inverse transforms of a long window and a short one (see `Imdct`).
+    imdct_long: Imdct,
+    imdct_short: Imdct,
+    /// |q|^(4/3) for the magnitudes the standard's escape codebook can send, 0
+    /// to 8191: the expression the dequantiser evaluated for every coefficient,
+    /// evaluated once for each value it can take. A stream that sends more --
+    /// the escape reading here goes to 2^21 -- is dequantised by the
+    /// expression itself, as it always was.
+    pow43: Box<[f32; POW43_LEN]>,
 }
+
+/// How many magnitudes `Tables::pow43` holds: the escape codebook's largest,
+/// 2^13 - 1, and zero.
+const POW43_LEN: usize = 8192;
 
 fn build_kbd(n: usize, alpha: f64) -> Vec<f32> {
     // w[j] = I0(pi*alpha*sqrt(1 - (2j/n - 1)^2)), then the running sum of those,
@@ -430,14 +436,10 @@ fn build_tables() -> Option<Tables> {
     let kbd_long = build_kbd(FRAME_LEN, 4.0);
     let kbd_short = build_kbd(SHORT_LEN, 6.0);
 
-    let cos_long: Vec<f64> = (0..8 * FRAME_LEN)
-        .map(|m| (PI * m as f64 / (4.0 * FRAME_LEN as f64)).cos())
+    let pow43: Vec<f32> = (0..POW43_LEN as u32)
+        .map(|m| (m as f32).powf(4.0 / 3.0))
         .collect();
-    let cos_short: Vec<f64> = (0..8 * SHORT_LEN)
-        .map(|m| (PI * m as f64 / (4.0 * SHORT_LEN as f64)).cos())
-        .collect();
-    let cos_long: Box<[f64; 8 * FRAME_LEN]> = cos_long.into_boxed_slice().try_into().ok()?;
-    let cos_short: Box<[f64; 8 * SHORT_LEN]> = cos_short.into_boxed_slice().try_into().ok()?;
+    let pow43: Box<[f32; POW43_LEN]> = pow43.into_boxed_slice().try_into().ok()?;
 
     Some(Tables {
         spectrum,
@@ -446,8 +448,9 @@ fn build_tables() -> Option<Tables> {
         sine_short,
         kbd_long,
         kbd_short,
-        cos_long,
-        cos_short,
+        imdct_long: Imdct::new(FRAME_LEN),
+        imdct_short: Imdct::new(SHORT_LEN),
+        pow43,
     })
 }
 
@@ -471,47 +474,188 @@ impl Tables {
     }
 }
 
-/// The inverse MDCT.
-///
-/// Still the definition -- one cosine sum per output sample -- but the cosine is
-/// a table lookup rather than a call. The argument
+/// A complex number: two doubles, and the arithmetic the transform below does
+/// with them.
+#[derive(Clone, Copy, Default)]
+struct Complex {
+    re: f64,
+    im: f64,
+}
+
+impl Complex {
+    /// e^(i angle), straight from the cosine and the sine.
+    fn turn(angle: f64) -> Complex {
+        Complex {
+            re: angle.cos(),
+            im: angle.sin(),
+        }
+    }
+}
+
+impl std::ops::Add for Complex {
+    type Output = Complex;
+    fn add(self, o: Complex) -> Complex {
+        Complex {
+            re: self.re + o.re,
+            im: self.im + o.im,
+        }
+    }
+}
+
+impl std::ops::Sub for Complex {
+    type Output = Complex;
+    fn sub(self, o: Complex) -> Complex {
+        Complex {
+            re: self.re - o.re,
+            im: self.im - o.im,
+        }
+    }
+}
+
+impl std::ops::Mul for Complex {
+    type Output = Complex;
+    fn mul(self, o: Complex) -> Complex {
+        Complex {
+            re: self.re * o.re - self.im * o.im,
+            im: self.re * o.im + self.im * o.re,
+        }
+    }
+}
+
+/// A radix-2 FFT of one power-of-two length, forward -- e^(-2 pi i jk / n) --
+/// and in place. The order the butterflies read in is worked out once, and so
+/// is each twiddle, from its own cosine and sine rather than from the one
+/// before it: a twiddle made by stepping inherits every earlier one's rounding.
+struct Fft {
+    reverse: Vec<usize>,
+    twiddle: Vec<Complex>,
+}
+
+impl Fft {
+    fn new(n: usize) -> Fft {
+        let bits = n.trailing_zeros();
+        let reverse = (0..n)
+            .map(|i| {
+                if bits == 0 {
+                    0
+                } else {
+                    i.reverse_bits() >> (usize::BITS - bits)
+                }
+            })
+            .collect();
+        let twiddle = (0..n / 2)
+            .map(|j| Complex::turn(-2.0 * PI * j as f64 / n as f64))
+            .collect();
+        Fft { reverse, twiddle }
+    }
+
+    fn run(&self, a: &mut [Complex]) {
+        for (i, &j) in self.reverse.iter().enumerate() {
+            if i < j {
+                a.swap(i, j);
+            }
+        }
+        let n = self.reverse.len();
+        let mut len = 2;
+        while len <= n {
+            let half = len / 2;
+            let stride = n / len;
+            for block in a[..n].chunks_exact_mut(len) {
+                let (lo, hi) = block.split_at_mut(half);
+                for (j, (u, v)) in lo.iter_mut().zip(hi.iter_mut()).enumerate() {
+                    let t = *v * self.twiddle[j * stride];
+                    let first = *u;
+                    *u = first + t;
+                    *v = first - t;
+                }
+            }
+            len *= 2;
+        }
+    }
+}
+
+/// The inverse MDCT of one window: K coefficients in, 2K samples out,
 ///
 /// ```text
-/// 2*pi/N (i + n0)(k + 1/2),  with n0 = (N/2 + 1)/2
+/// x[n] = 2/N * sum over k of X[k] cos(2 pi/N (n + n0)(k + 1/2)),  N = 2K, n0 = N/4 + 1/2
 /// ```
 ///
-/// is not an integer multiple of anything convenient, but twice it is: doubling
-/// gives pi/(2N) * (2i + N/2 + 1) * (2k + 1), whose two factors are both whole
-/// numbers. One table of cos(pi*m/(2N)) over m < 4N therefore answers every one
-/// of them, and the index advances by a constant stride as k does.
+/// -- the standard's definition, computed through a complex FFT of K/2
+/// points rather than as a sum per sample: two million multiplications a long
+/// window became a few thousand. Every step is in doubles, and the error is
+/// the FFT's, a few roundings deep, where the sum's was a thousand products
+/// deep. Both are far below a float's step, and the samples come out rounded
+/// to float as they always did: the same floats, to the bit, in the three
+/// streams measured -- stereo, 7.1, and 96 kHz.
 ///
-/// It is still O(N^2). An FFT would make it O(N log N) and is worth doing when
-/// there is a reason; the definition is what can be read against the standard,
-/// and this keeps that while making it usable.
-///
-/// **The table is an array of a power-of-two size, and the index is masked.**
-/// That is what lets the inner loop -- two million iterations per long window
-/// -- run without a bounds check: the compiler can see that `idx & (M - 1)` is
-/// below `M`, where it cannot see that a wrapped counter is. Measured before
-/// this shape, the Rust decoder took 1.5 times as long as the C++ on the same
-/// file. The value is the same either way: `idx` and `step` are both below `M`
-/// and `M` is a power of two, so the mask is the modulo.
-fn imdct<const M: usize>(table: &[f64; M], spec: &[f32], out: &mut [f32]) {
-    const { assert!(M.is_power_of_two()) };
-    let n = M / 4;
-    let half = n / 2;
-    let scale = 2.0 / n as f64;
+/// **How.** With C the DCT-IV of the coefficients,
+/// C[m] = sum over k of X[k] cos(pi/K (m + 1/2)(k + 1/2)), the definition is
+/// x[n] = 2/N C[n + K/2] with C carried past K by its own symmetry,
+/// C[2K - 1 - m] = -C[m]; and a DCT-IV of K points is a complex FFT of K/2.
+/// Pair the coefficients as u[p] = X[2p] + i X[K - 1 - 2p]; turn each by
+/// e^(-i pi (p + 1/4) / K); transform; turn output q by e^(-i pi q / K) to
+/// get Y[q]. Then C[2q] = Re Y[q] and C[K - 1 - 2q] = -Im Y[q] -- expanding
+/// Y[q] and taking the even and the odd k apart is the whole proof. The
+/// samples follow from C in three runs (see `run`).
+struct Imdct {
+    /// e^(-i pi (p + 1/4) / K) for p < K/2.
+    pre: Vec<Complex>,
+    /// e^(-i pi q / K) for q < K/2.
+    post: Vec<Complex>,
+    fft: Fft,
+}
 
-    for (i, o) in out[..n].iter_mut().enumerate() {
-        let a = 2 * i + half + 1; // 2i + N/2 + 1, and half *is* N/2
-        let mut idx = a & (M - 1); // k = 0, so (2k + 1) = 1
-        let step = (2 * a) & (M - 1);
-        let mut acc = 0.0f64;
-        for &s in &spec[..half] {
-            acc += f64::from(s) * table[idx];
-            idx = (idx + step) & (M - 1);
+impl Imdct {
+    fn new(coefficients: usize) -> Imdct {
+        let k = coefficients as f64;
+        let half = coefficients / 2;
+        Imdct {
+            pre: (0..half)
+                .map(|p| Complex::turn(-PI * (p as f64 + 0.25) / k))
+                .collect(),
+            post: (0..half)
+                .map(|q| Complex::turn(-PI * q as f64 / k))
+                .collect(),
+            fft: Fft::new(half),
         }
-        *o = (acc * scale) as f32;
+    }
+
+    /// `spec`'s K coefficients to `out`'s 2K samples.
+    fn run(&self, spec: &[f32], out: &mut [f32]) {
+        let half = self.pre.len(); // K/2
+        let k = 2 * half;
+        let mut z = [Complex::default(); FRAME_LEN / 2];
+        let z = &mut z[..half];
+        for (p, zp) in z.iter_mut().enumerate() {
+            let pair = Complex {
+                re: f64::from(spec[2 * p]),
+                im: f64::from(spec[k - 1 - 2 * p]),
+            };
+            *zp = pair * self.pre[p];
+        }
+        self.fft.run(z);
+        let mut c = [0.0f64; FRAME_LEN];
+        for (q, zq) in z.iter().enumerate() {
+            let y = *zq * self.post[q];
+            c[2 * q] = y.re;
+            c[k - 1 - 2 * q] = -y.im;
+        }
+
+        // x[n] = 2/N C[n + K/2], with C[m] for m >= K read as -C[2K - 1 - m]:
+        // the first quarter from C directly, the middle half reversed and
+        // negated, the last quarter negated.
+        let scale = 2.0 / (2 * k) as f64;
+        let (first, rest) = out[..2 * k].split_at_mut(half);
+        let (middle, last) = rest.split_at_mut(k);
+        for (n, o) in first.iter_mut().enumerate() {
+            *o = (scale * c[half + n]) as f32;
+        }
+        for (j, o) in middle.iter_mut().enumerate() {
+            *o = (-(scale * c[k - 1 - j])) as f32;
+        }
+        for (j, o) in last.iter_mut().enumerate() {
+            *o = (-(scale * c[j])) as f32;
+        }
     }
 }
 
@@ -1440,6 +1584,7 @@ fn apply_pns(
 // is how the text reads and how it is checked against the text.
 #[allow(clippy::needless_range_loop)]
 fn dequantise(
+    t: &Tables,
     ics: &Ics,
     sfb_cb: &[[u8; MAX_SFB]; WINDOWS],
     sf: &[[i32; MAX_SFB]; WINDOWS],
@@ -1474,7 +1619,12 @@ fn dequantise(
                     if q == 0 {
                         continue;
                     }
-                    let magnitude = (q.unsigned_abs() as f32).powf(4.0 / 3.0);
+                    let m = q.unsigned_abs();
+                    let magnitude = t
+                        .pow43
+                        .get(m as usize)
+                        .copied()
+                        .unwrap_or_else(|| (m as f32).powf(4.0 / 3.0));
                     out[base + k] = if q < 0 { -magnitude } else { magnitude } * gain;
                 }
             }
@@ -1586,11 +1736,8 @@ fn filterbank(
     if ics.window_sequence == EIGHT_SHORT {
         let mut tmp = [0.0f32; 2 * SHORT_LEN];
         for w in 0..WINDOWS {
-            imdct(
-                &t.cos_short,
-                &coeffs[w * SHORT_LEN..(w + 1) * SHORT_LEN],
-                &mut tmp,
-            );
+            t.imdct_short
+                .run(&coeffs[w * SHORT_LEN..(w + 1) * SHORT_LEN], &mut tmp);
             // Window w's rising half meets window w-1's falling half, so it uses
             // the previous *window's* shape -- which for the first is the
             // previous frame's.
@@ -1605,7 +1752,7 @@ fn filterbank(
             }
         }
     } else {
-        imdct(&t.cos_long, coeffs, &mut z);
+        t.imdct_long.run(coeffs, &mut z);
         match ics.window_sequence {
             LONG_START => {
                 for n in 0..FRAME_LEN {
@@ -1734,7 +1881,7 @@ fn read_ics(
         return Err(Error("individual_channel_stream: bad spectral_data"));
     }
 
-    dequantise(&ch.ics, &ch.sfb_cb, &ch.sf, quant, &mut ch.coeffs);
+    dequantise(t, &ch.ics, &ch.sfb_cb, &ch.sf, quant, &mut ch.coeffs);
     apply_pns(&ch.ics, &ch.sfb_cb, &ch.sf, rng, &mut ch.coeffs);
     Ok(())
 }
@@ -2236,6 +2383,88 @@ mod tests {
         // is spin, which is what the first version of read_section_data did,
         // or index past a buffer, which is what the language forbids.
         let _ = decoder.decode_frame(&junk);
+    }
+
+    /// Coefficients a real frame could have: a hash of the index, spread over
+    /// a few thousand either side of zero.
+    fn spectrum(k: usize, seed: u32) -> Vec<f32> {
+        let mut state = seed;
+        (0..k)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state as f32 / 4_294_967_296.0 - 0.5) * 4000.0
+            })
+            .collect()
+    }
+
+    /// The inverse MDCT as the standard writes it, a cosine sum per sample, in
+    /// doubles, with the cosine's argument reduced in whole numbers first:
+    /// 2 pi/N (n + n0)(k + 1/2) is pi/(4N) (4n + N + 2)(2k + 1).
+    fn imdct_by_definition(spec: &[f32]) -> Vec<f64> {
+        let n = 2 * spec.len();
+        (0..n)
+            .map(|i| {
+                let mut acc = 0.0f64;
+                for (k, &x) in spec.iter().enumerate() {
+                    let m = ((4 * i + n + 2) * (2 * k + 1)) % (8 * n);
+                    acc += f64::from(x) * (PI * m as f64 / (4 * n) as f64).cos();
+                }
+                acc * 2.0 / n as f64
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_inverse_mdct_is_its_definition_to_the_float_it_returns() {
+        let t = tables().unwrap();
+        for (imdct, k, seed) in [
+            (&t.imdct_long, FRAME_LEN, 1u32),
+            (&t.imdct_long, FRAME_LEN, 2u32),
+            (&t.imdct_short, SHORT_LEN, 3u32),
+        ] {
+            let spec = spectrum(k, seed);
+            let mut out = vec![0.0f32; 2 * k];
+            imdct.run(&spec, &mut out);
+            let exact = imdct_by_definition(&spec);
+            // Each sample is the definition rounded to float, or the float
+            // next to that where the two are a hair apart: a difference of at
+            // most one float step, measured at the sample.
+            for (i, (&got, &want)) in out.iter().zip(&exact).enumerate() {
+                let nearest = want as f32;
+                let step = (nearest.abs() * f32::EPSILON).max(f32::MIN_POSITIVE);
+                assert!(
+                    (got - nearest).abs() <= step,
+                    "window of {k}, sample {i}: {got} where the definition is {want}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_inverse_mdct_is_symmetric_where_the_definition_is() {
+        // x[N/2 - 1 - n] = -x[n] over the first half and x[3N/2 - 1 - n] = x[n]
+        // over the second: what the lapped transform's cancellation rests on,
+        // and exactly true of what this computes, since both are made from
+        // one value.
+        let t = tables().unwrap();
+        let spec = spectrum(FRAME_LEN, 7);
+        let mut out = vec![0.0f32; 2 * FRAME_LEN];
+        t.imdct_long.run(&spec, &mut out);
+        let n = 2 * FRAME_LEN;
+        for i in 0..n / 2 {
+            assert_eq!(out[n / 2 - 1 - i], -out[i], "first half, {i}");
+        }
+        for i in n / 2..n {
+            assert_eq!(out[3 * n / 2 - 1 - i], out[i], "second half, {i}");
+        }
+    }
+
+    #[test]
+    fn the_table_of_four_thirds_powers_is_the_expression_it_replaced() {
+        let t = tables().unwrap();
+        for (m, &v) in t.pow43.iter().enumerate() {
+            assert_eq!(v.to_bits(), (m as f32).powf(4.0 / 3.0).to_bits(), "{m}");
+        }
     }
 
     #[test]

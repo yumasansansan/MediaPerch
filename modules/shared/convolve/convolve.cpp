@@ -46,18 +46,19 @@ bool Convolver::configure(const std::vector<std::vector<double>>& impulses,
 
     partition_ = want;
     transform_ = want * 2;
+    bins_ = transform_ / 2 + 1;
     channels_ = static_cast<std::uint32_t>(impulses.size());
     taps_ = longest;
     partitions_ =
         static_cast<std::uint32_t>((longest + partition_ - 1) / partition_);
+    plan_ = mp::transform::RealFft(transform_);
 
-    spectra_.assign(static_cast<std::size_t>(channels_) * partitions_ * transform_,
-                    {0.0, 0.0});
-    std::vector<std::complex<double>> piece(transform_);
+    spectra_.assign(static_cast<std::size_t>(channels_) * partitions_ * bins_, {0.0, 0.0});
+    std::vector<double> piece(transform_);
     for (std::uint32_t c = 0; c < channels_; ++c) {
         const std::vector<double>& impulse = impulses[c];
         for (std::uint32_t p = 0; p < partitions_; ++p) {
-            std::fill(piece.begin(), piece.end(), std::complex<double>{0.0, 0.0});
+            std::fill(piece.begin(), piece.end(), 0.0);
             const std::size_t from = static_cast<std::size_t>(p) * partition_;
             // A channel whose impulse is shorter than the longest simply has
             // zeros there, which is what a shorter impulse means.
@@ -65,16 +66,10 @@ bool Convolver::configure(const std::vector<std::vector<double>>& impulses,
                 from >= impulse.size() ? 0
                                        : std::min<std::size_t>(partition_,
                                                                impulse.size() - from);
-            for (std::size_t i = 0; i < n; ++i) {
-                piece[i] = {impulse[from + i], 0.0};
-            }
-            mp::transform::fft(piece, false);
-            // The cast to the iterator's own difference type is not decoration:
-            // `spectra_.begin() + <size_t>` mixes signedness, which this tree
-            // compiles as a warning and which a second front end is what found.
-            const auto at = static_cast<std::ptrdiff_t>(
-                (static_cast<std::size_t>(c) * partitions_ + p) * transform_);
-            std::copy(piece.begin(), piece.end(), spectra_.begin() + at);
+            std::copy_n(impulse.begin() + static_cast<std::ptrdiff_t>(from), n, piece.begin());
+            plan_.forward(piece.data(),
+                          spectra_.data() +
+                              (static_cast<std::size_t>(c) * partitions_ + p) * bins_);
         }
     }
 
@@ -85,12 +80,12 @@ bool Convolver::configure(const std::vector<std::vector<double>>& impulses,
 void Convolver::reset() noexcept
 {
     const std::size_t count = partitions();
-    history_.assign(static_cast<std::size_t>(channels_) * count * transform_,
+    history_.assign(static_cast<std::size_t>(channels_) * count * bins_,
                     std::complex<double>{0.0, 0.0});
     tail_.assign(static_cast<std::size_t>(channels_) * partition_, 0.0);
     pending_.assign(static_cast<std::size_t>(channels_) * partition_, 0.0);
-    scratch_.assign(transform_, {0.0, 0.0});
-    sum_.assign(transform_, {0.0, 0.0});
+    scratch_.assign(transform_, 0.0);
+    sum_.assign(bins_, {0.0, 0.0});
     cursor_ = 0;
     held_ = 0;
     taken_ = 0;
@@ -111,51 +106,56 @@ double Convolver::multiplies() const noexcept
     }
     const double n = transform_;
     const double b = partition_;
-    // Two transforms of 2B points per B output samples, plus one complex
-    // multiply-accumulate per partition per bin. Counted as real multiplies so
-    // it can be compared with a biquad's five.
-    return (2.0 * 5.0 * n * std::log2(n) + 6.0 * partitions() * n) / b;
+    // Two real transforms of 2B points per B output samples -- each a complex
+    // one of B points and a pass to pull it apart -- plus one complex
+    // multiply-accumulate per partition per bin, of B + 1 bins. Counted as real
+    // multiplies so it can be compared with a biquad's five.
+    const double half = n / 2.0;
+    return (2.0 * (5.0 * half * std::log2(half) + 4.0 * half) +
+            6.0 * partitions() * (half + 1.0)) /
+           b;
 }
 
 void Convolver::run_block(std::uint32_t channel, double* out) noexcept
 {
     const std::size_t count = partitions();
+    const std::size_t bins = bins_;
     double* tail = tail_.data() + static_cast<std::size_t>(channel) * partition_;
     const double* fresh = pending_.data() + static_cast<std::size_t>(channel) * partition_;
 
     // Overlap-save: the transform sees the previous block and this one, and
     // only the second half of what comes back is a true linear convolution.
-    for (std::uint32_t i = 0; i < partition_; ++i) {
-        scratch_[i] = {tail[i], 0.0};
-        scratch_[partition_ + i] = {fresh[i], 0.0};
-    }
-    mp::transform::fft(scratch_, false);
+    // The spectrum goes straight into the delay line.
+    std::copy_n(tail, partition_, scratch_.data());
+    std::copy_n(fresh, partition_, scratch_.data() + partition_);
+    plan_.forward(scratch_.data(),
+                  history_.data() + (static_cast<std::size_t>(channel) * count + cursor_) * bins);
 
-    std::complex<double>* slot = history_.data() +
-                                 (static_cast<std::size_t>(channel) * count + cursor_) *
-                                     transform_;
-    std::copy(scratch_.begin(), scratch_.end(), slot);
-
+    // The multiply-accumulate written out as real arithmetic on the parts,
+    // which is a loop the compiler vectorises; a std::complex product carries a
+    // branch for the infinities of Annex G in one C library, and a loop with it
+    // stays scalar.
     std::fill(sum_.begin(), sum_.end(), std::complex<double>{0.0, 0.0});
+    std::complex<double>* sum = sum_.data();
     for (std::size_t p = 0; p < count; ++p) {
         // The block from `p` blocks ago meets the impulse's `p`th partition.
         const std::size_t at = (cursor_ + count - p) % count;
         const std::complex<double>* x =
-            history_.data() +
-            (static_cast<std::size_t>(channel) * count + at) * transform_;
+            history_.data() + (static_cast<std::size_t>(channel) * count + at) * bins;
         const std::complex<double>* h =
-            spectra_.data() +
-            (static_cast<std::size_t>(channel) * count + p) * transform_;
-        for (std::uint32_t k = 0; k < transform_; ++k) {
-            sum_[k] += h[k] * x[k];
+            spectra_.data() + (static_cast<std::size_t>(channel) * count + p) * bins;
+        for (std::size_t k = 0; k < bins; ++k) {
+            const double hr = h[k].real();
+            const double hi = h[k].imag();
+            const double xr = x[k].real();
+            const double xi = x[k].imag();
+            sum[k] = {sum[k].real() + (hr * xr - hi * xi), sum[k].imag() + (hr * xi + hi * xr)};
         }
     }
-    mp::transform::fft(sum_, true);
+    plan_.inverse(sum_.data(), scratch_.data());
 
-    for (std::uint32_t i = 0; i < partition_; ++i) {
-        out[i] = sum_[partition_ + i].real();
-        tail[i] = fresh[i];
-    }
+    std::copy_n(scratch_.data() + partition_, partition_, out);
+    std::copy_n(fresh, partition_, tail);
 }
 
 void Convolver::process(const double* const* in, std::uint32_t frames,

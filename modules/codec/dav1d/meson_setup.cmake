@@ -12,7 +12,7 @@
 # Driven by modules/codec/dav1d/CMakeLists.txt; see the comment there for why
 # this tree has a Meson dependency at all.
 
-foreach(required meson src build prefix cc ar)
+foreach(required meson src build prefix cc ar cflags)
     if(NOT DEFINED ${required})
         message(FATAL_ERROR "meson_setup.cmake needs -D${required}=")
     endif()
@@ -27,6 +27,12 @@ endforeach()
 set(ENV{CC} "${cc}")
 set(ENV{CC_LD} "lld")
 set(ENV{AR} "${ar}")
+
+# **The instruction set, the one every external project is given**
+# (cmake/CompilerOptions.cmake), as Meson's c_args. Given on every setup, a
+# reconfigure included, so that a build directory whose MEDIAPERCH_ARCH
+# changed compiles with the new one rather than the flags it began with.
+set(c_args "-Dc_args=${cflags}")
 
 set(extra)
 if(EXISTS "${build}/meson-private/coredata.dat")
@@ -47,6 +53,7 @@ execute_process(
         --default-library static
         --wrap-mode=nodownload
         --prefix "${prefix}"
+        "${c_args}"
         ${extra}
     RESULT_VARIABLE result)
 

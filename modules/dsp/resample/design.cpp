@@ -5,15 +5,16 @@
 #include <transform.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <limits>
-#include <numeric>
 
 namespace mp::resample {
 
 // Moved to modules/transform when the equaliser wanted them too.
 using mp::transform::dft_any;
-using mp::transform::fft;
+using mp::transform::kaiser_beta;
 using mp::transform::next_power_of_two;
 using mp::transform::to_minimum_phase;
 
@@ -21,40 +22,107 @@ namespace {
 
 constexpr double k_pi = 3.14159265358979323846;
 
-double bessel_i0(double x) noexcept
+/// `count` values into `low`, and the same values in reverse order into
+/// `high`: the two halves of a symmetric prototype, the second made from the
+/// first. Two loops of neighbours, and one of them reading backwards from a
+/// block of its own -- where writing tap n and its mirror in one loop is
+/// writing the one array in two places, which may meet at the centre, and
+/// that the compiler cannot make vector code of.
+void mirror(const double* values, std::size_t count, double* low, double* high) noexcept
 {
-    double sum = 1.0;
-    double term = 1.0;
-    for (int k = 1; k < 200; ++k) {
-        term *= (x / (2.0 * k)) * (x / (2.0 * k));
-        sum += term;
-        if (term < sum * 1e-18) {
-            break;
+    std::copy_n(values, count, low);
+    for (std::size_t i = 0; i < count; ++i) {
+        high[i] = values[count - 1 - i];
+    }
+}
+
+/// Makes `h`, of `length` taps, exactly symmetric: each tap and its mirror
+/// both their mean. The two halves are separate ranges and are passed as such
+/// -- `__restrict` says so -- or the compiler must allow that a write to one
+/// half lands in the other, and the loop stays scalar.
+void symmetric_halves(double* __restrict low, double* __restrict high, std::size_t half) noexcept
+{
+    for (std::size_t i = 0; i < half; ++i) {
+        const double mean = 0.5 * (low[i] + high[half - 1 - i]);
+        low[i] = mean;
+        high[half - 1 - i] = mean;
+    }
+}
+
+void symmetrize(std::vector<double>& h) noexcept
+{
+    const std::size_t half = h.size() / 2;
+    symmetric_halves(h.data(), h.data() + (h.size() - half), half);
+}
+
+/// The window method's sinc, sin(pi x) / (pi x), at x = j / m for whole j: the
+/// ideal lowpass whose cutoff is half of 1/m.
+///
+/// **The sine is taken from a table of a quarter of its period.** sin(pi j / m)
+/// repeats every 2m and mirrors about m / 2, so the whole of it is m / 2 + 1
+/// values, reached from any j by whole-number arithmetic: a sine per entry
+/// rather than per tap -- 27 thousand for a filter of 8 million taps -- and each
+/// of a small angle. The sine of pi j / m taken directly is of an angle rounded
+/// at its full size, which at the far end of a long filter is an error of 4e-14
+/// in a value that may be much smaller than one; from the table it is an ulp or
+/// two, and every multiple of m is a true zero.
+class Sinc {
+public:
+    /// For j up to `most`.
+    Sinc(std::uint64_t m, std::uint64_t most) : m_(m)
+    {
+        const std::uint64_t entries = std::min(m / 2, most) + 1;
+        quarter_.resize(static_cast<std::size_t>(entries));
+        for (std::uint64_t k = 0; k < entries; ++k) {
+            quarter_[static_cast<std::size_t>(k)] =
+                std::sin(k_pi * (static_cast<double>(k) / static_cast<double>(m)));
         }
     }
-    return sum;
-}
 
-double sinc(double x) noexcept
-{
-    if (x == 0.0) {
-        return 1.0;
+    /// sinc(j / m) for j = `from`, `from` - 1, and so on, `count` of them, into
+    /// `out`. Counting down is what the window method's half does.
+    void down(std::uint64_t from, std::size_t count, double* out) const noexcept
+    {
+        // The sines first. The place in the period counts down by one a tap
+        // and wraps where it passes zero, which is at most every two m taps,
+        // so the taps are runs in each of which the place is a plain
+        // difference -- a loop of whole-number arithmetic and a table read,
+        // with no division and no branch in it.
+        const std::uint64_t period = 2 * m_;
+        std::uint64_t at = from % period;
+        for (std::size_t done = 0; done < count;) {
+            const auto run =
+                static_cast<std::size_t>(std::min<std::uint64_t>(count - done, at + 1));
+            for (std::size_t r = 0; r < run; ++r) {
+                // The second half of the period is the first, negated; within
+                // a half, the sine mirrors about its middle.
+                const std::uint64_t place = at - r;
+                const bool negative = place >= m_;
+                const std::uint64_t within = negative ? place - m_ : place;
+                const std::uint64_t k = 2 * within > m_ ? m_ - within : within;
+                const double s = quarter_[static_cast<std::size_t>(k)];
+                out[done + r] = negative ? -s : s;
+            }
+            done += run;
+            at = period - 1;
+        }
+        // Then over pi x, x = j / m. j is below 2^31 -- a prototype has fewer
+        // than 2^32 taps and j is at most half of them -- so it is counted in
+        // 32 bits, which the vector unit turns into doubles, where before
+        // AVX-512 it has no instruction for 64.
+        const auto first = static_cast<std::int32_t>(from);
+        const auto m = static_cast<double>(m_);
+        for (std::size_t r = 0; r < count; ++r) {
+            const std::int32_t j = first - static_cast<std::int32_t>(r);
+            const double t = k_pi * (static_cast<double>(j) / m);
+            out[r] = j == 0 ? 1.0 : out[r] / t;
+        }
     }
-    const double t = k_pi * x;
-    return std::sin(t) / t;
-}
 
-double kaiser_beta(double attenuation_db) noexcept
-{
-    if (attenuation_db > 50.0) {
-        return 0.1102 * (attenuation_db - 8.7);
-    }
-    if (attenuation_db >= 21.0) {
-        return 0.5842 * std::pow(attenuation_db - 21.0, 0.4) +
-               0.07886 * (attenuation_db - 21.0);
-    }
-    return 0.0;
-}
+private:
+    std::uint64_t m_;
+    std::vector<double> quarter_;
+};
 
 /// How many eigenvalues of the symmetric tridiagonal (d, e) are below `x`.
 ///
@@ -111,18 +179,7 @@ double kaiser_beta_for(double attenuation_db) noexcept
 
 std::vector<double> kaiser_window(std::size_t length, double attenuation_db)
 {
-    std::vector<double> w(length, 0.0);
-    if (length < 2) {
-        return std::vector<double>(length, 1.0);
-    }
-    const double beta = kaiser_beta(attenuation_db);
-    const double denominator = bessel_i0(beta);
-    const double half = static_cast<double>(length - 1) / 2.0;
-    for (std::size_t n = 0; n < length; ++n) {
-        const double ratio = (static_cast<double>(n) - half) / half;
-        w[n] = bessel_i0(beta * std::sqrt(std::max(0.0, 1.0 - ratio * ratio))) / denominator;
-    }
-    return w;
+    return mp::transform::kaiser_window(length, kaiser_beta(attenuation_db));
 }
 
 std::vector<double> dolph_window(std::size_t length, double attenuation_db)
@@ -301,46 +358,120 @@ std::vector<double> dpss_window(std::size_t length, double nw)
 // Measuring
 // --------------------------------------------------------------------------
 
-Response measure(const std::vector<double>& h, double passband_edge, double stopband_edge,
-                 double gain, std::size_t most_points)
+namespace {
+
+/// Which bins of a transform of `n` points are in which band: the passband is
+/// bins [0, pass_end) and the stopband bins [stop_begin, n / 2].
+struct Bands {
+    std::size_t pass_end = 0;
+    std::size_t stop_begin = 0;
+};
+
+/// Bin k is at k / n of the rate, exactly, n being a power of two: so it is in
+/// the passband when k <= passband_edge * n, which is exact too, and in the
+/// stopband when k >= stopband_edge * n. The bands are ranges of bins, then,
+/// rather than a division and two comparisons for every one of them -- and a
+/// bin that is somehow in both is in the passband, as it always was.
+Bands bands(std::size_t n, double passband_edge, double stopband_edge) noexcept
 {
-    Response out;
-    if (h.empty() || gain == 0.0) {
+    const std::size_t last = n / 2;
+    const double pass_at = passband_edge * static_cast<double>(n);
+    const double stop_at = stopband_edge * static_cast<double>(n);
+    Bands out;
+    out.pass_end = !(pass_at >= 0.0)
+                       ? 0
+                       : static_cast<std::size_t>(
+                             std::min(std::floor(pass_at) + 1.0, static_cast<double>(last + 1)));
+    out.stop_begin = std::max(
+        out.pass_end, !(stop_at <= static_cast<double>(last))
+                          ? last + 1
+                          : static_cast<std::size_t>(std::max(0.0, std::ceil(stop_at))));
+    return out;
+}
+
+/// What `measure` does, with the transform planned once and the room for it
+/// kept: refining measures a filter of the same length every round.
+class Meter {
+public:
+    Meter(std::size_t taps, std::size_t most_points)
+        : n_(points_for(taps, most_points)), transform_(n_), folded_(n_), spectrum_(n_ / 2 + 1)
+    {
+    }
+
+    Response operator()(const std::vector<double>& h, double passband_edge,
+                        double stopband_edge, double gain)
+    {
+        Response out;
+        if (h.empty() || gain == 0.0) {
+            return out;
+        }
+        const std::size_t n = n_;
+        // Folded rather than truncated when the filter is longer than the
+        // transform: aliasing in time is exact sampling in frequency, which is
+        // the right approximation to make here. A transform's length at a time,
+        // each tap added where it lands, in the order the taps come.
+        std::fill(folded_.begin(), folded_.end(), 0.0);
+        for (std::size_t at = 0; at < h.size(); at += n) {
+            const std::size_t count = std::min(n, h.size() - at);
+            for (std::size_t i = 0; i < count; ++i) {
+                folded_[i] += h[at + i];
+            }
+        }
+        // The filter is real, so half the transform, and half the bins.
+        transform_.forward(folded_.data(), spectrum_.data());
+
+        // The transition band between the two is not looked at, as it never
+        // was.
+        const std::size_t last = n / 2;
+        const Bands band = bands(n, passband_edge, stopband_edge);
+
+        out.points = last;
+        double worst_pass = 0.0;
+        for (std::size_t k = 0; k < band.pass_end; ++k) {
+            const double magnitude = std::abs(spectrum_[k]) / gain;
+            worst_pass = std::max(worst_pass, std::abs(magnitude - 1.0));
+        }
+        // The largest magnitude, divided by the gain once: a division rounds
+        // in the same direction as its dividend grows, so the largest quotient
+        // is the quotient of the largest.
+        double peak = 0.0;
+        for (std::size_t k = band.stop_begin; k <= last; ++k) {
+            peak = std::max(peak, std::abs(spectrum_[k]));
+        }
+        const double worst_stop = peak / gain;
+        out.passband_ripple_db = 20.0 * std::log10(1.0 + worst_pass);
+        out.stopband_db = worst_stop > 0.0 ? 20.0 * std::log10(worst_stop) : -400.0;
         return out;
     }
 
+private:
     // Eight samples per ripple is enough to find the peaks and not so many that
     // a million-tap prototype takes a second to check. The cap is what keeps
     // this honest for the very longest filters, and `points` is reported so a
     // caller can see the resolution it got.
-    const std::size_t want = next_power_of_two(std::max<std::size_t>(h.size() * 8, 4096));
-    const std::size_t n =
-        std::min<std::size_t>(want, next_power_of_two(std::max<std::size_t>(most_points, 4096)));
-
-    std::vector<std::complex<double>> spectrum(n, {0.0, 0.0});
-    for (std::size_t i = 0; i < h.size(); ++i) {
-        // Folded rather than truncated when the filter is longer than the
-        // transform: aliasing in time is exact sampling in frequency, which is
-        // the right approximation to make here.
-        spectrum[i % n] += std::complex<double>{h[i], 0.0};
+    static std::size_t points_for(std::size_t taps, std::size_t most_points) noexcept
+    {
+        const std::size_t want = next_power_of_two(std::max<std::size_t>(taps * 8, 4096));
+        return std::min<std::size_t>(want,
+                                     next_power_of_two(std::max<std::size_t>(most_points, 4096)));
     }
-    fft(spectrum, false);
 
-    out.points = n / 2;
-    double worst_pass = 0.0;
-    double worst_stop = 0.0;
-    for (std::size_t k = 0; k <= n / 2; ++k) {
-        const double f = static_cast<double>(k) / static_cast<double>(n);
-        const double magnitude = std::abs(spectrum[k]) / gain;
-        if (f <= passband_edge) {
-            worst_pass = std::max(worst_pass, std::abs(magnitude - 1.0));
-        } else if (f >= stopband_edge) {
-            worst_stop = std::max(worst_stop, magnitude);
-        }
+    std::size_t n_;
+    mp::transform::RealFft transform_;
+    std::vector<double> folded_;
+    std::vector<std::complex<double>> spectrum_;
+};
+
+} // namespace
+
+Response measure(const std::vector<double>& h, double passband_edge, double stopband_edge,
+                 double gain, std::size_t most_points)
+{
+    if (h.empty() || gain == 0.0) {
+        return {};
     }
-    out.passband_ripple_db = 20.0 * std::log10(1.0 + worst_pass);
-    out.stopband_db = worst_stop > 0.0 ? 20.0 * std::log10(worst_stop) : -400.0;
-    return out;
+    Meter meter(h.size(), most_points);
+    return meter(h, passband_edge, stopband_edge, gain);
 }
 
 // --------------------------------------------------------------------------
@@ -626,6 +757,26 @@ bool remez_lowpass(std::size_t length, double passband_edge, double stopband_edg
 
 namespace {
 
+/// The rotation that undoes a symmetric filter's delay, bin by bin, for a filter
+/// of `length` taps in a real transform of `transform` points: its bins 0 to
+/// `transform / 2`.
+///
+/// It depends on nothing a round of refining changes, so it is made once for
+/// all of them: a cosine and a sine for each of a quarter of a million bins,
+/// sixty rounds over, was most of what refining cost.
+std::vector<std::complex<double>> rotations(std::size_t length, std::size_t transform)
+{
+    const std::uint64_t centre = (length - 1) / 2;
+    std::vector<std::complex<double>> out(transform / 2 + 1);
+    for (std::size_t k = 0; k < out.size(); ++k) {
+        // The delay is `centre` samples and k can be a million, so the turns are
+        // counted in whole numbers, modulo a whole turn, before any angle is.
+        out[k] = mp::transform::unit(static_cast<std::size_t>((k * centre) % transform),
+                                     transform);
+    }
+    return out;
+}
+
 /// One round of alternating projection: clip the response to the target, then
 /// put the filter back to its own length.
 ///
@@ -635,50 +786,52 @@ namespace {
 /// per round instead of an interpolation over ten thousand nodes. That is the
 /// whole reason this exists: it is the only method here that works at the length
 /// 44100 -> 48000 actually asks for.
-void project(std::vector<double>& h, std::size_t transform, double passband_edge,
+///
+/// The filter is real, so the transforms are: `transform` is planned for the
+/// length the response is looked at with, `rotate` is its bins' rotations (see
+/// `rotations`), and `signal` and `spectrum` are room the caller keeps from one
+/// round to the next.
+void project(std::vector<double>& h, mp::transform::RealFft& transform,
+             const std::vector<std::complex<double>>& rotate, std::vector<double>& signal,
+             std::vector<std::complex<double>>& spectrum, double passband_edge,
              double stopband_edge, double gain, double target_pass, double target_stop)
 {
     const std::size_t length = h.size();
-    const std::size_t centre = (length - 1) / 2;
+    const std::size_t n = transform.size();
 
-    std::vector<std::complex<double>> spectrum(transform, {0.0, 0.0});
-    for (std::size_t i = 0; i < length; ++i) {
-        spectrum[i] = {h[i], 0.0};
-    }
-    fft(spectrum, false);
+    signal.assign(n, 0.0);
+    std::copy(h.begin(), h.end(), signal.begin());
+    spectrum.resize(n / 2 + 1);
+    transform.forward(signal.data(), spectrum.data());
 
     // The zero-phase amplitude: undo the delay, which for a symmetric filter
-    // leaves a real number.
-    for (std::size_t k = 0; k < transform; ++k) {
-        // The delay is `centre` samples and k can be a million, so the angle is
-        // reduced before the cosine sees it rather than after.
-        const double turns = std::fmod(static_cast<double>(k) * static_cast<double>(centre),
-                                       static_cast<double>(transform));
-        const double angle = 2.0 * k_pi * turns / static_cast<double>(transform);
-        const std::complex<double> rotate{std::cos(angle), std::sin(angle)};
-        double value = (spectrum[k] * rotate).real() / gain;
-
-        const double f = static_cast<double>(std::min(k, transform - k)) /
-                         static_cast<double>(transform);
-        if (f <= passband_edge) {
-            value = std::clamp(value, 1.0 - target_pass, 1.0 + target_pass);
-        } else if (f >= stopband_edge) {
-            value = std::clamp(value, -target_stop, target_stop);
+    // leaves a real number; clip it; and put the delay back. The bands are
+    // ranges of bins (see `bands`), and each range is a loop of plain
+    // arithmetic.
+    const std::size_t last = n / 2;
+    const Bands band = bands(n, passband_edge, stopband_edge);
+    std::complex<double>* bins = spectrum.data();
+    const std::complex<double>* turn = rotate.data();
+    const auto clip = [&](std::size_t from, std::size_t to, double low, double high) {
+        for (std::size_t k = from; k < to; ++k) {
+            const double rr = turn[k].real();
+            const double ri = turn[k].imag();
+            const double value = std::clamp(
+                (bins[k].real() * rr - bins[k].imag() * ri) / gain, low, high);
+            const double amplitude = value * gain;
+            bins[k] = {amplitude * rr, -(amplitude * ri)};
         }
-        spectrum[k] = std::complex<double>{value * gain, 0.0} * std::conj(rotate);
-    }
+    };
+    const double unclipped = std::numeric_limits<double>::infinity();
+    clip(0, band.pass_end, 1.0 - target_pass, 1.0 + target_pass);
+    clip(band.pass_end, band.stop_begin, -unclipped, unclipped);
+    clip(band.stop_begin, last + 1, -target_stop, target_stop);
 
-    fft(spectrum, true);
-    for (std::size_t i = 0; i < length; ++i) {
-        h[i] = spectrum[i].real();
-    }
+    transform.inverse(spectrum.data(), signal.data());
+    std::copy_n(signal.begin(), length, h.begin());
     // Symmetry is a constraint too, and floating point does not preserve it for
     // free.
-    for (std::size_t i = 0; i < length / 2; ++i) {
-        const double mean = 0.5 * (h[i] + h[length - 1 - i]);
-        h[i] = mean;
-        h[length - 1 - i] = mean;
-    }
+    symmetrize(h);
 }
 
 } // namespace
@@ -877,19 +1030,59 @@ bool design_prototype(const Design& design, std::uint32_t up, std::uint32_t down
                 w = dpss_window(size, kaiser_beta(design.attenuation_db) / k_pi);
                 break;
             case Window::kaiser:
-                w = kaiser_window(size, design.attenuation_db);
+                // Made tap by tap below, together with the sinc.
                 break;
             }
             out.assign(size, 0.0);
-            for (std::size_t n = 0; n < size; ++n) {
-                const double offset = static_cast<double>(n) - static_cast<double>(centre);
-                out[n] = 2.0 * cutoff * sinc(2.0 * cutoff * offset) * w[n];
+            // Each tap is 2 * cutoff * sinc * window, and the sinc is even about
+            // the centre, so each value of it serves the tap at n and the tap at
+            // its mirror, taken a block at a time (see `Sinc`).
+            const Sinc sinc(std::max(up, down), centre);
+            std::array<double, 256> ideal{};
+            if (design.window == Window::kaiser) {
+                // Symmetric about its centre, and so is the arithmetic that
+                // makes it: `n - centre` is the same distance on either side,
+                // the window is the same bits there (see `kaiser_points`) and so
+                // is the sinc. So each tap is computed once and written to both
+                // places -- half the Bessel functions -- and no window as long
+                // as the prototype is made to be read once and thrown away.
+                const double beta = kaiser_beta(design.attenuation_db);
+                std::array<double, 256> window{};
+                for (std::size_t n = 0; n <= centre; n += window.size()) {
+                    const std::size_t count = std::min(window.size(), centre + 1 - n);
+                    mp::transform::kaiser_points(size, beta, n, count, window.data());
+                    sinc.down(centre - n, count, ideal.data());
+                    for (std::size_t i = 0; i < count; ++i) {
+                        ideal[i] = 2.0 * cutoff * ideal[i] * window[i];
+                    }
+                    mirror(ideal.data(), count, out.data() + n, out.data() + (size - n - count));
+                }
+            } else {
+                // Dolph's window is symmetric by construction, but the Slepian
+                // one comes out of an iteration and is only as symmetric as
+                // that leaves it, so each tap takes its own point of it.
+                for (std::size_t n = 0; n <= centre; n += ideal.size()) {
+                    const std::size_t count = std::min(ideal.size(), centre + 1 - n);
+                    sinc.down(centre - n, count, ideal.data());
+                    const double* low = w.data() + n;
+                    const double* high = w.data() + (size - n - count);
+                    double* to_low = out.data() + n;
+                    double* to_high = out.data() + (size - n - count);
+                    for (std::size_t i = 0; i < count; ++i) {
+                        to_low[i] = 2.0 * cutoff * ideal[i] * low[i];
+                    }
+                    // Tap size - 1 - n - i is the mirror of tap n + i, and
+                    // takes the same sinc and its own point of the window.
+                    for (std::size_t i = 0; i < count; ++i) {
+                        to_high[i] = 2.0 * cutoff * ideal[count - 1 - i] * high[i];
+                    }
+                }
             }
             // Unity gain at DC, scaled by the interpolation factor. The whole
             // prototype is scaled rather than each phase separately:
             // normalising the phases one at a time would flatten DC by bending
             // the response that was just designed.
-            const double sum = std::accumulate(out.begin(), out.end(), 0.0);
+            const double sum = mp::transform::sum(out.data(), out.size());
             if (sum != 0.0) {
                 const double scale = gain / sum;
                 for (double& tap : out) {
@@ -922,7 +1115,10 @@ bool design_prototype(const Design& design, std::uint32_t up, std::uint32_t down
                     ? std::pow(10.0, design.passband_ripple_db / 20.0) - 1.0
                     : std::pow(10.0, -design.attenuation_db / 20.0);
 
-            const Response start = measure(out, passband_edge, stopband_edge, gain, design.measure_points);
+            // Every round transforms and measures a filter of the same length,
+            // so the plans, the rotations and the room for them are made once.
+            Meter meter(size, design.measure_points);
+            const Response start = meter(out, passband_edge, stopband_edge, gain);
             // Never worse in the passband than the window design it started
             // from, and never worse than what was asked for. At a length where
             // the specification cannot be met at all, the first of those is the
@@ -933,6 +1129,10 @@ bool design_prototype(const Design& design, std::uint32_t up, std::uint32_t down
 
             Response best = start;
             std::vector<double> keep = out;
+            mp::transform::RealFft plan(transform);
+            const std::vector<std::complex<double>> rotate = rotations(size, transform);
+            std::vector<double> signal;
+            std::vector<std::complex<double>> spectrum;
             // Alternating projection is not monotone: a round that does not
             // improve is not the end of the improving, and stopping at the
             // first one leaves most of the gain on the table. Patience is what
@@ -946,9 +1146,9 @@ bool design_prototype(const Design& design, std::uint32_t up, std::uint32_t down
                 // the moment the specification was met, which is the opposite of
                 // what somebody choosing this method wants.
                 const double target_stop = std::pow(10.0, best.stopband_db / 20.0) * 0.9;
-                project(out, transform, passband_edge, stopband_edge, gain, target_pass,
-                        target_stop);
-                const Response now = measure(out, passband_edge, stopband_edge, gain, design.measure_points);
+                project(out, plan, rotate, signal, spectrum, passband_edge, stopband_edge, gain,
+                        target_pass, target_stop);
+                const Response now = meter(out, passband_edge, stopband_edge, gain);
                 if (now.stopband_db >= best.stopband_db - 1e-4 ||
                     now.passband_ripple_db > ripple_limit) {
                     ++patience;
@@ -970,7 +1170,7 @@ bool design_prototype(const Design& design, std::uint32_t up, std::uint32_t down
                                         ? design.phase_floor_db
                                         : -(design.attenuation_db + 20.0);
             to_minimum_phase(out, floor_db, design.cepstrum);
-            const double sum = std::accumulate(out.begin(), out.end(), 0.0);
+            const double sum = mp::transform::sum(out.data(), out.size());
             if (sum != 0.0) {
                 const double scale = gain / sum;
                 for (double& tap : out) {

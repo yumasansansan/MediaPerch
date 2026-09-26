@@ -31,10 +31,10 @@
 # is allocated across the module boundary means no CRT object ever crosses it.
 # The module is pinned to the same runtime so the two agree.
 #
-# dav1d chooses its assembly with CPUID rather than at compile time, so
-# MEDIAPERCH_ARCH does not reach it -- and is not made to. See the comment in
-# codec_dav1d.cpp for the measurement behind that, which is not the obvious
-# answer.
+# MEDIAPERCH_ARCH reaches dav1d's C as it reaches every external project
+# (cmake/CompilerOptions.cmake), through Meson's c_args; dav1d still chooses
+# its assembly with CPUID. See the comment in codec_dav1d.cpp for why that
+# choice is left to it, which is not the obvious answer.
 
 set(dav1d_src "${CMAKE_SOURCE_DIR}/external/dav1d")
 
@@ -81,6 +81,7 @@ ExternalProject_Add(dav1d_external
         "-Dprefix=${dav1d_install}"
         "-Dcc=${CMAKE_C_COMPILER}"
         "-Dar=${CMAKE_AR}"
+        "-Dcflags=${MEDIAPERCH_ARCH_CFLAGS}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/meson_setup.cmake"
     BUILD_COMMAND "${MEDIAPERCH_MESON}" compile -C "${dav1d_prefix}/build"
     INSTALL_COMMAND "${MEDIAPERCH_MESON}" install -C "${dav1d_prefix}/build"

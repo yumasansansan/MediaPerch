@@ -547,7 +547,9 @@ bool PacketSource::pump()
     // decoded, so the trim below sees one continuous stream rather than the end
     // of every packet.
     const std::size_t carried = carry_.size();
-    pcm_.resize(carried + k_pcm_room);
+    if (pcm_.size() < carried + k_pcm_room) {
+        pcm_.resize(carried + k_pcm_room);
+    }
     if (carried != 0) {
         std::memcpy(pcm_.data(), carry_.data(), carried);
         carry_.clear();
@@ -562,13 +564,13 @@ bool PacketSource::pump()
         after_seek_ = false;
         std::size_t got = 0;
         const MpResult r = demux_.read_frames(into, room, got);
-        pcm_.resize(carried + got);
+        pcm_end_ = carried + got;
         if (r != MP_OK || got == 0) {
             drained_ = true;
         }
         if (got == 0) {
             // The carry is the tail, and the tail is what the trim discards.
-            pcm_.clear();
+            pcm_end_ = 0;
             return false;
         }
         return true;
@@ -582,7 +584,7 @@ bool PacketSource::pump()
             // Another consumer of the same file has to read first. Not the end
             // and not an error: there is simply nothing yet, and a decode
             // thread that returns nothing is one the ring survives.
-            pcm_.clear();
+            pcm_end_ = 0;
             return false;
         }
         if (r == MP_END || (r == MP_OK && packet.bytes == 0)) {
@@ -590,22 +592,22 @@ bool PacketSource::pump()
             // still be holding a frame.
             std::size_t got = 0;
             (void)codec_.flush(into, room, got);
-            pcm_.resize(carried + got);
+            pcm_end_ = carried + got;
             drained_ = true;
             if (got == 0) {
-                pcm_.clear();
+                pcm_end_ = 0;
                 return false;
             }
             return true;
         }
         if (r != MP_OK) {
-            pcm_.clear();
+            pcm_end_ = 0;
             drained_ = true;
             return false;
         }
         std::size_t got = 0;
         if (codec_.decode(packet_.data(), packet.bytes, into, room, got) != MP_OK) {
-            pcm_.clear();
+            pcm_end_ = 0;
             drained_ = true;
             return false;
         }
@@ -630,7 +632,7 @@ bool PacketSource::pump()
                     skip_ = seek_target_ - packet.frame;
                 }
             }
-            pcm_.resize(carried + got);
+            pcm_end_ = carried + got;
             return true;
         }
         // A packet that decoded to nothing -- a priming frame. Ask for another
@@ -648,7 +650,7 @@ std::size_t PacketSource::read(void* dst, std::size_t bytes)
     std::size_t filled = 0;
 
     while (filled + stride <= bytes) {
-        if (pcm_at_ >= pcm_.size()) {
+        if (pcm_at_ >= pcm_end_) {
             if (!pump()) {
                 break;
             }
@@ -659,7 +661,7 @@ std::size_t PacketSource::read(void* dst, std::size_t bytes)
         // encoder's warm-up is discarded before anything is counted, and the
         // file's own length is what stops it.
         if (skip_ != 0) {
-            const std::size_t available = (pcm_.size() - pcm_at_) / stride;
+            const std::size_t available = (pcm_end_ - pcm_at_) / stride;
             const std::size_t drop = static_cast<std::size_t>(
                 std::min<std::uint64_t>(skip_, available));
             pcm_at_ += drop * stride;
@@ -677,10 +679,11 @@ std::size_t PacketSource::read(void* dst, std::size_t bytes)
         // forward, and when the packets run out they are simply never handed
         // over. See `MpStreamInfo::trim_frames` for why this cannot be done by
         // shortening the length instead.
-        const std::size_t buffered = pcm_.size() - pcm_at_;
+        const std::size_t buffered = pcm_end_ - pcm_at_;
         if (trim_ != 0 && buffered / stride <= trim_) {
-            carry_.assign(pcm_.begin() + static_cast<std::ptrdiff_t>(pcm_at_), pcm_.end());
-            pcm_.clear();
+            carry_.assign(pcm_.begin() + static_cast<std::ptrdiff_t>(pcm_at_),
+                          pcm_.begin() + static_cast<std::ptrdiff_t>(pcm_end_));
+            pcm_end_ = 0;
             pcm_at_ = 0;
             if (!pump()) {
                 break;
@@ -721,7 +724,7 @@ void PacketSource::warm_up(std::uint64_t target)
     // reservoir. v1 hid this inside each decoder, which is why each one had to
     // be right about it separately.
     (void)codec_.reset();
-    pcm_.clear();
+    pcm_end_ = 0;
     pcm_at_ = 0;
     carry_.clear();
     drained_ = false;

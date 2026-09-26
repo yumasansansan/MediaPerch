@@ -21,11 +21,13 @@
 // between them -- as brightness, not as an error. v3 chose between the two with
 // a `bool ten_bit` and had no way to be right about both.
 //
-// **MEDIAPERCH_ARCH does not reach this module, and that is the right answer
-// rather than a gap.** dav1d builds every SIMD variant it has and picks one
-// with CPUID, so the compiler's baseline never touches its assembly.
-// `dav1d_set_cpu_flags_mask` could cap it, and doing so was tried and removed,
-// because measuring what it actually does answered the question:
+// **MEDIAPERCH_ARCH reaches dav1d's C, and its assembly stays dav1d's to
+// pick.** The build hands dav1d the instruction set it hands everything else
+// (cmake/CompilerOptions.cmake), which is the code the compiler writes for its
+// C. dav1d builds every SIMD variant it has and picks one with CPUID, so the
+// flags never touch its assembly. `dav1d_set_cpu_flags_mask` could cap that,
+// and doing so was tried and removed, because measuring what it actually does
+// answered the question:
 //
 //   - the dispatch is a **cascade of overwrites**, not a choice of one tier.
 //     A DSP init assigns the SSSE3 functions, then overwrites the ones that
@@ -39,10 +41,8 @@
 //     and it made that build slower on a modern CPU for no correctness gain --
 //     dav1d's assembly is bit-exact against its C.
 //
-// Which is the policy cmake/CompilerOptions.cmake already records for libFLAC,
-// libmpg123, libopus and libwavpack: a library that dispatches internally is
-// left to dispatch. This tree builds *its own* inner loops twice because it
-// controls that codegen; dav1d's is not ours to pick.
+// So the mask stays out, as it does for libFLAC, libmpg123, libopus and
+// libwavpack: a library that dispatches internally is left to dispatch.
 //
 // **No device, and that is not a shortcoming.** Entropy decoding is serial by
 // construction -- AV1's symbol decoder, like CABAC -- and dav1d is CPU with

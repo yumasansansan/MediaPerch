@@ -187,10 +187,12 @@ decode-quality check inside it goes from 174 to 39.
 |---|---|
 | `llvm` | day to day. `llvm-debug`, `llvm-release` and `llvm-relwithdebinfo` build presets |
 | `llvm-avx2` | the x86-64-v3 half of what ships, and **where a change is validated** — see below |
+| `llvm-avx512` | x86-64-v4 with 512-bit vectors, for a machine with AVX-512 — see below |
+| `llvm-native` | the machine it is built on, and no other — see below |
 | `measure` | Release **with the measuring apparatus kept** — see below |
 | `core-only` | what CI builds to keep `src/engine` and `src/player` portable, and the engine free of the player |
 | `asan` | the parsers under ASan and UBSan |
-| `fuzz` | the libFuzzer targets |
+| `fuzz` | the libFuzzer targets. CI configures it with `-DMEDIAPERCH_ARCH=native`: the fuzzers are built and run on one runner and never shipped |
 
 There is no toolchain column because there is one toolchain. `llvm-tools`, a
 hidden preset every other one inherits, names each tool once.
@@ -540,7 +542,7 @@ syntax and the ON/OFF values they pass mean the same under either. Seventeen
 warnings per configure before; none after; every hash in the corpus the same
 with LTO on.
 
-## Two instruction-set baselines, both shipped
+## Instruction sets: two shipped, and two for a machine of your own
 
 Everything this tree links already dispatches on the CPU: libFLAC, libmpg123,
 libopus and libwavpack each compile several paths and pick one at run time. What
@@ -558,20 +560,53 @@ twice and upload both**, which costs a CI job and no code:
 |---|---|---|---|
 | baseline | `baseline` | `llvm` | anything x86-64 |
 | AVX2 | `avx2` | `llvm-avx2` | Haswell, Zen, and later |
+| AVX-512 | `avx512` | `llvm-avx512` | Skylake-SP, Ice Lake, Sapphire Rapids, Zen 4, and later |
+| this machine | `native` | `llvm-native` | the machine that built it |
+
+**One set of flags for everything the build compiles**: this tree, its
+submodules, the Rust modules, and the external projects -- aom, avm, libde265
+and HM through their own CMake, dav1d through Meson, libvpx through its
+configure. The libraries that dispatch still pick their hand-written SIMD at run
+time; what the flags decide is the code the compiler writes for the rest of
+them.
 
 `avx2` is x86-64-v3 -- AVX2, FMA, BMI1 and BMI2, LZCNT, MOVBE, F16C. Clang spells
 the whole set `-march=x86-64-v3`, and the baseline `-march=x86-64`, given as well
 so that a Clang built with some other default still builds this one. (MSVC's
 `/arch:AVX2` was the same set under another name.)
 
+`avx512` is x86-64-v4 -- AVX-512 F, BW, CD, DQ and VL on top of that -- and
+`native` is whatever the building machine has (`-march=native`). **Wherever there
+is AVX-512, all 512 bits of it are used**, which LLVM does not do by itself:
+measured with Clang 23 and rustc 1.98, its own choice for x86-64-v4, and for
+every Intel processor with AVX-512 from Skylake-SP to Granite Rapids, is 256-bit
+vectors, so a loop it vectorises never touches a zmm register; only Zen 4 and
+Zen 5 get 512 bits unasked. C and C++ are given `-mprefer-vector-width=512`. The
+Rust modules are given `-Ctarget-feature=-prefer-256-bit`, which turns off the
+LLVM tuning behind that choice; rustc has no stable spelling for it and warns,
+once for every crate it compiles, that the feature is unknown to it and
+unstable -- and passes it on, which is what counts. `avx512` always asks for the
+width; `native` asks each compiler whether the machine has AVX-512
+(`__AVX512F__` under `-march=native`, `target_feature="avx512f"` from rustc) and
+asks for it only where it does.
+
+**The configure checks that the width is real.** Wherever it asks for 512-bit
+vectors, it compiles a loop that wants them with the flags it is about to use,
+in C and in Rust, and stops if no zmm register appears in the assembly. The
+vectorised loops of the transforms, the resampler and the convolver were
+checked in their own assembly too.
+
 **In the AVX2 build, libopus is told to stop checking.** It compiles an SSE, an
 SSE2, an SSE4.1 and an AVX2 path and asks the CPU which to use; in a binary that
 already refuses to start without AVX2 that question has one answer, and asking
 it costs a branch and keeps three unreachable paths alive.
 `OPUS_X86_PRESUME_SSE`, `_SSE2`, `_SSE4_1` and `_AVX2` are all on there and off
-in the baseline. libFLAC and libmpg123 dispatch too and offer nothing to turn it
-off with -- FLAC's is not an option and mpg123's `OPT_MULTI` is a local `set()`
-in its own list file -- so their checks stay.
+in the baseline. The AVX-512 build presumes the same four: AVX2 is where opus's
+list ends, and the AVX-512 code it has (in `dnn/`) is chosen at compile time by
+the instruction set alone. `native` presumes nothing and lets opus ask. libFLAC
+and libmpg123 dispatch too and offer nothing to turn it off with -- FLAC's is
+not an option and mpg123's `OPT_MULTI` is a local `set()` in its own list file
+-- so their checks stay.
 
 **Does it change the bytes?** FMA computes a multiply and an add with one
 rounding where two instructions round twice, so it can. Under MSVC it did not:

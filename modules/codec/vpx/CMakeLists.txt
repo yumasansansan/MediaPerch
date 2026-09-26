@@ -94,6 +94,10 @@ ExternalProject_Add(vpx_external
         "$<IF:$<BOOL:${MEDIAPERCH_DECODER_CHECKS}>,1,0>"
         "${CMAKE_C_COMPILER}" "${CMAKE_CXX_COMPILER}" "${CMAKE_AR}"
         "${mediaperch_llvm_strip}" "${MEDIAPERCH_NASM}"
+        # The instruction set every external project is given
+        # (cmake/CompilerOptions.cmake), which the script adds to libvpx's
+        # extra C flags.
+        "${MEDIAPERCH_ARCH_CFLAGS}"
     INSTALL_COMMAND "${CMAKE_COMMAND}" -E true
     BUILD_BYPRODUCTS "${vpx_library}"
     # Everything is in the build step, so it is the one that has to run -- and

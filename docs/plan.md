@@ -4818,6 +4818,11 @@ Three things this turned up that were not obvious from the outside:
   libFLAC, libmpg123, libopus and libwavpack. This tree compiles *its own* inner loops twice
   because it controls that codegen; a library's own is not ours to pick.
 
+  *Later:* the instruction set does reach dav1d now, as it reaches every external project —
+  one set of flags for everything is the simpler arrangement, and what it changes is the code
+  the compiler writes for dav1d's C, never its assembly. The mask stays out, for the reasons
+  above.
+
 **CI installs them, and finding out that it did not is the reason.** The runner image has
 Ninja and neither of the other two, so the `find_program` guard fired and `codec_dav1d` was
 skipped in every leg -- the build stayed green and the artifacts quietly had no AV1 decoder,

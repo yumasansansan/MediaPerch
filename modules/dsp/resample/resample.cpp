@@ -141,16 +141,17 @@ std::shared_ptr<const Resampler::Filter> Resampler::filter_for(std::uint32_t up,
     // either, because its delay is a different number at every frequency. What
     // is reported instead is where the energy is.
     made->centre = made->minimum_phase ? 0 : (made->proto.size() - 1) / 2;
-    {
-        double weight = 0.0;
-        double moment = 0.0;
-        for (std::size_t i = 0; i < made->proto.size(); ++i) {
-            const double energy = made->proto[i] * made->proto[i];
-            weight += energy;
-            moment += energy * static_cast<double>(i);
-        }
+    made->latency = 0.0;
+    if (made->minimum_phase) {
+        // Found only where it is reported: it is a pass over every tap, and a
+        // linear-phase filter has nothing to report.
+        const double* h = made->proto.data();
+        const std::size_t n = made->proto.size();
+        const double weight = mp::transform::dot(h, h, n);
+        const double moment = mp::transform::sum_of(
+            n, [h](std::size_t i) { return h[i] * h[i] * static_cast<double>(i); });
         const double centroid = weight > 0.0 ? moment / weight : 0.0;
-        made->latency = made->minimum_phase ? centroid / static_cast<double>(up) : 0.0;
+        made->latency = centroid / static_cast<double>(up);
     }
 
     // Per phase, and reversed, so the inner loop walks both arrays forwards.
@@ -250,29 +251,37 @@ void Resampler::produce(std::uint64_t limit, double* const* out, std::uint32_t c
     const auto available =
         static_cast<std::uint64_t>(base_ + static_cast<std::int64_t>(held_));
 
+    // Where output frame `out_k_` is sampled from: input frame `i`, phase `p`.
+    // Every frame after it is `down_` further along, which steps `i` and `p`
+    // on by a whole part and a remainder -- where finding them afresh for each
+    // frame was a 64-bit division, as long as a sixth of the frame's arithmetic.
+    const std::uint64_t start = out_k_ * down_ + centre_;
+    std::uint64_t i = start / up_;
+    auto p = static_cast<std::uint32_t>(start - i * up_);
+    const std::uint32_t whole = down_ / up_;
+    const std::uint32_t rest = down_ % up_;
+
     while (produced < capacity && out_k_ < limit) {
-        const std::uint64_t m = out_k_ * down_ + centre_;
-        const std::uint64_t i = m / up_;
         if (i >= available) {
             break; // the newest tap has not arrived
         }
-        const auto p = static_cast<std::uint32_t>(m - i * up_);
         const auto at = static_cast<std::size_t>(static_cast<std::int64_t>(i) - base_);
         if (at + 1 < phase_taps_) {
             break; // the oldest tap was discarded, which would be a bug here
         }
         const double* co = coef_ + static_cast<std::size_t>(p) * phase_taps_;
-
+        const std::size_t from = at + 1 - phase_taps_;
         for (std::uint32_t c = 0; c < channels_; ++c) {
-            const double* x = hist_[c].data() + at + 1 - phase_taps_;
-            double acc = 0.0;
-            for (std::uint32_t j = 0; j < phase_taps_; ++j) {
-                acc += co[j] * x[j];
-            }
-            out[c][produced] = acc;
+            out[c][produced] = mp::transform::dot(co, hist_[c].data() + from, phase_taps_);
         }
         ++out_k_;
         ++produced;
+        i += whole;
+        p += rest;
+        if (p >= up_) {
+            p -= up_;
+            ++i;
+        }
     }
 }
 

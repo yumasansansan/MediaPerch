@@ -26,7 +26,7 @@ set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
 set(OPUS_INSTALL_PKG_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
 set(OPUS_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
 
-# **In the AVX2 build, opus is told to stop checking.**
+# **In the AVX2 and AVX-512 builds, opus is told to stop checking.**
 #
 # libopus compiles an SSE, an SSE2, an SSE4.1 and an AVX2 path and picks one per
 # call site by asking the CPU. In a binary that already refuses to start without
@@ -39,10 +39,17 @@ set(OPUS_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
 # they are named anyway so that all four read as one decision rather than two
 # defaults and two overrides.
 #
+# The AVX-512 build presumes the same four, because AVX2 is where opus's list
+# ends: it has no AVX-512 path to presume. What AVX-512 code it has (dnn/) is
+# chosen at compile time by the instruction set itself, so `-march=x86-64-v4`
+# is all it needs. `native` presumes nothing: what the machine it is built on
+# has is not a question this list file can answer, and asking the CPU at run
+# time is right for a build that is not told.
+#
 # libFLAC and libmpg123 dispatch internally too and offer nothing to turn it off
 # with -- FLAC's is not an option and mpg123's `OPT_MULTI` is a local `set()` in
 # its own list file. Their checks stay, and are a branch each.
-if(MEDIAPERCH_ARCH STREQUAL "avx2")
+if(MEDIAPERCH_ARCH MATCHES "^(avx2|avx512)$")
     set(OPUS_X86_PRESUME_SSE ON CACHE BOOL "" FORCE)
     set(OPUS_X86_PRESUME_SSE2 ON CACHE BOOL "" FORCE)
     set(OPUS_X86_PRESUME_SSE4_1 ON CACHE BOOL "" FORCE)

@@ -212,11 +212,18 @@ jobs:
         shell: bash
         run: bash ci/setup.sh
 
+      # **For the runner's own processor.** The fuzzers are built, run and
+      # thrown away in this job, and nothing but their findings leaves it, so
+      # they are compiled for the machine they run on -- native, AVX-512 at its
+      # whole width where the runner has it -- which is the fastest code it can
+      # run. What ships is built by the baseline and AVX2 jobs, not this one.
       - name: Configure
-        run: cmake --preset fuzz
+        run: cmake --preset fuzz -DMEDIAPERCH_ARCH=native
 
       - name: Report the toolchain
-        run: Get-Content build/fuzz/llvm-toolchain.txt
+        run: |
+          Get-Content build/fuzz/llvm-toolchain.txt
+          cmake -N -L build/fuzz | Select-String -Pattern 'MEDIAPERCH_ARCH'
 
       - name: Build
         run: cmake --build --preset fuzz

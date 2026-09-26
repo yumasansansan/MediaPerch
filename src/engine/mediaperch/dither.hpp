@@ -155,7 +155,15 @@ private:
     /// The previous rectangular draw, for the highpass construction.
     double previous_ = 0.0;
     std::vector<double> taps_;
+    /// The errors of the samples before this one, newest first from `head_`.
+    ///
+    /// **Kept twice over**: each error is written at `head_` and again at
+    /// `head_ + taps`, so the newest `taps` of them are always one run of
+    /// neighbours, read in the order the taps are. A single copy had to move
+    /// every stored error along by one for each sample, fifty-odd of them for a
+    /// long curve.
     std::vector<double> history_;
+    std::size_t head_ = 0;
 };
 
 } // namespace mp
