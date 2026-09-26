@@ -16,6 +16,7 @@
 #include <mediaperch/module.h>
 
 #include "module_loader.hpp"
+#include "temp_path.hpp"
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -38,10 +39,8 @@ constexpr MpPixelLayout k_bgra8 = MP_LAYOUT_BGRA8;
 /// something nobody uses.
 class CubeFile {
 public:
-    explicit CubeFile(const std::string& text)
+    explicit CubeFile(const std::string& text) : path_(mp::test::temp_path("lut.cube"))
     {
-        path_ = std::filesystem::temp_directory_path() /
-                ("mediaperch_test_" + std::to_string(++counter()) + ".cube");
         std::ofstream out{path_, std::ios::binary};
         out << text;
     }
@@ -56,11 +55,6 @@ public:
     [[nodiscard]] std::string name() const { return path_.string(); }
 
 private:
-    static int& counter()
-    {
-        static int n = 0;
-        return n;
-    }
     std::filesystem::path path_;
 };
 

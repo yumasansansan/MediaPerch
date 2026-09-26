@@ -24,6 +24,7 @@
 
 #include "h264.hpp"
 #include "module_loader.hpp"
+#include "temp_path.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -1252,7 +1253,10 @@ struct DeepFile {
         if (at.back() != L'\\') {
             at += L'\\';
         }
-        at += L"mediaperch-long";
+        // A directory of this file's own (temp_path.hpp): the one every copy
+        // shared was removed by whichever finished first.
+        const std::string top = mp::test::unique_name("long");
+        at.append(top.begin(), top.end());
         if (!::CreateDirectoryW(at.c_str(), nullptr) && ::GetLastError() != ERROR_ALREADY_EXISTS) {
             return;
         }

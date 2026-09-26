@@ -9,6 +9,8 @@
 
 #include <impulse.hpp>
 
+#include "temp_path.hpp"
+
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
@@ -23,11 +25,12 @@
 
 namespace {
 
-/// A float32 WAV, written by hand.
+/// A float32 WAV, written by hand, under a name no other test process has
+/// (temp_path.hpp).
 std::string write_wav(const std::string& name, const std::vector<std::vector<double>>& channels,
                       std::uint32_t rate)
 {
-    const auto path = std::filesystem::temp_directory_path() / name;
+    const auto path = mp::test::temp_path(name);
     const auto channel_count = static_cast<std::uint32_t>(channels.size());
     const auto frames = static_cast<std::uint32_t>(channels.front().size());
     const std::uint32_t data_bytes = frames * channel_count * 4;

@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <numeric>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -405,6 +406,29 @@ TEST_CASE("the block size the graph happens to use changes nothing", "[resample]
         for (std::size_t n = 0; n < whole[0].size(); ++n) {
             REQUIRE(pieces[0][n] == whole[0][n]); // bit for bit, not approximately
         }
+    }
+}
+
+TEST_CASE("a stage that is reset plays what a new one plays", "[resample]")
+{
+    // A reset is the stream starting over: the silence the filter starts half
+    // full of, back in place, and nothing of the last stream left. A stage run
+    // twice with a reset between plays the same samples both times -- after a
+    // flush, which is where a file ends, and at the decimating ratios, which
+    // can leave less history than that silence when the reset comes.
+    std::string why;
+    for (const auto& [from, to] : {std::pair{44100u, 48000u}, std::pair{48000u, 44100u},
+                                   std::pair{96000u, 44100u}}) {
+        const std::vector<std::vector<double>> in{sine(20000, 997.0, from, 0.4),
+                                                  sine(20000, 440.0, from, 0.3)};
+        mp::resample::Resampler r;
+        REQUIRE(r.configure(from, to, 2, quality("good"), why));
+        const auto first = run(r, in, 1000);
+        r.reset();
+        const auto second = run(r, in, 1000);
+        INFO(from << " -> " << to);
+        REQUIRE(!first[0].empty());
+        CHECK(second == first); // bit for bit
     }
 }
 

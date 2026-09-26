@@ -224,9 +224,11 @@ bool Resampler::configure(std::uint32_t in_rate, std::uint32_t out_rate,
 
 void Resampler::reset() noexcept
 {
+    // The silence the stream starts with, written into each room, which is
+    // never shorter than it (see `hist_`).
     const std::size_t seed = phase_taps_ > 1 ? phase_taps_ - 1 : 0;
     for (auto& channel : hist_) {
-        channel.assign(seed, 0.0);
+        std::fill_n(channel.data(), seed, 0.0);
     }
     held_ = seed;
     base_ = -static_cast<std::int64_t>(seed);
@@ -287,8 +289,11 @@ void Resampler::produce(std::uint64_t limit, double* const* out, std::uint32_t c
 
 void Resampler::reserve(std::uint32_t frames)
 {
+    const std::size_t room = held_ + frames + 1;
     for (auto& channel : hist_) {
-        channel.reserve(held_ + frames + 1);
+        if (channel.size() < room) {
+            channel.resize(room);
+        }
     }
 }
 
@@ -301,9 +306,11 @@ void Resampler::discard()
     if (drop <= 0) {
         return;
     }
+    // The rest of the run moves to the front of the room, and the room stays.
     const auto n = static_cast<std::size_t>(drop);
     for (auto& channel : hist_) {
-        channel.erase(channel.begin(), channel.begin() + static_cast<std::ptrdiff_t>(n));
+        std::copy(channel.begin() + static_cast<std::ptrdiff_t>(n),
+                  channel.begin() + static_cast<std::ptrdiff_t>(held_), channel.begin());
     }
     held_ -= n;
     base_ += drop;
@@ -329,10 +336,15 @@ bool Resampler::process(const double* const* in, std::uint32_t in_frames,
     }
 
     if (in_frames != 0 && in != nullptr) {
+        const std::size_t run = held_ + in_frames;
         for (std::uint32_t c = 0; c < channels_; ++c) {
-            hist_[c].insert(hist_[c].end(), in[c], in[c] + in_frames);
+            std::vector<double>& channel = hist_[c];
+            if (channel.size() < run) {
+                channel.resize(run);
+            }
+            std::copy_n(in[c], in_frames, channel.begin() + static_cast<std::ptrdiff_t>(held_));
         }
-        held_ += in_frames;
+        held_ = run;
         taken_ += in_frames;
     }
 
@@ -357,10 +369,14 @@ bool Resampler::flush(double* const* out, std::uint32_t capacity, std::uint32_t&
         // The tail exists because the last real samples are still walking out
         // through the taps. Feeding silence is what walks them out.
         flushed_ = true;
+        const std::size_t run = held_ + phase_taps_;
         for (auto& channel : hist_) {
-            channel.insert(channel.end(), phase_taps_, 0.0);
+            if (channel.size() < run) {
+                channel.resize(run);
+            }
+            std::fill_n(channel.begin() + static_cast<std::ptrdiff_t>(held_), phase_taps_, 0.0);
         }
-        held_ += phase_taps_;
+        held_ = run;
     }
 
     produce(limit, out, capacity, produced);

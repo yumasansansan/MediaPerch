@@ -161,8 +161,18 @@ private:
     const std::vector<double>* proto_ = nullptr;
     Response response_{};
 
-    /// One run of history per channel. Grown once and then reused: the decode
-    /// thread may allocate, but there is no reason to make it a habit.
+    /// One run of history per channel: each vector is the channel's room, and
+    /// the run is its first `held_` samples. Grown once and then reused: the
+    /// decode thread may allocate, but there is no reason to make it a habit.
+    ///
+    /// **Only `process`, `flush` and `reserve` make a room longer, and nothing
+    /// makes one shorter**, so a room is never shorter than the silence a
+    /// stream starts with, which `configure` made it. That is what lets `reset`
+    /// write the silence into the room rather than make it anew -- it
+    /// allocates nothing, so it can promise not to throw. When the vector's
+    /// length was the run, a reset had to lengthen a run that a decimating
+    /// stage had left shorter than that silence, through a call that may
+    /// allocate.
     std::vector<std::vector<double>> hist_;
     std::size_t held_ = 0;      ///< samples in each channel's run
     std::int64_t base_ = 0;     ///< absolute input index of hist[0]
