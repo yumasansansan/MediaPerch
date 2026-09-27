@@ -14,7 +14,8 @@
 //    demuxers name the codec. In the one-object shape each of those would have
 //    needed its own copy of "and if it is uncompressed, hand the bytes over".
 //  * **It has no dependency of any kind** -- not dr_libs, not the C++ standard
-//    library beyond <cstring>. Uncompressed audio therefore plays on this and
+//    library beyond <cstring> and the headers that name its integer types.
+//    Uncompressed audio therefore plays on this and
 //    `demux_wav`, which is a header, and on nothing else that has to be built.
 //  * **It cannot convert, because there is nothing here that could.** Path A's
 //    bit-exactness used to be a property of one module behaving itself.
@@ -48,6 +49,8 @@
 
 #include <mediaperch/module.h>
 
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <new>
 

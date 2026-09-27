@@ -12,35 +12,36 @@
 //
 // Deliberately not `mp::win::ModuleRegistry`: what the tests exercise is the
 // portable half against a module, and the registry belongs to the Windows head.
-// What a module *is*, is a DLL exporting `mp_module_entry`, and saying so in a
-// dozen lines is a better statement of the ABI than borrowing the loader that
-// already knows. `module_abi_test.cpp` keeps its own raw loading on purpose:
-// it needs the entry point itself, to ask it the wrong versions.
+// What a module *is*, is a shared library -- a DLL on Windows, a shared object
+// elsewhere -- exporting `mp_module_entry`, and saying so in a dozen lines is a
+// better statement of the ABI than borrowing the loader that already knows.
+// The loading itself is test_platform.hpp's, where the build chooses the
+// system. `module_abi_test.cpp` loads modules without this on purpose: it
+// needs the entry point itself, to ask it the wrong versions.
 
 #pragma once
 
+#include "test_platform.hpp"
+
 #include <mediaperch/module.h>
 
+#include <bit>
 #include <cstdint>
-
-#ifndef WIN32_LEAN_AND_MEAN
-#    define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
 
 namespace mp::test {
 
 struct Module {
+    /// The module at `path`, which is UTF-8, as every path the tests are
+    /// handed by CMake is.
     Module(const char* path, MpKind kind)
     {
-        auto* dll = ::LoadLibraryA(path);
-        if (dll == nullptr) {
+        using Entry = const MpModuleDesc*(MP_CALL*)(std::uint32_t);
+        library = platform::open_library(utf8_path(path));
+        if (library == nullptr) {
             return;
         }
-        library = dll;
-        using Entry = const MpModuleDesc*(MP_CALL*)(std::uint32_t);
-        auto* entry = reinterpret_cast<Entry>(
-            reinterpret_cast<void*>(::GetProcAddress(dll, "mp_module_entry")));
+        auto* entry =
+            std::bit_cast<Entry>(platform::find_function(library, "mp_module_entry"));
         if (entry == nullptr) {
             return;
         }
@@ -56,13 +57,13 @@ struct Module {
     ~Module()
     {
         if (library != nullptr) {
-            // Before FreeLibrary, and not from a destructor inside the module:
-            // codec_mft stops Media Foundation here, and MFShutdown from under
-            // the loader lock is a deadlock.
+            // Before the library is let go, and not from a destructor inside the
+            // module: codec_mft stops Media Foundation here, and MFShutdown from
+            // under the loader lock is a deadlock.
             if (desc != nullptr && desc->shutdown != nullptr) {
                 desc->shutdown();
             }
-            ::FreeLibrary(static_cast<HMODULE>(library));
+            platform::close_library(library);
         }
     }
     Module(const Module&) = delete;

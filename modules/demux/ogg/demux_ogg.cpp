@@ -20,24 +20,16 @@
 
 #include <mediaperch/module.h>
 
+#include "module_file.hpp"
 #include "module_log.hpp"
-#if defined(_WIN32)
-#    include "win_path.hpp" // a path past MAX_PATH; see the header
-#endif
 
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <new>
 #include <string>
 #include <vector>
-
-#if defined(_WIN32)
-#  ifndef WIN32_LEAN_AND_MEAN
-#    define WIN32_LEAN_AND_MEAN
-#  endif
-#  include <windows.h>
-#endif
 
 namespace {
 
@@ -52,16 +44,6 @@ void log_fmt(MpLogLevel level, const char* format, ...) noexcept
     va_start(args, format);
     mp::log::vfmt(g_host, level, format, args);
     va_end(args);
-}
-
-FILE* open_utf8(const char* path) noexcept
-{
-#if defined(_WIN32)
-    // win_path.hpp: UTF-16, and past MAX_PATH the prefix that lifts the limit.
-    return mp::winpath::fopen_utf8(path, L"rb");
-#else
-    return std::fopen(path, "rb");
-#endif
 }
 
 /// How many header packets a codec puts in front of its audio, and what it
@@ -182,14 +164,14 @@ bool next_page(MpDemux* d) noexcept
 /// only the last one knows how long it turned out to be.
 std::uint64_t final_granule(FILE* fp) noexcept
 {
-    if (_fseeki64(fp, 0, SEEK_END) != 0) {
+    if (mp::file::seek(fp, 0, SEEK_END) != 0) {
         return 0;
     }
-    const std::int64_t size = _ftelli64(fp);
+    const std::int64_t size = mp::file::tell(fp);
     // 64 KB is comfortably more than Ogg's 64 KB *maximum* page, so the last
     // page begins inside it unless the file ends in something that is not one.
     const std::int64_t window = size < 65536 ? size : 65536;
-    if (_fseeki64(fp, size - window, SEEK_SET) != 0) {
+    if (mp::file::seek(fp, size - window, SEEK_SET) != 0) {
         return 0;
     }
     std::vector<std::uint8_t> tail(static_cast<std::size_t>(window));
@@ -242,7 +224,7 @@ MpResult MP_CALL demux_open(const char* path, MpDemux** out) noexcept
         return MP_ERR_NO_MEMORY;
     }
     d->path = path;
-    d->fp = open_utf8(path);
+    d->fp = mp::file::open_read(path);
     if (d->fp == nullptr) {
         delete d;
         return MP_ERR_IO;
@@ -380,9 +362,9 @@ MpResult MP_CALL demux_open(const char* path, MpDemux** out) noexcept
     // on from it and the length is at the other end of the file. Looking for the
     // last page moves it; not putting it back produced a stream that described
     // itself perfectly and then decoded nothing at all.
-    const std::int64_t resume = _ftelli64(d->fp);
+    const std::int64_t resume = mp::file::tell(d->fp);
     const std::uint64_t granule = final_granule(d->fp);
-    (void)_fseeki64(d->fp, resume, SEEK_SET);
+    (void)mp::file::seek(d->fp, resume, SEEK_SET);
     // Opus counts its granule at 48 kHz from before the pre-skip, so the audio
     // is what is left after it. Vorbis counts finished samples.
     d->total_frames = granule > d->pre_skip ? granule - d->pre_skip : granule;
@@ -548,7 +530,7 @@ MpResult MP_CALL demux_seek(MpDemux* d, std::uint32_t stream,
     // `vorbisfile` does. Restarting and reading forward is correct, costs one
     // pass over the file, and is honest about being the simple version; the
     // fast one is worth writing when something asks for it.
-    if (_fseeki64(d->fp, 0, SEEK_SET) != 0) {
+    if (mp::file::seek(d->fp, 0, SEEK_SET) != 0) {
         return MP_ERR_IO;
     }
     ogg_stream_reset(&d->stream);

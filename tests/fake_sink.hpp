@@ -12,6 +12,8 @@
 #include "mediaperch/format.hpp"
 #include "mediaperch/sink.hpp"
 
+#include "test_platform.hpp"
+
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -21,75 +23,11 @@
 #include <thread>
 #include <vector>
 
-#ifdef _WIN32
-#    ifndef WIN32_LEAN_AND_MEAN
-#        define WIN32_LEAN_AND_MEAN
-#    endif
-#    include <windows.h>
-#endif
-
 namespace mp::test {
 
-/// Sleeps a thread to a deadline, as near to it as the system can wake one.
-///
-/// **On Windows, by a timer that can keep one.** `std::this_thread::sleep_until`
-/// sleeps there in whole timer ticks, 15.5 ms, so a device paced by it played
-/// 31 periods back to back once a tick: the right rate on average, and a burst
-/// that no ring sized for this device lives through -- calibration's rings of
-/// 4 and 8 ms underran in every run. A waitable timer made high-resolution
-/// wakes within tens of microseconds of its time: paced by one, 256 periods of
-/// 500 us came a median of 500 us apart and never more than two back to back,
-/// which is how a device's own clock runs. The flag is Windows 10 1803's; a
-/// system older than that refuses the timer, and the ticks are what is left.
-class PeriodTimer {
-public:
-    PeriodTimer() noexcept
-    {
-#ifdef _WIN32
-        timer_ = ::CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
-                                          SYNCHRONIZE | TIMER_MODIFY_STATE);
-#endif
-    }
-
-    ~PeriodTimer()
-    {
-#ifdef _WIN32
-        if (timer_ != nullptr) {
-            ::CloseHandle(timer_);
-        }
-#endif
-    }
-
-    PeriodTimer(const PeriodTimer&) = delete;
-    PeriodTimer& operator=(const PeriodTimer&) = delete;
-
-    void sleep_until(std::chrono::steady_clock::time_point due) const noexcept
-    {
-#ifdef _WIN32
-        const auto left = due - std::chrono::steady_clock::now();
-        if (left <= std::chrono::steady_clock::duration::zero()) {
-            return;
-        }
-        if (timer_ != nullptr) {
-            // Relative, which is negative, in units of 100 ns -- rounded up, so
-            // that the wait does not end before the deadline.
-            LARGE_INTEGER when{};
-            when.QuadPart =
-                -((std::chrono::duration_cast<std::chrono::nanoseconds>(left).count() + 99) / 100);
-            if (::SetWaitableTimerEx(timer_, &when, 0, nullptr, nullptr, nullptr, 0) != FALSE &&
-                ::WaitForSingleObject(timer_, INFINITE) == WAIT_OBJECT_0) {
-                return;
-            }
-        }
-#endif
-        std::this_thread::sleep_until(due);
-    }
-
-private:
-#ifdef _WIN32
-    HANDLE timer_ = nullptr;
-#endif
-};
+/// The device's clock: test_platform.hpp says why it is a timer of the
+/// system's on Windows, and the standard library's sleep elsewhere.
+using platform::PeriodTimer;
 
 /// Behaviour a test wants out of the fake device.
 struct FakeSinkRules {

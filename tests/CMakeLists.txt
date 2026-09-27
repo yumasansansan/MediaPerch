@@ -10,6 +10,28 @@ FetchContent_Declare(Catch2
     GIT_SHALLOW TRUE
     EXCLUDE_FROM_ALL)
 FetchContent_MakeAvailable(Catch2)
+# At the tests' standard, C++23 without extensions: Catch2 compiles its printers
+# for std::string_view only from C++17 on, the tests use them, and a Catch2 left
+# to Clang's default -- C++14 for the MSVC target -- links without them.
+set_target_properties(Catch2 Catch2WithMain PROPERTIES
+    CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+
+# **The system's half of a test program, chosen here.** What the tests ask of
+# the system is declared in test_platform.hpp and answered per system, in
+# test_platform_windows.cpp or test_platform_posix.cpp, so that no test has an
+# `#if` for it; on Windows a test program also gets no_dialogs.cpp, which keeps
+# its failures out of message boxes (src/win/mediaperch/no_dialogs.hpp).
+function(mediaperch_test_platform target)
+    if(WIN32)
+        target_sources(${target} PRIVATE
+            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/test_platform_windows.cpp"
+            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/no_dialogs.cpp")
+    else()
+        target_sources(${target} PRIVATE
+            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/test_platform_posix.cpp")
+        target_link_libraries(${target} PRIVATE ${CMAKE_DL_LIBS})
+    endif()
+endfunction()
 
 add_executable(mediaperch_tests
     abi_test.cpp
@@ -50,9 +72,8 @@ add_executable(mediaperch_tests
     settings_test.cpp
     sine_test.cpp
     transport_test.cpp
-    # Fails on stderr rather than in a dialog: see src/win/mediaperch/no_dialogs.hpp.
-    no_dialogs.cpp
 )
+mediaperch_test_platform(mediaperch_tests)
 
 # **Every module, loaded, at this tree's ABI version.** Not a named module: the
 # one that falls behind is the one nobody remembered to name, which is how five
@@ -62,8 +83,11 @@ add_executable(mediaperch_tests
 # is built into.
 if(TARGET mp_codec_pcm)
     target_sources(mediaperch_tests PRIVATE module_abi_test.cpp)
+    # UTF-8, which std::filesystem reads as UTF-8 everywhere, and the ending a
+    # module's file name has on this platform: .dll, or .so.
     target_compile_definitions(mediaperch_tests PRIVATE
-        "MEDIAPERCH_MODULE_DIR=L\"$<TARGET_FILE_DIR:mp_codec_pcm>/..\"")
+        "MEDIAPERCH_MODULE_DIR=u8\"$<TARGET_FILE_DIR:mp_codec_pcm>/..\""
+        "MEDIAPERCH_MODULE_SUFFIX=\"${CMAKE_SHARED_MODULE_SUFFIX}\"")
     # And every demuxer found there, handed broken copies of real files.
     target_sources(mediaperch_tests PRIVATE demux_robust_test.cpp)
 endif()
@@ -125,7 +149,8 @@ if(TARGET mediaperch_biquad)
     target_sources(mediaperch_tests PRIVATE eq_test.cpp autoeq_test.cpp
                    ../modules/dsp/eq/autoeq.cpp)
     target_include_directories(mediaperch_tests PRIVATE ../modules/dsp/eq)
-    target_link_libraries(mediaperch_tests PRIVATE mediaperch_biquad)
+    # autoeq.cpp opens a profile by name, through module_file.hpp.
+    target_link_libraries(mediaperch_tests PRIVATE mediaperch_biquad mediaperch_module_log)
 endif()
 
 # A loudness meter has a published calibration point, so the test uses it: EBU
@@ -209,6 +234,9 @@ if(TARGET mp_codec_de265 AND TARGET mp_demux_mp4)
     add_subdirectory(hm)
     if(MEDIAPERCH_HM_FOUND)
         target_sources(mediaperch_tests PRIVATE hm_cross_test.cpp)
+        # The hvcC-to-Annex-B conversion, which turns the MP4's samples into
+        # the elementary stream HM reads.
+        target_link_libraries(mediaperch_tests PRIVATE mediaperch_h264)
         target_compile_definitions(mediaperch_tests PRIVATE
             "MEDIAPERCH_HM_DECODER=\"${MEDIAPERCH_HM_DECODER}\"")
         add_dependencies(mediaperch_tests hm_external)
@@ -240,8 +268,11 @@ endif()
 if(TARGET mp_codec_aom AND TARGET mp_codec_dav1d AND TARGET mp_demux_mp4)
     target_sources(mediaperch_tests PRIVATE av1_cross_test.cpp)
     target_compile_definitions(mediaperch_tests PRIVATE
-        "MEDIAPERCH_CODEC_AOM=\"$<TARGET_FILE:mp_codec_aom>\"")
-    add_dependencies(mediaperch_tests mp_codec_aom)
+        "MEDIAPERCH_CODEC_AOM=\"$<TARGET_FILE:mp_codec_aom>\""
+        # Named here as well as above: the block above needs a presenter, which
+        # only Windows has, and two decoders need none.
+        "MEDIAPERCH_CODEC_DAV1D=\"$<TARGET_FILE:mp_codec_dav1d>\"")
+    add_dependencies(mediaperch_tests mp_codec_aom mp_codec_dav1d)
 endif()
 
 # The presenter, rendered off-screen on WARP and read back. Not a screenshot
@@ -360,13 +391,15 @@ catch_discover_tests(mediaperch_tests)
 # other, and use it: the link line is the proof, because a reference across
 # would be an unresolved symbol here and nowhere else. cmake/CorePurity.cmake
 # reads the includes for the same rule at the source level.
-add_executable(mediaperch_audio_alone audio_alone.cpp no_dialogs.cpp)
+add_executable(mediaperch_audio_alone audio_alone.cpp)
+mediaperch_test_platform(mediaperch_audio_alone)
 target_include_directories(mediaperch_audio_alone PRIVATE ../src/win)
 target_link_libraries(mediaperch_audio_alone PRIVATE MediaPerch::audio mediaperch_flags)
 set_target_properties(mediaperch_audio_alone PROPERTIES FOLDER "tests")
 add_test(NAME audio_alone COMMAND mediaperch_audio_alone)
 
-add_executable(mediaperch_video_alone video_alone.cpp no_dialogs.cpp)
+add_executable(mediaperch_video_alone video_alone.cpp)
+mediaperch_test_platform(mediaperch_video_alone)
 target_include_directories(mediaperch_video_alone PRIVATE ../src/win)
 target_link_libraries(mediaperch_video_alone PRIVATE MediaPerch::video mediaperch_flags)
 set_target_properties(mediaperch_video_alone PROPERTIES FOLDER "tests")
@@ -424,9 +457,6 @@ if(TARGET mediaperch_probe)
     set_tests_properties(format_matrix PROPERTIES TIMEOUT 600 LABELS quality)
 endif()
 
-# win_path.hpp, for the module sources compiled straight into the tests
-# (autoeq.cpp opens a profile by name): the header beside module_log.
-target_include_directories(mediaperch_tests PRIVATE ../modules/shared/module_log)
 # no_dialogs.hpp, which every test program and the probe share: the Windows
 # head's header, the one that decides how this process reports a failure.
 target_include_directories(mediaperch_tests PRIVATE ../src/win)

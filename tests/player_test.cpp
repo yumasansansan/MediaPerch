@@ -505,6 +505,11 @@ TEST_CASE("a track boundary does not rebuild the picture", "[player][video]")
         const std::lock_guard lock{mp::test::presenter_log().mutex};
         return mp::test::presenter_log().configured;
     }));
+    // **Handed out, and not only configured.** The presenter says it is
+    // configured from inside VideoPath::open, and the player publishes the
+    // path once open has returned: a question asked in between finds no
+    // picture, which with every core busy was one run in a few hundred.
+    REQUIRE(wait_for([&] { return player.picture_generation() != 0; }));
 
     std::string why;
     REQUIRE(player.set_node("presenter", "size", "640x360", why));
@@ -577,6 +582,11 @@ TEST_CASE("a track with no picture ends it, and the next one gets its size back"
         const std::lock_guard lock{mp::test::presenter_log().mutex};
         return mp::test::presenter_log().configured;
     }));
+    // **Handed out, and not only configured.** The presenter says it is
+    // configured from inside VideoPath::open, and the player publishes the
+    // path once open has returned: a question asked in between finds no
+    // picture, which with every core busy was one run in a few hundred.
+    REQUIRE(wait_for([&] { return player.picture_generation() != 0; }));
 
     std::string why;
     REQUIRE(player.set_node("presenter", "size", "640x360", why));
@@ -633,6 +643,11 @@ TEST_CASE("a size the presenter refuses is not remembered", "[player][video]")
         const std::lock_guard lock{mp::test::presenter_log().mutex};
         return mp::test::presenter_log().configured;
     }));
+    // **Handed out, and not only configured.** The presenter says it is
+    // configured from inside VideoPath::open, and the player publishes the
+    // path once open has returned: a question asked in between finds no
+    // picture, which with every core busy was one run in a few hundred.
+    REQUIRE(wait_for([&] { return player.picture_generation() != 0; }));
     {
         const std::lock_guard lock{mp::test::presenter_log().mutex};
         mp::test::presenter_log().refuse_size = true;

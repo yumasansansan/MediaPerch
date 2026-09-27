@@ -12,22 +12,28 @@
 # COFF objects for the same C runtime as everything else here, and the assembly
 # is nasm's win64 output either way. Measured: configure turns on the x86
 # assembly and run-time CPU detection through AVX-512, as it did for the `-vs`
-# target, and the archive builds with no change to libvpx.
+# target, and the archive builds with no change to libvpx. On Linux the target
+# is `x86_64-linux-gcc`, the same makefiles with Clang, and the archive is
+# position-independent, because the module it goes into is a shared library.
 #
 # **The C runtime is said, not left to the link.** Clang's GNU driver compiles
 # for no particular C runtime unless it is told one, and libvpx's makefiles do
 # not tell it; -fms-runtime-lib=dll is /MD, which defines _DLL for the headers
-# and names msvcrt for the linker, and is what the module links.
+# and names msvcrt for the linker, and is what the module links. Windows only:
+# Linux has the one C library.
 #
 # **The instruction set is the rest of the build's** (MEDIAPERCH_ARCH, the
 # flags cmake/CompilerOptions.cmake hands every external project), added to the
-# same extra flags. libvpx still picks its own assembly at run time; what the
-# flags change is the code the compiler writes for its C.
+# same extra flags -- **and in a build for AVX2 or AVX-512, that set's assembly
+# is taken without asking the CPU.** With run-time detection off, libvpx's
+# rtcd.pl calls every function's version for the highest set enabled, so a build
+# for AVX2 turns AVX-512 off, which it does not guarantee, and a build for
+# AVX-512 keeps it (MEDIAPERCH_ISA_LEVEL, the last argument).
 #
-# **This runs under MSYS2 and that is not a preference.** libvpx's scripts use
-# MSYS2's sed and cut, and its rules put long lists on one command line. A
-# native Windows GNU make runs a command through cmd.exe, whose limit is 8191
-# characters; it once truncated this build's source list mid-word --
+# **On Windows this runs under MSYS2, and that is not a preference.** libvpx's
+# scripts use MSYS2's sed and cut, and its rules put long lists on one command
+# line. A native Windows GNU make runs a command through cmd.exe, whose limit is
+# 8191 characters; it once truncated this build's source list mid-word --
 #
 #     ../libvpx/vpx_dsp/x86/inv_txfm
 #
@@ -36,17 +42,27 @@
 # own bash, so the limit is CreateProcess's 32767 and the lists fit.
 #
 # Arguments: <src> <build> <checks> <cc> <cxx> <ar> <strip> <nasm> <arch flags>
+#            <isa level>
 set -e
 
-# **MSYS2's own tools first, before anything else runs.** This script is started
-# by CMake with the parent's PATH, which is a Windows one: `cygpath`, `sed` and
-# `cut` all have to be MSYS2's, and libvpx's scripts assume so.
-export PATH="/usr/bin:$PATH"
+# **MSYS2's own tools first, before anything else runs**, on Windows: this
+# script is started by CMake with the parent's PATH, which is a Windows one, and
+# `cygpath`, `sed` and `cut` all have to be MSYS2's, as libvpx's scripts assume.
+# Elsewhere the paths are already the shell's own.
+if [ -x /usr/bin/cygpath ]; then
+    windows=1
+    export PATH="/usr/bin:$PATH"
+    unix_path() { /usr/bin/cygpath -u "$1"; }
+else
+    windows=0
+    unix_path() { printf '%s' "$1"; }
+fi
 
-src=$(/usr/bin/cygpath -u "$1")
-build=$(/usr/bin/cygpath -u "$2")
+src=$(unix_path "$1")
+build=$(unix_path "$2")
 checks=$3
 arch=$9
+isa=${10}
 
 # **The toolchain the parent build was checked against**, found by putting its
 # directory first on PATH and naming each tool bare. Not by path: libvpx's
@@ -54,8 +70,8 @@ arch=$9
 # C:\Program Files\LLVM\bin -- a compiler called `/c/Program`. LLVM's
 # directory holds no sed, cut or make, so nothing of MSYS2's is shadowed.
 # `--as=nasm` looks nasm up by name the same way.
-llvm_bin=$(dirname "$(/usr/bin/cygpath -u "$4")")
-nasm=$(/usr/bin/cygpath -u "$8")
+llvm_bin=$(dirname "$(unix_path "$4")")
+nasm=$(unix_path "$8")
 export PATH="$llvm_bin:$PATH:$(dirname "$nasm")"
 export CC=$(basename "$4" .exe)
 export CXX=$(basename "$5" .exe)
@@ -79,10 +95,16 @@ cd "$build"
 #
 # webm-io and libyuv are on by default and are both jobs this tree does itself:
 # containers are demuxers here and colour conversion is a shader.
-options=(
-    --target=x86_64-win64-gcc
+if [ "$windows" = 1 ]; then
+    options=(--target=x86_64-win64-gcc "--extra-cflags=-fms-runtime-lib=dll${arch:+ $arch}")
+else
+    options=(--target=x86_64-linux-gcc --enable-pic)
+    if [ -n "$arch" ]; then
+        options+=("--extra-cflags=$arch")
+    fi
+fi
+options+=(
     --as=nasm
-    "--extra-cflags=-fms-runtime-lib=dll${arch:+ $arch}"
     --enable-vp9-highbitdepth
     --disable-vp8-encoder
     --disable-vp9-encoder
@@ -94,10 +116,18 @@ options=(
     --disable-webm-io
     --disable-libyuv
 )
+options+=(--disable-runtime-cpu-detect)
+case "$isa" in
+    avx2) options+=(--disable-avx512) ;;
+    avx512) options+=(--enable-avx512) ;;
+    *) echo "vpx_build.sh: the instruction-set level is avx2 or avx512, not '$isa'" >&2; exit 1 ;;
+esac
 # The decoder checks its own intermediate transform coefficients. Slower, and
 # what a build being fuzzed or audited wants rather than one being shipped --
 # see MEDIAPERCH_DECODER_CHECKS.
-[ "$checks" = "1" ] && options+=(--enable-coefficient-range-checking)
+if [ "$checks" = "1" ]; then
+    options+=(--enable-coefficient-range-checking)
+fi
 
 # **A build directory is configured once, and checked against what it was
 # configured with.** Configuring once is what makes the next build incremental

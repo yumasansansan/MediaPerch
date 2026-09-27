@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#if defined(_WIN32)
-#    include "win_path.hpp" // a path past MAX_PATH; see the header
-#endif
 #include "impulse.hpp"
+
+#include "dr_wav_file.hpp"
+#include "module_file.hpp"
 
 #include <dr_wav.h>
 #include <resample.hpp>
@@ -11,26 +11,19 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <memory>
 #include <vector>
-
-#if defined(_WIN32)
-#    ifndef WIN32_LEAN_AND_MEAN
-#        define WIN32_LEAN_AND_MEAN
-#    endif
-#    include <windows.h>
-#endif
 
 namespace mp::impulse {
 namespace {
 
 constexpr double k_pi = 3.14159265358979323846;
 
-#if defined(_WIN32)
-std::wstring widen(const std::string& utf8)
-{
-    return mp::winpath::for_open(utf8.c_str()); // and past MAX_PATH, see win_path.hpp
-}
-#endif
+/// A `FILE*` closed when it goes: dr_wav reads it over callbacks and leaves
+/// it here (dr_wav_file.hpp), and `load` returns from five places.
+struct CloseFile {
+    void operator()(std::FILE* file) const noexcept { std::fclose(file); }
+};
 
 } // namespace
 
@@ -41,15 +34,9 @@ bool load(const std::string& path, Response& out, std::string& why)
     // Zeroed, so that the path where opening fails before drwav_init touches
     // it is not a read of an indeterminate struct -- which it never was, and
     // which the compiler cannot see.
+    const std::unique_ptr<std::FILE, CloseFile> file{mp::file::open_read(path.c_str())};
     drwav wav{};
-#if defined(_WIN32)
-    const std::wstring wide = widen(path);
-    const drwav_bool32 opened =
-        wide.empty() ? DRWAV_FALSE : drwav_init_file_w(&wav, wide.c_str(), nullptr);
-#else
-    const drwav_bool32 opened = drwav_init_file(&wav, path.c_str(), nullptr);
-#endif
-    if (opened == DRWAV_FALSE) {
+    if (!mp::drwav_file::init(&wav, file.get())) {
         why = "could not read " + path + " as an impulse response";
         return false;
     }

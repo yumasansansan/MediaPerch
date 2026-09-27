@@ -6,10 +6,13 @@
 | | |
 |---|---|
 | Windows | 10 version 2004 or later. Windows 11 24H2 for the HDR paths, when they exist |
-| Toolchain | **LLVM, all of it and one version of it**: Clang's GNU driver compiles, LLD links, `llvm-ar` archives, `llvm-rc` and `llvm-ml` do the rest. CI pins 23.1.2 (`ci/setup.sh`), as ADLplug-Next does; the LLVM installer's `C:\Program Files\LLVM\bin` on `PATH` is how a person gets it. **MSVC, GCC and clang-cl are all refused** — configuration fails on purpose for each |
-| C++ library | the **MSVC STL**, linked dynamically, from Visual Studio 2026 or its Build Tools. Clang finds it and the Windows SDK by itself, so there is **no developer prompt**: nothing here needs `vcvars64.bat` |
+| Ubuntu | 26.04, for everything but the Windows head and the Windows modules: the engine, the player, the other modules and the tests. The shell is Windows' alone so far |
+| Processor | x86-64 with **AVX2** (x86-64-v3): Haswell, Zen and later. There is no build for less — see *Instruction sets* below |
+| Toolchain | **LLVM, all of it and one version of it**: Clang's GNU driver compiles, LLD links, `llvm-ar` archives, `llvm-rc` and `llvm-ml` do the rest. CI pins major version 23 (`ci/setup.sh`), as ADLplug-Next does: 23.1.2 from LLVM's own release archive on Windows, the packages of apt.llvm.org on Ubuntu. On Windows the LLVM installer's `C:\Program Files\LLVM\bin` on `PATH` is how a person gets it; on Ubuntu `clang-23`, `lld-23`, `llvm-23` and `clang-tools-23` from apt.llvm.org, with `/usr/lib/llvm-23/bin` first on `PATH`. **MSVC, GCC and clang-cl are all refused** — configuration fails on purpose for each |
+| C++ library | On Windows the **MSVC STL**, linked dynamically, from Visual Studio 2026 or its Build Tools. Clang finds it and the Windows SDK by itself, so there is **no developer prompt**: nothing here needs `vcvars64.bat`. On Ubuntu the system's **libstdc++**, linked dynamically, with the development package of the GCC its runtime comes from — `libstdc++-16-dev` on 26.04. Clang takes the headers of the newest GCC it finds them for, and older ones alone would leave a build without what the running library has |
 | CMake | 3.29 or later |
 | Ninja | for every preset |
+| The external decoders' tools | **nasm** for the x86 code of libaom, avm, libvpx and dav1d; **Meson** for dav1d; **bash and make** for libvpx's configure. On Windows, nasm and Meson from conda-forge (`modules/codec/dav1d` has the command) and bash and make from MSYS2 (`modules/codec/vpx`); on Ubuntu, the packages `nasm meson ninja-build make`. A missing one stops the configure rather than leave a decoder out |
 
 ## Checking out
 
@@ -78,7 +81,7 @@ diffs for faults found in the libraries this tree ships, and `cmake/Patches.cmak
 them to the submodules when CMake configures, so that every build has them: a fault read
 around in the code that calls a library is fixed for that one caller and left for the next,
 and a patch is what can be offered upstream. Each goes away once the submodule moves to a
-revision that carries it. Five so far:
+revision that carries it. Seven so far:
 
 - Bento4's time-to-sample box looped as many times as a file said, whatever the reads
   answered -- four billion pairs of failed reads for a box of a few bytes -- where every
@@ -93,6 +96,12 @@ revision that carries it. Five so far:
 - libvorbis doubled a floor's room with a left shift, and a floor that predicts a value
   outside its range makes the room negative: a shift of a negative value, which C leaves
   undefined. It is a multiplication now, as libvorbis made one of the same kind.
+- libwavpack turned its assembly on only where it found an AT&T assembler, GNU as, which it
+  never ran: its `.S` files are compiled by the C compiler. With Clang and no binutils the
+  assembly was off; it asks for the C compiler's assembler now.
+- HM, the HEVC reference the tests hold libde265 to, wrote its programs into its own
+  source tree, so every build of that tree wrote one file: the Windows build once ran a
+  Linux decoder built from the same checkout. The build says where they go now.
 
 `modules/demux/mp4/mp4_guard.hpp` is from before this rule, and still reads around three
 Bento4 boxes the demuxer never needs.
@@ -176,23 +185,23 @@ choice between an LGPL and a GPL build.
 ## The presets
 
 **From any shell.** The presets name every tool -- `clang`, `clang++`, LLD,
-`llvm-ar`, `llvm-rc` -- and Clang finds the MSVC STL and the Windows SDK in the
-Visual Studio installation by itself, so there is nothing to run first. LLVM's
-`bin` has to be on `PATH`; the section below is about what happens when some
-other compiler is found there instead.
+`llvm-ar`, `llvm-rc` -- and on Windows Clang finds the MSVC STL and the Windows
+SDK in the Visual Studio installation by itself, so there is nothing to run
+first. LLVM's `bin` has to be on `PATH`; the section below is about what happens
+when some other compiler is found there instead.
 
 ```bash
-cmake --preset llvm && cmake --build --preset llvm-release && ctest --preset llvm-release
+cmake --preset windows && cmake --build --preset windows-release && ctest --preset windows-release
 ```
 
-**And AVX2, not baseline, when the answer matters.** Both are shipped, but the
-AVX2 build is the one Path B's inner loops were raised for and the one where
-libopus's run-time dispatch is compiled out, so it is the build a change is
-checked in:
+and on Ubuntu:
 
 ```bash
-cmake --preset llvm-avx2 && cmake --build build/llvm-avx2 --config Release && ctest --test-dir build/llvm-avx2 -C Release
+cmake --preset linux && cmake --build --preset linux-release && ctest --preset linux-release
 ```
+
+Both build for AVX2, x86-64-v3, which is the least this tree builds for and
+the build a change is checked in.
 
 **Release, not Debug, unless you are debugging.** The decoders do real arithmetic
 on real amounts of audio, and a Debug build is five to ten times slower at it:
@@ -201,27 +210,33 @@ decode-quality check inside it goes from 174 to 39.
 
 | Preset | For |
 |---|---|
-| `llvm` | day to day. `llvm-debug`, `llvm-release` and `llvm-relwithdebinfo` build presets |
-| `llvm-avx2` | the x86-64-v3 half of what ships, and **where a change is validated** — see below |
-| `llvm-avx512` | x86-64-v4 with 512-bit vectors, for a machine with AVX-512 — see below |
-| `llvm-native` | the machine it is built on, and no other — see below |
-| `measure` | Release **with the measuring apparatus kept** — see below |
-| `core-only` | what CI builds to keep `src/engine` and `src/player` portable, and the engine free of the player |
-| `asan` | the parsers under ASan and UBSan |
-| `fuzz` | the libFuzzer targets. CI configures it with `-DMEDIAPERCH_ARCH=native`: the fuzzers are built and run on one runner and never shipped |
+| `windows`, `linux` | day to day, for AVX2. `windows-debug`, `windows-release`, `windows-relwithdebinfo`, `linux-debug` and `linux-release` build presets |
+| `windows-avx512`, `linux-avx512` | x86-64-v4 with 512-bit vectors, for a machine with AVX-512 — see below |
+| `windows-native`, `linux-native` | the machine it is built on, and no other — see below |
+| `windows-measure` | Release **with the measuring apparatus kept** — see below |
+| `windows-core-only` | what CI builds to keep `src/engine` and `src/player` portable, and the engine free of the player |
+| `windows-asan` | the parsers under ASan and UBSan |
+| `windows-fuzz` | the libFuzzer targets. CI configures it with `-DMEDIAPERCH_ARCH=native`: the fuzzers are built and run on one runner and never shipped |
 
 There is no toolchain column because there is one toolchain. `llvm-tools`, a
 hidden preset every other one inherits, names each tool once.
 
-**A build directory MSVC configured is not reused; remove it.** `llvm` and
-`llvm-avx2` are new directories, but `measure`, `core-only`, `asan` and `fuzz`
-kept their names, and a tree configured with MSVC keeps MSVC's choices where
-`cmake --fresh` does not reach: in each external project's own cache and
-`CMakeFiles/`, where libde265 went on building its sample decoder and HM went
-on compiling through ccache. Everything in a build directory is generated, so
-deleting it once costs one build. libvpx is the exception that looks after
-itself: `vpx_build.sh` keeps the options and compilers it configured with, and
-starts its directory again when they differ.
+**A preset is named for the system it builds on**, so that the Linux ones could
+arrive beside the Windows ones without either set changing meaning. The Linux
+presets build everything but the Windows head and the Windows modules -- Media
+Foundation, WASAPI, Direct3D and the rest -- which the tree leaves out by
+itself. A preset that exists for one system only does not appear on the other:
+each carries a condition on the host, so `cmake --list-presets` shows what can
+be built where it is run.
+
+**Every preset builds into `build/<preset>`, and no directory of an older tree
+is reused.** The presets were `llvm`, `llvm-avx2`, `measure`, `core-only`,
+`asan` and `fuzz` until the Linux ones arrived, and those directories -- one
+configured by MSVC among them, whose choices outlived `cmake --fresh` in each
+external project's own cache -- are simply not read any more. Everything in a
+build directory is generated, so deleting them costs nothing. libvpx looks after
+its own directory regardless: `vpx_build.sh` keeps the options and compilers it
+configured with, and starts its directory again when they differ.
 
 **There is one generator, and it is Ninja.** A Visual Studio generator was here
 and is not any more, because keeping both meant two of everything: two build
@@ -250,14 +265,14 @@ is only the executable that does without, so the code cannot rot:
 |---|---|---|
 | Debug | present | it is what you are there for |
 | Release | **absent** | it is not what ships |
-| Release, `-D MEDIAPERCH_DIAGNOSTICS=ON` | present | the `measure` preset is exactly this |
+| Release, `-D MEDIAPERCH_DIAGNOSTICS=ON` | present | the `windows-measure` preset is exactly this |
 
 Asking a build without them for one says so and exits 77 — the code a test
 runner reads as *skipped* rather than *failed*, so `ctest` on a shipping build
 reports the decode-quality check as not run instead of pretending it passed.
 
 ```bash
-cmake --preset measure && cmake --build --preset measure && ctest --preset measure
+cmake --preset windows-measure && cmake --build --preset windows-measure && ctest --preset windows-measure
 ```
 
 ## Optimisation, and link-time optimisation
@@ -360,8 +375,8 @@ Three modules are Rust -- `codec_alac`, `codec_aac` and `demux_adts` -- and
 the way they are built is written down here rather than left in
 `cmake/Rust.cmake`'s comments alone.
 
-**The toolchain is stable, from rustup, on the MSVC target.** Nothing here needs
-nightly, including the fuzzer (below). `cargo` has to be on PATH when CMake
+**The toolchain is stable, from rustup**, on the MSVC target on Windows and the
+GNU one on Linux. Nothing here needs nightly, including the fuzzer (below). `cargo` has to be on PATH when CMake
 configures; if it is not, the modules are skipped with a warning the way a
 missing submodule is, and ALAC, AAC-LC and raw ADTS fall to the next reader.
 
@@ -373,6 +388,32 @@ target and hands cargo the `lld-link` Clang runs through
 import libraries in the Visual Studio installation, by itself, as Clang does.
 The link errors in the list below were measured with `link.exe` and are kept as
 they were found.
+
+On Linux the corner was GCC's. rustc's GNU target runs `cc` -- GCC, of whatever
+version the system defaults to -- and hands it an LLD of Rust's own, so the Rust
+modules came out linked by Rust's LLD 22 behind GCC 15's crt files while every
+other module was LLVM 23's LLD behind Clang, with GCC 16's; each module's
+`.comment` section says which. There cargo is given the build's Clang as its
+linker, and Clang the build's `ld.lld` by its path (`-Clink-arg=--ld-path=`):
+given Clang alone, rustc hands over no LLD, and Clang runs binutils' `ld`.
+
+On Windows the linker was already the right one, and the libraries it read
+agreed with Clang's by coincidence: rustc hands lld-link a `LIB` of its own
+finding while Clang passes the directories LLVM's code found, and both picked
+MSVC 14.51.36231 and SDK 10.0.28000.0 here, measured with `/verbose`.
+`-Clink-arg=/lldignoreenv` has lld-link ignore rustc's `LIB` and find them by
+LLVM's code too, so the two cannot come to differ on a machine with more than
+one Visual Studio or SDK.
+
+**And the Rust modules carry what protections stable rustc can give.** The C++
+images have Control Flow Guard, the table of exception continuations and the
+mark of CET compatibility (below), and the Rust ones had none of the three.
+`-Ccontrol-flow-guard` gives them the first, under the same condition as the
+C++ images: not in the sanitized and fuzzing builds. The continuation table is
+`-Zehcont-guard`, nightly's alone, and the CET mark stays off without it, since
+the table is what an image needs before it can say it is compatible; the stack
+cookie is nightly's `-Zstack-protector`. On Linux, rustc's defaults already
+match the C++ link: full RELRO and a stack that does not execute.
 
 **Nothing links across the language boundary.** A module is a `.dll` on disk
 that exports `mp_module_entry`, and the host cannot tell which compiler made
@@ -558,26 +599,33 @@ syntax and the ON/OFF values they pass mean the same under either. Seventeen
 warnings per configure before; none after; every hash in the corpus the same
 with LTO on.
 
-## Instruction sets: two shipped, and two for a machine of your own
+## Instruction sets: AVX2 at the least, AVX-512 beside it, and a machine of your own
 
-Everything this tree links already dispatches on the CPU: libFLAC, libmpg123,
-libopus and libwavpack each compile several paths and pick one at run time. What
-none of that covers is the code *here* -- the resampler, the convolver, the FFT,
-the equaliser, the channel matrix, the dither -- which is Path B's inner loops
-and compiles to the **x86-64 baseline, meaning SSE2 and 2003.**
+**AVX2 is the least this tree builds for.** The code *here* -- the resampler,
+the convolver, the FFT, the equaliser, the channel matrix, the dither, which are
+Path B's inner loops -- is what no library's own dispatch covers, and it is
+compiled for x86-64-v3 outright, as is everything it links. There was an SSE2
+`baseline` below it, the default, with AVX2 as a second build beside it. It
+went, because MediaPerch is a suite of libraries that other programs link --
+ADLplug-Next among them -- as much as it is a player, and one floor for all of
+them is simpler than two builds of each. A build directory that still says
+`MEDIAPERCH_ARCH=baseline` stops the configure and says what to do.
 
-Raising it is one flag and unshippable on its own: a binary built for AVX2 does
-not start without AVX2. The usual answer is to compile the hot loops twice and
+**Nothing asks the processor anything when a program starts.** A binary built
+for an instruction set stops at the first instruction of it on a processor
+without it -- an illegal-instruction exception on Windows, SIGILL on Linux --
+and a library cannot check before the program that loads it has run, so no part
+of this tree tries. The usual alternative is to compile the hot loops twice and
 dispatch, which buys a dispatcher, a second copy of every stage, and a CPU check
 on a path that must not branch. The answer here is to **build the whole tree
-twice and upload both**, which costs a CI job and no code:
+once for each instruction set**, which costs a CI job and no code; CI builds and
+uploads the AVX2 and the AVX-512 builds both:
 
-| | `MEDIAPERCH_ARCH` | Preset | Runs on |
+| | `MEDIAPERCH_ARCH` | Presets | Runs on |
 |---|---|---|---|
-| baseline | `baseline` | `llvm` | anything x86-64 |
-| AVX2 | `avx2` | `llvm-avx2` | Haswell, Zen, and later |
-| AVX-512 | `avx512` | `llvm-avx512` | Skylake-SP, Ice Lake, Sapphire Rapids, Zen 4, and later |
-| this machine | `native` | `llvm-native` | the machine that built it |
+| AVX2 | `avx2`, the default | `windows`, `linux` | Haswell, Zen, and later |
+| AVX-512 | `avx512` | `windows-avx512`, `linux-avx512` | Intel's Xeons from Skylake-SP on, Ice Lake, Tiger Lake and Rocket Lake; AMD's Zen 4 on. Not Alder Lake or Raptor Lake, which have none |
+| this machine | `native` | `windows-native`, `linux-native` | the machine that built it, which has to have x86-64-v3 at least |
 
 **One set of flags for everything the build compiles**: this tree, its
 submodules, the Rust modules, and the external projects -- aom, avm, libde265
@@ -586,13 +634,15 @@ configure. The libraries that dispatch still pick their hand-written SIMD at run
 time; what the flags decide is the code the compiler writes for the rest of
 them.
 
-`avx2` is x86-64-v3 -- AVX2, FMA, BMI1 and BMI2, LZCNT, MOVBE, F16C. Clang spells
-the whole set `-march=x86-64-v3`, and the baseline `-march=x86-64`, given as well
-so that a Clang built with some other default still builds this one. (MSVC's
-`/arch:AVX2` was the same set under another name.)
+`avx2` is x86-64-v3 -- AVX2, FMA, BMI1 and BMI2, LZCNT, MOVBE, F16C -- which Clang
+spells `-march=x86-64-v3`. (MSVC's `/arch:AVX2` was the same set under another
+name.)
 
 `avx512` is x86-64-v4 -- AVX-512 F, BW, CD, DQ and VL on top of that -- and
-`native` is whatever the building machine has (`-march=native`). **Wherever there
+`native` is whatever the building machine has (`-march=native`): the configure
+asks the compiler what that defines, and stops on a machine without the whole of
+x86-64-v3, and builds for the AVX-512 level only where all five of x86-64-v4's
+are there. **Wherever there
 is AVX-512, all 512 bits of it are used**, which LLVM does not do by itself:
 measured with Clang 23 and rustc 1.98, its own choice for x86-64-v4, and for
 every Intel processor with AVX-512 from Skylake-SP to Granite Rapids, is 256-bit
@@ -612,32 +662,36 @@ in C and in Rust, and stops if no zmm register appears in the assembly. The
 vectorised loops of the transforms, the resampler and the convolver were
 checked in their own assembly too.
 
-**In the AVX2 build, libopus is told to stop checking.** It compiles an SSE, an
-SSE2, an SSE4.1 and an AVX2 path and asks the CPU which to use; in a binary that
-already refuses to start without AVX2 that question has one answer, and asking
-it costs a branch and keeps three unreachable paths alive.
-`OPUS_X86_PRESUME_SSE`, `_SSE2`, `_SSE4_1` and `_AVX2` are all on there and off
-in the baseline. The AVX-512 build presumes the same four: AVX2 is where opus's
-list ends, and the AVX-512 code it has (in `dnn/`) is chosen at compile time by
-the instruction set alone. `native` presumes nothing and lets opus ask. libFLAC
-and libmpg123 dispatch too and offer nothing to turn it off with -- FLAC's is
-not an option and mpg123's `OPT_MULTI` is a local `set()` in its own list file
--- so their checks stay.
+**The libraries that can be told the instruction set are told it, and stop
+asking.** libopus compiles an SSE, an SSE2, an SSE4.1 and an AVX2 path and asks
+the CPU which to use; in a binary that cannot run without AVX2 at all that
+question has one answer, and asking it costs a branch and keeps three
+unreachable paths alive, so `OPUS_X86_PRESUME_SSE`, `_SSE2`, `_SSE4_1` and
+`_AVX2` are on in every build. AVX2 is where opus's list ends, and the AVX-512
+code it has (in `dnn/`) is chosen at compile time by the instruction set alone.
+libaom, avm and libvpx are configured with their run-time CPU detection off, so
+that each calls the version of every function for the highest set its build
+enables, and with their AVX-512 versions enabled exactly where the build is for
+AVX-512 -- `MEDIAPERCH_ISA_LEVEL`, which `native` sets from what the machine
+has; avm has none. libFLAC, libmpg123 and dav1d dispatch too and offer nothing
+to turn it off with -- FLAC's is not an option, mpg123's `OPT_MULTI` is a local
+`set()` in its own list file, and dav1d always asks -- so their checks stay.
 
 **Does it change the bytes?** FMA computes a multiply and an add with one
-rounding where two instructions round twice, so it can. Under MSVC it did not:
-measured across the whole format corpus -- 22 files, every container and codec
-this tree reads, DSD and WavPack included -- the two builds produced **identical
+rounding where two instructions round twice, so it can. It was measured while
+the SSE2 `baseline` build still stood beside the AVX2 one. Under MSVC it did
+not: across the whole format corpus -- 22 files, every container and codec this
+tree reads, DSD and WavPack included -- the two builds produced **identical
 hashes**, because MSVC fuses nothing it is not told to.
 
-**Under Clang it does, and only in the AVX2 build.** Clang contracts `a * b + c`
-wherever one expression allows it, which C and C++ permit and which is more
-accurate rather than less, and nothing here turns it off. Clang's baseline build
-produces MSVC's bytes for all 22 files and all 144 Path B runs below, so the
-change of compiler changed nothing; its AVX2 build differs in MP3, Vorbis and
-Opus -- the three lossy decoders that are C libraries, by at most 1.1e-7 -- and
-in two places of Path B that are float arithmetic too. Every lossless path is the
-same bytes in both. [formats.md](formats.md) has the measurement.
+**Under Clang it does, in the AVX2 build.** Clang contracts `a * b + c` wherever
+one expression allows it, which C and C++ permit and which is more accurate
+rather than less, and nothing here turns it off. Clang's baseline build produced
+MSVC's bytes for all 22 files and all 144 Path B runs below, so the change of
+compiler changed nothing; its AVX2 build differs in MP3, Vorbis and Opus -- the
+three lossy decoders that are C libraries, by at most 1.1e-7 -- and in two
+places of Path B that are float arithmetic too. Every lossless path is the same
+bytes in both. [formats.md](formats.md) has the measurement.
 
 That covered the decoders and not Path B, which is the half AVX2 was raised for,
 and for a while there was no way to run the DSP chain without a device at all.
@@ -650,31 +704,38 @@ does not say, under *Path B, hashed* in [formats.md](formats.md).
 
 ## Two assemblers, and what they were doing by accident
 
-Both hand-written assembly paths in this tree were being taken or skipped for
-reasons nobody chose, and a CI log is what showed it.
+**Every library's hand-written assembly is built, on every system, or the
+configure stops.** nasm assembles the x86 code of libaom, avm, libvpx and dav1d,
+and each of them stops the configure without it rather than build its C code
+alone; dav1d is told `enable_asm=true` for the same reason. The two libraries
+below had their assembly taken or skipped for reasons nobody chose, and a CI log
+is what showed it; each is checked after it configures now.
 
-**libmpg123 needs `yasm` and does not say so.** Its CMake looks for one on PATH;
-without it `MACHINE` silently becomes `generic` and the library loses OPT_MULTI,
-OPT_X86_64 and OPT_AVX. Both machines this has run on found one -- `yasm.exe`
-ships inside **Strawberry Perl**, which is on PATH here and pre-installed on
-GitHub's Windows runners. Nobody asked for Perl and nothing declared it.
+**libmpg123 needed `yasm` and did not say so.** While MSVC compiled this tree,
+its CMake looked for yasm on PATH, and without it `MACHINE` silently became
+`generic` and the library lost OPT_MULTI, OPT_X86_64 and OPT_AVX. Both machines
+this ran on found one -- `yasm.exe` ships inside **Strawberry Perl**, which is on
+PATH here and pre-installed on GitHub's Windows runners. Nobody asked for Perl
+and nothing declared it. With Clang the assembly is libmpg123's `.S` files,
+which Clang compiles, and no yasm is involved.
 
 That would be a curiosity if the two decoders agreed. They do not: the same
 2-second MP3 hashes `69dca145…` with the AVX synthesis and `f6c8a8e4…` with the
 generic one. They agree to **127.84 dB**, maximum difference 1.5e-7, 10% of
 samples identical -- float rounding between two implementations of one synthesis
 filter, both correct by the RMS bound ISO 11172-4 calls conformance. But only one
-is the hash [formats.md](formats.md) records. So `modules/codec/mpa/CMakeLists.txt`
-looks for yasm itself and **warns, naming what a build without it will differ
-by**, rather than letting a hash find it out later.
+is the hash [formats.md](formats.md) records. So `cmake/Mpg123.cmake` reads the
+definitions libmpg123 was configured with and **stops the configure without
+`OPT_X86_64` and `OPT_AVX`**, rather than letting a hash find it out later.
 
 **libwavpack's assembly was decided by how many times you had configured.** Its
 CMakeLists calls `enable_language(ASM_MASM)` guarded by `WavPack_CPU_X64` and
 sets that variable ninety lines later, in the CPU detection -- which caches it.
 So the first configure has the guard false and the assembly off, and the second
 has it true and the assembly on, from identical source. Measured both ways.
-`modules/demux/wavpack/CMakeLists.txt` enables the language itself before adding
-the subdirectory, so the first configure is the same as the fiftieth.
+`cmake/WavPack.cmake` enables the language itself before adding the
+subdirectory, so the first configure is the same as the fiftieth, and stops the
+configure if libwavpack still comes out without its assembly.
 
 There is **no reproducibility cost** to that one: WavPack is lossless, so its two
 paths must agree or one is broken, and five files including a lossy hybrid one
@@ -690,8 +751,8 @@ global option in `cmake/CompilerOptions.cmake` now says
 `$<COMPILE_LANGUAGE:C,CXX>`, which is what each of them always meant.
 
 **The MASM is `llvm-ml`'s now**, the MASM-compatible assembler that ships beside
-Clang, and three things stood between libwavpack's two x64 files and it, all met
-in `modules/demux/wavpack/CMakeLists.txt` rather than in the submodule:
+Clang, and three things stood between libwavpack's two x64 files and it. Two are
+met in `cmake/WavPack.cmake`, and the third by a patch:
 
 - `include <ksamd64.inc>` is the Windows SDK's, and `llvm-ml` expands its prologue
   macros once it is told where the SDK keeps them.
@@ -699,12 +760,15 @@ in `modules/demux/wavpack/CMakeLists.txt` rather than in the submodule:
   straight after `proc`. ml64 makes every procedure public anyway, so the build
   assembles copies with the word taken out; both procedures still come out
   external, each with its unwind data.
-- libwavpack chooses MASM by asking `if(MSVC)`, which a GNU-driver Clang is not,
+- libwavpack chose MASM by asking `if(MSVC)`, which a GNU-driver Clang is not,
   so it went on to look for an AT&T assembler too -- and found Strawberry Perl's
   `as.exe`, whose language also claims `.asm`. Enabled after MASM, it won the
-  extension, and the first build handed it the MASM. An empty
-  `CMAKE_ASM-ATT_COMPILER` tells its `check_language` there is none, and the
-  copies name their language rather than leaving it to the extension.
+  extension, and the first build handed it the MASM. libwavpack never assembled
+  a file with it -- its AT&T files are `.S`, which the C compiler compiles -- so
+  `external/patches/libwavpack-assembly-by-the-c-compiler.patch` stops it
+  looking, which is also what lets Linux build the assembly with Clang and no
+  binutils. The copies name their language rather than leaving it to the
+  extension all the same.
 
 ### `CMP0194`, and a Perl distribution holding up a configure
 
@@ -753,7 +817,7 @@ every binary — and it charges every byte of a linked image to the object that
 brought it:
 
 ```bash
-python tools/mapsize.py --symbols build/llvm/bin/Release/modules/codec/mp_codec_vorbis.map
+python tools/mapsize.py --symbols build/windows/bin/Release/modules/codec/mp_codec_vorbis.map
 ```
 
 lld-link's `/MAP` is written in `link.exe`'s format, so the tool reads either. With
@@ -814,10 +878,20 @@ it has external projects in it, whose own caches `--fresh` does not reach.
 
 ## Standards, and the one thing to know about them
 
-`CMAKE_CXX_STANDARD 23` and `CMAKE_C_STANDARD 23` are set once at the top of
-`CMakeLists.txt`, and Clang is given `-std=c++23` and `-std=c23`: the standards
-themselves, where MSVC offered `/std:c++latest` and `/std:clatest` -- most of each,
-under a name that meant something different every year.
+**C23 and C++23, strictly, on every target of this tree**, and Clang is given
+`-std=c23` and `-std=c++23`: the standards themselves, not GNU's dialects of
+them, where MSVC offered `/std:c++latest` and `/std:clatest` -- most of each,
+under a name that meant something different every year. The code here uses no
+POSIX or GNU extension to the C and C++ libraries; where Windows and Linux differ
+(a 64-bit file position is `_fseeki64` on Windows, whose `long` is 32 bits, and
+`std::fseek` on Linux, whose `long` is 64), the difference is one header in
+`modules/shared`. The standard is set target by target, by
+`mediaperch_flags_everywhere` in `cmake/CompilerOptions.cmake` as ADLplug-Next
+does it, rather than as `CMAKE_C_STANDARD` and `CMAKE_CXX_STANDARD` at the top:
+those would reach the submodules too, and a library written for POSIX in its GNU
+dialect -- libvorbis's `alloca`, libwavpack's `fseeko` and `strcasecmp` -- finds
+none of it in glibc under ISO C23. Each library says what it is written in
+itself.
 
 **`include/mediaperch/module.h` is C23 too, whole.** It was held to the C11 common
 subset of C and C++ for as long as MSVC compiled C, because its C compiler had no
@@ -845,7 +919,7 @@ compile commands:
   analyzer's, less its opt-in set, and the script says why:
 
   ```bash
-  bash ci/tidy.sh build/llvm-avx2
+  bash ci/tidy.sh build/windows
   ```
 
   Its first run over this tree reported 86 things. Seventy-six were the opt-in checks -- a
@@ -895,6 +969,6 @@ compile commands:
   It takes a couple of minutes, so it carries a label:
 
   ```
-  ctest --preset measure -LE quality          # everything except this
-  ctest --preset measure -R decode_quality    # only this
+  ctest --preset windows-measure -LE quality          # everything except this
+  ctest --preset windows-measure -R decode_quality    # only this
   ```

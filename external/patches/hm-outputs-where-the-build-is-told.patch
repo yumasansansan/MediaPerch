@@ -1,0 +1,67 @@
+HM: the build's outputs where the build is told to put them
+
+BBuildEnv writes every library and program into the source tree, under lib/ and bin/, whatever directory CMake was given to build in. Two builds of one source tree -- two instruction sets, or Windows and Linux from one checkout -- then write TAppDecoder to the same file, and each takes whichever was built last: MediaPerch's Windows build ran a Linux TAppDecoder, which Windows refused to start. BBuildEnv_OUTPUT_ROOT now says where lib/ and bin/ go, and is the source tree when nobody says, as before. Against HM-16.26.
+
+diff --git a/cmake/CMakeBuild/cmake/modules/BBuildEnv.cmake b/cmake/CMakeBuild/cmake/modules/BBuildEnv.cmake
+index 07532ba3..13c0886c 100644
+--- a/cmake/CMakeBuild/cmake/modules/BBuildEnv.cmake
++++ b/cmake/CMakeBuild/cmake/modules/BBuildEnv.cmake
+@@ -1314,12 +1314,18 @@ macro( bb_build_env_setup )
+   set( BBuildEnv_MINSIZEREL_POSTFIX     "-mr" )
+   
+   
++  # Where the lib and bin trees go: the source tree unless told otherwise,
++  # which a build of several configurations from one source tree needs.
++  if( NOT DEFINED BBuildEnv_OUTPUT_ROOT )
++    set( BBuildEnv_OUTPUT_ROOT "${CMAKE_SOURCE_DIR}" )
++  endif()
++
+   if( BBuildEnv_USE_LIBRARY_NAME_POSTFIX ) 
+     set( CMAKE_DEBUG_POSTFIX                           ${BBuildEnv_DEBUG_POSTFIX} )
+     set( CMAKE_RELWITHDEBINFO_POSTFIX                  ${BBuildEnv_RELWITHDEBINFO_POSTFIX} )
+     set( CMAKE_MINSIZEREL_POSTFIX                      ${BBuildEnv_MINSIZEREL_POSTFIX} )
+ 
+-    set( CMAKE_ARCHIVE_OUTPUT_DIRECTORY                "${CMAKE_SOURCE_DIR}/lib${BBuildEnv_SHARED_DIR_POSTFIX}/${BBuildEnv_OUTPUT_DIR_SUFFIX}" )
++    set( CMAKE_ARCHIVE_OUTPUT_DIRECTORY                "${BBuildEnv_OUTPUT_ROOT}/lib${BBuildEnv_SHARED_DIR_POSTFIX}/${BBuildEnv_OUTPUT_DIR_SUFFIX}" )
+     set( CMAKE_ARCHIVE_OUTPUT_DIRECTORY_DEBUG          "${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}" )
+     set( CMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELEASE        "${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}" )
+     set( CMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}" )
+@@ -1330,7 +1336,7 @@ macro( bb_build_env_setup )
+     set( CMAKE_LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELWITHDEBINFO}" )
+     set( CMAKE_LIBRARY_OUTPUT_DIRECTORY_MINSIZEREL     "${CMAKE_ARCHIVE_OUTPUT_DIRECTORY_MINSIZEREL}" )    
+     
+-    set( CMAKE_RUNTIME_OUTPUT_DIRECTORY                "${CMAKE_SOURCE_DIR}/bin${BBuildEnv_SHARED_DIR_POSTFIX}/${BBuildEnv_OUTPUT_DIR_SUFFIX}" )
++    set( CMAKE_RUNTIME_OUTPUT_DIRECTORY                "${BBuildEnv_OUTPUT_ROOT}/bin${BBuildEnv_SHARED_DIR_POSTFIX}/${BBuildEnv_OUTPUT_DIR_SUFFIX}" )
+     set( CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG          "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}" )
+     set( CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE        "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}" )
+     set( CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}" )
+@@ -1338,10 +1344,10 @@ macro( bb_build_env_setup )
+     
+   else()
+     # Using CMake's default library name convention which is the same for all configurations.
+-    set( CMAKE_ARCHIVE_OUTPUT_DIRECTORY_DEBUG          "${CMAKE_SOURCE_DIR}/lib/${BBuildEnv_OUTPUT_DIR_SUFFIX}/debug${BBuildEnv_SHARED_DIR_POSTFIX}" )
+-    set( CMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELEASE        "${CMAKE_SOURCE_DIR}/lib/${BBuildEnv_OUTPUT_DIR_SUFFIX}/release${BBuildEnv_SHARED_DIR_POSTFIX}" )
+-    set( CMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_SOURCE_DIR}/lib/${BBuildEnv_OUTPUT_DIR_SUFFIX}/relwithdebinfo${BBuildEnv_SHARED_DIR_POSTFIX}" )
+-    set( CMAKE_ARCHIVE_OUTPUT_DIRECTORY_MINSIZEREL     "${CMAKE_SOURCE_DIR}/lib/${BBuildEnv_OUTPUT_DIR_SUFFIX}/minsizerel${BBuildEnv_SHARED_DIR_POSTFIX}" )
++    set( CMAKE_ARCHIVE_OUTPUT_DIRECTORY_DEBUG          "${BBuildEnv_OUTPUT_ROOT}/lib/${BBuildEnv_OUTPUT_DIR_SUFFIX}/debug${BBuildEnv_SHARED_DIR_POSTFIX}" )
++    set( CMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELEASE        "${BBuildEnv_OUTPUT_ROOT}/lib/${BBuildEnv_OUTPUT_DIR_SUFFIX}/release${BBuildEnv_SHARED_DIR_POSTFIX}" )
++    set( CMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELWITHDEBINFO "${BBuildEnv_OUTPUT_ROOT}/lib/${BBuildEnv_OUTPUT_DIR_SUFFIX}/relwithdebinfo${BBuildEnv_SHARED_DIR_POSTFIX}" )
++    set( CMAKE_ARCHIVE_OUTPUT_DIRECTORY_MINSIZEREL     "${BBuildEnv_OUTPUT_ROOT}/lib/${BBuildEnv_OUTPUT_DIR_SUFFIX}/minsizerel${BBuildEnv_SHARED_DIR_POSTFIX}" )
+     
+     
+     set( CMAKE_LIBRARY_OUTPUT_DIRECTORY_DEBUG          "${CMAKE_ARCHIVE_OUTPUT_DIRECTORY_DEBUG}" )
+@@ -1349,10 +1355,10 @@ macro( bb_build_env_setup )
+     set( CMAKE_LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELWITHDEBINFO}" )
+     set( CMAKE_LIBRARY_OUTPUT_DIRECTORY_MINSIZEREL     "${CMAKE_ARCHIVE_OUTPUT_DIRECTORY_MINSIZEREL}" )    
+     
+-    set( CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG          "${CMAKE_SOURCE_DIR}/bin/${BBuildEnv_OUTPUT_DIR_SUFFIX}/debug${BBuildEnv_SHARED_DIR_POSTFIX}" )
+-    set( CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE        "${CMAKE_SOURCE_DIR}/bin/${BBuildEnv_OUTPUT_DIR_SUFFIX}/release${BBuildEnv_SHARED_DIR_POSTFIX}" )
+-    set( CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_SOURCE_DIR}/bin/${BBuildEnv_OUTPUT_DIR_SUFFIX}/relwithdebinfo${BBuildEnv_SHARED_DIR_POSTFIX}" )
+-    set( CMAKE_RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL     "${CMAKE_SOURCE_DIR}/bin/${BBuildEnv_OUTPUT_DIR_SUFFIX}/minsizerel${BBuildEnv_SHARED_DIR_POSTFIX}" )    
++    set( CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG          "${BBuildEnv_OUTPUT_ROOT}/bin/${BBuildEnv_OUTPUT_DIR_SUFFIX}/debug${BBuildEnv_SHARED_DIR_POSTFIX}" )
++    set( CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE        "${BBuildEnv_OUTPUT_ROOT}/bin/${BBuildEnv_OUTPUT_DIR_SUFFIX}/release${BBuildEnv_SHARED_DIR_POSTFIX}" )
++    set( CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${BBuildEnv_OUTPUT_ROOT}/bin/${BBuildEnv_OUTPUT_DIR_SUFFIX}/relwithdebinfo${BBuildEnv_SHARED_DIR_POSTFIX}" )
++    set( CMAKE_RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL     "${BBuildEnv_OUTPUT_ROOT}/bin/${BBuildEnv_OUTPUT_DIR_SUFFIX}/minsizerel${BBuildEnv_SHARED_DIR_POSTFIX}" )    
+   endif()
+     
+   

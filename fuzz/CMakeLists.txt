@@ -5,9 +5,9 @@
 # Clang, as the whole tree is: libFuzzer is LLVM's, and so is every compiler
 # this project uses (cmake/LLVMToolchain.cmake).
 #
-#   cmake --preset fuzz
-#   cmake --build --preset fuzz
-#   build/fuzz/bin/wav_fuzzer corpus/wav -runs=100000
+#   cmake --preset windows-fuzz
+#   cmake --build --preset windows-fuzz
+#   build/windows-fuzz/bin/wav_fuzzer corpus/wav -runs=100000
 
 # libFuzzer's own runtime, clang_rt.fuzzer-x86_64.lib, is built against the
 # static CRT. Objects here default to the dynamic one, and the two disagree
@@ -168,22 +168,12 @@ mediaperch_add_fuzzer(wav_fuzzer wav_fuzzer.cpp wav)
 mediaperch_add_fuzzer(flac_fuzzer flac_fuzzer.cpp flac)
 # MPEG audio is libmpg123 now, on both sides, so the fuzzer links it rather
 # than compiling a parser of ours into itself. The library is built by
-# modules/codec/mpa, which this build does not add -- so it is built here, with
-# the sanitizer on, for the reason the Bento4 one gives: a library linked in
-# uninstrumented is a library the fuzzer runs through and reports nothing about.
-if(NOT TARGET libmpg123 AND EXISTS "${CMAKE_SOURCE_DIR}/external/mpg123/ports/cmake/CMakeLists.txt")
-    set(BUILD_LIBOUT123 OFF CACHE BOOL "" FORCE)
-    set(BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
-    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-    set(CMAKE_SKIP_INSTALL_RULES ON)
-    add_subdirectory("${CMAKE_SOURCE_DIR}/external/mpg123/ports/cmake"
-                     "${CMAKE_BINARY_DIR}/external/mpg123" EXCLUDE_FROM_ALL)
-endif()
+# modules/codec/mpa, which this build does not add -- so it is built here, as
+# that module builds it (cmake/Mpg123.cmake, optimised decoders and all), with
+# the sanitizer on: a library linked in uninstrumented is a library the fuzzer
+# runs through and reports nothing about.
+include(Mpg123)
 if(TARGET libmpg123)
-    # The same INTERFACE path modules/codec/mpa adds: mpg123's CMake sets its
-    # include paths per-directory, so the target carries none of its own.
-    target_include_directories(libmpg123
-        INTERFACE "${CMAKE_SOURCE_DIR}/external/mpg123/src/include")
     foreach(_ext IN ITEMS libmpg123 libsyn123 compat compat_str)
         if(TARGET ${_ext})
             mediaperch_instrument(${_ext})
@@ -299,22 +289,9 @@ endif()
 
 # WavPack, which demux_wavpack is built on. It is on OSS-Fuzz upstream, which
 # is why this is expected to find nothing -- and is not a reason to leave it
-# out, for the reasons wavpack_fuzzer.cpp gives.
-if(NOT TARGET wavpack AND EXISTS "${CMAKE_SOURCE_DIR}/external/wavpack/CMakeLists.txt")
-    # No assembly under the sanitizer, and no GNU as found for it either: see
-    # modules/demux/wavpack/CMakeLists.txt for what libwavpack does otherwise.
-    set(CMAKE_ASM-ATT_COMPILER "")
-    set(WAVPACK_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
-    set(WAVPACK_INSTALL_CMAKE_MODULE OFF CACHE BOOL "" FORCE)
-    set(WAVPACK_INSTALL_PKGCONFIG_MODULE OFF CACHE BOOL "" FORCE)
-    set(WAVPACK_INSTALL_DOCS OFF CACHE BOOL "" FORCE)
-    set(WAVPACK_ENABLE_DSD ON CACHE BOOL "" FORCE)
-    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-    set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
-    set(CMAKE_SKIP_INSTALL_RULES ON)
-    add_subdirectory("${CMAKE_SOURCE_DIR}/external/wavpack"
-                     "${CMAKE_BINARY_DIR}/external/wavpack" EXCLUDE_FROM_ALL)
-endif()
+# out, for the reasons wavpack_fuzzer.cpp gives. Built as demux_wavpack builds
+# it (cmake/WavPack.cmake), assembly and all: what is fuzzed is what ships.
+include(WavPack)
 if(TARGET wavpack)
     mediaperch_instrument(wavpack)
     mediaperch_add_fuzzer(wavpack_fuzzer wavpack_fuzzer.cpp wavpack)
@@ -378,10 +355,28 @@ mediaperch_add_fuzzer(settings_fuzzer settings_fuzzer.cpp
 # warnings that build holds it to already: the definitions mediaperch_flags
 # gives a module on Windows, and the shared sources it links. The codec fuzzers
 # further down are made the same way, with a harness of their own.
+#
+# **The system's half is chosen here, as the platform build chooses it**: the
+# files a module opens by name (module_file.hpp) and what the scratch files ask
+# of the system (tests/test_platform.hpp) are the Windows functions on Windows
+# and ISO C's -- and POSIX's, for a process id -- elsewhere, and on Windows a
+# fuzzer gets tests/no_dialogs.cpp, which keeps a failure out of a message box.
+if(WIN32)
+    set(mediaperch_module_system_sources
+        "${CMAKE_SOURCE_DIR}/modules/shared/module_log/module_file_windows.cpp"
+        "${CMAKE_SOURCE_DIR}/tests/test_platform_windows.cpp"
+        "${CMAKE_SOURCE_DIR}/tests/no_dialogs.cpp")
+else()
+    set(mediaperch_module_system_sources
+        "${CMAKE_SOURCE_DIR}/modules/shared/module_log/module_file_iso.cpp"
+        "${CMAKE_SOURCE_DIR}/tests/test_platform_posix.cpp")
+endif()
+
 function(mediaperch_add_module_fuzzer name harness corpus module_source)
     cmake_parse_arguments(M "" "" "SOURCES;LINK" ${ARGN})
     mediaperch_add_fuzzer(${name} ${harness} "${corpus}" "${module_source}"
         "${CMAKE_SOURCE_DIR}/modules/shared/module_log/module_log.cpp"
+        ${mediaperch_module_system_sources}
         ${M_SOURCES})
     get_filename_component(module_dir "${module_source}" DIRECTORY)
     # tests/ for the driver and the scratch files, which the test that hands
@@ -389,6 +384,7 @@ function(mediaperch_add_module_fuzzer name harness corpus module_source)
     target_include_directories(${name} PRIVATE
         "${module_dir}"
         "${CMAKE_SOURCE_DIR}/modules/shared/abi_guard"
+        "${CMAKE_SOURCE_DIR}/modules/shared/dr_wav"
         "${CMAKE_SOURCE_DIR}/modules/shared/h264"
         "${CMAKE_SOURCE_DIR}/modules/shared/module_log"
         "${CMAKE_SOURCE_DIR}/modules/shared/pcm_format"
@@ -405,7 +401,7 @@ function(mediaperch_add_module_fuzzer name harness corpus module_source)
     # this target -- the module's and the shared ones; the libraries under it
     # are other people's, whose undefined behaviour has its own fuzzers.
     target_compile_options(${name} PRIVATE -fsanitize=undefined -fsanitize-trap=undefined)
-    target_link_libraries(${name} PRIVATE ${M_LINK})
+    target_link_libraries(${name} PRIVATE ${M_LINK} ${CMAKE_DL_LIBS})
 endfunction()
 
 function(mediaperch_add_demux_fuzzer module corpus)
@@ -524,20 +520,12 @@ if(TARGET FLAC)
     target_compile_definitions(codec_flac_fuzzer PRIVATE MEDIAPERCH_FUZZ_FLAC_ALLOCATIONS)
 endif()
 
-# libopus, built as modules/codec/opus builds it, with OPUS_ASSERTIONS -- its
-# own switch for testing, as OSS-Fuzz builds it: the decoder's inner
-# invariants, checked, so a packet that breaks one is a crash here rather than
-# wrong audio.
-if(NOT TARGET opus AND EXISTS "${CMAKE_SOURCE_DIR}/external/opus/CMakeLists.txt")
-    set(OPUS_BUILD_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
-    set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
-    set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
-    set(OPUS_INSTALL_PKG_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
-    set(OPUS_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
-    set(OPUS_ASSERTIONS ON CACHE BOOL "" FORCE)
-    add_subdirectory("${CMAKE_SOURCE_DIR}/external/opus"
-                     "${CMAKE_BINARY_DIR}/external/opus" EXCLUDE_FROM_ALL SYSTEM)
-endif()
+# libopus, built as modules/codec/opus builds it (cmake/Opus.cmake), with
+# OPUS_ASSERTIONS -- its own switch for testing, as OSS-Fuzz builds it: the
+# decoder's inner invariants, checked, so a packet that breaks one is a crash
+# here rather than wrong audio.
+set(OPUS_ASSERTIONS ON CACHE BOOL "" FORCE)
+include(Opus)
 if(TARGET opus)
     mediaperch_instrument(opus)
     mediaperch_add_codec_fuzzer(opus LINK Opus::opus)

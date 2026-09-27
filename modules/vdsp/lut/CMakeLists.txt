@@ -12,6 +12,10 @@
 # file -- is `modules/shared/cube`, which a Metal or a Vulkan stage takes
 # unchanged.
 
+if(NOT WIN32)
+    return()
+endif()
+
 mediaperch_add_module(mp_vdsp_lut
     KIND vdsp
     SOURCES vdsp_lut.cpp

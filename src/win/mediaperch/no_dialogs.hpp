@@ -20,24 +20,30 @@
 // and a crash is not shown in a window. Aborting rather than exiting keeps a
 // failure a failure: exit code 3 for ctest, and a crash with its input saved
 // for libFuzzer. LLVM's unit test main does the same, for the same reason.
+//
+// **Windows' alone, as the dialogs are.** The probe calls it from its `main`,
+// and the test programs and the fuzzers get tests/no_dialogs.cpp, which calls
+// it before any `main` runs -- a file the build adds on Windows only, so that
+// nothing portable includes this or has an `#if` for it.
 
-#ifdef _WIN32
-#    ifndef WIN32_LEAN_AND_MEAN
-#        define WIN32_LEAN_AND_MEAN
-#    endif
-#    include <windows.h>
-
-#    include <crtdbg.h>
-#    include <cstdint>
-#    include <cstdio>
-#    include <cstdlib>
-#    include <cwchar>
-#    include <initializer_list>
+#if !defined(_WIN32)
+#    error "no_dialogs.hpp is Windows' error reporting; nothing else has its dialogs"
 #endif
+
+#ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
+#include <crtdbg.h>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cwchar>
+#include <initializer_list>
 
 namespace mp::win {
 
-#ifdef _WIN32
 namespace detail {
 
 /// Says what the CRT was handed, and aborts. The release CRT passes nothing
@@ -54,23 +60,20 @@ inline void invalid_parameter(const wchar_t* expression, const wchar_t* function
 }
 
 } // namespace detail
-#endif
 
 /// Everything above, for the whole process. Call it before anything can fail.
 inline void no_dialogs() noexcept
 {
-#ifdef _WIN32
-#    ifdef _DEBUG
+#ifdef _DEBUG
     for (const int report : {_CRT_ERROR, _CRT_ASSERT}) {
         _CrtSetReportMode(report, _CRTDBG_MODE_FILE | _CRTDBG_MODE_DEBUG);
         _CrtSetReportFile(report, _CRTDBG_FILE_STDERR);
     }
-#    endif
+#endif
     _set_error_mode(_OUT_TO_STDERR);
     _set_abort_behavior(0, _CALL_REPORTFAULT);
     _set_invalid_parameter_handler(&detail::invalid_parameter);
     ::SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
-#endif
 }
 
 } // namespace mp::win

@@ -24,10 +24,9 @@
 
 #include <mediaperch/module.h>
 
+#include "dr_wav_file.hpp"
+#include "module_file.hpp"
 #include "module_log.hpp"
-#if defined(_WIN32)
-#    include "win_path.hpp" // a path past MAX_PATH; see the header
-#endif
 
 #include "pcm_format.hpp"
 
@@ -36,10 +35,6 @@
 #include <cstring>
 #include <new>
 #include <string>
-
-#if defined(_WIN32)
-#include <windows.h>
-#endif
 
 namespace {
 
@@ -79,29 +74,6 @@ MpSampleType sample_type_for(std::uint32_t container, std::uint32_t valid) noexc
     return mp::pcm::sample_type_for(container, valid);
 }
 
-// The ABI carries paths as UTF-8. On Windows that has to become UTF-16 before it
-// reaches the file system, or half this machine's music is unopenable.
-#if defined(_WIN32)
-std::wstring widen(const char* utf8)
-{
-    if (utf8 == nullptr || *utf8 == '\0') {
-        return {};
-    }
-    // win_path.hpp: UTF-16, and past MAX_PATH the prefix that lifts the limit.
-    return mp::winpath::for_open(utf8);
-}
-#endif
-
-bool open_wav(drwav* wav, const char* path)
-{
-#if defined(_WIN32)
-    const std::wstring wide = widen(path);
-    return !wide.empty() && drwav_init_file_w(wav, wide.c_str(), nullptr) != 0;
-#else
-    return drwav_init_file(wav, path, nullptr) != 0;
-#endif
-}
-
 bool has_prefix(const std::uint8_t* head, std::size_t bytes, const char* magic,
                 std::size_t offset) noexcept
 {
@@ -123,6 +95,10 @@ constexpr std::uint64_t k_packet_frames = 4096;
 } // namespace
 
 struct MpDemux {
+    // The file, opened by module_file.hpp -- the ABI's UTF-8 path, at any
+    // length -- and read by dr_wav over callbacks (dr_wav_file.hpp), which
+    // leave it this object's to close, after dr_wav is done with it.
+    std::FILE* file = nullptr;
     drwav wav{};
     bool ready = false;
     MpFormat format{};
@@ -134,6 +110,9 @@ struct MpDemux {
     {
         if (ready) {
             drwav_uninit(&wav);
+        }
+        if (file != nullptr) {
+            std::fclose(file);
         }
     }
 };
@@ -187,7 +166,8 @@ try {
     if (d == nullptr) {
         return MP_ERR_NO_MEMORY;
     }
-    if (!open_wav(&d->wav, path)) {
+    d->file = mp::file::open_read(path);
+    if (!mp::drwav_file::init(&d->wav, d->file)) {
         log_fmt(MP_LOG_DEBUG, "dr_wav would not open %s", path);
         delete d;
         return MP_ERR_UNSUPPORTED;

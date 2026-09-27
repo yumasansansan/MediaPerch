@@ -45,7 +45,7 @@ include(ExternalProject)
 set(hm_prefix "${CMAKE_BINARY_DIR}/external/HM")
 # Not where HM puts it -- see find_decoder.cmake, which is why there is a copy
 # step at all -- but where everything downstream can name it.
-set(hm_bin "${hm_prefix}/TAppDecoder.exe")
+set(hm_bin "${hm_prefix}/TAppDecoder${CMAKE_EXECUTABLE_SUFFIX}")
 
 ExternalProject_Add(hm_external
     SOURCE_DIR "${hm_src}"
@@ -62,6 +62,10 @@ ExternalProject_Add(hm_external
         # the toolchain into it. Defined, and false, is how its find_program is
         # told not to look.
         "-DCCACHE_FOUND=OFF"
+        # Its lib/ and bin/ in this build rather than in HM's source tree,
+        # which every build of that tree would otherwise share
+        # (external/patches/hm-outputs-where-the-build-is-told.patch).
+        "-DBBuildEnv_OUTPUT_ROOT=${hm_prefix}/out"
         # **HM turns warnings into errors**, in its own `bb_enable_warnings`,
         # against a compiler generations newer than the one it was written for.
         # This is somebody else's code built for one purpose; the warnings in it
@@ -73,7 +77,7 @@ ExternalProject_Add(hm_external
     # besides, and none of them is what the reference is being asked for.
     BUILD_COMMAND "${CMAKE_COMMAND}" --build "${hm_prefix}/build" --target TAppDecoder
     INSTALL_COMMAND "${CMAKE_COMMAND}"
-        "-Dsrc=${hm_src}" "-Ddest=${hm_bin}"
+        "-Dout=${hm_prefix}/out" "-Ddest=${hm_bin}" "-Dsuffix=${CMAKE_EXECUTABLE_SUFFIX}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/find_decoder.cmake"
     BUILD_BYPRODUCTS "${hm_bin}"
     BUILD_ALWAYS ON

@@ -25,6 +25,7 @@
 #include "h264.hpp"
 #include "module_loader.hpp"
 #include "temp_path.hpp"
+#include "test_platform.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -35,12 +36,8 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <system_error>
 #include <vector>
-
-#ifndef WIN32_LEAN_AND_MEAN
-#    define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
 
 using mp::test::Module;
 
@@ -1437,75 +1434,60 @@ TEST_CASE("a conformance window is the picture's edge, and both containers say w
 
 namespace {
 
-/// A copy of `source` under %TEMP%, at a path longer than MAX_PATH, made with
-/// the prefix the file functions want and handed back plain -- forward
-/// slashes, no prefix -- which is how a shell hands a path over. Empty when
-/// the temp directory could not be built.
+using mp::test::utf8_path;
+using mp::test::platform::long_form;
+
+/// A copy of `source` in the temporary directory, at a path longer than
+/// MAX_PATH, handed back plain -- forward slashes, no prefix -- which is how a
+/// shell hands a path over. Empty when the temp directory could not be built.
+/// The tree is built through `long_form` (test_platform.hpp), because MAX_PATH
+/// is what is under test and building it cannot lean on the limit being gone.
+/// Past Windows, three hundred characters is an ordinary path, and what this
+/// still catches there is a module that copies a path into a buffer of its own.
 struct DeepFile {
-    std::wstring prefixed;
-    std::vector<std::wstring> directories; // deepest last
+    std::filesystem::path top; // removed with everything under it
     std::string plain;
 
-    explicit DeepFile(const char* source, const wchar_t* name)
+    explicit DeepFile(const char* source, const char* name)
     {
-        wchar_t temp[MAX_PATH];
-        const DWORD n = ::GetTempPathW(MAX_PATH, temp);
-        if (n == 0 || n >= MAX_PATH) {
+        std::error_code error;
+        std::filesystem::path at = std::filesystem::temp_directory_path(error);
+        if (error) {
             return;
-        }
-        std::wstring at = std::wstring{L"\\\\?\\"} + temp;
-        if (at.back() != L'\\') {
-            at += L'\\';
         }
         // A directory of this file's own (temp_path.hpp): the one every copy
         // shared was removed by whichever finished first.
-        const std::string top = mp::test::unique_name("long");
-        at.append(top.begin(), top.end());
-        if (!::CreateDirectoryW(at.c_str(), nullptr) && ::GetLastError() != ERROR_ALREADY_EXISTS) {
+        at /= mp::test::unique_name("long");
+        std::filesystem::create_directory(long_form(at), error);
+        if (error) {
             return;
         }
-        directories.push_back(at);
+        top = at;
         // Twelve segments of twenty-two characters: past 300 with the root.
         for (int i = 0; i < 12; ++i) {
-            at += L"\\a-segment-that-is-long-" + std::to_wstring(i);
-            if (!::CreateDirectoryW(at.c_str(), nullptr) &&
-                ::GetLastError() != ERROR_ALREADY_EXISTS) {
+            at /= "a-segment-that-is-long-" + std::to_string(i);
+            std::filesystem::create_directory(long_form(at), error);
+            if (error) {
                 return;
             }
-            directories.push_back(at);
         }
-        prefixed = at + L"\\" + name;
-        std::wstring wide_source;
-        {
-            const int needed = ::MultiByteToWideChar(CP_UTF8, 0, source, -1, nullptr, 0);
-            wide_source.assign(static_cast<std::size_t>(needed > 0 ? needed - 1 : 0), L'\0');
-            ::MultiByteToWideChar(CP_UTF8, 0, source, -1, wide_source.data(), needed);
-        }
-        if (!::CopyFileW(wide_source.c_str(), prefixed.c_str(), FALSE)) {
-            prefixed.clear();
+        at /= name;
+        std::filesystem::copy_file(utf8_path(source), long_form(at), error);
+        if (error) {
             return;
         }
-        std::wstring shown = prefixed.substr(4); // without the prefix
-        for (wchar_t& c : shown) {
-            if (c == L'\\') {
-                c = L'/';
-            }
-        }
-        const int bytes = ::WideCharToMultiByte(CP_UTF8, 0, shown.c_str(), -1, nullptr, 0,
-                                                nullptr, nullptr);
-        plain.assign(static_cast<std::size_t>(bytes > 0 ? bytes - 1 : 0), '\0');
-        ::WideCharToMultiByte(CP_UTF8, 0, shown.c_str(), -1, plain.data(), bytes, nullptr,
-                              nullptr);
+        const std::u8string shown = at.generic_u8string();
+        plain.assign(shown.begin(), shown.end());
     }
     ~DeepFile()
     {
-        if (!prefixed.empty()) {
-            ::DeleteFileW(prefixed.c_str());
-        }
-        for (auto it = directories.rbegin(); it != directories.rend(); ++it) {
-            ::RemoveDirectoryW(it->c_str());
+        if (!top.empty()) {
+            std::error_code ignored;
+            std::filesystem::remove_all(long_form(top), ignored);
         }
     }
+    DeepFile(const DeepFile&) = delete;
+    DeepFile& operator=(const DeepFile&) = delete;
 };
 
 } // namespace
@@ -1518,8 +1500,8 @@ TEST_CASE("a path past MAX_PATH opens, in both containers", "[abi][demux][mp4][m
     // its own fifteen lines that stopped where the file functions stop
     // without the `\\?\` prefix. The Matroska reader was worse: it handed
     // libebml a narrow path, which is the ANSI code page.
-    DeepFile mp4_file{MEDIAPERCH_TEST_HDR10, L"deep.mp4"};
-    DeepFile mkv_file{MEDIAPERCH_TEST_AV_MKV, L"deep.mkv"};
+    DeepFile mp4_file{MEDIAPERCH_TEST_HDR10, "deep.mp4"};
+    DeepFile mkv_file{MEDIAPERCH_TEST_AV_MKV, "deep.mkv"};
     if (mp4_file.plain.empty() || mkv_file.plain.empty()) {
         SKIP("the temp directory would not take a path past MAX_PATH");
     }

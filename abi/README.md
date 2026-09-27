@@ -79,8 +79,8 @@ option is now known to be open rather than assumed to be.
 ## Running them
 
 ```bash
-cmake --preset llvm -DMEDIAPERCH_BUILD_ABI_PROBES=ON
-cmake --build --preset llvm-release
+cmake --preset windows -DMEDIAPERCH_BUILD_ABI_PROBES=ON
+cmake --build --preset windows-release
 ```
 
 ```bash

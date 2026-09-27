@@ -18,9 +18,8 @@
 #   micromamba create -y -n mediaperch-build -c conda-forge python meson ninja nasm
 #   micromamba activate mediaperch-build
 #
-# -- and the module is skipped, loudly, when they are not there. The tree still
-# builds; it just has no AV1 decoder, which is the same shape every other
-# optional module here takes.
+# -- and the configure stops when they are not there, rather than build a tree
+# with no AV1 decoder or a dav1d without its assembly.
 #
 # **The release CRT, always, and the ABI is what makes that safe.** dav1d is
 # built once as a release static library rather than once per configuration,
@@ -50,14 +49,14 @@ find_program(MEDIAPERCH_MESON NAMES meson meson.exe
     DOC "Meson, which builds external/dav1d. Nothing else in this tree needs it.")
 find_program(MEDIAPERCH_NINJA NAMES ninja ninja.exe
     DOC "Ninja, which Meson drives to build external/dav1d.")
+find_program(MEDIAPERCH_NASM NAMES nasm nasm.exe
+    DOC "NASM, which assembles dav1d, libaom, avm and libvpx.")
 
-if(NOT MEDIAPERCH_MESON OR NOT MEDIAPERCH_NINJA)
-    message(WARNING
-        "meson or ninja is not on PATH, and external/dav1d builds with no other "
-        "build system. Skipping codec_dav1d -- the tree still builds and simply "
-        "has no AV1 decoder. See the comment at the top of this file for one way "
-        "to get them.")
-    return()
+if(NOT MEDIAPERCH_MESON OR NOT MEDIAPERCH_NINJA OR NOT MEDIAPERCH_NASM)
+    message(FATAL_ERROR
+        "meson, ninja or nasm is not on PATH, and external/dav1d builds with Meson "
+        "and assembles with nasm. See the comment at the top of this file for one "
+        "way to get them.")
 endif()
 
 include(ExternalProject)

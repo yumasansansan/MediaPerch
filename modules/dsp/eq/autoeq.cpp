@@ -1,22 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#if defined(_WIN32)
-#    include "win_path.hpp"
-#endif
 #include "autoeq.hpp"
+
+#include "module_file.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-
-#if defined(_WIN32)
-#    ifndef WIN32_LEAN_AND_MEAN
-#        define WIN32_LEAN_AND_MEAN
-#    endif
-#    include <windows.h>
-#endif
 
 namespace mp::autoeq {
 namespace {
@@ -231,12 +223,7 @@ bool parse(const std::string& text, Profile& out, std::string& why)
 
 bool load(const std::string& path, Profile& out, std::string& why)
 {
-    std::FILE* file = nullptr;
-#if defined(_WIN32)
-    file = mp::winpath::fopen_utf8(path.c_str(), L"rb"); // and past MAX_PATH, see win_path.hpp
-#else
-    file = std::fopen(path.c_str(), "rb");
-#endif
+    std::FILE* file = mp::file::open_read(path.c_str());
     if (file == nullptr) {
         why = "could not open " + path;
         return false;

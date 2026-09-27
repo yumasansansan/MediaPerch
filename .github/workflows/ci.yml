@@ -12,14 +12,16 @@ concurrency:
   cancel-in-progress: true
 
 # **Every job builds with LLVM, and with one pinned version of it.** Clang's GNU
-# driver compiles, LLD links, llvm-ar archives; on Windows the C++ library is
+# driver compiles, LLD links, llvm-ar archives. On Windows the C++ library is
 # the MSVC STL, linked dynamically, which Clang finds in the Visual Studio the
 # image already has -- by itself, with no developer prompt, which is why there is
-# no vcvars64.bat step anywhere below. `ci/setup.sh` downloads LLVM's own release
-# archive, checks its SHA-256, puts it first on PATH and exports
-# MEDIAPERCH_LLVM_MAJOR, and cmake/LLVMToolchain.cmake then refuses a configure
-# whose compiler, linker or archiver is anything else -- the runner image's own
-# LLVM included, whose version moves when the image does.
+# no vcvars64.bat step anywhere below; on Ubuntu it is the system's libstdc++.
+# `ci/setup.sh` installs LLVM -- LLVM's own release archive on Windows, checked
+# against its SHA-256, and the packages of apt.llvm.org on Ubuntu, checked by
+# their signing key -- puts it first on PATH and exports MEDIAPERCH_LLVM_MAJOR,
+# and cmake/LLVMToolchain.cmake then refuses a configure whose compiler, linker
+# or archiver is anything else -- the runner image's own LLVM included, whose
+# version moves when the image does.
 
 jobs:
   # The rule that the portable half is portable is only worth something if
@@ -49,16 +51,16 @@ jobs:
         run: bash ci/setup.sh
 
       - name: Configure
-        run: cmake --preset core-only
+        run: cmake --preset windows-core-only
 
       - name: Report the toolchain
-        run: Get-Content build/core-only/llvm-toolchain.txt
+        run: Get-Content build/windows-core-only/llvm-toolchain.txt
 
       - name: Build the engine, and nothing else
-        run: cmake --build --preset core-only --target mediaperch_core mediaperch_audio mediaperch_video
+        run: cmake --build --preset windows-core-only --target mediaperch_core mediaperch_audio mediaperch_video
 
       - name: Build the player on top of it
-        run: cmake --build --preset core-only --target mediaperch_player
+        run: cmake --build --preset windows-core-only --target mediaperch_player
 
       - name: Check that both are still portable
         run: >
@@ -67,28 +69,30 @@ jobs:
 
   # The ABI header is compiled as C23 here as well as C++ (tests/abi_header_c.c),
   # so a C++-ism creeping into it fails the build rather than a third party's.
-  # **Two instruction-set baselines, both shipped.**
+  # **Two instruction sets, both shipped.**
   #
-  # Nothing this tree links needs help -- libFLAC, libmpg123, libopus and
-  # libwavpack each dispatch on the CPU internally. The code *here* does: the
-  # resampler, the convolver, the FFT, the equaliser, the channel matrix and the
-  # dither are Path B's inner loops and compile to the x86-64 baseline, which is
-  # SSE2 and 2003. `avx2` is x86-64-v3 -- Haswell and Zen and later -- and a
-  # binary built that way does not start without it, which is why both are built
-  # and both are uploaded rather than one being chosen for everybody.
-  llvm:
-    name: LLVM, build and test
+  # AVX2 -- x86-64-v3, Haswell and Zen and later -- is the least this tree is
+  # built for, because MediaPerch is a suite of libraries other programs link as
+  # much as it is a player: the resampler, the convolver, the FFT, the equaliser,
+  # the channel matrix and the dither are Path B's inner loops, and every one is
+  # compiled for AVX2 outright. The AVX-512 build is x86-64-v4 with 512-bit
+  # vectors, for the processors that have them. Neither asks the processor
+  # anything when it starts: a binary run where its instruction set is missing
+  # stops at the first instruction it lacks. So both are built and both are
+  # uploaded rather than one being chosen for everybody.
+  windows:
+    name: Windows, build and test
     runs-on: windows-2025-vs2026
     strategy:
       fail-fast: false
       matrix:
         configuration: [Debug, Release]
-        arch: [baseline, avx2]
+        arch: [avx2, avx512]
         include:
-          - arch: baseline
-            preset: llvm
           - arch: avx2
-            preset: llvm-avx2
+            preset: windows
+          - arch: avx512
+            preset: windows-avx512
     steps:
       - uses: actions/checkout@v7
         with:
@@ -96,11 +100,9 @@ jobs:
 
       # **dav1d builds with Meson and nothing else**, which makes it the one
       # submodule here CMake cannot build -- see modules/codec/dav1d. The image
-      # has Ninja already and neither of the other two, so without this step
-      # `codec_dav1d` is skipped by its own guard, the build stays green, and
-      # the artifacts quietly have no AV1 decoder. A silent absence is exactly
-      # what this repository does not do elsewhere, so it is installed rather
-      # than shrugged at.
+      # has Ninja already and neither of the other two, and codec_dav1d stops
+      # the configure without them rather than leave the artifacts without an
+      # AV1 decoder, so they are installed here.
       #
       # Through the Miniconda the image ships rather than pip: both tools come
       # from one channel, which is also how the development machine gets them.
@@ -120,9 +122,8 @@ jobs:
       # modules/codec/vpx wants anyway: it finds that bash and that make by
       # name, and PATH stays a Windows PATH rather than one where `find` and
       # `sort` are suddenly somebody else's. What the image does not carry is
-      # make, and without it codec_vpx skips itself and the artifacts have no
-      # VP8 or VP9 decoder -- the same silent absence the step above exists to
-      # prevent.
+      # make, and codec_vpx stops the configure without it rather than leave the
+      # artifacts without a VP8 or VP9 decoder.
       #
       # `pacman -S` on its own first, because the image's databases were synced
       # when it was built. `-Sy` is a partial upgrade and only worth risking if
@@ -144,8 +145,8 @@ jobs:
         shell: bash
         run: bash ci/setup.sh
 
-      # Stated out loud, because these modules skip themselves silently when a
-      # tool is absent and a skipped decoder looks exactly like a passing build.
+      # Stated out loud: the versions of what built the external decoders are
+      # part of what the log records.
       - name: Report the tools the external decoders need
         run: |
           meson --version
@@ -158,7 +159,7 @@ jobs:
 
       # What the configure checked -- every tool with its version, and the C++
       # library -- and the instruction set it was asked for.
-      - name: Report the toolchain and the baseline
+      - name: Report the toolchain and the instruction set
         run: |
           Get-Content build/${{ matrix.preset }}/llvm-toolchain.txt
           cmake -N -L build/${{ matrix.preset }} | Select-String -Pattern 'MEDIAPERCH_ARCH'
@@ -166,7 +167,30 @@ jobs:
       - name: Build
         run: cmake --build --preset ${{ matrix.preset }} --config ${{ matrix.configuration }}
 
+      # **Whether this runner can run what was built.** Neither build checks the
+      # processor it starts on, and a runner is whichever machine the pool hands
+      # out, with AVX-512 or without it. The AVX-512 build is built either way;
+      # its tests run where the processor has x86-64-v4's five -- AVX-512 F, BW,
+      # CD, DQ and VL -- as .NET finds them, which includes the system's word
+      # that it saves their registers.
+      - name: Can this runner run it?
+        id: cpu
+        run: |
+          $runs = $true
+          if ('${{ matrix.arch }}' -eq 'avx512') {
+            $runs = [System.Runtime.Intrinsics.X86.Avx512F]::IsSupported -and
+                    [System.Runtime.Intrinsics.X86.Avx512F+VL]::IsSupported -and
+                    [System.Runtime.Intrinsics.X86.Avx512BW]::IsSupported -and
+                    [System.Runtime.Intrinsics.X86.Avx512CD]::IsSupported -and
+                    [System.Runtime.Intrinsics.X86.Avx512DQ]::IsSupported
+          }
+          if (-not $runs) {
+            Write-Output "::notice::This runner has no AVX-512: the AVX-512 build was built, and its tests were not run."
+          }
+          "runs=$($runs.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
       - name: Test
+        if: steps.cpu.outputs.runs == 'true'
         run: >
           ctest --preset ${{ matrix.preset }} --build-config ${{ matrix.configuration }}
           --output-on-failure --no-tests=error
@@ -178,13 +202,14 @@ jobs:
       # and after the build, because several modules include headers an external
       # project generates.
       - name: Static analysis
-        if: matrix.configuration == 'Debug' && matrix.arch == 'baseline'
+        if: matrix.configuration == 'Debug' && matrix.arch == 'avx2'
         shell: bash
         run: bash ci/tidy.sh build/${{ matrix.preset }}
 
-      # The Release build of each baseline, so a person can take the one their
-      # machine runs. The AVX2 one refuses to start on anything before Haswell,
-      # which is the whole reason there are two.
+      # The Release build of each instruction set, so a person can take the one
+      # their machine runs. The AVX-512 one stops at its first AVX-512
+      # instruction on anything without it, which is the whole reason there are
+      # two.
       - name: Keep the Release build
         if: matrix.configuration == 'Release'
         uses: actions/upload-artifact@v7
@@ -192,6 +217,74 @@ jobs:
           name: mediaperch-${{ matrix.arch }}
           path: build/${{ matrix.preset }}/bin/Release
           if-no-files-found: error
+
+  # **Ubuntu: everything but the Windows head.** The engine, the player, every
+  # module whose code is not Windows' own, and the tests, built and run on every
+  # push -- so that what builds on Linux now still builds the day a shell arrives
+  # to hold it. The shell and the Windows modules (Media Foundation, WASAPI,
+  # Direct3D and the rest) are left out by the tree itself, not by anything here.
+  linux:
+    name: Linux, build and test
+    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Debug, Release]
+        arch: [avx2, avx512]
+        include:
+          - arch: avx2
+            preset: linux
+          - arch: avx512
+            preset: linux-avx512
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      # LLVM, and on Ubuntu what the external decoders are built with as well:
+      # nasm, Meson and make, from the system's packages (ci/setup.sh).
+      - name: LLVM, pinned, and the tools of the external decoders
+        run: bash ci/setup.sh
+
+      - name: Report the tools the external decoders need
+        run: |
+          meson --version
+          nasm -v
+          ninja --version
+          make --version
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Report the toolchain and the instruction set
+        run: |
+          cat build/${{ matrix.preset }}/llvm-toolchain.txt
+          cmake -N -L build/${{ matrix.preset }} | grep MEDIAPERCH_ARCH
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }} --config ${{ matrix.configuration }}
+
+      # As on Windows. The kernel lists a flag in /proc/cpuinfo only when the
+      # processor has it and the system saves its registers.
+      - name: Can this runner run it?
+        id: cpu
+        run: |
+          runs=true
+          if [ '${{ matrix.arch }}' = avx512 ]; then
+            for flag in avx512f avx512bw avx512cd avx512dq avx512vl; do
+              grep -qw "$flag" /proc/cpuinfo || runs=false
+            done
+          fi
+          if [ "$runs" = false ]; then
+            echo "::notice::This runner has no AVX-512: the AVX-512 build was built, and its tests were not run."
+          fi
+          echo "runs=$runs" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        if: steps.cpu.outputs.runs == 'true'
+        run: >
+          ctest --preset ${{ matrix.preset }} --build-config ${{ matrix.configuration }}
+          --output-on-failure --no-tests=error
 
   # Every parser that reads a file somebody else wrote, given bytes nobody wrote.
   #
@@ -216,20 +309,20 @@ jobs:
       # thrown away in this job, and nothing but their findings leaves it, so
       # they are compiled for the machine they run on -- native, AVX-512 at its
       # whole width where the runner has it -- which is the fastest code it can
-      # run. What ships is built by the baseline and AVX2 jobs, not this one.
+      # run. What ships is built by the AVX2 and AVX-512 jobs, not this one.
       - name: Configure
-        run: cmake --preset fuzz -DMEDIAPERCH_ARCH=native
+        run: cmake --preset windows-fuzz -DMEDIAPERCH_ARCH=native
 
       - name: Report the toolchain
         run: |
-          Get-Content build/fuzz/llvm-toolchain.txt
-          cmake -N -L build/fuzz | Select-String -Pattern 'MEDIAPERCH_ARCH'
+          Get-Content build/windows-fuzz/llvm-toolchain.txt
+          cmake -N -L build/windows-fuzz | Select-String -Pattern 'MEDIAPERCH_ARCH'
 
       - name: Build
-        run: cmake --build --preset fuzz
+        run: cmake --build --preset windows-fuzz
 
       - name: Fuzz
-        run: ctest --preset fuzz
+        run: ctest --preset windows-fuzz
 
       # Whatever the run found: the input of every crash, leak, timeout and
       # out-of-memory, each named after its fuzzer. RunFuzzer.cmake tells
@@ -240,7 +333,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: fuzz-findings
-          path: build/fuzz/fuzz-findings/
+          path: build/windows-fuzz/fuzz-findings/
           if-no-files-found: ignore
 
   # Every other check in this tree compares one decoder with another, which can
@@ -294,15 +387,15 @@ jobs:
       # behaviour is code in this repository is still held to the table.
       - name: Configure
         run: >
-          cmake --preset llvm
+          cmake --preset windows
           -D MEDIAPERCH_REQUIRE_FFMPEG=ON -D MEDIAPERCH_DIAGNOSTICS=ON
           -D MEDIAPERCH_MATRIX_STRICT=OFF
 
       - name: Report the toolchain
-        run: Get-Content build/llvm/llvm-toolchain.txt
+        run: Get-Content build/windows/llvm-toolchain.txt
 
       - name: Build
-        run: cmake --build --preset llvm --config Release
+        run: cmake --build --preset windows --config Release
 
       # MEDIAPERCH_REQUIRE_FFMPEG turns a missing FFmpeg -- or a build without
       # the measuring commands -- from a skip into a failure, so the day either
@@ -319,7 +412,7 @@ jobs:
       # it turns out to be.
       - name: Measure
         run: >
-          ctest --preset llvm --build-config Release
+          ctest --preset windows --build-config Release
           -L quality --output-on-failure --no-tests=error
 
   # What actually ships: optimised, link-time optimised, no test suite and no
@@ -338,9 +431,9 @@ jobs:
         with:
           submodules: true
 
-      # See the `llvm` job for why this is here. Without it the shipping build
-      # has no AV1 decoder, and a size report that leaves one out is the wrong
-      # report.
+      # See the `windows` job for why these two are here: without them the
+      # configure stops, and a size report of a build without its AV1, VP8 and
+      # VP9 decoders would be the wrong report anyway.
       - name: Meson and nasm, which build external/dav1d
         run: |
           & "$env:CONDA\Scripts\conda.exe" create -y -n mediaperch-build -c conda-forge meson nasm
@@ -348,18 +441,6 @@ jobs:
           Add-Content -Path $env:GITHUB_PATH -Value "$root\Scripts"
           Add-Content -Path $env:GITHUB_PATH -Value "$root\Library\bin"
 
-      # **libvpx needs MSYS2, and the image already carries one.** C:\msys64 is
-      # there and deliberately not on PATH, which is the arrangement
-      # modules/codec/vpx wants anyway: it finds that bash and that make by
-      # name, and PATH stays a Windows PATH rather than one where `find` and
-      # `sort` are suddenly somebody else's. What the image does not carry is
-      # make, and without it codec_vpx skips itself and the artifacts have no
-      # VP8 or VP9 decoder -- the same silent absence the step above exists to
-      # prevent.
-      #
-      # `pacman -S` on its own first, because the image's databases were synced
-      # when it was built. `-Sy` is a partial upgrade and only worth risking if
-      # that fails.
       - name: make, from the MSYS2 the image already has
         run: |
           $pacman = "C:\msys64\usr\bin\pacman.exe"
@@ -379,21 +460,21 @@ jobs:
 
       - name: Configure
         run: >
-          cmake --preset llvm
+          cmake --preset windows
           -D MEDIAPERCH_BUILD_TESTS=OFF -D MEDIAPERCH_LINK_MAP=ON
 
       - name: Report the toolchain
-        run: Get-Content build/llvm/llvm-toolchain.txt
+        run: Get-Content build/windows/llvm-toolchain.txt
 
       - name: Build
-        run: cmake --build --preset llvm --config Release
+        run: cmake --build --preset windows --config Release
 
       - name: What it weighs
         run: |
-          Get-ChildItem build/llvm/bin/Release -Include *.exe,*.dll -Recurse |
+          Get-ChildItem build/windows/bin/Release -Include *.exe,*.dll -Recurse |
             Sort-Object Length -Descending |
             Format-Table @{n='KB';e={'{0,8:N1}' -f ($_.Length/1KB)}}, Name -AutoSize
-          '{0:N1} KB total' -f ((Get-ChildItem build/llvm/bin/Release -Include *.exe,*.dll -Recurse |
+          '{0:N1} KB total' -f ((Get-ChildItem build/windows/bin/Release -Include *.exe,*.dll -Recurse |
             Measure-Object Length -Sum).Sum / 1KB)
 
       # Where those bytes came from, attributed to the object files that brought
@@ -401,5 +482,5 @@ jobs:
       # name.
       - name: Where the bytes are
         run: |
-          $maps = (Get-ChildItem build/llvm/bin/Release/*.map).FullName
+          $maps = (Get-ChildItem build/windows/bin/Release/*.map).FullName
           python tools/mapsize.py --top 8 @maps

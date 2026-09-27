@@ -327,7 +327,15 @@ void Player::shutdown()
     if (!started_) {
         return;
     }
-    quit_.store(true, std::memory_order_release);
+    // **Set under the lock the loop waits with.** The loop looks at `quit_`
+    // holding `mutex_` and then sleeps; set without it, the flag could land
+    // after the look and before the sleep, the one notification would wake
+    // nobody, and `join` would wait for good -- which a Linux run of the whole
+    // suite did, the loop asleep on `wake_` and the test in `join`.
+    {
+        const std::lock_guard lock{mutex_};
+        quit_.store(true, std::memory_order_release);
+    }
     stop_wanted_.store(true, std::memory_order_release);
     wake_.notify_all();
     if (thread_.joinable()) {
@@ -2165,7 +2173,17 @@ Player::RunEnd Player::play_run(Queue& queue, Playlist& playlist, std::uint64_t&
     // a presenter and a decoder take milliseconds to open and the first frame
     // should not wait on them; after, because §9.8.1 hands the decoder the
     // presenter's graphics device and neither exists until now.
-    open_video(playlist, queue.index());
+    //
+    // **And which track it is for is kept, and handed to the pump.** From the
+    // moment the graph is published below, `next` may move the queue -- a
+    // listener pressing it as the run starts, or a test that presses it as soon
+    // as the picture is configured -- and a pump that asked which track was
+    // being heard once it had started would find the next one, take it for the
+    // one on screen, and never build the picture for it: measured, one run in
+    // ten of the boundary tests with every core busy, the old picture and its
+    // decoder kept for good.
+    const std::size_t picture = queue.index();
+    open_video(playlist, picture);
 
     RunEnd end = RunEnd::failed;
     // **An enormous ring is the user's business; a terminated engine is not.**
@@ -2190,7 +2208,7 @@ Player::RunEnd Player::play_run(Queue& queue, Playlist& playlist, std::uint64_t&
                 const std::lock_guard lock{mutex_};
                 graph_b_ = &graph;
             }
-            end = pump(graph, playlist);
+            end = pump(graph, playlist, picture);
             position = graph.position_frames();
             {
                 const std::lock_guard lock{mutex_};
@@ -2207,7 +2225,7 @@ Player::RunEnd Player::play_run(Queue& queue, Playlist& playlist, std::uint64_t&
                 const std::lock_guard lock{mutex_};
                 graph_a_ = &graph;
             }
-            end = pump(graph, playlist);
+            end = pump(graph, playlist, picture);
             position = graph.position_frames();
             {
                 const std::lock_guard lock{mutex_};
@@ -2376,7 +2394,7 @@ void Player::stop_video() noexcept
 }
 
 template <typename Graph>
-Player::RunEnd Player::pump(Graph& graph, Playlist& playlist)
+Player::RunEnd Player::pump(Graph& graph, Playlist& playlist, std::size_t picture)
 {
     const MpResult started = graph.start();
     if (started != MP_OK) {
@@ -2416,7 +2434,10 @@ Player::RunEnd Player::pump(Graph& graph, Playlist& playlist)
             return static_cast<double>(queue_->start_at(graph.position_frames())) /
                    static_cast<double>(source_.sample_rate);
         };
-        std::size_t showing = heard();
+        // What is on screen is what `play_run` opened, and not what is heard by
+        // the time this line runs: a `next` in between is a boundary like any
+        // other, which the first turn of the loop below then crosses.
+        std::size_t showing = picture;
         start_video(&audible, began());
 
         while (graph.running()) {

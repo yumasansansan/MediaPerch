@@ -29,8 +29,8 @@
 // and an accurate frame index, which were four separate pieces of code here.
 //
 // **The file is opened by this module, not by mpg123.** `mpg123_reader64`
-// installs our own read and seek over a `FILE*` from `open_utf8`, the way every
-// other module in this tree opens a file. That is not only for consistency:
+// installs our own read and seek over a `FILE*` from module_file.hpp, the way
+// every other module in this tree opens a file. That is not only for consistency:
 // mpg123 1.33.7 fixed heap buffer overflows in its Windows Unicode path
 // conversion, and this is the arrangement under which that code is never
 // reached at all.
@@ -41,10 +41,8 @@
 
 #include <mediaperch/module.h>
 
+#include "module_file.hpp"
 #include "module_log.hpp"
-#if defined(_WIN32)
-#    include "win_path.hpp" // a path past MAX_PATH; see the header
-#endif
 
 #include <mpg123.h>
 
@@ -54,13 +52,6 @@
 #include <cstring>
 #include <new>
 #include <string>
-
-#if defined(_WIN32)
-#  ifndef WIN32_LEAN_AND_MEAN
-#    define WIN32_LEAN_AND_MEAN
-#  endif
-#  include <windows.h>
-#endif
 
 namespace {
 
@@ -75,16 +66,6 @@ void log_fmt(MpLogLevel level, const char* format, ...) noexcept
     va_start(args, format);
     mp::log::vfmt(g_host, level, format, args);
     va_end(args);
-}
-
-FILE* open_utf8(const char* path) noexcept
-{
-#if defined(_WIN32)
-    // win_path.hpp: UTF-16, and past MAX_PATH the prefix that lifts the limit.
-    return mp::winpath::fopen_utf8(path, L"rb");
-#else
-    return std::fopen(path, "rb");
-#endif
 }
 
 // --------------------------------------------------------------- our I/O
@@ -110,10 +91,10 @@ int io_read(void* handle, void* buffer, std::size_t count, std::size_t* got) noe
 std::int64_t io_seek(void* handle, std::int64_t offset, int whence) noexcept
 {
     auto* fp = static_cast<FILE*>(handle);
-    if (_fseeki64(fp, offset, whence) != 0) {
+    if (mp::file::seek(fp, offset, whence) != 0) {
         return -1;
     }
-    return _ftelli64(fp);
+    return mp::file::tell(fp);
 }
 
 // ------------------------------------------------------------ the format
@@ -275,7 +256,7 @@ void shut_down(MpDemux* d) noexcept
 /// first frame. The caller owns `d` either way.
 bool start(MpDemux* d, const char* path) noexcept
 {
-    d->fp = open_utf8(path);
+    d->fp = mp::file::open_read(path);
     if (d->fp == nullptr) {
         return false;
     }
@@ -345,7 +326,7 @@ try {
     // A probe sees four kilobytes and may have to guess past a large tag; this
     // does not.
     {
-        FILE* peek = open_utf8(path);
+        FILE* peek = mp::file::open_read(path);
         if (peek == nullptr) {
             delete d;
             return MP_ERR_IO;
@@ -358,7 +339,7 @@ try {
         std::int64_t at = 0;
         for (int tags = 0; tags < 4; ++tags) {
             std::uint8_t head[10] = {};
-            if (_fseeki64(peek, at, SEEK_SET) != 0 ||
+            if (mp::file::seek(peek, at, SEEK_SET) != 0 ||
                 std::fread(head, 1, sizeof(head), peek) != sizeof(head)) {
                 break;
             }

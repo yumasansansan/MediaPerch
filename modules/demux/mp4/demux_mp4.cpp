@@ -33,10 +33,8 @@
 #include <mediaperch/module.h>
 
 #include "h264.hpp"
+#include "module_file.hpp"
 #include "module_log.hpp"
-#if defined(_WIN32)
-#    include "win_path.hpp" // a path past MAX_PATH; see the header
-#endif
 
 #include <Ap4.h>
 #include <Ap4ColrAtom.h>
@@ -50,13 +48,6 @@
 #include <new>
 #include <string>
 #include <vector>
-
-#if defined(_WIN32)
-#  ifndef WIN32_LEAN_AND_MEAN
-#    define WIN32_LEAN_AND_MEAN
-#  endif
-#  include <windows.h>
-#endif
 
 namespace {
 
@@ -82,16 +73,6 @@ void log_fmt(MpLogLevel level, const char* format, ...) noexcept
 constexpr std::uint64_t k_parse_budget = 1000000;
 constexpr std::uint64_t k_packet_budget = 100000;
 
-FILE* open_utf8(const char* path) noexcept
-{
-#if defined(_WIN32)
-    // win_path.hpp: UTF-16, and past MAX_PATH the prefix that lifts the limit.
-    return mp::winpath::fopen_utf8(path, L"rb");
-#else
-    return std::fopen(path, "rb");
-#endif
-}
-
 /// A read-only AP4_ByteStream over a FILE* this module opened itself, with a
 /// budget.
 ///
@@ -100,7 +81,7 @@ FILE* open_utf8(const char* path) noexcept
 /// The first is that it opens with the narrow CRT call: on Windows that is the
 /// process code page, so a path with a character outside it -- most of a
 /// Japanese music library -- would not open at all. Every other module here goes
-/// through the same `open_utf8`, and this is the adapter that lets Bento4 do the
+/// through module_file.hpp, and this is the adapter that lets Bento4 do the
 /// same.
 ///
 /// **The second is the budget, and it is a security control.** Bento4 has more
@@ -180,14 +161,14 @@ public:
         if (++used_ > budget_) {
             return AP4_ERROR_EOS;
         }
-        return _fseeki64(fp_, static_cast<std::int64_t>(position), SEEK_SET) == 0
+        return mp::file::seek(fp_, static_cast<std::int64_t>(position), SEEK_SET) == 0
                    ? AP4_SUCCESS
                    : AP4_ERROR_EOS;
     }
 
     AP4_Result Tell(AP4_Position& position) override
     {
-        const std::int64_t at = _ftelli64(fp_);
+        const std::int64_t at = mp::file::tell(fp_);
         if (at < 0) {
             return AP4_FAILURE;
         }
@@ -204,15 +185,15 @@ public:
     /// Opens `path`, or returns null. The caller owns one reference.
     static FileStream* open(const char* path) noexcept
     {
-        FILE* fp = open_utf8(path);
+        FILE* fp = mp::file::open_read(path);
         if (fp == nullptr) {
             return nullptr;
         }
         std::int64_t bytes = -1;
-        if (_fseeki64(fp, 0, SEEK_END) == 0) {
-            bytes = _ftelli64(fp);
+        if (mp::file::seek(fp, 0, SEEK_END) == 0) {
+            bytes = mp::file::tell(fp);
         }
-        if (bytes < 0 || _fseeki64(fp, 0, SEEK_SET) != 0) {
+        if (bytes < 0 || mp::file::seek(fp, 0, SEEK_SET) != 0) {
             std::fclose(fp);
             return nullptr;
         }

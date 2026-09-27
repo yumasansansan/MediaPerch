@@ -20,7 +20,6 @@
 // fail, in the fuzzer that links it (module_harness.hpp); a seed ends in a byte
 // no packet takes, zero, so that none does.
 
-#include "mediaperch/no_dialogs.hpp"
 #include "module_harness.hpp"
 
 #include <mediaperch/module.h>
@@ -109,7 +108,6 @@ struct Reader {
 
 extern "C" int LLVMFuzzerInitialize(int*, char***)
 {
-    mp::win::no_dialogs();
     (void)module();
     return 0;
 }

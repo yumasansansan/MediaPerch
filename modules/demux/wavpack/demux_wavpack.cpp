@@ -37,10 +37,8 @@
 
 #include <mediaperch/module.h>
 
+#include "module_file.hpp"
 #include "module_log.hpp"
-#if defined(_WIN32)
-#    include "win_path.hpp" // a path past MAX_PATH; see the header
-#endif
 
 #include "pcm_format.hpp"
 
@@ -53,10 +51,6 @@
 #include <new>
 #include <string>
 #include <vector>
-
-#if defined(_WIN32)
-#include <windows.h>
-#endif
 
 namespace {
 
@@ -79,17 +73,9 @@ void log_fmt(MpLogLevel level, const char* format, ...) noexcept
 // code page unless `OPEN_FILE_UTF8` is passed -- a flag whose behaviour is one
 // more thing to be right about, on a path this tree already knows how to open.
 // `WavpackOpenFileInputEx64` takes callbacks instead, so the host's UTF-8 path
-// goes through the same `_wfopen_s` every other module here uses and libwavpack
-// never sees a filename at all. The same arrangement `demux_mpa` has with
-// libmpg123 and `demux_mp4` with Bento4.
-#if defined(_WIN32)
-FILE* open_utf8(const char* path)
-{
-    return mp::winpath::fopen_utf8(path, L"rb"); // and past MAX_PATH, see win_path.hpp
-}
-#else
-FILE* open_utf8(const char* path) { return std::fopen(path, "rb"); }
-#endif
+// goes through module_file.hpp, as every other module here opens its files, and
+// libwavpack never sees a filename at all. The same arrangement `demux_mpa` has
+// with libmpg123 and `demux_mp4` with Bento4.
 
 /// A `FILE*` with one byte of push-back, which is what libwavpack's reader
 /// interface asks for and what `ungetc` cannot promise more than one of.
@@ -126,7 +112,7 @@ std::int32_t io_write(void*, void*, std::int32_t)
 std::int64_t io_get_pos(void* id)
 {
     auto* s = static_cast<Stream*>(id);
-    const std::int64_t at = _ftelli64(s->fp);
+    const std::int64_t at = mp::file::tell(s->fp);
     return s->pushed >= 0 ? at - 1 : at;
 }
 
@@ -134,7 +120,7 @@ int io_set_pos_abs(void* id, std::int64_t pos)
 {
     auto* s = static_cast<Stream*>(id);
     s->pushed = -1;
-    return _fseeki64(s->fp, pos, SEEK_SET);
+    return mp::file::seek(s->fp, pos, SEEK_SET);
 }
 
 int io_set_pos_rel(void* id, std::int64_t delta, int mode)
@@ -144,7 +130,7 @@ int io_set_pos_rel(void* id, std::int64_t delta, int mode)
         delta -= 1; // the pushed byte is one the caller has not consumed
     }
     s->pushed = -1;
-    return _fseeki64(s->fp, delta, mode);
+    return mp::file::seek(s->fp, delta, mode);
 }
 
 int io_push_back(void* id, int c)
@@ -156,12 +142,12 @@ int io_push_back(void* id, int c)
 std::int64_t io_get_length(void* id)
 {
     auto* s = static_cast<Stream*>(id);
-    const std::int64_t at = _ftelli64(s->fp);
-    if (_fseeki64(s->fp, 0, SEEK_END) != 0) {
+    const std::int64_t at = mp::file::tell(s->fp);
+    if (mp::file::seek(s->fp, 0, SEEK_END) != 0) {
         return 0;
     }
-    const std::int64_t end = _ftelli64(s->fp);
-    (void)_fseeki64(s->fp, at, SEEK_SET);
+    const std::int64_t end = mp::file::tell(s->fp);
+    (void)mp::file::seek(s->fp, at, SEEK_SET);
     return end;
 }
 
@@ -239,7 +225,7 @@ try {
     if (d == nullptr) {
         return MP_ERR_NO_MEMORY;
     }
-    d->stream.fp = open_utf8(path);
+    d->stream.fp = mp::file::open_read(path);
     if (d->stream.fp == nullptr) {
         delete d;
         return MP_ERR_IO;

@@ -10,6 +10,10 @@
 # Direct3D 11 device. The kernels themselves are `modules/shared/kernels`,
 # which is where a Metal or a Vulkan scaler would take them from.
 
+if(NOT WIN32)
+    return()
+endif()
+
 mediaperch_add_module(mp_vdsp_scale
     KIND vdsp
     SOURCES vdsp_scale.cpp

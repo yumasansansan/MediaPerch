@@ -11,36 +11,31 @@
 // mapping cannot change a file's size, so each size gets a file of its own:
 // written the first time it is seen, and scanned that once, and copied into
 // through a mapping after that -- 0.09 ms. The mapping is closed again before
-// the module opens the file, because the modules open with `_wfopen_s`, whose
-// share mode refuses a file anybody else has open for writing.
+// the module opens the file, because the modules open with `_wfopen_s` there
+// (modules/shared/module_log/module_file_windows.cpp), whose share mode refuses
+// a file anybody else has open for writing.
 //
 // Past a budget of bytes the files are all removed and the count starts
 // again, and they are removed with the object. A process that dies -- which is
 // what a fuzzer that finds something does -- leaves its files, and the next one
 // made with the same prefix removes those of any process no longer running.
+//
+// The mapping and the questions about processes are the system's, and are
+// test_platform.hpp's to answer, per system and chosen by the build; this is
+// ISO C++.
+
+#include "test_platform.hpp"
 
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <ios>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <unordered_map>
-
-#ifdef _WIN32
-#    ifndef WIN32_LEAN_AND_MEAN
-#        define WIN32_LEAN_AND_MEAN
-#    endif
-#    include <windows.h>
-
-#    include <process.h>
-#else
-#    include <signal.h>
-#    include <unistd.h>
-#endif
 
 namespace mp::test {
 
@@ -49,11 +44,7 @@ public:
     /// Files named `<prefix><process id>-<size>` in the temporary directory.
     explicit ScratchFiles(std::string_view prefix) : prefix_(prefix)
     {
-#ifdef _WIN32
-        const auto id = static_cast<unsigned long>(_getpid());
-#else
-        const auto id = static_cast<unsigned long>(getpid());
-#endif
+        const unsigned long id = platform::process_id();
         const std::filesystem::path temp = std::filesystem::temp_directory_path();
         base_ = temp / (prefix_ + std::to_string(id) + "-");
         remove_orphans(temp);
@@ -95,52 +86,25 @@ private:
         std::string utf8;
     };
 
-    /// The first time a size is seen: written, as any file is.
+    /// The first time a size is seen: written, as any file is. std::ofstream
+    /// takes the path as the system spells it, UTF-16 on Windows included.
     static bool make(const File& file, const std::uint8_t* data, std::size_t size)
     {
-        std::FILE* out = nullptr;
-#ifdef _WIN32
-        if (::_wfopen_s(&out, file.native.c_str(), L"wb") != 0) {
+        std::ofstream out{file.native, std::ios::binary | std::ios::trunc};
+        if (!out) {
             return false;
         }
-#else
-        out = std::fopen(file.native.c_str(), "wb");
-#endif
-        if (out == nullptr) {
-            return false;
+        if (size != 0) {
+            out.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
         }
-        const bool written = size == 0 || std::fwrite(data, 1, size, out) == size;
-        return std::fclose(out) == 0 && written;
+        out.close();
+        return !out.fail();
     }
 
     /// Every time after: through a mapping on Windows, which is not scanned.
     static bool copy_in(const File& file, const std::uint8_t* data, std::size_t size)
     {
-        if (size == 0) {
-            return true;
-        }
-#ifdef _WIN32
-        const HANDLE handle = ::CreateFileW(file.native.c_str(), GENERIC_READ | GENERIC_WRITE,
-                                            FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-                                            FILE_ATTRIBUTE_TEMPORARY, nullptr);
-        if (handle == INVALID_HANDLE_VALUE) {
-            return false;
-        }
-        const HANDLE mapping = ::CreateFileMappingW(handle, nullptr, PAGE_READWRITE, 0, 0, nullptr);
-        void* const view =
-            mapping != nullptr ? ::MapViewOfFile(mapping, FILE_MAP_WRITE, 0, 0, 0) : nullptr;
-        if (view != nullptr) {
-            std::memcpy(view, data, size);
-            ::UnmapViewOfFile(view);
-        }
-        if (mapping != nullptr) {
-            ::CloseHandle(mapping);
-        }
-        ::CloseHandle(handle);
-        return view != nullptr;
-#else
-        return make(file, data, size);
-#endif
+        return size == 0 || platform::overwrite(file.native, data, size);
     }
 
     /// The files of processes that died, which no destructor removed.
@@ -160,22 +124,7 @@ private:
         }
     }
 
-    static bool running(unsigned long id)
-    {
-#ifdef _WIN32
-        const HANDLE process =
-            ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(id));
-        if (process == nullptr) {
-            return false;
-        }
-        DWORD code = 0;
-        const bool alive = ::GetExitCodeProcess(process, &code) != FALSE && code == STILL_ACTIVE;
-        ::CloseHandle(process);
-        return alive;
-#else
-        return ::kill(static_cast<pid_t>(id), 0) == 0;
-#endif
-    }
+    static bool running(unsigned long id) { return platform::process_running(id); }
 
     void clear()
     {

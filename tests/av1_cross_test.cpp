@@ -45,11 +45,6 @@
 #include <string>
 #include <vector>
 
-#ifndef WIN32_LEAN_AND_MEAN
-#    define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-
 using mp::test::Module;
 
 namespace {

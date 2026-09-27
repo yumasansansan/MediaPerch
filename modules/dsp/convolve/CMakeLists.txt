@@ -12,9 +12,11 @@
 add_library(mediaperch_impulse STATIC impulse.cpp)
 target_include_directories(mediaperch_impulse PUBLIC "${CMAKE_CURRENT_LIST_DIR}")
 # dr_wav's implementation comes from modules/shared/dr_wav, compiled once and
-# held to nobody's warning standard but its own; impulse.cpp keeps ours.
+# held to nobody's warning standard but its own; impulse.cpp keeps ours. The
+# file it reads is opened by module_file.hpp, from mediaperch_module_log.
 target_link_libraries(mediaperch_impulse
-    PUBLIC mediaperch_resample PRIVATE mediaperch_flags mediaperch_dr_wav)
+    PUBLIC mediaperch_resample
+    PRIVATE mediaperch_flags mediaperch_dr_wav mediaperch_module_log)
 set_target_properties(mediaperch_impulse PROPERTIES FOLDER "modules")
 
 mediaperch_add_module(mp_dsp_convolve
@@ -22,7 +24,3 @@ mediaperch_add_module(mp_dsp_convolve
     SOURCES dsp_convolve.cpp
     LINK mediaperch_convolve mediaperch_impulse)
 
-
-# win_path.hpp, for a path past MAX_PATH: the one header beside module_log
-# that every module opening a file by name includes (see it for why).
-target_include_directories(mediaperch_impulse PRIVATE "${CMAKE_SOURCE_DIR}/modules/shared/module_log")

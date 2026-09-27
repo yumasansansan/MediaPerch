@@ -52,11 +52,16 @@ find_program(MEDIAPERCH_NASM NAMES nasm nasm.exe
     DOC "NASM, which assembles avm. external/aom and external/dav1d need it too.")
 
 if(NOT MEDIAPERCH_NASM)
-    message(WARNING
-        "nasm is not on PATH and avm's x86 code needs an assembler. Skipping "
-        "codec_avm -- the tree still builds and simply has no AV2 decoder.")
-    return()
+    message(FATAL_ERROR
+        "nasm is not on PATH, and avm's x86 code is assembled with it.")
 endif()
+
+# **x86-64 by name, and the set the build guarantees taken without asking**,
+# as modules/codec/aom does for libaom, which avm is a fork of: AVM_TARGET_CPU
+# so that its detection cannot answer `generic`, and run-time detection off, so
+# that cmake/rtcd.pl calls the versions for the highest set enabled -- AVX2,
+# which every build here guarantees and which is the highest avm has.
+set(mediaperch_avm_cpu "-DAVM_TARGET_CPU=x86_64" "-DCONFIG_RUNTIME_CPU_DETECT=0")
 
 include(ExternalProject)
 
@@ -66,7 +71,7 @@ set(avm_prefix "${CMAKE_BINARY_DIR}/external/avm")
 # library and nothing else. The library is taken from the build directory and
 # the headers from the source tree, which is what modules/codec/vpx already
 # does for the same reason.
-set(avm_library "${avm_prefix}/avm.lib")
+set(avm_library "${avm_prefix}/${CMAKE_STATIC_LIBRARY_PREFIX}avm${CMAKE_STATIC_LIBRARY_SUFFIX}")
 
 ExternalProject_Add(avm_external
     SOURCE_DIR "${avm_src}"
@@ -84,6 +89,7 @@ ExternalProject_Add(avm_external
         # The toolchain, the linker and the dynamic C runtime: an external
         # project inherits none of them (cmake/CompilerOptions.cmake).
         ${MEDIAPERCH_EXTERNAL_CMAKE_ARGS}
+        ${mediaperch_avm_cpu}
         "-DCONFIG_AV2_DECODER=1"
         "-DCONFIG_AV2_ENCODER=0"
         # Matroska is a demuxer in this tree, so avm's own muxer is not wanted --

@@ -41,9 +41,11 @@ include(ExternalProject)
 
 set(de265_prefix "${CMAKE_BINARY_DIR}/external/libde265")
 set(de265_install "${de265_prefix}/install")
-# libde265 keeps the `lib` prefix on Windows -- `libde265.lib`, not `de265.lib`
-# -- which lld-link links perfectly well and CMake will not guess at.
-set(de265_library "${de265_install}/lib/libde265.lib")
+# libde265 keeps the `lib` prefix on Windows too -- `libde265.lib`, not
+# `de265.lib` -- which lld-link links perfectly well and CMake will not guess
+# at; `libde265.a` elsewhere. The directory is `lib` everywhere because
+# MEDIAPERCH_EXTERNAL_CMAKE_ARGS says so.
+set(de265_library "${de265_install}/lib/libde265${CMAKE_STATIC_LIBRARY_SUFFIX}")
 
 ExternalProject_Add(de265_external
     SOURCE_DIR "${de265_src}"

@@ -24,15 +24,26 @@
 
 find_program(MEDIAPERCH_CARGO cargo)
 
-# **cargo links with LLD too.** rustc's MSVC target runs link.exe unless it is
-# told otherwise, and a build whose linker is LLD everywhere else should not
-# have one corner where it is Microsoft's. So cargo is given the lld-link Clang
-# runs (cmake/LLVMToolchain.cmake) as the host target's linker, through the
+# **cargo links with LLD too, the one the rest of the build links with.**
+# rustc's MSVC target runs link.exe unless it is told otherwise, and a build
+# whose linker is LLD everywhere else should not have one corner where it is
+# Microsoft's. So on Windows cargo is given the lld-link Clang runs
+# (cmake/LLVMToolchain.cmake) as the host target's linker, through the
 # environment variable cargo reads for it. rustc still finds the C runtime's
 # and the SDK's import libraries in the Visual Studio installation, which it
 # asks the system for by itself, exactly as Clang does.
+#
+# **On Linux the corner was GCC's.** rustc's GNU target runs `cc`, which is
+# GCC of whatever version the system defaults to, and hands it an LLD of
+# Rust's own: measured from each module's `.comment`, the Rust modules were
+# linked by Rust's LLD 22 behind GCC 15's driver and crt files, while every
+# other module was linked by LLVM 23's LLD behind Clang, with GCC 16's. So
+# cargo is given the Clang that compiles everything else as its linker, and
+# that Clang is told the LLD to run by its path, in RUSTFLAGS below. Both are
+# needed: given Clang, rustc no longer hands over an LLD of its own, and Clang
+# left to itself runs binutils' ld.
 set(MEDIAPERCH_CARGO_ENV "")
-if(MEDIAPERCH_CARGO AND WIN32)
+if(MEDIAPERCH_CARGO AND (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux"))
     get_filename_component(mediaperch_cargo_dir "${MEDIAPERCH_CARGO}" DIRECTORY)
     find_program(MEDIAPERCH_RUSTC rustc HINTS "${mediaperch_cargo_dir}")
     execute_process(COMMAND "${MEDIAPERCH_RUSTC}" -vV
@@ -41,7 +52,11 @@ if(MEDIAPERCH_CARGO AND WIN32)
         set(MEDIAPERCH_RUST_HOST "${CMAKE_MATCH_1}")
         string(TOUPPER "${MEDIAPERCH_RUST_HOST}" mediaperch_host_var)
         string(REPLACE "-" "_" mediaperch_host_var "${mediaperch_host_var}")
-        set(MEDIAPERCH_CARGO_ENV "CARGO_TARGET_${mediaperch_host_var}_LINKER=${MEDIAPERCH_LLD}")
+        if(WIN32)
+            set(MEDIAPERCH_CARGO_ENV "CARGO_TARGET_${mediaperch_host_var}_LINKER=${MEDIAPERCH_LLD}")
+        else()
+            set(MEDIAPERCH_CARGO_ENV "CARGO_TARGET_${mediaperch_host_var}_LINKER=${CMAKE_C_COMPILER}")
+        endif()
     else()
         message(FATAL_ERROR "rustc -vV did not say which target it is for:\n${mediaperch_rustc_info}")
     endif()
@@ -49,7 +64,7 @@ endif()
 
 # **The instruction set reaches the Rust modules too** (cmake/CompilerOptions.cmake):
 # a decoder is arithmetic like any other, and an AVX2 build whose Rust modules
-# were x86-64 would be a baseline build in those. It goes to cargo in
+# were plain x86-64 would be an SSE2 build in those. It goes to cargo in
 # RUSTFLAGS, which without `--target` reaches every crate cargo compiles --
 # build scripts and procedural macros too, which run on the machine that
 # builds -- and that is safe because this workspace has neither, and no
@@ -141,6 +156,38 @@ if(mediaperch_rust_wide AND MEDIAPERCH_CARGO)
             "wants them (${mediaperch_rust_probe}).\n${mediaperch_rust_errors}")
     endif()
     message(STATUS "Rust modules: ${MEDIAPERCH_RUSTFLAGS} (512-bit vectors, checked)")
+endif()
+# The LLD Clang runs for cargo on Linux, above. A link argument, so it reaches
+# the links and nothing else, and the probe before it had no link to reach.
+if(MEDIAPERCH_CARGO AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    string(APPEND MEDIAPERCH_RUSTFLAGS " -Clink-arg=--ld-path=${MEDIAPERCH_LLD}")
+endif()
+
+# **On Windows, the libraries and the protections of the C++ images.**
+#
+# The libraries: rustc hands lld-link a LIB of its own finding, and Clang
+# passes the directories it found itself, by different code -- rustc's is
+# find-msvc-tools, Clang's LLVM's own -- so the two agree only as long as both
+# pick the same Visual Studio and the same SDK. They did here, measured with
+# lld-link's /verbose: MSVC 14.51.36231 and SDK 10.0.28000.0 for both. With
+# /lldignoreenv lld-link ignores rustc's LIB and finds them by the code Clang
+# uses, the same LLVM's, so the agreement is no longer a coincidence.
+#
+# The protections (cmake/CompilerOptions.cmake): the C++ images carry Control
+# Flow Guard's checks and tables, the table of exception continuations, and
+# the mark of CET compatibility, and the Rust modules carried none of the
+# three. Control Flow Guard is stable rustc's to give (-Ccontrol-flow-guard,
+# with /guard:cf passed to the linker by rustc), and under the same condition
+# as the C++ one: not in the sanitized and fuzzing builds. The continuation
+# table is nightly's alone (-Zehcont-guard), and the CET mark is left off with
+# it, for the reason the C++ side gives it last: the table is what an image
+# needs before it can say it is compatible. The stack cookie is nightly's too
+# (-Zstack-protector).
+if(MEDIAPERCH_CARGO AND WIN32)
+    string(APPEND MEDIAPERCH_RUSTFLAGS " -Clink-arg=/lldignoreenv")
+    if(NOT (MEDIAPERCH_SANITIZE OR MEDIAPERCH_BUILD_FUZZERS))
+        string(APPEND MEDIAPERCH_RUSTFLAGS " -Ccontrol-flow-guard")
+    endif()
 endif()
 set(MEDIAPERCH_RUSTFLAGS_ENV "")
 if(MEDIAPERCH_RUSTFLAGS)

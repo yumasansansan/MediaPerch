@@ -120,14 +120,16 @@ TEST_CASE("libde265 and the HEVC reference agree on every sample",
 
     // ---- HM, as a program --------------------------------------------------
     const std::string yuv_path = scratch("reference.yuv");
-    // **Two pairs of quotes, and the outer one is not decoration.** `system`
-    // runs `cmd /c <string>`, and cmd strips the first and last character when
-    // the string begins with a quote -- so a command whose program *and*
-    // arguments are quoted arrives with its first quote gone and its last one
-    // orphaned. Wrapping the whole thing again is what survives that.
-    const std::string command = std::string{"\"\""} + MEDIAPERCH_HM_DECODER +
-                                "\" -b \"" + bitstream_path + "\" -o \"" + yuv_path +
-                                "\" -d 8 > \"" + scratch("hm.log") + "\" 2>&1\"";
+    // **One string for both shells, and its first character is why.** `system`
+    // hands it to `cmd /c` on Windows and to `sh -c` elsewhere, and the two read
+    // quotes alike but for one rule of cmd's: a string that *begins* with a quote
+    // loses its first and its last, so a command whose program and arguments are
+    // all quoted arrives with the first quote gone and the last one orphaned.
+    // Both shells take redirections before the program as well as after it, so
+    // the string begins with them, and no quote is first.
+    const std::string command = "> \"" + scratch("hm.log") + "\" 2>&1 \"" +
+                                std::string{MEDIAPERCH_HM_DECODER} + "\" -b \"" +
+                                bitstream_path + "\" -o \"" + yuv_path + "\" -d 8";
     const int ran = std::system(command.c_str());
     INFO("HM said " << ran << "; its output is in " << scratch("hm.log"));
     REQUIRE(ran == 0);

@@ -46,6 +46,15 @@ endif()
 # external/dav1d, which then showed up as untracked content inside the
 # submodule and would have been a network fetch during every CI configure. The
 # tests that use it are off, so nothing is lost by refusing.
+#
+# **The assembly by name as well**, which is dav1d's default and is not left to
+# it: with it on, a missing nasm stops `meson setup` rather than giving a dav1d
+# without its assembly. And the archive position-independent, also Meson's
+# default, because on Linux it goes into a module, which is a shared library.
+#
+# `--libdir lib`, because Meson's own choice on Debian and Ubuntu is
+# `lib/x86_64-linux-gnu`, whatever the prefix, and the module links the archive
+# by a path written down in modules/codec/dav1d/CMakeLists.txt.
 execute_process(
     COMMAND "${meson}" setup "${build}" "${src}"
         --backend ninja
@@ -53,6 +62,9 @@ execute_process(
         --default-library static
         --wrap-mode=nodownload
         --prefix "${prefix}"
+        --libdir lib
+        -Denable_asm=true
+        -Db_staticpic=true
         "${c_args}"
         ${extra}
     RESULT_VARIABLE result)

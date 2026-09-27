@@ -35,61 +35,72 @@
       }
     },
     {
-      "name": "llvm",
+      "name": "windows-base",
+      "hidden": true,
       "inherits": "llvm-tools",
-      "displayName": "Ninja + LLVM",
-      "description": "Day to day: Clang, LLD and the LLVM tools, the MSVC STL as the C++ library on Windows. No developer prompt: Clang finds Visual Studio's STL and the Windows SDK by itself.",
-      "generator": "Ninja Multi-Config"
-    },
-    {
-      "name": "llvm-avx2",
-      "inherits": "llvm",
-      "displayName": "Ninja + LLVM, AVX2",
-      "description": "The same build raised to x86-64-v3. Needs a Haswell or Zen and refuses to start without one; CI ships this beside the baseline so a person can pick.",
-      "cacheVariables": {
-        "MEDIAPERCH_ARCH": "avx2"
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
       }
     },
     {
-      "name": "llvm-avx512",
-      "inherits": "llvm",
-      "displayName": "Ninja + LLVM, AVX-512",
-      "description": "The same build raised to x86-64-v4, with 512-bit vectors. Needs Skylake-SP, Ice Lake, Sapphire Rapids, Zen 4 or later, and refuses to start without AVX-512.",
+      "name": "linux-base",
+      "hidden": true,
+      "inherits": "llvm-tools",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "windows",
+      "inherits": "windows-base",
+      "displayName": "Windows, AVX2",
+      "description": "Day to day: Clang, LLD and the LLVM tools, with the MSVC STL as the C++ library, for x86-64-v3 -- AVX2, the least this tree builds for. No developer prompt: Clang finds Visual Studio's STL and the Windows SDK by itself.",
+      "generator": "Ninja Multi-Config"
+    },
+    {
+      "name": "windows-avx512",
+      "inherits": "windows",
+      "displayName": "Windows, AVX-512",
+      "description": "The same build raised to x86-64-v4, with 512-bit vectors. Needs AVX-512 -- Intel's Xeons from Skylake-SP on, Ice Lake, Tiger Lake and Rocket Lake, AMD's Zen 4 on -- and stops at its first AVX-512 instruction on a processor without it, Alder Lake and Raptor Lake included.",
       "cacheVariables": {
         "MEDIAPERCH_ARCH": "avx512"
       }
     },
     {
-      "name": "llvm-native",
-      "inherits": "llvm",
-      "displayName": "Ninja + LLVM, this machine",
-      "description": "The same build for exactly the processor it is built on, with 512-bit vectors where it has AVX-512. For that machine alone: another may refuse to start it.",
+      "name": "windows-native",
+      "inherits": "windows",
+      "displayName": "Windows, this machine",
+      "description": "The same build for exactly the processor it is built on, with 512-bit vectors where it has AVX-512. For that machine alone: another may lack an instruction it uses, and stop there.",
       "cacheVariables": {
         "MEDIAPERCH_ARCH": "native"
       }
     },
     {
-      "name": "core-only",
-      "inherits": "llvm",
-      "displayName": "Engine and player alone",
+      "name": "windows-core-only",
+      "inherits": "windows",
+      "displayName": "Windows, engine and player alone",
       "description": "What CI builds to keep the portable half portable, and to keep the engine free of the player. No platform head, no modules.",
       "cacheVariables": {
         "MEDIAPERCH_BUILD_PLATFORM": "OFF"
       }
     },
     {
-      "name": "measure",
-      "inherits": "llvm",
-      "displayName": "Release, with the measuring apparatus kept",
+      "name": "windows-measure",
+      "inherits": "windows",
+      "displayName": "Windows, Release with the measuring apparatus kept",
       "description": "An optimised build that still has `compare` and `verify`, so the decode-quality check can run at Release speed rather than Debug speed.",
       "cacheVariables": {
         "MEDIAPERCH_DIAGNOSTICS": "ON"
       }
     },
     {
-      "name": "asan",
-      "inherits": "llvm-tools",
-      "displayName": "Clang, sanitized",
+      "name": "windows-asan",
+      "inherits": "windows-base",
+      "displayName": "Windows, sanitized",
       "description": "The parsers under ASan and UBSan, without the Windows head.",
       "generator": "Ninja",
       "cacheVariables": {
@@ -99,9 +110,9 @@
       }
     },
     {
-      "name": "fuzz",
-      "inherits": "llvm-tools",
-      "displayName": "Fuzzers (Clang + libFuzzer)",
+      "name": "windows-fuzz",
+      "inherits": "windows-base",
+      "displayName": "Windows, fuzzers (Clang + libFuzzer)",
       "description": "libFuzzer over every parser that reads somebody else's file, with the static C runtime libFuzzer is built against.",
       "generator": "Ninja",
       "cacheVariables": {
@@ -110,60 +121,102 @@
         "MEDIAPERCH_BUILD_TESTS": "OFF",
         "MEDIAPERCH_BUILD_PLATFORM": "OFF"
       }
+    },
+    {
+      "name": "linux",
+      "inherits": "linux-base",
+      "displayName": "Linux, AVX2",
+      "description": "Clang, LLD and the LLVM tools, with the system's libstdc++ as the C++ library, for x86-64-v3 -- AVX2, the least this tree builds for. Everything but the Windows head and the Windows modules.",
+      "generator": "Ninja Multi-Config"
+    },
+    {
+      "name": "linux-avx512",
+      "inherits": "linux",
+      "displayName": "Linux, AVX-512",
+      "description": "The same build raised to x86-64-v4, with 512-bit vectors. Needs AVX-512 -- Intel's Xeons from Skylake-SP on, Ice Lake, Tiger Lake and Rocket Lake, AMD's Zen 4 on -- and stops at its first AVX-512 instruction on a processor without it, Alder Lake and Raptor Lake included.",
+      "cacheVariables": {
+        "MEDIAPERCH_ARCH": "avx512"
+      }
+    },
+    {
+      "name": "linux-native",
+      "inherits": "linux",
+      "displayName": "Linux, this machine",
+      "description": "The same build for exactly the processor it is built on, with 512-bit vectors where it has AVX-512. For that machine alone: another may lack an instruction it uses, and stop there.",
+      "cacheVariables": {
+        "MEDIAPERCH_ARCH": "native"
+      }
     }
   ],
   "buildPresets": [
     {
-      "name": "llvm",
-      "configurePreset": "llvm"
+      "name": "windows",
+      "configurePreset": "windows"
     },
     {
-      "name": "llvm-avx2",
-      "configurePreset": "llvm-avx2"
+      "name": "windows-avx512",
+      "configurePreset": "windows-avx512"
     },
     {
-      "name": "llvm-avx512",
-      "configurePreset": "llvm-avx512"
+      "name": "windows-native",
+      "configurePreset": "windows-native"
     },
     {
-      "name": "llvm-native",
-      "configurePreset": "llvm-native"
-    },
-    {
-      "name": "llvm-debug",
-      "configurePreset": "llvm",
+      "name": "windows-debug",
+      "configurePreset": "windows",
       "configuration": "Debug"
     },
     {
-      "name": "llvm-release",
-      "configurePreset": "llvm",
+      "name": "windows-release",
+      "configurePreset": "windows",
       "configuration": "Release"
     },
     {
-      "name": "llvm-relwithdebinfo",
-      "configurePreset": "llvm",
+      "name": "windows-relwithdebinfo",
+      "configurePreset": "windows",
       "configuration": "RelWithDebInfo"
     },
     {
-      "name": "measure",
-      "configurePreset": "measure",
+      "name": "windows-measure",
+      "configurePreset": "windows-measure",
       "configuration": "Release"
     },
     {
-      "name": "core-only",
-      "configurePreset": "core-only",
+      "name": "windows-core-only",
+      "configurePreset": "windows-core-only",
       "configuration": "Debug"
     },
     {
-      "name": "fuzz",
-      "configurePreset": "fuzz"
+      "name": "windows-fuzz",
+      "configurePreset": "windows-fuzz"
+    },
+    {
+      "name": "linux",
+      "configurePreset": "linux"
+    },
+    {
+      "name": "linux-avx512",
+      "configurePreset": "linux-avx512"
+    },
+    {
+      "name": "linux-native",
+      "configurePreset": "linux-native"
+    },
+    {
+      "name": "linux-debug",
+      "configurePreset": "linux",
+      "configuration": "Debug"
+    },
+    {
+      "name": "linux-release",
+      "configurePreset": "linux",
+      "configuration": "Release"
     }
   ],
   "testPresets": [
     {
-      "name": "measure",
-      "configurePreset": "measure",
-      "configuration": "Release",
+      "name": "checked",
+      "hidden": true,
       "output": {
         "outputOnFailure": true
       },
@@ -172,76 +225,63 @@
       }
     },
     {
-      "name": "llvm",
-      "configurePreset": "llvm",
-      "output": {
-        "outputOnFailure": true
-      },
-      "execution": {
-        "noTestsAction": "error"
-      }
+      "name": "windows",
+      "inherits": "checked",
+      "configurePreset": "windows"
     },
     {
-      "name": "llvm-avx2",
-      "configurePreset": "llvm-avx2",
-      "output": {
-        "outputOnFailure": true
-      },
-      "execution": {
-        "noTestsAction": "error"
-      }
+      "name": "windows-avx512",
+      "inherits": "checked",
+      "configurePreset": "windows-avx512"
     },
     {
-      "name": "llvm-avx512",
-      "configurePreset": "llvm-avx512",
-      "output": {
-        "outputOnFailure": true
-      },
-      "execution": {
-        "noTestsAction": "error"
-      }
+      "name": "windows-native",
+      "inherits": "checked",
+      "configurePreset": "windows-native"
     },
     {
-      "name": "llvm-native",
-      "configurePreset": "llvm-native",
-      "output": {
-        "outputOnFailure": true
-      },
-      "execution": {
-        "noTestsAction": "error"
-      }
+      "name": "windows-release",
+      "inherits": "checked",
+      "configurePreset": "windows",
+      "configuration": "Release"
     },
     {
-      "name": "llvm-release",
-      "configurePreset": "llvm",
-      "configuration": "Release",
-      "output": {
-        "outputOnFailure": true
-      },
-      "execution": {
-        "noTestsAction": "error"
-      }
+      "name": "windows-measure",
+      "inherits": "checked",
+      "configurePreset": "windows-measure",
+      "configuration": "Release"
     },
     {
-      "name": "core-only",
-      "configurePreset": "core-only",
-      "configuration": "Debug",
-      "output": {
-        "outputOnFailure": true
-      },
-      "execution": {
-        "noTestsAction": "error"
-      }
+      "name": "windows-core-only",
+      "inherits": "checked",
+      "configurePreset": "windows-core-only",
+      "configuration": "Debug"
     },
     {
-      "name": "fuzz",
-      "configurePreset": "fuzz",
-      "output": {
-        "outputOnFailure": true
-      },
-      "execution": {
-        "noTestsAction": "error"
-      }
+      "name": "windows-fuzz",
+      "inherits": "checked",
+      "configurePreset": "windows-fuzz"
+    },
+    {
+      "name": "linux",
+      "inherits": "checked",
+      "configurePreset": "linux"
+    },
+    {
+      "name": "linux-avx512",
+      "inherits": "checked",
+      "configurePreset": "linux-avx512"
+    },
+    {
+      "name": "linux-native",
+      "inherits": "checked",
+      "configurePreset": "linux-native"
+    },
+    {
+      "name": "linux-release",
+      "inherits": "checked",
+      "configurePreset": "linux",
+      "configuration": "Release"
     }
   ]
 }

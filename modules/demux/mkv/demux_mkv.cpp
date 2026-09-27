@@ -32,10 +32,8 @@
 
 #include <mediaperch/module.h>
 
+#include "module_file.hpp"
 #include "module_log.hpp"
-#if defined(_WIN32)
-#    include "win_path.hpp" // a path past MAX_PATH; see the header
-#endif
 
 #include "pcm_format.hpp"
 
@@ -318,18 +316,11 @@ std::uint64_t to_frames(std::uint64_t ns, std::uint32_t rate)
 /// takes a narrow path through `fopen`, which on Windows is the ANSI code
 /// page: a path with a character outside it -- most of the world's -- does
 /// not open, and one past MAX_PATH does not open at all. This is the same
-/// five calls over `_wfopen_s` and win_path.hpp's rule; `float_of` seeks and
-/// reads through it unchanged.
+/// five calls over module_file.hpp, which every module opens its files with;
+/// `float_of` seeks and reads through it unchanged.
 class FileIo final : public libebml::IOCallback {
 public:
-    explicit FileIo(const char* path)
-#if defined(_WIN32)
-        : file_(mp::winpath::fopen_utf8(path, L"rb"))
-#else
-        : file_(std::fopen(path, "rb"))
-#endif
-    {
-    }
+    explicit FileIo(const char* path) : file_(mp::file::open_read(path)) {}
     ~FileIo() override { close(); }
     FileIo(const FileIo&) = delete;
     FileIo& operator=(const FileIo&) = delete;
@@ -345,13 +336,13 @@ public:
     {
         if (file_ != nullptr) {
             // libebml's three modes are SEEK_SET, SEEK_END and SEEK_CUR by value.
-            (void)_fseeki64(file_, offset, static_cast<int>(mode));
+            (void)mp::file::seek(file_, offset, static_cast<int>(mode));
         }
     }
     std::size_t write(const void*, std::size_t) override { return 0; }
     std::uint64_t getFilePointer() override
     {
-        return file_ != nullptr ? static_cast<std::uint64_t>(_ftelli64(file_)) : 0u;
+        return file_ != nullptr ? static_cast<std::uint64_t>(mp::file::tell(file_)) : 0u;
     }
     void close() override
     {

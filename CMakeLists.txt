@@ -41,12 +41,21 @@ option(MEDIAPERCH_BUILD_ABI_PROBES "Build the throwaway ABI probe modules" OFF)
 # `-std=c23`, where MSVC offered a `latest` that stood for most of each and
 # meant something different every year -- and the ABI header is compiled as C23
 # by a C compiler that has C23's enums (tests/abi_header_c.c).
-set(CMAKE_CXX_STANDARD 23)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_C_STANDARD 23)
-set(CMAKE_C_STANDARD_REQUIRED ON)
-set(CMAKE_C_EXTENSIONS OFF)
+#
+# **For this tree's own targets, not for the libraries it builds.**
+# mediaperch_flags_everywhere (cmake/CompilerOptions.cmake) sets the standard
+# on each of them, where CMAKE_C_STANDARD and CMAKE_CXX_STANDARD would be
+# inherited by every submodule added below: a library written for POSIX in its
+# GNU dialect -- libvorbis's alloca, libwavpack's fseeko and strcasecmp -- finds
+# none of it in glibc under ISO C23, and each library says what it is written in
+# itself. ADLplug-Next sets its standard per target for the same reason.
+
+# **Every object position-independent, the libraries' included.** A module is
+# a shared library, and on Linux, where Clang makes position-independent
+# executables by default, a static library compiled for an executable cannot be
+# linked into one. Windows has no such distinction and the property changes
+# nothing there.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 

@@ -65,17 +65,29 @@ find_program(MEDIAPERCH_NASM NAMES nasm nasm.exe
     DOC "NASM, which assembles libaom. external/dav1d's Meson build needs it too.")
 
 if(NOT MEDIAPERCH_NASM)
-    message(WARNING
-        "nasm is not on PATH and libaom's x86 code needs an assembler. Skipping "
-        "codec_aom -- the tree still builds and dav1d still decodes AV1.")
-    return()
+    message(FATAL_ERROR
+        "nasm is not on PATH, and libaom's x86 code is assembled with it.")
+endif()
+
+# **x86-64 by name, and the set the build guarantees taken without asking.**
+# The name, so that libaom's own detection cannot answer `generic` and build
+# without its assembly. The set (MEDIAPERCH_ISA_LEVEL, cmake/CompilerOptions.cmake):
+# with run-time detection off, cmake/rtcd.pl calls every function's version for
+# the highest set enabled, so a build for AVX2 turns AVX-512 off -- which it
+# does not guarantee -- and takes the AVX2 versions, and a build for AVX-512
+# turns it on by name and takes those.
+set(mediaperch_aom_cpu "-DAOM_TARGET_CPU=x86_64" "-DCONFIG_RUNTIME_CPU_DETECT=0")
+if(MEDIAPERCH_ISA_LEVEL STREQUAL "avx512")
+    list(APPEND mediaperch_aom_cpu "-DENABLE_AVX512=1")
+else()
+    list(APPEND mediaperch_aom_cpu "-DENABLE_AVX512=0")
 endif()
 
 include(ExternalProject)
 
 set(aom_prefix "${CMAKE_BINARY_DIR}/external/aom")
 set(aom_install "${aom_prefix}/install")
-set(aom_library "${aom_install}/lib/aom.lib")
+set(aom_library "${aom_install}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}aom${CMAKE_STATIC_LIBRARY_SUFFIX}")
 
 ExternalProject_Add(aom_external
     SOURCE_DIR "${aom_src}"
@@ -95,6 +107,9 @@ ExternalProject_Add(aom_external
         # The toolchain, the linker and the dynamic C runtime: an external
         # project inherits none of them (cmake/CompilerOptions.cmake).
         ${MEDIAPERCH_EXTERNAL_CMAKE_ARGS}
+        # x86-64 by name rather than by libaom's detection, whose answer
+        # for a processor it does not know is `generic`: no assembly.
+        ${mediaperch_aom_cpu}
         "-DCONFIG_AV1_DECODER=1"
         "-DCONFIG_AV1_ENCODER=0"
         "-DENABLE_EXAMPLES=OFF"

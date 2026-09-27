@@ -7,8 +7,8 @@
 # letter. Deleting it would delete the evidence, and an off-by-default target
 # costs the same as a deleted one until somebody turns it on:
 #
-#   cmake --preset llvm -DMEDIAPERCH_BUILD_ABI_PROBES=ON
-#   cmake --build --preset llvm-release
+#   cmake --preset windows -DMEDIAPERCH_BUILD_ABI_PROBES=ON
+#   cmake --build --preset windows-release
 #   mediaperch-probe --dsp list        # it is there
 #   mediaperch-probe play --file X --dsp probe_c --verbose
 #

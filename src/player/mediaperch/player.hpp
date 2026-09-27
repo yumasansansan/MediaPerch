@@ -344,8 +344,10 @@ private:
     /// no graph, and the transport talks to the clock.
     RunEnd play_alone(Playlist& playlist, std::size_t index, std::uint64_t from,
                       std::uint64_t& position);
+    /// `picture` is the track `play_run` opened the picture for, which is the
+    /// one the pump starts out showing.
     template <typename Graph>
-    RunEnd pump(Graph& graph, Playlist& playlist);
+    RunEnd pump(Graph& graph, Playlist& playlist, std::size_t picture);
 
     /// Builds the chain from `config_.dsp`. False and a reason when a stage is
     /// not there or will not take a setting.

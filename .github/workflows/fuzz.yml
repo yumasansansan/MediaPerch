@@ -66,15 +66,15 @@ jobs:
       # For the runner's own processor, as CI's fuzz job is: nothing built here
       # leaves this job but what it finds.
       - name: Configure
-        run: cmake --preset fuzz -DMEDIAPERCH_ARCH=native
+        run: cmake --preset windows-fuzz -DMEDIAPERCH_ARCH=native
 
       - name: Report the toolchain
         run: |
-          Get-Content build/fuzz/llvm-toolchain.txt
-          cmake -N -L build/fuzz | Select-String -Pattern 'MEDIAPERCH_ARCH'
+          Get-Content build/windows-fuzz/llvm-toolchain.txt
+          cmake -N -L build/windows-fuzz | Select-String -Pattern 'MEDIAPERCH_ARCH'
 
       - name: Build
-        run: cmake --build --preset fuzz
+        run: cmake --build --preset windows-fuzz
 
       # The corpus the last campaign grew, where there was one: a night that
       # starts from the seed inputs spends its first minutes finding again what
@@ -108,7 +108,7 @@ jobs:
         run: |
           $seconds = [int]('${{ github.event.inputs.minutes || '10' }}') * 60
           $env:MEDIAPERCH_FUZZ_SECONDS = "$seconds"
-          ctest --preset fuzz ${{ matrix.select }} --timeout ($seconds + 600) --output-on-failure
+          ctest --preset windows-fuzz ${{ matrix.select }} --timeout ($seconds + 600) --output-on-failure
 
       - name: Keep the corpus
         if: always()

@@ -19,18 +19,21 @@
 // builds -- the one job that has FFmpeg runs `decode_quality` alone.
 //
 // So this walks the module directory instead of naming anything. A module is a
-// DLL exporting `mp_module_entry`; what it must do is answer the version this
-// tree is compiled for. Anything that does not is a module the player will not
-// load, and a silent absence is the one thing §7 says this tree does not do.
+// shared library -- a DLL on Windows -- exporting `mp_module_entry`; what it
+// must do is answer the version this tree is compiled for. Anything that does
+// not is a module the player will not load, and a silent absence is the one
+// thing §7 says this tree does not do.
 
 #include "mediaperch/result.hpp"
 
 #include "temp_path.hpp"
+#include "test_platform.hpp"
 
 #include <mediaperch/module.h>
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -38,14 +41,9 @@
 #include <string>
 #include <vector>
 
-#ifndef WIN32_LEAN_AND_MEAN
-#    define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-
 namespace {
 
-/// Every DLL under the directory the modules are built into, whatever built
+/// Every module under the directory the modules are built into, whatever built
 /// them. Naming them would defeat the point: the module that falls behind is
 /// the one nobody remembered to name.
 std::vector<std::filesystem::path> modules()
@@ -57,11 +55,32 @@ std::vector<std::filesystem::path> modules()
         return found;
     }
     for (const auto& entry : std::filesystem::recursive_directory_iterator(root, trouble)) {
-        if (entry.is_regular_file(trouble) && entry.path().extension() == ".dll") {
+        if (entry.is_regular_file(trouble) &&
+            entry.path().extension() == MEDIAPERCH_MODULE_SUFFIX) {
             found.push_back(entry.path());
         }
     }
     return found;
+}
+
+// A module loaded by hand rather than through module_loader.hpp, because what
+// this file asks the entry point is the wrong versions, and that header hands
+// out only the answer to the right one. The loading is test_platform.hpp's.
+using Entry = const MpModuleDesc*(MP_CALL*)(std::uint32_t);
+
+void* load(const std::filesystem::path& path)
+{
+    return mp::test::platform::open_library(path);
+}
+
+Entry entry_of(void* library)
+{
+    return std::bit_cast<Entry>(mp::test::platform::find_function(library, "mp_module_entry"));
+}
+
+void unload(void* library)
+{
+    mp::test::platform::close_library(library);
 }
 
 /// One name per line, so a failure reads as a list rather than as a sentence
@@ -96,20 +115,18 @@ TEST_CASE("every module built here loads at this tree's ABI version", "[abi][mod
         const std::string name = path.filename().string();
         INFO(name);
 
-        auto* dll = ::LoadLibraryW(path.c_str());
+        void* dll = load(path);
         if (dll == nullptr) {
             unusable.push_back(name + " would not load at all");
             continue;
         }
 
-        using Entry = const MpModuleDesc*(MP_CALL*)(std::uint32_t);
-        auto* entry = reinterpret_cast<Entry>(
-            reinterpret_cast<void*>(::GetProcAddress(dll, "mp_module_entry")));
+        const Entry entry = entry_of(dll);
         // Every DLL in this directory is a module, so one without the export is
         // something that should not have been put here.
         if (entry == nullptr) {
             unusable.push_back(name + " exports no mp_module_entry");
-            ::FreeLibrary(dll);
+            unload(dll);
             continue;
         }
 
@@ -118,7 +135,7 @@ TEST_CASE("every module built here loads at this tree's ABI version", "[abi][mod
         // null here is one the player silently does without.
         if (desc == nullptr) {
             refused.push_back(name);
-            ::FreeLibrary(dll);
+            unload(dll);
             continue;
         }
         CHECK(desc->abi_version == MP_ABI_VERSION);
@@ -144,7 +161,7 @@ TEST_CASE("every module built here loads at this tree's ABI version", "[abi][mod
         if (desc->shutdown != nullptr) {
             desc->shutdown();
         }
-        ::FreeLibrary(dll);
+        unload(dll);
     }
 
     {
@@ -449,17 +466,15 @@ TEST_CASE("every module refuses nonsense, and lives through it", "[abi][modules]
     for (const auto& path : found) {
         const std::string name = path.filename().string();
         INFO(name);
-        auto* dll = ::LoadLibraryW(path.c_str());
+        void* dll = load(path);
         if (dll == nullptr) {
             continue; // the test above says which, and why
         }
-        using Entry = const MpModuleDesc*(MP_CALL*)(std::uint32_t);
-        auto* entry = reinterpret_cast<Entry>(
-            reinterpret_cast<void*>(::GetProcAddress(dll, "mp_module_entry")));
+        const Entry entry = entry_of(dll);
         const MpModuleDesc* desc = entry != nullptr ? entry(MP_ABI_VERSION) : nullptr;
         if (desc == nullptr || desc->vtbl == nullptr ||
             (desc->init != nullptr && desc->init(&quiet_host()) != MP_OK)) {
-            ::FreeLibrary(dll);
+            unload(dll);
             continue;
         }
         Nonsense n{name, {}};
@@ -494,7 +509,7 @@ TEST_CASE("every module refuses nonsense, and lives through it", "[abi][modules]
         if (desc->shutdown != nullptr) {
             desc->shutdown();
         }
-        ::FreeLibrary(dll);
+        unload(dll);
     }
     CHECK(asked >= 10u);
     INFO("calls a module answered MP_OK when it was handed nonsense:" << listed(accepted));

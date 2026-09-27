@@ -14,8 +14,8 @@ for the question, which is "what should I look at first".
 
 Configure with -D MEDIAPERCH_LINK_MAP=ON to get the maps, then:
 
-    python tools/mapsize.py build/llvm/bin/Release/*.map
-    python tools/mapsize.py --symbols build/llvm/bin/Release/mediaperch-probe.map
+    python tools/mapsize.py build/windows/bin/Release/*.map
+    python tools/mapsize.py --symbols build/windows/bin/Release/mediaperch-probe.map
 
 lld-link writes its /MAP in link.exe's format, so either linker's map reads the
 same. With ThinLTO an object's code arrives from the link-time backend, which

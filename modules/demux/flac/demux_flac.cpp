@@ -36,10 +36,8 @@
 
 #include <mediaperch/module.h>
 
+#include "module_file.hpp"
 #include "module_log.hpp"
-#if defined(_WIN32)
-#    include "win_path.hpp" // a path past MAX_PATH; see the header
-#endif
 
 #include "pcm_format.hpp"
 
@@ -51,10 +49,6 @@
 #include <new>
 #include <string>
 #include <vector>
-
-#if defined(_WIN32)
-#include <windows.h>
-#endif
 
 namespace {
 
@@ -70,15 +64,6 @@ void log_fmt(MpLogLevel level, const char* format, ...) noexcept
     mp::log::vfmt(g_host, level, format, args);
     va_end(args);
 }
-
-#if defined(_WIN32)
-FILE* open_file(const char* path)
-{
-    return mp::winpath::fopen_utf8(path, L"rb"); // and past MAX_PATH, see win_path.hpp
-}
-#else
-FILE* open_file(const char* path) { return std::fopen(path, "rb"); }
-#endif
 
 /// How many bytes a sample of `bits` occupies. Shared -- see
 /// modules/shared/pcm_format, and the drift that put it there.
@@ -170,7 +155,7 @@ FLAC__StreamDecoderSeekStatus seek_cb(const FLAC__StreamDecoder*, FLAC__uint64 a
                                       void* client)
 {
     auto* d = static_cast<MpDemux*>(client);
-    return _fseeki64(d->fp, static_cast<std::int64_t>(at), SEEK_SET) == 0
+    return mp::file::seek(d->fp, static_cast<std::int64_t>(at), SEEK_SET) == 0
                ? FLAC__STREAM_DECODER_SEEK_STATUS_OK
                : FLAC__STREAM_DECODER_SEEK_STATUS_ERROR;
 }
@@ -179,7 +164,7 @@ FLAC__StreamDecoderTellStatus tell_cb(const FLAC__StreamDecoder*, FLAC__uint64* 
                                       void* client)
 {
     auto* d = static_cast<MpDemux*>(client);
-    const std::int64_t here = _ftelli64(d->fp);
+    const std::int64_t here = mp::file::tell(d->fp);
     if (here < 0) {
         return FLAC__STREAM_DECODER_TELL_STATUS_ERROR;
     }
@@ -295,7 +280,7 @@ bool restart_at(MpDemux* d, std::uint64_t at) noexcept
     if (FLAC__stream_decoder_flush(d->dec) == 0) {
         return false;
     }
-    return _fseeki64(d->fp, static_cast<std::int64_t>(at), SEEK_SET) == 0;
+    return mp::file::seek(d->fp, static_cast<std::int64_t>(at), SEEK_SET) == 0;
 }
 
 /// Records where a frame begins, one in `k_index_stride`. Appended only when it
@@ -348,18 +333,18 @@ try {
     if (d == nullptr) {
         return MP_ERR_NO_MEMORY;
     }
-    d->fp = open_file(path);
-    d->bytes = open_file(path);
+    d->fp = mp::file::open_read(path);
+    d->bytes = mp::file::open_read(path);
     if (d->fp == nullptr || d->bytes == nullptr) {
         delete d;
         return MP_ERR_IO;
     }
-    if (_fseeki64(d->fp, 0, SEEK_END) != 0) {
+    if (mp::file::seek(d->fp, 0, SEEK_END) != 0) {
         delete d;
         return MP_ERR_IO;
     }
-    d->file_bytes = static_cast<std::uint64_t>(_ftelli64(d->fp));
-    if (_fseeki64(d->fp, 0, SEEK_SET) != 0) {
+    d->file_bytes = static_cast<std::uint64_t>(mp::file::tell(d->fp));
+    if (mp::file::seek(d->fp, 0, SEEK_SET) != 0) {
         delete d;
         return MP_ERR_IO;
     }
@@ -511,7 +496,7 @@ try {
     }
 
     // The frame's own bytes, on the handle libFLAC does not know about.
-    if (_fseeki64(d->bytes, static_cast<std::int64_t>(start), SEEK_SET) != 0 ||
+    if (mp::file::seek(d->bytes, static_cast<std::int64_t>(start), SEEK_SET) != 0 ||
         std::fread(dst, 1, static_cast<std::size_t>(length), d->bytes) != length) {
         return MP_END;
     }

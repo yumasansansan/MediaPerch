@@ -14,6 +14,7 @@
 
 #include <mediaperch/module.h>
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <new>

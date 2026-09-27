@@ -43,7 +43,7 @@ std::vector<std::filesystem::path> demuxers()
     std::error_code trouble;
     const std::filesystem::path dir = std::filesystem::path{MEDIAPERCH_MODULE_DIR} / "demux";
     for (const auto& entry : std::filesystem::directory_iterator{dir, trouble}) {
-        if (entry.path().extension() == ".dll") {
+        if (entry.path().extension() == MEDIAPERCH_MODULE_SUFFIX) {
             found.push_back(entry.path());
         }
     }

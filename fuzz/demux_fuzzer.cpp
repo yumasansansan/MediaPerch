@@ -17,7 +17,6 @@
 // read. The input reaches the module as a file (tests/scratch_files.hpp).
 
 #include "demux_drive.hpp"
-#include "mediaperch/no_dialogs.hpp"
 #include "module_harness.hpp"
 #include "scratch_files.hpp"
 
@@ -71,7 +70,6 @@ std::uint64_t tail_number(const std::uint8_t* data, std::size_t size)
 
 extern "C" int LLVMFuzzerInitialize(int*, char***)
 {
-    mp::win::no_dialogs();
     (void)demuxer();
     (void)files();
     return 0;

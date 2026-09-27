@@ -8,37 +8,35 @@
 // in the process starts at 1 in every process, a fixed name is the same in all
 // of them, and a fixed directory is removed by whichever process finishes
 // first. Two of the LUT tests, run side by side, wrote and removed each other's
-// table, and one of them read the other's picture back. The process id is what
-// tells two processes apart while both run, and the counter tells one
-// process's own files apart; a name left behind by a process long gone, whose
-// id came round again, is simply written over.
+// table, and one of them read the other's picture back. A number drawn once per
+// process from std::random_device is what tells two processes apart while both
+// run -- sixty-four bits, which two processes of one test run do not both draw
+// -- and the counter tells one process's own files apart.
+//
+// It was the process id, which asked the system, and so asked it by name on
+// each system. ISO C++ says this much by itself.
 
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <filesystem>
+#include <random>
 #include <string>
 #include <string_view>
 
-#ifdef _WIN32
-#    include <process.h>
-#else
-#    include <unistd.h>
-#endif
-
 namespace mp::test {
 
-/// `mediaperch-<process id>-<n>-<name>`: `name`, as the test would have called
-/// its file or directory, made this process's and this call's alone.
+/// `mediaperch-<process token>-<n>-<name>`: `name`, as the test would have
+/// called its file or directory, made this process's and this call's alone.
 [[nodiscard]] inline std::string unique_name(std::string_view name)
 {
+    static const std::uint64_t token = [] {
+        std::random_device device;
+        return (static_cast<std::uint64_t>(device()) << 32) ^ device();
+    }();
     static std::atomic<unsigned> counter{0};
-#ifdef _WIN32
-    const auto id = static_cast<unsigned long>(_getpid());
-#else
-    const auto id = static_cast<unsigned long>(getpid());
-#endif
-    return "mediaperch-" + std::to_string(id) + "-" + std::to_string(++counter) + "-" +
+    return "mediaperch-" + std::to_string(token) + "-" + std::to_string(++counter) + "-" +
            std::string{name};
 }
 

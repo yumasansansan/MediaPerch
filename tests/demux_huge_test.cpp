@@ -5,15 +5,17 @@
 // **An offset or a count held in 32 bits is the fault no small file shows**,
 // and every fixture here is under a megabyte -- while an evening of 24-bit
 // 192 kHz stereo is past four gibibytes, and a film is past it at once. These
-// make files of twenty gibibytes that take 128 KiB of disk: sparse, on NTFS,
-// with nothing written between the header and the last bytes, which a read
-// gets back as zeros. The demuxer is asked for what is at the end: a count cut
+// make files of twenty gibibytes that take 128 KiB of disk: sparse -- on NTFS
+// by asking for it, on Linux's file systems by writing past the end -- with
+// nothing written between the header and the last bytes, which a read gets
+// back as zeros. The demuxer is asked for what is at the end: a count cut
 // to 32 bits puts the end somewhere else, and an offset cut to 32 bits reads
 // from somewhere else, and either way the bytes that come back are not the
 // ones written there.
 
 #include "module_loader.hpp"
 #include "temp_path.hpp"
+#include "test_platform.hpp"
 
 #include <mediaperch/module.h>
 
@@ -27,12 +29,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
-#ifndef WIN32_LEAN_AND_MEAN
-#    define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#include <winioctl.h>
 
 namespace {
 
@@ -56,31 +52,10 @@ public:
     [[nodiscard]] bool write(const std::vector<std::uint8_t>& head, std::uint64_t tail_at,
                              const std::vector<std::uint8_t>& tail) const
     {
-        const HANDLE file = ::CreateFileW(path_.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
-                                          CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (file == INVALID_HANDLE_VALUE) {
-            return false;
-        }
-        DWORD returned = 0;
-        bool ok = ::DeviceIoControl(file, FSCTL_SET_SPARSE, nullptr, 0, nullptr, 0, &returned,
-                                    nullptr) != FALSE;
-        DWORD written = 0;
-        ok = ok && ::WriteFile(file, head.data(), static_cast<DWORD>(head.size()), &written,
-                               nullptr) != FALSE;
-        LARGE_INTEGER at{};
-        at.QuadPart = static_cast<LONGLONG>(tail_at);
-        ok = ok && ::SetFilePointerEx(file, at, nullptr, FILE_BEGIN) != FALSE;
-        ok = ok && ::WriteFile(file, tail.data(), static_cast<DWORD>(tail.size()), &written,
-                               nullptr) != FALSE;
-        ::CloseHandle(file);
-        return ok;
+        return mp::test::platform::write_sparse(path_, head, tail_at, tail);
     }
 
-    [[nodiscard]] std::string utf8() const
-    {
-        const std::u8string text = path_.u8string();
-        return {text.begin(), text.end()};
-    }
+    [[nodiscard]] std::string utf8() const { return mp::test::utf8_string(path_); }
 
 private:
     std::filesystem::path path_;

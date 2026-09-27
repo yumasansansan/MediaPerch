@@ -17,11 +17,12 @@
 
 #pragma once
 
-// **Windows only, and included only under `_WIN32`**: the demuxers that use
-// it are portable and open with `std::fopen` everywhere else, so each one
-// guards the include as well as the call.
+// **Windows only, and included only by files the build compiles on Windows
+// alone**: module_file_windows.cpp, through which the portable modules open
+// their files (module_file.hpp has no system in it), and the modules that are
+// Windows' own, such as demux_mf. The check says so to anything else.
 #if !defined(_WIN32)
-#    error "win_path.hpp is the Windows file functions; include it under _WIN32"
+#    error "win_path.hpp is the Windows file functions; module_file.hpp is what a portable module includes"
 #endif
 
 #include <cstdio>
