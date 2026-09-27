@@ -28,6 +28,7 @@ using mp::test::cd_audio;
 using mp::test::Host;
 using mp::test::pattern;
 using mp::test::wait_for;
+using mp::test::wait_for_run;
 using mp::test::wait_for_state;
 
 namespace {
@@ -300,8 +301,7 @@ TEST_CASE("a file with no picture plays exactly as it did", "[player][video]")
     mp::Player player{host};
     player.start();
     player.play({"song"});
-    REQUIRE(wait_for_state(player, mp::ipc::State::playing));
-    REQUIRE(wait_for_state(player, mp::ipc::State::stopped));
+    REQUIRE(wait_for_run(player));
 
     const std::lock_guard lock{mp::test::presenter_log().mutex};
     CHECK_FALSE(mp::test::presenter_log().open);
@@ -326,8 +326,7 @@ TEST_CASE("a picture that will not open is a track that still plays",
     mp::Player player{host};
     player.start();
     player.play({"film"});
-    REQUIRE(wait_for_state(player, mp::ipc::State::playing));
-    REQUIRE(wait_for_state(player, mp::ipc::State::stopped));
+    REQUIRE(wait_for_run(player));
 
     CHECK(player.status().underruns == 0);
     CHECK(host.said("playing without the picture"));
@@ -369,8 +368,7 @@ TEST_CASE("a profile measured on this machine sizes the ring", "[player][profile
     player.use_profile(measured_profile(100.0));
     player.start();
     player.play({"film"});
-    REQUIRE(wait_for_state(player, mp::ipc::State::playing));
-    REQUIRE(wait_for_state(player, mp::ipc::State::stopped));
+    REQUIRE(wait_for_run(player));
 
     CHECK(host.said("profile: "));
     CHECK(host.said("ring periods rather than"));
@@ -393,8 +391,7 @@ TEST_CASE("a number somebody typed is not overruled by a measurement",
     REQUIRE(player.set("ring_periods", "40", why));
     player.start();
     player.play({"film"});
-    REQUIRE(wait_for_state(player, mp::ipc::State::playing));
-    REQUIRE(wait_for_state(player, mp::ipc::State::stopped));
+    REQUIRE(wait_for_run(player));
 
     CHECK_FALSE(host.said("profile: "));
     player.shutdown();
@@ -412,8 +409,7 @@ TEST_CASE("a track with no picture has no class to look up", "[player][profile]"
     player.use_profile(measured_profile(100.0));
     player.start();
     player.play({"song"});
-    REQUIRE(wait_for_state(player, mp::ipc::State::playing));
-    REQUIRE(wait_for_state(player, mp::ipc::State::stopped));
+    REQUIRE(wait_for_run(player));
 
     CHECK_FALSE(host.said("profile: "));
     player.shutdown();
@@ -565,7 +561,10 @@ TEST_CASE("a track with no picture ends it, and the next one gets its size back"
     Host host;
     host.add("seen", pattern(1024 * 1024, 6));
     host.add_video("seen");
-    host.add("heard", pattern(64 * 4 * 40, 7)); // no picture
+    // No picture, and long enough to be playing still when the test moves on:
+    // were it to end first, the next file's presenter would open while the
+    // last one closes, and a close in between could go unseen.
+    host.add("heard", pattern(64 * 4 * 4000, 7));
     host.add("seen again", pattern(1024 * 1024, 8));
     host.add_video("seen again");
     host.pace_with([] { return std::make_unique<Endless>(); });
@@ -1106,7 +1105,7 @@ TEST_CASE("a video stage that will not open leaves a picture that still plays",
     }
 
     Host host;
-    host.add("film", pattern(4096, 22));
+    host.add("film", pattern(64 * 4 * 4000, 22));
     host.add_video("film");
     host.add_video_dsp("vdsp_test", &mp::test::fake_video_stage_vtbl());
     host.pace_with([] { return std::make_unique<Endless>(); });
@@ -1134,7 +1133,10 @@ TEST_CASE("a video stage that will not open leaves a picture that still plays",
 TEST_CASE("an engine plays what it is told to", "[player]")
 {
     Host host;
-    host.add("one", pattern(4096, 1));
+    // Long enough to be asked about while it plays: half a second of the
+    // device's clock.
+    constexpr std::size_t bytes = 64 * 4 * 1000;
+    host.add("one", pattern(bytes, 1));
     mp::Player player{host};
     player.start();
 
@@ -1153,7 +1155,7 @@ TEST_CASE("an engine plays what it is told to", "[player]")
     REQUIRE(wait_for_state(player, mp::ipc::State::stopped));
     const mp::ipc::Status ended = player.status();
     CHECK(ended.underruns == 0);
-    CHECK(ended.frames_rendered >= 4096 / mp::frame_bytes(cd_audio()));
+    CHECK(ended.frames_rendered >= bytes / mp::frame_bytes(cd_audio()));
     player.shutdown();
 }
 
@@ -1165,7 +1167,10 @@ TEST_CASE("an engine says which track it could not open, and plays the rest", "[
     // which is what this did until the queue learned to walk past.
     Host host;
     host.add("good", pattern(2048, 2));
-    host.add("last", pattern(2048, 3));
+    // Long enough to be seen playing: half a second of the device's clock,
+    // where eight periods were four milliseconds and a look at the status
+    // is a timer tick apart on Windows.
+    host.add("last", pattern(64 * 4 * 1000, 3));
     mp::Player player{host};
     player.start();
     player.play({"good", "missing", "last"});
@@ -1202,8 +1207,9 @@ TEST_CASE("a playlist with nothing that opens says why, in the words of whoever 
 TEST_CASE("an engine takes transport commands from another thread", "[player]")
 {
     Host host;
-    // Long enough that the test can do things to it while it plays.
-    host.add("long", pattern(64 * 4 * 200, 3));
+    // Long enough that the test can do things to it while it plays: two
+    // seconds of the device's clock, where a section takes a few ticks.
+    host.add("long", pattern(64 * 4 * 4000, 3));
     mp::Player player{host};
     player.start();
     player.play({"long"});
@@ -1227,10 +1233,21 @@ TEST_CASE("an engine takes transport commands from another thread", "[player]")
     {
         REQUIRE(player.seek(1000, false));
         CHECK(player.status().position >= 1000);
-        // Relative, from wherever it is now.
-        const std::uint64_t before = player.status().position;
+        // Relative, from wherever it is now -- which is a number the test can
+        // know only while the clock is stopped. Playing, the device goes on
+        // while `seek` waits to see the seek done, and on Windows the wait's
+        // millisecond polls sleep a timer tick each, 15.5 ms, which is two
+        // thousand frames of this device: more than a relative seek of 500
+        // takes back. Paused, the position is where the seek put it.
+        player.pause();
+        REQUIRE(player.seek(3000, false));
+        CHECK(player.status().position == 3000);
         REQUIRE(player.seek(-500, true));
-        CHECK(player.status().position < before);
+        CHECK(player.status().position == 2500);
+        REQUIRE(player.seek(700, true));
+        CHECK(player.status().position == 3200);
+        player.resume();
+        CHECK(wait_for([&] { return player.status().position > 3200; }));
     }
 
     SECTION("seeking before the bottom stops at the bottom")
@@ -1251,8 +1268,10 @@ TEST_CASE("an engine takes transport commands from another thread", "[player]")
 TEST_CASE("an engine joins two tracks and can be told to skip one", "[player]")
 {
     Host host;
-    host.add("a", pattern(64 * 4 * 40, 4));
-    host.add("b", pattern(64 * 4 * 40, 5));
+    // The first long enough to be playing when it is skipped, the second to be
+    // seen playing after it.
+    host.add("a", pattern(64 * 4 * 4000, 4));
+    host.add("b", pattern(64 * 4 * 1000, 5));
     mp::Player player{host};
     player.start();
     player.play({"a", "b"});
@@ -1310,7 +1329,7 @@ TEST_CASE("a track in another format reopens the device and plays on", "[player]
     mp::Format other = cd_audio();
     other.sample_rate = 48000;
     Host host;
-    host.add("one", pattern(64 * 4 * 200, 4));
+    host.add("one", pattern(64 * 4 * 1000, 4));
     host.add("two", pattern(64 * 4 * 4000, 5), other);
     mp::Player player{host};
     player.start();
@@ -1461,7 +1480,7 @@ TEST_CASE("an engine refuses a setting it cannot make sense of", "[player]")
 TEST_CASE("a setting that changes the graph rebuilds it where it stands", "[player]")
 {
     Host host;
-    host.add("long", pattern(64 * 4 * 300, 6));
+    host.add("long", pattern(64 * 4 * 4000, 6));
     mp::Player player{host};
     player.start();
     player.play({"long"});
@@ -1486,7 +1505,7 @@ TEST_CASE("a setting the device will not take is put back", "[player]")
     // Somebody asked for something impossible. Stopping the music would be the
     // easy answer and the wrong one.
     Host host;
-    host.add("long", pattern(64 * 4 * 300, 7));
+    host.add("long", pattern(64 * 4 * 4000, 7));
     mp::Player player{host};
     player.start();
     player.play({"long"});
@@ -1504,7 +1523,7 @@ TEST_CASE("a setting the device will not take is put back", "[player]")
 TEST_CASE("an engine waits for a device that was taken away", "[player][device]")
 {
     Host host;
-    host.add("long", pattern(64 * 4 * 400, 8));
+    host.add("long", pattern(64 * 4 * 4000, 8));
     host.rules_.waits_before_loss = 20;
     mp::Player player{host};
     player.start();

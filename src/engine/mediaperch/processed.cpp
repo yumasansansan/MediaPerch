@@ -47,6 +47,13 @@ void ProcessedGraph::fail(MpResult r) noexcept
     MpResult expected = MP_OK;
     error_.compare_exchange_strong(expected, r, std::memory_order_relaxed);
     running_.store(false, std::memory_order_release);
+    wake_decoder();
+}
+
+void ProcessedGraph::wake_decoder() noexcept
+{
+    decoder_wakes_.fetch_add(1, std::memory_order_release);
+    decoder_wakes_.notify_one();
 }
 
 bool ProcessedGraph::pump_once()
@@ -162,6 +169,7 @@ MpResult ProcessedGraph::start()
 void ProcessedGraph::stop() noexcept
 {
     running_.store(false, std::memory_order_release);
+    wake_decoder();
     if (render_thread_.joinable()) {
         render_thread_.join();
     }
@@ -175,18 +183,20 @@ void ProcessedGraph::stop() noexcept
 
 void ProcessedGraph::decode_loop()
 {
-    const auto nap = std::chrono::microseconds{
-        std::max<std::uint64_t>(250, (std::uint64_t{period_frames_} * 1'000'000ULL) /
-                                             std::max(wire_.sample_rate, 1u) / 4)};
-
-    while (running_.load(std::memory_order_acquire)) {
+    for (;;) {
+        // Path A's loop, and its wait: read the count before looking, sleep
+        // on it until the render thread, a seek or the end moves it.
+        const std::uint32_t woken = decoder_wakes_.load(std::memory_order_acquire);
+        if (!running_.load(std::memory_order_acquire)) {
+            break;
+        }
         const std::uint64_t target = seek_request_.load(std::memory_order_acquire);
         if (target != k_no_seek) {
             perform_seek(target);
             continue;
         }
         if (drained_.load(std::memory_order_acquire) || ring_.writable() < pump_bytes_) {
-            std::this_thread::sleep_for(nap);
+            decoder_wakes_.wait(woken, std::memory_order_acquire);
             continue;
         }
         if (!pump_once()) {
@@ -271,6 +281,10 @@ void ProcessedGraph::render_loop() noexcept
             break;
         }
         frames_rendered_.fetch_add(frames, std::memory_order_relaxed);
+        if (got != 0) {
+            // The device first, then the room this period left in the ring.
+            wake_decoder();
+        }
 
         // Nothing left to play and nothing coming. Never while seeking: the
         // ring is empty because somebody emptied it, not because the file ended.
@@ -304,6 +318,7 @@ void ProcessedGraph::render_loop() noexcept
 
         if (finishing) {
             running_.store(false, std::memory_order_release); // rather than silence for ever
+            wake_decoder();
         }
     }
 
@@ -393,6 +408,7 @@ bool ProcessedGraph::seek(std::uint64_t frame)
         return true;
     }
     seek_request_.store(frame, std::memory_order_release);
+    wake_decoder();
     // Wait for the decode thread to have done it. A seek whose end a caller
     // cannot observe is one a caller has to guess about.
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};

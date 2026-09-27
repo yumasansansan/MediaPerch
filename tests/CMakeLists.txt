@@ -50,6 +50,8 @@ add_executable(mediaperch_tests
     settings_test.cpp
     sine_test.cpp
     transport_test.cpp
+    # Fails on stderr rather than in a dialog: see src/win/mediaperch/no_dialogs.hpp.
+    no_dialogs.cpp
 )
 
 # **Every module, loaded, at this tree's ABI version.** Not a named module: the
@@ -338,12 +340,14 @@ catch_discover_tests(mediaperch_tests)
 # other, and use it: the link line is the proof, because a reference across
 # would be an unresolved symbol here and nowhere else. cmake/CorePurity.cmake
 # reads the includes for the same rule at the source level.
-add_executable(mediaperch_audio_alone audio_alone.cpp)
+add_executable(mediaperch_audio_alone audio_alone.cpp no_dialogs.cpp)
+target_include_directories(mediaperch_audio_alone PRIVATE ../src/win)
 target_link_libraries(mediaperch_audio_alone PRIVATE MediaPerch::audio mediaperch_flags)
 set_target_properties(mediaperch_audio_alone PROPERTIES FOLDER "tests")
 add_test(NAME audio_alone COMMAND mediaperch_audio_alone)
 
-add_executable(mediaperch_video_alone video_alone.cpp)
+add_executable(mediaperch_video_alone video_alone.cpp no_dialogs.cpp)
+target_include_directories(mediaperch_video_alone PRIVATE ../src/win)
 target_link_libraries(mediaperch_video_alone PRIVATE MediaPerch::video mediaperch_flags)
 set_target_properties(mediaperch_video_alone PROPERTIES FOLDER "tests")
 add_test(NAME video_alone COMMAND mediaperch_video_alone)
@@ -403,6 +407,9 @@ endif()
 # win_path.hpp, for the module sources compiled straight into the tests
 # (autoeq.cpp opens a profile by name): the header beside module_log.
 target_include_directories(mediaperch_tests PRIVATE ../modules/shared/module_log)
+# no_dialogs.hpp, which every test program and the probe share: the Windows
+# head's header, the one that decides how this process reports a failure.
+target_include_directories(mediaperch_tests PRIVATE ../src/win)
 
 # The source tree, for the test that reads the shell's C# mirror of the wire
 # and holds it to the C++ enum -- see protocol_test.cpp.

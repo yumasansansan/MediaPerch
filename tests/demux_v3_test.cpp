@@ -28,6 +28,11 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <bit>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -399,6 +404,104 @@ TEST_CASE("a mastering display stated only in band, in the first sample, reaches
         ++packets;
     }
     CHECK(packets == 8u);
+}
+
+namespace {
+
+/// Every packet of every stream, in the order the file stores them.
+std::vector<std::vector<std::uint8_t>> all_packets(mp::Demux& demux)
+{
+    std::vector<std::uint32_t> every(demux.stream_count());
+    for (std::uint32_t i = 0; i < demux.stream_count(); ++i) {
+        every[i] = i;
+    }
+    std::vector<std::vector<std::uint8_t>> out;
+    if (demux.select_streams(every) != MP_OK) {
+        return out;
+    }
+    std::vector<std::uint8_t> buffer;
+    MpPacket packet{};
+    while (demux.read_packet(buffer, packet) == MP_OK) {
+        out.emplace_back(buffer.begin(), buffer.begin() + packet.bytes);
+    }
+    return out;
+}
+
+void write_file(const std::filesystem::path& path, const std::vector<char>& bytes)
+{
+    std::ofstream out{path, std::ios::binary};
+    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+}
+
+} // namespace
+
+TEST_CASE("a file that is not Matroska is refused, not read as its header",
+          "[abi][demux][mkv]")
+{
+    // **`FindNextID` hands back what it found, not what it was asked for.**
+    // Asked for the EBML header, it reads the first element whatever that is,
+    // and for a file that is not EBML it is an `EbmlDummy` -- which this module
+    // took for the header and read as a list of children. The debug STL stopped
+    // on the range that made; a release build read wherever it pointed. The
+    // format matrix, which makes every demuxer read every file, found it with a
+    // FLAC: "fL" is an EBML ID, and "aC" a size.
+    Module module{mkv_module(), MP_KIND_DEMUX};
+    REQUIRE(module.as<MpDemuxVtbl>() != nullptr);
+
+    const auto path = mp::test::temp_path("not_matroska.flac");
+    // A FLAC's marker and the header of its STREAMINFO block, and the block.
+    std::vector<char> flac{'f', 'L', 'a', 'C', '\x80', '\0', '\0', '\x22'};
+    flac.resize(flac.size() + 0x22, '\0');
+    write_file(path, flac);
+    {
+        mp::Demux demux;
+        CHECK(demux.open(*module.as<MpDemuxVtbl>(), path.string().c_str()) ==
+              MP_ERR_UNSUPPORTED);
+    }
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("a Void before the segment is stepped over, not taken for it", "[abi][demux][mkv]")
+{
+    // EBML lets elements stand between the header and the segment, and padding
+    // -- a Void -- is the one a writer puts there. The segment was looked for
+    // the way the header was, and whatever came first was cast to it.
+    Module module{mkv_module(), MP_KIND_DEMUX};
+    REQUIRE(module.as<MpDemuxVtbl>() != nullptr);
+
+    std::ifstream in{mkv_path(), std::ios::binary};
+    std::vector<char> file{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+    REQUIRE(file.size() > 16u);
+    // The header's four-byte ID, and then its size as an EBML number: the
+    // leading zeros of the first byte say how many bytes follow it.
+    REQUIRE(static_cast<unsigned char>(file[0]) == 0x1Au);
+    const auto first = static_cast<unsigned char>(file[4]);
+    REQUIRE(first != 0u);
+    const int length = std::countl_zero(first) + 1;
+    std::uint64_t size = first & (0xFFu >> length);
+    for (int i = 1; i < length; ++i) {
+        size = size << 8 | static_cast<unsigned char>(file[static_cast<std::size_t>(4 + i)]);
+    }
+    const std::size_t end = 4 + static_cast<std::size_t>(length) + static_cast<std::size_t>(size);
+    REQUIRE(end < file.size());
+    // A Void: its ID, a size of five in one byte, and five bytes of nothing.
+    const char pad[] = {'\xEC', '\x85', '\0', '\0', '\0', '\0', '\0'};
+    file.insert(file.begin() + static_cast<std::ptrdiff_t>(end), std::begin(pad), std::end(pad));
+    const auto path = mp::test::temp_path("padded.mkv");
+    write_file(path, file);
+    {
+        mp::Demux plain;
+        REQUIRE(plain.open(*module.as<MpDemuxVtbl>(), mkv_path()) == MP_OK);
+        mp::Demux padded;
+        REQUIRE(padded.open(*module.as<MpDemuxVtbl>(), path.string().c_str()) == MP_OK);
+        REQUIRE(padded.stream_count() == plain.stream_count());
+        // The same file with seven bytes more before its segment: the same
+        // packets, byte for byte.
+        const auto expected = all_packets(plain);
+        CHECK_FALSE(expected.empty());
+        CHECK(all_packets(padded) == expected);
+    }
+    std::filesystem::remove(path);
 }
 
 TEST_CASE("a Matroska with no audio in it still opens", "[abi][demux][mkv]")

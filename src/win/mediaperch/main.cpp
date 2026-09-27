@@ -9,6 +9,7 @@
 
 #include "mediaperch/platform.hpp"
 #include "mediaperch/framerate.hpp"
+#include "mediaperch/no_dialogs.hpp"
 #include "mediaperch/refresh_win.hpp"
 
 #include "mediaperch/calibrate.hpp"
@@ -4277,6 +4278,10 @@ int calibrate(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& regist
 
 int main(int argc, char** argv)
 {
+    // Before anything that can fail: the tests run this program over every
+    // file with every demuxer forced on it, and a failed check has to be a
+    // line on stderr and an exit code there, not a window.
+    mp::win::no_dialogs();
     const mp::win::ConsoleUtf8 console;
 
     // Windows hands `main` its arguments in the process code page. Everything

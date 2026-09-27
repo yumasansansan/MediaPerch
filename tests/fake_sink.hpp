@@ -12,6 +12,7 @@
 #include "mediaperch/format.hpp"
 #include "mediaperch/sink.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -20,7 +21,75 @@
 #include <thread>
 #include <vector>
 
+#ifdef _WIN32
+#    ifndef WIN32_LEAN_AND_MEAN
+#        define WIN32_LEAN_AND_MEAN
+#    endif
+#    include <windows.h>
+#endif
+
 namespace mp::test {
+
+/// Sleeps a thread to a deadline, as near to it as the system can wake one.
+///
+/// **On Windows, by a timer that can keep one.** `std::this_thread::sleep_until`
+/// sleeps there in whole timer ticks, 15.5 ms, so a device paced by it played
+/// 31 periods back to back once a tick: the right rate on average, and a burst
+/// that no ring sized for this device lives through -- calibration's rings of
+/// 4 and 8 ms underran in every run. A waitable timer made high-resolution
+/// wakes within tens of microseconds of its time: paced by one, 256 periods of
+/// 500 us came a median of 500 us apart and never more than two back to back,
+/// which is how a device's own clock runs. The flag is Windows 10 1803's; a
+/// system older than that refuses the timer, and the ticks are what is left.
+class PeriodTimer {
+public:
+    PeriodTimer() noexcept
+    {
+#ifdef _WIN32
+        timer_ = ::CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                          SYNCHRONIZE | TIMER_MODIFY_STATE);
+#endif
+    }
+
+    ~PeriodTimer()
+    {
+#ifdef _WIN32
+        if (timer_ != nullptr) {
+            ::CloseHandle(timer_);
+        }
+#endif
+    }
+
+    PeriodTimer(const PeriodTimer&) = delete;
+    PeriodTimer& operator=(const PeriodTimer&) = delete;
+
+    void sleep_until(std::chrono::steady_clock::time_point due) const noexcept
+    {
+#ifdef _WIN32
+        const auto left = due - std::chrono::steady_clock::now();
+        if (left <= std::chrono::steady_clock::duration::zero()) {
+            return;
+        }
+        if (timer_ != nullptr) {
+            // Relative, which is negative, in units of 100 ns -- rounded up, so
+            // that the wait does not end before the deadline.
+            LARGE_INTEGER when{};
+            when.QuadPart =
+                -((std::chrono::duration_cast<std::chrono::nanoseconds>(left).count() + 99) / 100);
+            if (::SetWaitableTimerEx(timer_, &when, 0, nullptr, nullptr, nullptr, 0) != FALSE &&
+                ::WaitForSingleObject(timer_, INFINITE) == WAIT_OBJECT_0) {
+                return;
+            }
+        }
+#endif
+        std::this_thread::sleep_until(due);
+    }
+
+private:
+#ifdef _WIN32
+    HANDLE timer_ = nullptr;
+#endif
+};
 
 /// Behaviour a test wants out of the fake device.
 struct FakeSinkRules {
@@ -30,13 +99,25 @@ struct FakeSinkRules {
     std::uint32_t period_frames = 64;
     /// Answer `wait` with this many times before returning MP_OK for ever.
     std::uint32_t timeouts_before_ok = 0;
-    /// Microseconds `wait` sleeps before saying the device is ready.
+    /// Microseconds of the device's clock per period: `wait` says the device is
+    /// ready when the period is due, a period every `pace_us` from when the
+    /// device started taking them.
     ///
     /// Zero -- the default -- is a device with no clock at all, which is what
     /// most tests want: they check what bytes came out, not when. A test about
     /// *transport* cannot use that, because gapless and seek are claims about a
     /// stream that keeps up, and a render thread with nothing to wait for
     /// outruns the decode thread by a factor of thousands.
+    ///
+    /// **To a deadline, and by a clock that can keep one.** `wait` slept for
+    /// `pace_us` once a period, and on Windows a sleep of 500 us is a whole
+    /// timer tick, 15.5 ms: the device played 64 frames of 44.1 kHz in 15.5 ms,
+    /// a tenth of real time, where it was meant to play them three times faster
+    /// than that, and a quarter-second track took four seconds -- as long as a
+    /// test waits for a track to end. Each period is now slept to its own
+    /// deadline, so a wait that wakes late is made up by the ones after it,
+    /// and slept there by `PeriodTimer`, so that the periods come one at a
+    /// time, as a device's do, and not a tick's worth at once.
     std::uint32_t pace_us = 0;
     /// Hand back a format that is not the one asked for. Models the driver that
     /// says yes and means something else.
@@ -166,12 +247,14 @@ private:
     static MpResult MP_CALL start_thunk(MpSink* s)
     {
         self(s).started_ = true;
+        self(s).paced_.store(false, std::memory_order_relaxed);
         return MP_OK;
     }
 
     static MpResult MP_CALL stop_thunk(MpSink* s)
     {
         self(s).started_ = false;
+        self(s).paced_.store(false, std::memory_order_relaxed);
         return MP_OK;
     }
 
@@ -187,7 +270,20 @@ private:
             return me.rules_.loss_result;
         }
         if (me.rules_.pace_us != 0) {
-            std::this_thread::sleep_for(std::chrono::microseconds{me.rules_.pace_us});
+            // A device behind by more than a buffer's worth of periods -- the
+            // first wait, a start, a render thread that stopped asking for a
+            // while -- starts afresh from now rather than playing the gap back
+            // at once, as a device that ran dry does. The allowance is 32 ms at
+            // 500 us a period, so that a render thread the system did not run
+            // for a few milliseconds is caught up, not forgotten.
+            const auto period = std::chrono::microseconds{me.rules_.pace_us};
+            const auto now = std::chrono::steady_clock::now();
+            if (!me.paced_.exchange(true, std::memory_order_relaxed) ||
+                now - me.due_ > period * k_backlog_periods) {
+                me.due_ = now;
+            }
+            me.due_ += period;
+            me.timer_.sleep_until(me.due_);
         }
         return MP_OK;
     }
@@ -224,6 +320,14 @@ private:
     std::uint32_t frame_bytes_ = 0;
     bool started_ = false;
     std::uint32_t waits_ = 0;
+    /// When the next period is due (see `FakeSinkRules::pace_us`), whether
+    /// that has been set since the device last started, and what sleeps to it.
+    /// The deadline and the timer are the render thread's alone; the flag is
+    /// cleared by `start` and `stop`, which the engine's thread calls too.
+    static constexpr int k_backlog_periods = 64;
+    std::chrono::steady_clock::time_point due_{};
+    std::atomic<bool> paced_{false};
+    PeriodTimer timer_;
 
     std::vector<std::uint8_t> scratch_;
     mutable std::mutex mutex_;

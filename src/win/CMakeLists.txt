@@ -14,6 +14,8 @@ add_library(mediaperch_win STATIC
     mediaperch/ipc_client.hpp
     mediaperch/ipc_server.cpp
     mediaperch/ipc_server.hpp
+    # How a program the tests run reports a failure: on stderr, not in a window.
+    mediaperch/no_dialogs.hpp
     mediaperch/platform.cpp
     mediaperch/platform.hpp
     # Enumerating a display's modes and putting one in force: DXGI for the

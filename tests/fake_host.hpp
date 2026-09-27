@@ -426,6 +426,23 @@ inline bool wait_for_state(const Player& player, ipc::State state, int ms = 4000
     return wait_for([&] { return player.status().state == state; }, ms);
 }
 
+/// Waits for a run to have played and ended.
+///
+/// **Not `playing` and then `stopped`.** A track of a few periods plays in a
+/// few milliseconds, and on Windows one look at the status is a timer tick,
+/// 15.5 ms, from the next, so `playing` can come and go unseen. Frames played
+/// and the state back at `stopped` are what a run leaves behind; `stopped`
+/// alone is also where it began.
+inline bool wait_for_run(const Player& player, int ms = 4000)
+{
+    return wait_for(
+        [&] {
+            const ipc::Status s = player.status();
+            return s.state == ipc::State::stopped && s.frames_rendered != 0;
+        },
+        ms);
+}
+
 } // namespace mp::test
 
 #endif // MEDIAPERCH_TESTS_FAKE_HOST_HPP

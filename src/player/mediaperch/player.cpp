@@ -1536,18 +1536,22 @@ void Player::run_sweep(const Sweeping& sweep)
     for (const std::string& skipped : report.skipped) {
         note("skipped " + skipped);
     }
-    note("measured " + std::to_string(report.profile.measured.size()) +
-         (report.profile.measured.size() == 1 ? " class of stream in "
-                                              : " classes of stream in ") +
-         std::to_string(report.runs) + (report.runs == 1 ? " run" : " runs"));
     {
         const std::lock_guard lock{mutex_};
         // **Applied as well as reported.** A measurement this machine made
         // about itself is the answer to the question the default is a guess at,
         // and a shell that had to hand it back would be a shell that could
         // forget to.
+        //
+        // **And applied before it is reported.** Whoever reads the line below
+        // may ask for the profile the moment they have read it, and the answer
+        // they get has to be the one the line is about.
         config_.profile = report.profile;
     }
+    note("measured " + std::to_string(report.profile.measured.size()) +
+         (report.profile.measured.size() == 1 ? " class of stream in "
+                                              : " classes of stream in ") +
+         std::to_string(report.runs) + (report.runs == 1 ? " run" : " runs"));
     set_state(ipc::State::stopped);
 }
 

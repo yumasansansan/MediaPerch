@@ -183,6 +183,9 @@ private:
     /// Takes the ring from the render thread, moves the source, and refills.
     void perform_seek(std::uint64_t frame);
 
+    /// Moves `decoder_wakes_` on and wakes the decode thread.
+    void wake_decoder() noexcept;
+
     /// No seek is pending. Not zero, because zero is the top of the file.
     static constexpr std::uint64_t k_no_seek = ~std::uint64_t{0};
 
@@ -195,6 +198,9 @@ private:
     std::atomic<bool> parked_{false};
     std::atomic<std::uint64_t> render_tick_{0};
     std::atomic<std::uint64_t> seek_request_{k_no_seek};
+    /// What the decode thread sleeps on when it has nothing to do: Path A's
+    /// `decoder_wakes_`, for the same reasons.
+    std::atomic<std::uint32_t> decoder_wakes_{0};
     /// Where the position is counted from, reset at every seek.
     std::atomic<std::uint64_t> played_base_{0};
     std::atomic<std::uint64_t> rendered_base_{0};

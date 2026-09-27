@@ -1230,7 +1230,13 @@ try {
     d->stream = std::make_unique<EbmlStream>(*d->io);
 
     std::unique_ptr<EbmlElement> head{d->stream->FindNextID(EBML_INFO(EbmlHead), 0xFFFFFFFFull)};
-    if (!head) {
+    // **Found is not the same as asked for.** `FindNextID` reads the first
+    // element, whatever it is, and when its ID is not the one asked for it
+    // hands back an `EbmlDummy` -- a binary element -- which for a file that is
+    // not EBML is what it always does. Cast to the master a header is, the
+    // dummy's bytes were taken for a list of children: the debug STL stopped on
+    // the range they made, and a release build read wherever they pointed.
+    if (!head || EbmlId(*head) != EBML_ID(EbmlHead)) {
         return MP_ERR_UNSUPPORTED;
     }
     {
@@ -1248,7 +1254,16 @@ try {
         }
     }
 
+    // The same for the segment, with one difference: EBML allows elements
+    // before it -- a Void at the top level is legal -- so one that is not the
+    // segment is skipped rather than taken for it. `FindNextID` gives up by
+    // itself on an element of unknown size that is not the one asked for, and
+    // every other is skipped whole, so the walk ends.
     d->segment.reset(d->stream->FindNextID(EBML_INFO(KaxSegment), 0xFFFFFFFFFFFFFFFFull));
+    while (d->segment && EbmlId(*d->segment) != EBML_ID(KaxSegment)) {
+        d->segment->SkipData(*d->stream, EBML_CONTEXT(d->segment.get()));
+        d->segment.reset(d->stream->FindNextID(EBML_INFO(KaxSegment), 0xFFFFFFFFFFFFFFFFull));
+    }
     if (!d->segment) {
         return MP_ERR_UNSUPPORTED;
     }

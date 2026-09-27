@@ -46,6 +46,13 @@ void PassthroughGraph::fail(MpResult r) noexcept
     MpResult expected = MP_OK;
     error_.compare_exchange_strong(expected, r, std::memory_order_relaxed);
     running_.store(false, std::memory_order_release);
+    wake_decoder();
+}
+
+void PassthroughGraph::wake_decoder() noexcept
+{
+    decoder_wakes_.fetch_add(1, std::memory_order_release);
+    decoder_wakes_.notify_one();
 }
 
 bool PassthroughGraph::pump_once()
@@ -153,6 +160,7 @@ MpResult PassthroughGraph::start()
 void PassthroughGraph::stop() noexcept
 {
     running_.store(false, std::memory_order_release);
+    wake_decoder();
 
     // The render thread first: nothing else may touch the device buffer while it
     // might still be inside acquire/commit.
@@ -171,24 +179,27 @@ void PassthroughGraph::decode_loop()
 {
     const std::size_t chunk_bytes = static_cast<std::size_t>(chunk_frames_) * wire_frame_bytes_;
 
-    // A quarter of a period is short enough that the ring never runs dry waiting
-    // for this thread, and long enough that it is not a spin.
-    const auto nap = std::chrono::microseconds{
-        std::max<std::uint64_t>(250, (std::uint64_t{period_frames_} * 1'000'000ULL) /
-                                             std::max(wire_.sample_rate, 1u) / 4)};
-
-    while (running_.load(std::memory_order_acquire)) {
+    for (;;) {
+        // Read before anything is looked at: a wake after this moves the count,
+        // and the wait below returns at once rather than sleeping through it.
+        const std::uint32_t woken = decoder_wakes_.load(std::memory_order_acquire);
+        if (!running_.load(std::memory_order_acquire)) {
+            break;
+        }
         const std::uint64_t target = seek_request_.load(std::memory_order_acquire);
         if (target != k_no_seek) {
             perform_seek(target);
             continue;
         }
-        if (drained_.load(std::memory_order_acquire)) {
-            std::this_thread::sleep_for(nap);
-            continue;
-        }
-        if (ring_.writable() < chunk_bytes) {
-            std::this_thread::sleep_for(nap);
+        if (drained_.load(std::memory_order_acquire) || ring_.writable() < chunk_bytes) {
+            // **Until there is something to do, not for a nap.** This thread
+            // slept a quarter of a period and looked again, and Windows sleeps
+            // in whole timer ticks, 15.5 ms: a ring holding less than that ran
+            // dry waiting for it, however fast the machine. The render thread
+            // wakes it the moment it takes a period out, as do a seek and the
+            // end of the run -- and a thread with nothing to do is not woken
+            // four times a period to find that out.
+            decoder_wakes_.wait(woken, std::memory_order_acquire);
             continue;
         }
         if (!pump_once()) {
@@ -270,6 +281,10 @@ void PassthroughGraph::render_loop() noexcept
             break;
         }
         frames_rendered_.fetch_add(frames, std::memory_order_relaxed);
+        if (got != 0) {
+            // The device first, then the room this period left in the ring.
+            wake_decoder();
+        }
 
         // Nothing left to play and nothing coming. Never while seeking: the
         // ring is empty because somebody emptied it, not because the file ended.
@@ -303,6 +318,7 @@ void PassthroughGraph::render_loop() noexcept
 
         if (finishing) {
             running_.store(false, std::memory_order_release); // rather than silence for ever
+            wake_decoder();
         }
     }
 
@@ -392,6 +408,7 @@ bool PassthroughGraph::seek(std::uint64_t frame)
         return true;
     }
     seek_request_.store(frame, std::memory_order_release);
+    wake_decoder();
     // Wait for the decode thread to have done it. A seek whose end a caller
     // cannot observe is one a caller has to guess about.
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
