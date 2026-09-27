@@ -28,6 +28,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <bit>
 #include <cstdint>
 #include <filesystem>
@@ -433,6 +434,43 @@ void write_file(const std::filesystem::path& path, const std::vector<char>& byte
     out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
 }
 
+/// An EBML element's header: its ID with the length marker kept, as the
+/// specification writes IDs, its size with the marker taken off, and where its
+/// content starts.
+struct EbmlHeader {
+    std::uint32_t id = 0;
+    std::uint64_t size = 0;
+    std::size_t data = 0;
+};
+
+/// The header of the element at `at`, or false where there is none to read.
+bool ebml_header(const std::vector<char>& file, std::size_t at, EbmlHeader& out)
+{
+    const auto byte = [&](std::size_t i) { return static_cast<unsigned char>(file[i]); };
+    if (at >= file.size() || byte(at) == 0) {
+        return false;
+    }
+    const auto id_length = static_cast<std::size_t>(std::countl_zero(byte(at))) + 1;
+    if (id_length > 4 || at + id_length >= file.size() || byte(at + id_length) == 0) {
+        return false;
+    }
+    std::uint32_t id = 0;
+    for (std::size_t i = 0; i < id_length; ++i) {
+        id = id << 8 | byte(at + i);
+    }
+    const std::size_t sized = at + id_length;
+    const auto size_length = static_cast<std::size_t>(std::countl_zero(byte(sized))) + 1;
+    if (sized + size_length > file.size()) {
+        return false;
+    }
+    std::uint64_t size = byte(sized) & (0xFFu >> size_length);
+    for (std::size_t i = 1; i < size_length; ++i) {
+        size = size << 8 | byte(sized + i);
+    }
+    out = {id, size, sized + size_length};
+    return true;
+}
+
 } // namespace
 
 TEST_CASE("a file that is not Matroska is refused, not read as its header",
@@ -500,6 +538,69 @@ TEST_CASE("a Void before the segment is stepped over, not taken for it", "[abi][
         const auto expected = all_packets(plain);
         CHECK_FALSE(expected.empty());
         CHECK(all_packets(padded) == expected);
+    }
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("a block before its cluster's Timestamp is skipped, not placed", "[abi][demux][mkv]")
+{
+    // **libmatroska places a block against the timestamp its cluster was told**
+    // (InitTimestamp), and a cluster that was not told asserts -- then, in a
+    // release build, looks for the Timestamp among the cluster's children,
+    // which a cluster read one child at a time does not have. The Timestamp
+    // comes first in every file a muxer writes; the debug build met a block
+    // ahead of it in a broken copy of one. Here it is the same file with the
+    // first cluster's Timestamp and first block swapped: the cluster keeps its
+    // size, the block ahead of the Timestamp is skipped, and every packet after
+    // it is the file's own.
+    Module module{mkv_module(), MP_KIND_DEMUX};
+    REQUIRE(module.as<MpDemuxVtbl>() != nullptr);
+
+    std::ifstream in{mkv_path(), std::ios::binary};
+    std::vector<char> file{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+    EbmlHeader h;
+    REQUIRE(ebml_header(file, 0, h));
+    REQUIRE(h.id == 0x1A45DFA3u); // EBML
+    REQUIRE(ebml_header(file, h.data + h.size, h));
+    REQUIRE(h.id == 0x18538067u); // Segment
+    std::size_t at = h.data;
+    for (;;) {
+        REQUIRE(ebml_header(file, at, h));
+        if (h.id == 0x1F43B675u) { // Cluster
+            break;
+        }
+        at = h.data + static_cast<std::size_t>(h.size);
+    }
+    std::size_t first = h.data;
+    EbmlHeader timestamp;
+    REQUIRE(ebml_header(file, first, timestamp));
+    if (timestamp.id == 0xBFu) { // CRC-32, which FFmpeg puts first
+        first = timestamp.data + static_cast<std::size_t>(timestamp.size);
+        REQUIRE(ebml_header(file, first, timestamp));
+    }
+    REQUIRE(timestamp.id == 0xE7u); // Timestamp
+    const std::size_t block_at = timestamp.data + static_cast<std::size_t>(timestamp.size);
+    EbmlHeader block;
+    REQUIRE(ebml_header(file, block_at, block));
+    REQUIRE((block.id == 0xA3u || block.id == 0xA0u)); // SimpleBlock or BlockGroup
+    const std::size_t block_end = block.data + static_cast<std::size_t>(block.size);
+    REQUIRE(block_end <= file.size());
+    std::rotate(file.begin() + static_cast<std::ptrdiff_t>(first),
+                file.begin() + static_cast<std::ptrdiff_t>(block_at),
+                file.begin() + static_cast<std::ptrdiff_t>(block_end));
+
+    const auto path = mp::test::temp_path("block_before_timestamp.mkv");
+    write_file(path, file);
+    {
+        mp::Demux plain;
+        REQUIRE(plain.open(*module.as<MpDemuxVtbl>(), mkv_path()) == MP_OK);
+        mp::Demux swapped;
+        REQUIRE(swapped.open(*module.as<MpDemuxVtbl>(), path.string().c_str()) == MP_OK);
+        const auto expected = all_packets(plain);
+        const auto got = all_packets(swapped);
+        REQUIRE(got.size() < expected.size());
+        CHECK(std::equal(got.begin(), got.end(),
+                         expected.end() - static_cast<std::ptrdiff_t>(got.size())));
     }
     std::filesystem::remove(path);
 }

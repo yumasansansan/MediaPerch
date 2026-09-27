@@ -1,0 +1,39 @@
+Bento4: a time-to-sample box reads the entries it has bytes for, and stops when the stream does
+
+AP4_SttsAtom's constructor reads the entry count a file states and then loops that many times, reading two numbers each time and going on when the reads fail. Every other sample table here checks the count against the bytes its box holds first -- ctts, stsc, stsz, stz2, stss return or clamp, stco, co64 and elst clamp -- and stts alone does not. So a box that claims four billion entries in a file of a few hundred bytes made four billion pairs of failed reads: MediaPerch's demuxer fuzzer found a 1335-byte file that kept Bento4 in this loop for longer than its 20-second limit, and a player's own budget on reads could not stop it, because the loop carries on whatever the reads answer.
+
+The count is clamped to what the box has bytes for, as stco's is, and the loop stops at the first read that fails; a box too small to hold a count is left with no entries. Against v1.6.0-641-119-gb8c50a0.
+
+diff --git a/Source/C++/Core/Ap4SttsAtom.cpp b/Source/C++/Core/Ap4SttsAtom.cpp
+index 6131ea1..a9450f2 100644
+--- a/Source/C++/Core/Ap4SttsAtom.cpp
++++ b/Source/C++/Core/Ap4SttsAtom.cpp
+@@ -76,16 +76,23 @@ AP4_SttsAtom::AP4_SttsAtom(AP4_UI32        size,
+     m_LookupCache.sample      = 0;
+     m_LookupCache.dts         = 0;
+ 
++    // check for bogus values, as the other sample tables do: no more entries
++    // than the box has bytes for, and none once the stream has run out
++    if (size < AP4_FULL_ATOM_HEADER_SIZE + 4) return;
+     AP4_UI32 entry_count;
+-    stream.ReadUI32(entry_count);
++    if (AP4_FAILED(stream.ReadUI32(entry_count))) return;
++    if (entry_count > (size - AP4_FULL_ATOM_HEADER_SIZE - 4) / 8) {
++        entry_count = (size - AP4_FULL_ATOM_HEADER_SIZE - 4) / 8;
++    }
+     while (entry_count--) {
+         AP4_UI32 sample_count;
+         AP4_UI32 sample_duration;
+-        if (stream.ReadUI32(sample_count)    == AP4_SUCCESS &&
+-            stream.ReadUI32(sample_duration) == AP4_SUCCESS) {
+-            m_Entries.Append(AP4_SttsTableEntry(sample_count,
+-                                                sample_duration));
++        if (stream.ReadUI32(sample_count)    != AP4_SUCCESS ||
++            stream.ReadUI32(sample_duration) != AP4_SUCCESS) {
++            break;
+         }
++        m_Entries.Append(AP4_SttsTableEntry(sample_count,
++                                            sample_duration));
+     }
+ }
+ 

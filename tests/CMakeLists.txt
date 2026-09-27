@@ -64,6 +64,17 @@ if(TARGET mp_codec_pcm)
     target_sources(mediaperch_tests PRIVATE module_abi_test.cpp)
     target_compile_definitions(mediaperch_tests PRIVATE
         "MEDIAPERCH_MODULE_DIR=L\"$<TARGET_FILE_DIR:mp_codec_pcm>/..\"")
+    # And every demuxer found there, handed broken copies of real files.
+    target_sources(mediaperch_tests PRIVATE demux_robust_test.cpp)
+endif()
+
+# The FLAC codec, handed a real frame under a STREAMINFO that disagrees with it:
+# what the codec fuzzer found first.
+if(TARGET mp_codec_flac)
+    target_sources(mediaperch_tests PRIVATE codec_flac_test.cpp)
+    target_compile_definitions(mediaperch_tests PRIVATE
+        "MEDIAPERCH_CODEC_FLAC=\"$<TARGET_FILE:mp_codec_flac>\"")
+    add_dependencies(mediaperch_tests mp_codec_flac)
 endif()
 
 # `sink_asio`'s DoP unpack is in a header with no Windows in it, so the one part
@@ -304,6 +315,15 @@ if(TARGET mp_demux_mp4 AND TARGET mp_demux_mkv)
         add_dependencies(mediaperch_tests mp_codec_opus)
     endif()
     add_dependencies(mediaperch_tests mp_demux_mp4 mp_demux_mkv)
+endif()
+
+# Files past four gibibytes -- sparse, so they take next to no disk -- read by
+# the WAV demuxer and the Matroska one at their far end.
+if(TARGET mp_demux_wav AND TARGET mp_demux_mkv)
+    target_sources(mediaperch_tests PRIVATE demux_huge_test.cpp)
+    target_compile_definitions(mediaperch_tests PRIVATE
+        "MEDIAPERCH_DEMUX_WAV=\"$<TARGET_FILE:mp_demux_wav>\"")
+    add_dependencies(mediaperch_tests mp_demux_wav mp_demux_mkv)
 endif()
 
 # The VST3 host, with a VST3 this repository writes so that the test does not

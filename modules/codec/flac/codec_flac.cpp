@@ -158,6 +158,17 @@ FLAC__StreamDecoderWriteStatus write_callback(const FLAC__StreamDecoder*,
     if (c->frame_bytes == 0) {
         return FLAC__STREAM_DECODER_WRITE_STATUS_ABORT;
     }
+    // **A frame names its own channel count and sample size**, and libFLAC
+    // decodes what the frame says without holding it to STREAMINFO -- a stream
+    // need not have one -- so `buffer` has the frame's channels, and the ones
+    // past them are null. The format this codec reports is STREAMINFO's; a
+    // frame that disagrees with it is not audio of that format, and is refused
+    // rather than read as if it were. Found by fuzz/codec_fuzzer.cpp: a frame of
+    // one channel in a stream of six.
+    if (frame->header.channels != c->format.channels || frame->header.bits_per_sample != c->bits) {
+        c->failed = true;
+        return FLAC__STREAM_DECODER_WRITE_STATUS_ABORT;
+    }
     const std::uint32_t frames = frame->header.blocksize;
     const std::uint32_t channels = c->format.channels;
     const std::size_t needed = static_cast<std::size_t>(frames) * c->frame_bytes;

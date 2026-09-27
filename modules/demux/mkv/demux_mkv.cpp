@@ -59,6 +59,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <new>
 #include <string>
@@ -384,6 +385,22 @@ private:
 /// takes.
 double float_of(MpDemux* d, const libebml::EbmlFloat& e);
 
+/// A number the file states as a float, for a field that holds integers: the
+/// largest the field holds from its top up, and zero below zero or where the
+/// float is no number at all. **Converting a float outside an integer's range
+/// is undefined**, and every float here is the file's -- a sampling frequency
+/// of 1e300, or NaN, is a byte pattern away. The demuxer fuzzer's trap on
+/// undefined behaviour found one on its hundred and twenty-second input.
+template <typename Int>
+Int clamped(double value) noexcept
+{
+    if (!(value > 0.0)) {
+        return 0;
+    }
+    constexpr auto top = static_cast<double>(std::numeric_limits<Int>::max());
+    return value >= top ? std::numeric_limits<Int>::max() : static_cast<Int>(value);
+}
+
 /// What a track's last block says about where its audio stops. Filled by
 /// `find_tail`, which is where the two elements involved are explained.
 struct Tail {
@@ -508,6 +525,8 @@ struct MpDemux {
     std::unique_ptr<EbmlElement> cluster;
     std::unique_ptr<EbmlElement> pending;
     std::uint64_t cluster_ts = 0; ///< unscaled
+    /// Whether the cluster's Timestamp has been read and libmatroska told it.
+    bool cluster_timed = false;
     int upper = 0;
 
     /// The block being handed out, a lace at a time. Matroska packs several
@@ -680,14 +699,14 @@ void read_track_entry(MpDemux* d, KaxTrackEntry& entry)
                 // the container's spelling is known -- rather than a presenter
                 // guessing which of its callers used which.
                 const auto chroma = [&](auto* e) {
-                    return e == nullptr ? 0u
-                                        : static_cast<std::uint32_t>(float_of(d, *e) * 50000.0 +
-                                                                     0.5);
+                    return e == nullptr
+                               ? 0u
+                               : clamped<std::uint32_t>(float_of(d, *e) * 50000.0 + 0.5);
                 };
                 const auto nits = [&](auto* e) {
-                    return e == nullptr ? 0u
-                                        : static_cast<std::uint32_t>(float_of(d, *e) * 10000.0 +
-                                                                     0.5);
+                    return e == nullptr
+                               ? 0u
+                               : clamped<std::uint32_t>(float_of(d, *e) * 10000.0 + 0.5);
                 };
                 t.mastering_x[0] = chroma(FindChild<KaxVideoRChromaX>(*master));
                 t.mastering_y[0] = chroma(FindChild<KaxVideoRChromaY>(*master));
@@ -704,7 +723,7 @@ void read_track_entry(MpDemux* d, KaxTrackEntry& entry)
     }
     if (auto* audio = FindChild<KaxTrackAudio>(entry)) {
         if (auto* rate = FindChild<KaxAudioSamplingFreq>(*audio)) {
-            t.format.sample_rate = static_cast<std::uint32_t>(float_of(d, *rate));
+            t.format.sample_rate = clamped<std::uint32_t>(float_of(d, *rate));
         }
         if (auto* channels = FindChild<KaxAudioChannels>(*audio)) {
             t.format.channels = static_cast<std::uint32_t>(
@@ -909,6 +928,7 @@ bool next_block(MpDemux* d)
             }
             d->cluster = std::move(el);
             d->cluster_ts = 0;
+            d->cluster_timed = false;
             d->upper = 0;
         }
 
@@ -951,6 +971,7 @@ bool next_block(MpDemux* d)
             // mandatory data back after reading", and it is the documented way.
             static_cast<KaxCluster*>(d->cluster.get())
                 ->InitTimestamp(d->cluster_ts, static_cast<std::int64_t>(d->timestamp_scale));
+            d->cluster_timed = true;
             continue;
         }
         // **A block arrives two ways and ffmpeg uses both in one file.** Most
@@ -972,6 +993,17 @@ bool next_block(MpDemux* d)
             std::size_t from = 0;
             if (block == nullptr ||
                 !d->selected_by_number(block->TrackNum(), from)) {
+                continue;
+            }
+            // **A block before its cluster's Timestamp has no position**, and
+            // is skipped as one without a cluster would be. libmatroska places
+            // a block against the timestamp InitTimestamp gave the cluster, and
+            // without one it asserts, then looks for the Timestamp among the
+            // cluster's children -- which a cluster read a child at a time, as
+            // this one is, does not have. The Timestamp is mandatory and comes
+            // first in every file a muxer writes; the debug build met a block
+            // ahead of it in a broken copy of one.
+            if (!d->cluster_timed) {
                 continue;
             }
             d->reading = from;
@@ -1383,8 +1415,8 @@ try {
         // a millisecond, which is what it is for, and never used as a bound.
         std::uint64_t ns = tail.end_ns;
         if (ns == 0 && d->duration_scaled > 0.0) {
-            ns = static_cast<std::uint64_t>(d->duration_scaled *
-                                            static_cast<double>(d->timestamp_scale));
+            ns = clamped<std::uint64_t>(d->duration_scaled *
+                                        static_cast<double>(d->timestamp_scale));
         }
         if (ns != 0) {
             const std::uint64_t frames = to_frames(ns, t.format.sample_rate);
@@ -1404,8 +1436,8 @@ try {
             ns = tail.last_ns + t.frame_duration_ns;
         }
         if (ns == 0 && d->duration_scaled > 0.0) {
-            ns = static_cast<std::uint64_t>(d->duration_scaled *
-                                            static_cast<double>(d->timestamp_scale));
+            ns = clamped<std::uint64_t>(d->duration_scaled *
+                                        static_cast<double>(d->timestamp_scale));
         }
         out->duration_ms = ns / 1'000'000ull;
     }

@@ -419,6 +419,9 @@ try {
     std::memset(out, 0, size);
     out->size = size;
 
+    if (d->wpc == nullptr) {
+        return MP_ERR_IO; // a seek failed and took the context with it
+    }
     const std::size_t want = static_cast<std::size_t>(k_packet_frames) * d->frame_bytes;
     if (dst == nullptr || dst_bytes < want) {
         out->bytes = static_cast<std::uint32_t>(want);
@@ -474,12 +477,29 @@ MpResult MP_CALL demux_seek(MpDemux* d, std::uint32_t stream,
     if (d == nullptr || stream != 0) {
         return MP_ERR_INVALID;
     }
+    if (d->wpc == nullptr) {
+        return MP_ERR_IO;
+    }
+    // Past the end is refused here, before libwavpack is asked -- see below for
+    // why asking and being told no is not the same thing -- and before the
+    // frame is doubled, which for a frame near the top of the range would wrap.
+    if (frame >= d->total_frames) {
+        return MP_ERR_INVALID;
+    }
     // A DSD file counts in DoP frames outside this module and in DSD bytes
     // inside it, and the rounding down to an even frame is `demux_dsd`'s: the
     // DoP marker alternates, so landing on an odd frame gives every frame after
     // it the wrong one.
     const std::uint64_t target = d->is_dsd ? (frame & ~1ull) * 2ull : frame;
     if (WavpackSeekSample64(d->wpc, static_cast<std::int64_t>(target)) == 0) {
+        // **A failed seek is the end of the context.** libwavpack says a file
+        // whose seek returned FALSE "should not be accessed again (other than
+        // to close it); this is a fatal error" -- and this went on unpacking
+        // from it, into a stream it had freed: demux_wavpack_fuzzer found the
+        // read after the free. Closed here, and every call after answers that
+        // the file could not be read.
+        WavpackCloseFile(d->wpc);
+        d->wpc = nullptr;
         return MP_ERR_IO;
     }
     d->position = d->is_dsd ? target / 2ull : target;

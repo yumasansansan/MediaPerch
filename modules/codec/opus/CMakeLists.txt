@@ -15,10 +15,10 @@ if(NOT EXISTS "${CMAKE_SOURCE_DIR}/external/opus/CMakeLists.txt")
     return()
 endif()
 
-# The version libopus reports, pinned here beside the gitlink that decides it.
-# cmake/OpusPackageVersion.cmake reads this instead of running `git describe`,
-# which upstream does and which fails in any checkout without tags.
-set(MEDIAPERCH_OPUS_VERSION "1.6.1")      # external/opus at v1.6.1
+# The version libopus reports is pinned in cmake/OpusPackageVersion.cmake, which
+# upstream's list file reaches instead of running `git describe` -- which fails
+# in any checkout without tags. It is there rather than here because the fuzzers
+# build libopus too (fuzz/CMakeLists.txt).
 
 set(OPUS_BUILD_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
 set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)

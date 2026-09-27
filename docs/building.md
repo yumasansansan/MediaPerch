@@ -73,13 +73,29 @@ in the Windows SDK the build already requires. The colour shader is compiled at 
 rather than baked in, because a shader that sits next to the comment explaining it is one
 somebody can check -- and `d3dcompiler_47.dll` has shipped in Windows since 10.
 
-**A patch a submodule needs is kept beside it.** `external/patches/` holds the diffs this
-tree's pinned revisions would want and does not apply them: the code reads around each fault
-so that a clean checkout is right, and the patch is there for whoever updates the submodule.
-One so far: libebml's MSVC byte swap for 32-bit values returns sixteen of them, which the
-Matroska demuxer sidesteps by reading four-byte floats from the file itself. Clang takes the
-other branch of that header, `__builtin_bswap32`, so the fault is not compiled into this tree
-any more; the demuxer reads the bytes itself all the same.
+**A patch a submodule needs is kept beside it, and applied.** `external/patches/` holds the
+diffs for faults found in the libraries this tree ships, and `cmake/Patches.cmake` applies
+them to the submodules when CMake configures, so that every build has them: a fault read
+around in the code that calls a library is fixed for that one caller and left for the next,
+and a patch is what can be offered upstream. Each goes away once the submodule moves to a
+revision that carries it. Five so far:
+
+- Bento4's time-to-sample box looped as many times as a file said, whatever the reads
+  answered -- four billion pairs of failed reads for a box of a few bytes -- where every
+  other sample table checks the count against its box.
+- libebml's MSVC byte swap for 32-bit values returns sixteen of them. Clang takes the other
+  branch of that header, `__builtin_bswap32`, so the fault was never compiled into this tree,
+  and the Matroska demuxer reads four-byte floats from the file itself all the same.
+- libebml took a Void of two gibibytes or more for no element at all, as it takes any binary
+  element that large, and searched on through it a byte at a time.
+- libmatroska read a lace size that is no number as a size of nothing in a release build,
+  and stopped on an assertion in a debug one; it is a broken block in both now.
+- libvorbis doubled a floor's room with a left shift, and a floor that predicts a value
+  outside its range makes the room negative: a shift of a negative value, which C leaves
+  undefined. It is a multiplication now, as libvorbis made one of the same kind.
+
+`modules/demux/mp4/mp4_guard.hpp` is from before this rule, and still reads around three
+Bento4 boxes the demuxer never needs.
 
 **Each submodule sits with the one module that needs it**, which is a property of the
 container/codec split rather than a tidying. One module used to bring in four of the Xiph

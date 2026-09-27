@@ -47,6 +47,30 @@ else()
         "and then exit silently before main.")
 endif()
 
+# **On Windows, a fuzzer that stops with STATUS_BREAKPOINT (0x80000003) inside
+# a catch handler, with no report, has found LLVM rather than the code under
+# it.** SanitizerCoverage puts its calls -- before an indirect call, before a
+# comparison -- into catch and cleanup funclets without the "funclet" bundle a
+# call there must carry, and WinEHPrepare deletes each such call and all that
+# follows it in its block: the handler falls through into the int3 padding
+# after the function. The Matroska fuzzer meets it wherever libebml's
+# EbmlMaster::Read deletes an element in `catch (...)` before rethrowing
+# (llvm/llvm-project#212404). It is left as a known false positive until LLVM
+# carries the fix, not hidden: taking coverage out of the functions it hits
+# would blind the fuzzer to them.
+
+# What every fuzz test is run with. Thirty seconds, or twenty thousand inputs
+# if those come first, on every push -- a smoke test that the campaign still
+# builds and a place for the regression corpus to live; the nightly workflow
+# runs the same tests for longer (RunFuzzer.cmake). **-timeout=25 makes a hang
+# a finding**: without it one input that never ends holds the test until
+# ctest gives up on it, twenty-five minutes later, and says only that it took
+# too long.
+set(mediaperch_fuzz_args "-runs=20000|-max_total_time=30|-timeout=25|-print_final_stats=1")
+# Where the tests put what they find, for CI to keep: one directory, every
+# file named after its fuzzer.
+set(mediaperch_fuzz_findings "${CMAKE_BINARY_DIR}/fuzz-findings")
+
 function(mediaperch_add_fuzzer name source corpus)
     # Extra translation units after the corpus name: the AAC parser is ours,
     # so it is compiled into the fuzzer directly and gets instrumented with it.
@@ -68,6 +92,12 @@ function(mediaperch_add_fuzzer name source corpus)
     # alac.cpp already cover.
     target_compile_definitions(${name} PRIVATE
         _DISABLE_VECTOR_ANNOTATION _DISABLE_STRING_ANNOTATION)
+    # **The STL's own preconditions, checked in a release build**: an index
+    # past a vector's end, front() of nothing, a span taken past its data. ASan
+    # sees a read outside an allocation; these see a read outside the object,
+    # inside an allocation that is bigger -- a vector's spare capacity, say --
+    # which ASan cannot. A broken one traps, and libFuzzer keeps the input.
+    target_compile_definitions(${name} PRIVATE _MSVC_STL_HARDENING=1)
 
     # Not mediaperch_flags: this is somebody else's parser compiled into our
     # binary, and holding it to our warning set would drown the signal.
@@ -107,10 +137,31 @@ function(mediaperch_add_fuzzer name source corpus)
     add_test(NAME fuzz_${name}
              COMMAND ${CMAKE_COMMAND}
                      -D "FUZZER=$<TARGET_FILE:${name}>"
+                     -D "NAME=${name}"
                      -D "SEEDS=${seeds}"
                      -D "SCRATCH=${scratch}"
-                     -D "ARGS=-runs=20000|-max_total_time=30|-print_final_stats=1"
+                     -D "FINDINGS=${mediaperch_fuzz_findings}"
+                     -D "ARGS=${mediaperch_fuzz_args}"
                      -P "${CMAKE_CURRENT_LIST_DIR}/RunFuzzer.cmake")
+endfunction()
+
+# A library the fuzzers link, built with them rather than borrowed: a library
+# linked in uninstrumented is a library the fuzzer runs through and reports
+# nothing about. **`fuzzer-no-link` is the half that puts coverage counters
+# in**: with `address` alone libFuzzer runs the library blind -- measured,
+# libmpg123 reported `cov: 20`, the harness and nothing else, over a quarter of
+# a million executions. `no-link` because the entry point comes from the fuzzer
+# target, not from the library. Per language, because libwavpack carries
+# assembly and an assembler handed a compiler's options fails; the annotations
+# are off for the reason mediaperch_add_fuzzer gives.
+function(mediaperch_instrument target)
+    target_compile_options(${target} PRIVATE
+        "$<$<COMPILE_LANGUAGE:C,CXX>:-fsanitize=fuzzer-no-link,address>"
+        "$<$<COMPILE_LANGUAGE:C,CXX>:-w>")
+    target_compile_definitions(${target} PRIVATE
+        _DISABLE_VECTOR_ANNOTATION _DISABLE_STRING_ANNOTATION
+        "$<$<COMPILE_LANGUAGE:CXX>:_MSVC_STL_HARDENING=1>")
+    set_target_properties(${target} PROPERTIES FOLDER "external")
 endfunction()
 
 mediaperch_add_fuzzer(wav_fuzzer wav_fuzzer.cpp wav)
@@ -135,15 +186,7 @@ if(TARGET libmpg123)
         INTERFACE "${CMAKE_SOURCE_DIR}/external/mpg123/src/include")
     foreach(_ext IN ITEMS libmpg123 libsyn123 compat compat_str)
         if(TARGET ${_ext})
-            # **`fuzzer-no-link` is the half that puts coverage counters in.**
-            # With `address` alone libFuzzer runs the library blind: measured,
-            # this target reported `cov: 20` -- the harness and nothing else --
-            # over a quarter of a million executions. `no-link` because the
-            # entry point comes from the fuzzer target, not from the library.
-            target_compile_options(${_ext} PRIVATE -fsanitize=fuzzer-no-link,address -w)
-            target_compile_definitions(${_ext} PRIVATE
-                _DISABLE_VECTOR_ANNOTATION _DISABLE_STRING_ANNOTATION)
-            set_target_properties(${_ext} PROPERTIES FOLDER "external")
+            mediaperch_instrument(${_ext})
         endif()
     endforeach()
     mediaperch_add_fuzzer(mpa_fuzzer mpa_fuzzer.cpp mp3)
@@ -225,9 +268,11 @@ function(mediaperch_add_rust_fuzzer name manifest corpus)
     add_test(NAME fuzz_${name}
              COMMAND ${CMAKE_COMMAND}
                      -D "FUZZER=${rust_fuzz_exe}"
+                     -D "NAME=${name}"
                      -D "SEEDS=${corpus}"
                      -D "SCRATCH=${CMAKE_CURRENT_BINARY_DIR}/${name}_scratch"
-                     -D "ARGS=-runs=20000|-max_total_time=30|-print_final_stats=1"
+                     -D "FINDINGS=${mediaperch_fuzz_findings}"
+                     -D "ARGS=${mediaperch_fuzz_args}"
                      -P "${CMAKE_CURRENT_LIST_DIR}/RunFuzzer.cmake")
 endfunction()
 
@@ -271,12 +316,7 @@ if(NOT TARGET wavpack AND EXISTS "${CMAKE_SOURCE_DIR}/external/wavpack/CMakeList
                      "${CMAKE_BINARY_DIR}/external/wavpack" EXCLUDE_FROM_ALL)
 endif()
 if(TARGET wavpack)
-    target_compile_options(wavpack PRIVATE
-        "$<$<COMPILE_LANGUAGE:C,CXX>:-fsanitize=fuzzer-no-link,address>"
-        "$<$<COMPILE_LANGUAGE:C,CXX>:-w>")
-    target_compile_definitions(wavpack PRIVATE
-        _DISABLE_VECTOR_ANNOTATION _DISABLE_STRING_ANNOTATION)
-    set_target_properties(wavpack PROPERTIES FOLDER "external")
+    mediaperch_instrument(wavpack)
     mediaperch_add_fuzzer(wavpack_fuzzer wavpack_fuzzer.cpp wavpack)
     target_link_libraries(wavpack_fuzzer PRIVATE wavpack)
 endif()
@@ -300,16 +340,10 @@ if(NOT TARGET ap4 AND EXISTS "${CMAKE_SOURCE_DIR}/external/Bento4/CMakeLists.txt
                      "${CMAKE_BINARY_DIR}/external/Bento4" EXCLUDE_FROM_ALL)
 endif()
 if(TARGET ap4)
-    # **`fuzzer-no-link` is the half that matters**: it is what puts coverage
-    # counters in Bento4's code. With `address` alone the fuzzer still catches a
-    # crash, but it is walking blind -- the first campaign here reported "36
-    # inline 8-bit counters", which is this file's own harness and nothing else,
-    # and every mutation it made was guesswork. `no-link` because the entry point
-    # comes from the fuzzer target, not from the library.
-    target_compile_options(ap4 PRIVATE -fsanitize=fuzzer-no-link,address -w)
-    target_compile_definitions(ap4 PRIVATE
-        _DISABLE_VECTOR_ANNOTATION _DISABLE_STRING_ANNOTATION)
-    set_target_properties(ap4 PROPERTIES FOLDER "external")
+    # Instrumented, as every library here is: Bento4's first campaign, before
+    # it was, reported "36 inline 8-bit counters" -- this file's own harness
+    # and nothing else -- and every mutation it made was guesswork.
+    mediaperch_instrument(ap4)
 
     mediaperch_add_fuzzer(mp4_fuzzer mp4_fuzzer.cpp mp4)
     target_link_libraries(mp4_fuzzer PRIVATE ap4)
@@ -326,3 +360,197 @@ mediaperch_add_fuzzer(settings_fuzzer settings_fuzzer.cpp
                       "${CMAKE_SOURCE_DIR}/src/player/mediaperch/settings.cpp"
                       "${CMAKE_SOURCE_DIR}/src/player/mediaperch/protocol.cpp"
                       "${CMAKE_SOURCE_DIR}/external/dragonperch/src/core/dragonperch/ini.cpp")
+
+# ---------------------------------------------------------------------------
+# Every demuxer, through the module ABI
+# ---------------------------------------------------------------------------
+#
+# The fuzzers above hand a parser its bytes. What sits between such a parser
+# and the host -- the module's own reading of the container, its index, its
+# packets, its seek -- is fuzzed here: demux_fuzzer.cpp drives a demuxer the
+# way the host does, with the module's own source and every library under it
+# compiled in and instrumented. That is the code in which the format matrix,
+# not a fuzzer, found demux_mkv casting whatever libebml had found to the
+# header it had asked for. One fuzzer per module, because each defines
+# mp_module_entry; the seeds are the parser fuzzer's where there is one.
+#
+# The module is compiled with what the platform build gives it, less the
+# warnings that build holds it to already: the definitions mediaperch_flags
+# gives a module on Windows, and the shared sources it links. The codec fuzzers
+# further down are made the same way, with a harness of their own.
+function(mediaperch_add_module_fuzzer name harness corpus module_source)
+    cmake_parse_arguments(M "" "" "SOURCES;LINK" ${ARGN})
+    mediaperch_add_fuzzer(${name} ${harness} "${corpus}" "${module_source}"
+        "${CMAKE_SOURCE_DIR}/modules/shared/module_log/module_log.cpp"
+        ${M_SOURCES})
+    get_filename_component(module_dir "${module_source}" DIRECTORY)
+    # tests/ for the driver and the scratch files, which the test that hands
+    # every demuxer broken copies of real files shares with these.
+    target_include_directories(${name} PRIVATE
+        "${module_dir}"
+        "${CMAKE_SOURCE_DIR}/modules/shared/abi_guard"
+        "${CMAKE_SOURCE_DIR}/modules/shared/h264"
+        "${CMAKE_SOURCE_DIR}/modules/shared/module_log"
+        "${CMAKE_SOURCE_DIR}/modules/shared/pcm_format"
+        "${CMAKE_SOURCE_DIR}/src/win"
+        "${CMAKE_SOURCE_DIR}/tests")
+    if(WIN32)
+        target_compile_definitions(${name} PRIVATE
+            NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+    endif()
+    # **Undefined behaviour in this tree's own code is a crash here**: an
+    # overflow of a signed number, a shift past the width, a misaligned load, a
+    # pointer taken past its object. Trapping rather than reporting, so it needs
+    # no runtime of its own beside ASan's, and only on the sources compiled into
+    # this target -- the module's and the shared ones; the libraries under it
+    # are other people's, whose undefined behaviour has its own fuzzers.
+    target_compile_options(${name} PRIVATE -fsanitize=undefined -fsanitize-trap=undefined)
+    target_link_libraries(${name} PRIVATE ${M_LINK})
+endfunction()
+
+function(mediaperch_add_demux_fuzzer module corpus)
+    mediaperch_add_module_fuzzer(demux_${module}_fuzzer demux_fuzzer.cpp "${corpus}"
+        "${CMAKE_SOURCE_DIR}/modules/demux/${module}/demux_${module}.cpp" ${ARGN})
+endfunction()
+
+set(mediaperch_pcm_format_source
+    "${CMAKE_SOURCE_DIR}/modules/shared/pcm_format/pcm_format.cpp")
+set(mediaperch_h264_source "${CMAKE_SOURCE_DIR}/modules/shared/h264/h264.cpp")
+
+mediaperch_add_demux_fuzzer(wav wav
+    SOURCES "${mediaperch_pcm_format_source}"
+            "${CMAKE_SOURCE_DIR}/modules/shared/dr_wav/dr_wav_impl.c")
+if(TARGET libmpg123)
+    mediaperch_add_demux_fuzzer(mpa mp3 LINK libmpg123)
+endif()
+if(TARGET wavpack)
+    mediaperch_add_demux_fuzzer(wavpack wavpack
+        SOURCES "${mediaperch_pcm_format_source}" LINK wavpack)
+endif()
+if(TARGET ap4)
+    mediaperch_add_demux_fuzzer(mp4 mp4 SOURCES "${mediaperch_h264_source}" LINK ap4)
+endif()
+
+# libFLAC, which demux_flac reads frames with, built here as modules/codec/flac
+# builds it. FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION is its own switch for a
+# fuzzer, as OSS-Fuzz uses it: a frame whose CRC does not match is decoded
+# rather than dropped, so a mutation reaches the decoder instead of stopping at
+# a checksum it has one chance in 65536 of getting right.
+if(NOT TARGET FLAC AND EXISTS "${CMAKE_SOURCE_DIR}/external/flac/CMakeLists.txt")
+    set(BUILD_CXXLIBS OFF CACHE BOOL "" FORCE)
+    set(BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+    set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(BUILD_DOCS OFF CACHE BOOL "" FORCE)
+    set(INSTALL_MANPAGES OFF CACHE BOOL "" FORCE)
+    set(INSTALL_PKGCONFIG_MODULES OFF CACHE BOOL "" FORCE)
+    set(INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+    set(WITH_OGG OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${CMAKE_SOURCE_DIR}/external/flac"
+                     "${CMAKE_BINARY_DIR}/external/flac" EXCLUDE_FROM_ALL SYSTEM)
+endif()
+if(TARGET FLAC)
+    mediaperch_instrument(FLAC)
+    target_compile_definitions(FLAC PRIVATE FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION)
+    mediaperch_add_demux_fuzzer(flac flac SOURCES "${mediaperch_pcm_format_source}" LINK FLAC)
+    # The same switch fails allocations inside libFLAC when the fuzzer says to,
+    # and the fuzzer owns the counters that say it: flac_allocations.hpp.
+    target_compile_definitions(demux_flac_fuzzer PRIVATE MEDIAPERCH_FUZZ_FLAC_ALLOCATIONS)
+endif()
+
+# libogg, which demux_ogg pages with, built as modules/demux/ogg builds it.
+# DISABLE_CRC is libogg's switch for a fuzzer, and for the same reason: a page
+# whose checksum is wrong is skipped whole, and nearly every mutation makes it
+# wrong. The seeds are a quarter of a second of a sine in each mapping the
+# module names -- Vorbis, Opus, FLAC and Speex -- written by FFmpeg.
+if(NOT TARGET ogg AND EXISTS "${CMAKE_SOURCE_DIR}/external/ogg/CMakeLists.txt")
+    set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(INSTALL_DOCS OFF CACHE BOOL "" FORCE)
+    set(INSTALL_PKG_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+    set(INSTALL_CMAKE_PACKAGE_MODULE OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${CMAKE_SOURCE_DIR}/external/ogg"
+                     "${CMAKE_BINARY_DIR}/external/ogg" EXCLUDE_FROM_ALL SYSTEM)
+endif()
+if(TARGET ogg)
+    mediaperch_instrument(ogg)
+    target_compile_definitions(ogg PRIVATE DISABLE_CRC)
+    mediaperch_add_demux_fuzzer(ogg ogg LINK Ogg::ogg)
+endif()
+
+# libebml and libmatroska, which demux_mkv reads Matroska with, built as
+# modules/demux/mkv builds them. The seeds are the Matroska and WebM files the
+# tests read, audio and video both, from tests/data/mkv.
+if(NOT TARGET matroska AND EXISTS "${CMAKE_SOURCE_DIR}/external/libmatroska/CMakeLists.txt"
+   AND EXISTS "${CMAKE_SOURCE_DIR}/external/libebml/CMakeLists.txt")
+    set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(DISABLE_PKGCONFIG ON CACHE BOOL "" FORCE)
+    set(DISABLE_CMAKE_CONFIG ON CACHE BOOL "" FORCE)
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(CMAKE_SKIP_INSTALL_RULES ON)
+    add_subdirectory("${CMAKE_SOURCE_DIR}/external/libebml"
+                     "${CMAKE_BINARY_DIR}/external/libebml" EXCLUDE_FROM_ALL SYSTEM)
+    add_subdirectory("${CMAKE_SOURCE_DIR}/external/libmatroska"
+                     "${CMAKE_BINARY_DIR}/external/libmatroska" EXCLUDE_FROM_ALL SYSTEM)
+endif()
+if(TARGET matroska AND TARGET ebml)
+    mediaperch_instrument(ebml)
+    mediaperch_instrument(matroska)
+    mediaperch_add_demux_fuzzer(mkv "${CMAKE_SOURCE_DIR}/tests/data/mkv"
+        SOURCES "${mediaperch_pcm_format_source}" "${mediaperch_h264_source}"
+        LINK matroska ebml)
+endif()
+
+# ---------------------------------------------------------------------------
+# Every audio codec, through the module ABI
+# ---------------------------------------------------------------------------
+#
+# What a demuxer cuts out of a file -- the packets, and the configuration blob
+# before them -- goes to a codec module verbatim, and none of the fuzzers above
+# reaches one. codec_fuzzer.cpp drives a codec the way the host does, with the
+# module's source and the library under it compiled in and instrumented. The
+# seeds are the files in corpus/ taken apart into its input by
+# tools/make_codec_seeds.py.
+function(mediaperch_add_codec_fuzzer module)
+    mediaperch_add_module_fuzzer(codec_${module}_fuzzer codec_fuzzer.cpp codec_${module}
+        "${CMAKE_SOURCE_DIR}/modules/codec/${module}/codec_${module}.cpp" ${ARGN})
+endfunction()
+
+mediaperch_add_codec_fuzzer(pcm)
+if(TARGET libmpg123)
+    mediaperch_add_codec_fuzzer(mpa LINK libmpg123)
+endif()
+if(TARGET FLAC)
+    mediaperch_add_codec_fuzzer(flac SOURCES "${mediaperch_pcm_format_source}" LINK FLAC)
+    target_compile_definitions(codec_flac_fuzzer PRIVATE MEDIAPERCH_FUZZ_FLAC_ALLOCATIONS)
+endif()
+
+# libopus, built as modules/codec/opus builds it, with OPUS_ASSERTIONS -- its
+# own switch for testing, as OSS-Fuzz builds it: the decoder's inner
+# invariants, checked, so a packet that breaks one is a crash here rather than
+# wrong audio.
+if(NOT TARGET opus AND EXISTS "${CMAKE_SOURCE_DIR}/external/opus/CMakeLists.txt")
+    set(OPUS_BUILD_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
+    set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+    set(OPUS_INSTALL_PKG_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+    set(OPUS_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+    set(OPUS_ASSERTIONS ON CACHE BOOL "" FORCE)
+    add_subdirectory("${CMAKE_SOURCE_DIR}/external/opus"
+                     "${CMAKE_BINARY_DIR}/external/opus" EXCLUDE_FROM_ALL SYSTEM)
+endif()
+if(TARGET opus)
+    mediaperch_instrument(opus)
+    mediaperch_add_codec_fuzzer(opus LINK Opus::opus)
+endif()
+
+# libvorbis, built as modules/codec/vorbis builds it, on the libogg above: the
+# codec reads its bits with libogg's bit packer.
+if(NOT TARGET vorbis AND TARGET Ogg::ogg
+   AND EXISTS "${CMAKE_SOURCE_DIR}/external/vorbis/CMakeLists.txt")
+    add_subdirectory("${CMAKE_SOURCE_DIR}/external/vorbis"
+                     "${CMAKE_BINARY_DIR}/external/vorbis" EXCLUDE_FROM_ALL SYSTEM)
+endif()
+if(TARGET vorbis)
+    mediaperch_instrument(vorbis)
+    mediaperch_add_codec_fuzzer(vorbis LINK vorbis Ogg::ogg)
+endif()

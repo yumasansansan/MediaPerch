@@ -766,10 +766,11 @@ try {
     return MP_ERR_NO_MEMORY;
 }
 
-MpResult MP_CALL scale_reset(MpVideoDsp*) noexcept
+MpResult MP_CALL scale_reset(MpVideoDsp* d) noexcept
 {
-    // A resampler carries nothing across frames, so a seek asks nothing of it.
-    return MP_OK;
+    // A resampler carries nothing across frames, so a seek asks nothing of it --
+    // of a stage that exists.
+    return d != nullptr ? MP_OK : MP_ERR_INVALID;
 }
 
 /// A whole number, or nothing.

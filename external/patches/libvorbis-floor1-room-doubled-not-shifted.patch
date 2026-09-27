@@ -1,0 +1,17 @@
+libvorbis: floor 1's room is doubled, not shifted
+
+floor1_inverse1 works out how far each post's predicted value lies from the two ends of the range, and doubles the nearer distance with a left shift. A floor whose posts predict a value outside the range makes one of the distances negative, and a left shift of a negative value is undefined behaviour in C: UndefinedBehaviorSanitizer stopped there, at "left shift of negative value -7572", on a packet MediaPerch's codec fuzzer made. Multiplying by two is what the shift was for, and what c2aa86b0 ("Replaced left shift of negative number with multiplication.") did for the same report in psy.c. Against v1.3.7-37-g1b75110b.
+
+diff --git a/lib/floor1.c b/lib/floor1.c
+index 00a5a97b..cba5e805 100644
+--- a/lib/floor1.c
++++ b/lib/floor1.c
+@@ -1004,7 +1004,7 @@ static void *floor1_inverse1(vorbis_block *vb,vorbis_look_floor *in){
+                                  info->postlist[i]);
+       int hiroom=look->quant_q-predicted;
+       int loroom=predicted;
+-      int room=(hiroom<loroom?hiroom:loroom)<<1;
++      int room=(hiroom<loroom?hiroom:loroom)*2;
+       int val=fit_value[i];
+ 
+       if(val){

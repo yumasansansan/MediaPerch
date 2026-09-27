@@ -1,0 +1,43 @@
+libebml: a Void of any size is stepped over, not taken for a broken element
+
+EbmlVoid is an EbmlBinary, and EbmlBinary::SizeIsValid allows less than 0x7FFFFFFF bytes, because a binary element's ReadData allocates its size and reads it in. So FindNextElement, finding a Void of two gibibytes or more, rejects it as no element at all and goes on looking one byte at a time -- through the whole Void. MediaPerch's test that reads a Matroska file whose one cluster lies past five gibibytes of Void found it: the file of four kibibytes of Void opened at once, the one of five gibibytes had not after eight minutes, every sample of the demuxer's stack in FindNextElement reading a byte.
+
+What a Void holds is padding, and nothing reads it. EbmlVoid now accepts any size, and its ReadData steps over its data with a seek instead of allocating and reading it, so that a master read in full with a large Void in it does not ask for gigabytes either. Against release-1.4.3-535-g928e273.
+
+diff --git a/ebml/EbmlVoid.h b/ebml/EbmlVoid.h
+index 0a4de8e..afd61cd 100644
+--- a/ebml/EbmlVoid.h
++++ b/ebml/EbmlVoid.h
+@@ -19,6 +19,12 @@ DECLARE_EBML_BINARY(EbmlVoid)
+     */
+     void SetSize(std::uint64_t aSize) {SetSize_(aSize);}
+ 
++    /*!
++      \brief A Void holds nothing to read, so it may be of any size: it is stepped over, not kept
++    */
++    bool SizeIsValid(std::uint64_t /*size*/) const override {return true;}
++    filepos_t ReadData(IOCallback & input, ScopeMode ReadFully = SCOPE_ALL_DATA) override;
++
+     /*!
+       \note overwrite to write fake data
+     */
+diff --git a/src/EbmlVoid.cpp b/src/EbmlVoid.cpp
+index 12dd817..cd182fa 100644
+--- a/src/EbmlVoid.cpp
++++ b/src/EbmlVoid.cpp
+@@ -20,6 +20,15 @@ EbmlVoid::EbmlVoid()
+   SetValueIsSet();
+ }
+ 
++filepos_t EbmlVoid::ReadData(IOCallback & input, ScopeMode /* ReadFully */)
++{
++  // what a Void holds is padding: step over it, whatever its size, rather than
++  // allocate it and read it in
++  input.setFilePointer(static_cast<std::int64_t>(GetSize()), seek_current);
++  SetValueIsSet();
++  return GetSize();
++}
++
+ filepos_t EbmlVoid::RenderData(IOCallback & output, bool /* bForceRender */, const ShouldWrite & /* writeFilter */)
+ {
+   // write dummy data by 4KB chunks

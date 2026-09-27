@@ -20,6 +20,8 @@
 
 #include <mediaperch/module.h>
 
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <new>
 #include <vector>

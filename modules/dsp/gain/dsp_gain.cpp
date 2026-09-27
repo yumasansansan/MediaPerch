@@ -107,10 +107,9 @@ MEDIAPERCH_ABI_GUARD_CATCH
 MpResult MP_CALL dsp_flush(MpDsp* d, double* const* out, std::uint32_t out_capacity,
                            std::uint32_t* out_frames) noexcept
 try {
-    (void)d;
     (void)out;
     (void)out_capacity;
-    if (out_frames == nullptr) {
+    if (d == nullptr || out_frames == nullptr) {
         return MP_ERR_INVALID;
     }
     *out_frames = 0; // no history, nothing held back

@@ -1,0 +1,26 @@
+libmatroska: a lace size that is no number ends the block, in a release build as well
+
+ReadSignedVINT asserts that it has bytes to read and that ReadCodedSizeValue found a number in them, and KaxInternalBlock::ReadData calls it on whatever a file's EBML lacing holds. A size whose first byte has no length marker is no number: ReadCodedSizeValue answers by setting the byte count to zero, which a debug build stops on at the second assert and a release build reads as a size of nothing -- SignedVINTSizeToShift(0) is 0 -- so every frame after it takes the first frame's size and the block is played with sizes the file never had. The size read before them, with ReadCodedSizeValue itself, already throws EndOfStreamX when it does not fit, and so do these when they do not; a size that is not there at all now throws the same, and a broken lace is a broken block in either build.
+
+Found by MediaPerch's test that hands every demuxer broken copies of real files, in its Debug build. Against release-1.7.0-289-g67166f0.
+
+diff --git a/src/KaxBlock.cpp b/src/KaxBlock.cpp
+index 3dfda0d..fb6bcd3 100644
+--- a/src/KaxBlock.cpp
++++ b/src/KaxBlock.cpp
+@@ -141,9 +141,13 @@ static int SignedVINTValue(std::int64_t Value, int CodedSize, binary * OutBuffer
+ static std::int64_t ReadSignedVINT(const binary * InBuffer, std::uint32_t & BufferSize)
+ {
+   std::uint64_t SizeUnknown = 0;
+-  assert(BufferSize != 0);
++  // No bytes left, or none that start a number: the lace is broken, as its
++  // other sizes are when they do not fit, and says so the same way.
++  if (BufferSize == 0)
++    throw SafeReadIOCallback::EndOfStreamX(0);
+   std::int64_t Result = ReadCodedSizeValue(InBuffer, BufferSize, SizeUnknown);
+-  assert(BufferSize != 0);
++  if (BufferSize == 0)
++    throw SafeReadIOCallback::EndOfStreamX(0);
+ 
+   return Result - SignedVINTSizeToShift(BufferSize);
+ }

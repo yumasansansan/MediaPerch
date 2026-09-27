@@ -756,7 +756,10 @@ MpResult MP_CALL sink_start(MpSink* sink) noexcept
 
 MpResult MP_CALL sink_stop(MpSink* sink) noexcept
 {
-    if (sink == nullptr || !sink->started) {
+    if (sink == nullptr) {
+        return MP_ERR_INVALID;
+    }
+    if (!sink->started) {
         return MP_OK;
     }
     sink->driver->stop();
@@ -766,10 +769,16 @@ MpResult MP_CALL sink_stop(MpSink* sink) noexcept
     return MP_OK;
 }
 
-// MP_RT from here down: no allocation, no logging, no locking.
+// MP_RT from here down: no allocation, no logging, no locking -- and no sink
+// taken on trust. A null one, or one never negotiated, has no event and no
+// buffer to reach through; the render thread pays one predictable branch a
+// period for the answer being MP_ERR_INVALID rather than a crash.
 
 MpResult MP_CALL sink_wait(MpSink* sink, std::uint32_t timeout_ms) noexcept
 {
+    if (sink == nullptr || !sink->ready) {
+        return MP_ERR_INVALID;
+    }
     const DWORD waited = ::WaitForSingleObject(sink->free_event, timeout_ms);
     if (waited == WAIT_OBJECT_0) {
         return MP_OK;
@@ -782,6 +791,9 @@ MpResult MP_CALL sink_wait(MpSink* sink, std::uint32_t timeout_ms) noexcept
 
 MpResult MP_CALL sink_acquire(MpSink* sink, void** ptr, std::uint32_t* frames) noexcept
 {
+    if (sink == nullptr || !sink->ready || ptr == nullptr || frames == nullptr) {
+        return MP_ERR_INVALID;
+    }
     if (sink->filled.load(std::memory_order_acquire) != 0) {
         // The driver has not taken the last one yet. Nothing to write into,
         // and the host's answer to that is to wait again.
@@ -796,6 +808,9 @@ MpResult MP_CALL sink_acquire(MpSink* sink, void** ptr, std::uint32_t* frames) n
 
 MpResult MP_CALL sink_commit(MpSink* sink, std::uint32_t frames, std::uint32_t flags) noexcept
 {
+    if (sink == nullptr || !sink->ready) {
+        return MP_ERR_INVALID;
+    }
     if (frames == 0) {
         return MP_OK;
     }

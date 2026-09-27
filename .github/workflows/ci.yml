@@ -231,17 +231,16 @@ jobs:
       - name: Fuzz
         run: ctest --preset fuzz
 
-      # Whatever the run found that the corpus did not already cover. Worth
-      # keeping even when nothing crashed: it is the next run's starting point.
-      - name: Keep the crashes and the new corpus
+      # Whatever the run found: the input of every crash, leak, timeout and
+      # out-of-memory, each named after its fuzzer. RunFuzzer.cmake tells
+      # libFuzzer where; left alone, it writes them wherever the process
+      # started, which was not where this step looked.
+      - name: Keep the inputs that failed
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: fuzz-findings
-          path: |
-            build/fuzz/bin/crash-*
-            build/fuzz/bin/leak-*
-            build/fuzz/bin/timeout-*
+          path: build/fuzz/fuzz-findings/
           if-no-files-found: ignore
 
   # Every other check in this tree compares one decoder with another, which can

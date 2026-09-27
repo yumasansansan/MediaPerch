@@ -430,10 +430,16 @@ MpResult MP_CALL sink_stop(MpSink* sink) noexcept
     return FAILED(hr) ? map_hr(hr) : MP_OK;
 }
 
-// MP_RT from here down: no allocation, no logging, no locking.
+// MP_RT from here down: no allocation, no logging, no locking -- and no sink
+// taken on trust. A null one, or one never negotiated, has no event and no
+// client to reach through; the render thread pays one predictable branch a
+// period for the answer being MP_ERR_INVALID rather than a crash.
 
 MpResult MP_CALL sink_wait(MpSink* sink, std::uint32_t timeout_ms) noexcept
 {
+    if (sink == nullptr || !sink->ready) {
+        return MP_ERR_INVALID;
+    }
     const DWORD waited = ::WaitForSingleObject(sink->event, timeout_ms);
     if (waited == WAIT_OBJECT_0) {
         return MP_OK;
@@ -446,6 +452,9 @@ MpResult MP_CALL sink_wait(MpSink* sink, std::uint32_t timeout_ms) noexcept
 
 MpResult MP_CALL sink_acquire(MpSink* sink, void** ptr, std::uint32_t* frames) noexcept
 {
+    if (sink == nullptr || !sink->ready || ptr == nullptr || frames == nullptr) {
+        return MP_ERR_INVALID;
+    }
     UINT32 wanted = sink->buffer_frames;
 
     if (sink->mode == MP_SHARE_SHARED) {
@@ -476,6 +485,9 @@ MpResult MP_CALL sink_acquire(MpSink* sink, void** ptr, std::uint32_t* frames) n
 
 MpResult MP_CALL sink_commit(MpSink* sink, std::uint32_t frames, std::uint32_t flags) noexcept
 {
+    if (sink == nullptr || !sink->ready) {
+        return MP_ERR_INVALID;
+    }
     if (frames == 0) {
         return MP_OK;
     }

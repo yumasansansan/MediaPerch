@@ -251,10 +251,9 @@ MpResult MP_CALL codec_decode(MpCodecInstance* c, const void* packet,
 MpResult MP_CALL codec_flush(MpCodecInstance* c, void* dst, std::size_t dst_bytes,
                              std::size_t* out_bytes) noexcept
 {
-    (void)c;
     (void)dst;
     (void)dst_bytes;
-    if (out_bytes == nullptr) {
+    if (c == nullptr || out_bytes == nullptr) {
         return MP_ERR_INVALID;
     }
     // Opus is a packet in, a packet out. The overlap that remains is the

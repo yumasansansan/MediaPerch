@@ -529,10 +529,11 @@ try {
     return MP_ERR_NO_MEMORY;
 }
 
-MpResult MP_CALL lut_reset(MpVideoDsp*) noexcept
+MpResult MP_CALL lut_reset(MpVideoDsp* d) noexcept
 {
-    // A table carries nothing across frames, so a seek asks nothing of it.
-    return MP_OK;
+    // A table carries nothing across frames, so a seek asks nothing of it --
+    // of a stage that exists.
+    return d != nullptr ? MP_OK : MP_ERR_INVALID;
 }
 
 MpResult MP_CALL lut_set(MpVideoDsp* d, const char* key, const char* value) noexcept
