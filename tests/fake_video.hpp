@@ -18,6 +18,7 @@
 #define MEDIAPERCH_TESTS_FAKE_VIDEO_HPP
 
 #include "mediaperch/display.hpp"
+#include "fake_handles.hpp"
 
 #include <mediaperch/module.h>
 
@@ -138,7 +139,7 @@ private:
 
 namespace detail {
 
-inline MpResult MP_CALL video_open(void* window, MpVideo** out) noexcept
+inline MpResult MP_CALL video_open(void* /*window*/, MpVideo** out) noexcept
 {
     PresenterLog& log = presenter_log();
     {
@@ -153,9 +154,12 @@ inline MpResult MP_CALL video_open(void* window, MpVideo** out) noexcept
         log.size.clear();
         log.stages = 0;
     }
-    // The handle is never dereferenced; it only has to be distinguishable
-    // from null, because that is all the ABI promises about it.
-    *out = reinterpret_cast<MpVideo*>(window != nullptr ? window : &log);
+    // The handle is never looked through; it only has to be distinguishable
+    // from null, because that is all the ABI promises about it -- one of its
+    // own type, which fake_handles.hpp completes, rather than the window or
+    // the log standing for one.
+    static MpVideo presenter;
+    *out = &presenter;
     return MP_OK;
 }
 
@@ -305,6 +309,12 @@ struct DecoderLog {
     /// What `get_format` answers, when a test gives it something to say: a
     /// `size` of zero is a decoder with no answer, which is the default.
     MpVideoInfo says{};
+    /// **`open` waits while this is true**, and `opening` says that it is
+    /// waiting: a test that sets it can look at a player whose picture is
+    /// opening for as long as it likes, and lets it go by clearing it and
+    /// notifying.
+    std::atomic<bool> hold_open{false};
+    std::atomic<bool> opening{false};
 
     void reset()
     {
@@ -319,6 +329,8 @@ struct DecoderLog {
         refuse_threads = false;
         refuse_open = false;
         says = MpVideoInfo{};
+        hold_open.store(false);
+        opening.store(false);
     }
 };
 
@@ -334,6 +346,9 @@ inline MpResult MP_CALL codec_open(MpCodec, const MpGraphicsDevice*, const std::
                                    std::uint32_t, MpVideoCodec** out) noexcept
 {
     DecoderLog& log = decoder_log();
+    log.opening.store(true);
+    log.hold_open.wait(true);
+    log.opening.store(false);
     const std::lock_guard lock{log.mutex};
     if (log.refuse_open) {
         return MP_ERR_UNSUPPORTED;
@@ -341,7 +356,10 @@ inline MpResult MP_CALL codec_open(MpCodec, const MpGraphicsDevice*, const std::
     log.open = true;
     ++log.opens;
     log.produced = 0;
-    *out = reinterpret_cast<MpVideoCodec*>(&log);
+    // One of its own type, as the presenter's is; the log is where the
+    // decoder's state is.
+    static MpVideoCodec decoder;
+    *out = &decoder;
     return MP_OK;
 }
 
@@ -480,7 +498,8 @@ inline MpResult MP_CALL vdsp_open(const MpGraphicsDevice*, MpVideoDsp** out) noe
         return MP_ERR_UNSUPPORTED;
     }
     ++log.opened;
-    *out = reinterpret_cast<MpVideoDsp*>(&log);
+    static MpVideoDsp stage;
+    *out = &stage;
     return MP_OK;
 }
 

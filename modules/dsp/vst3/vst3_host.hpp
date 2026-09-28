@@ -198,7 +198,10 @@ private:
     /// hands out and in as separate arrays it does not expect to be swapped.
     std::vector<double> out64_;
     std::vector<double*> out64_ptr_;
-    /// Non-const because `AudioBusBuffers` has no const form; see `process`.
+    /// f64 input, copied in: `AudioBusBuffers` has no const form, and a
+    /// plugin handed the chain's own arrays could write into what it was only
+    /// given to read.
+    std::vector<double> in64_;
     std::vector<double*> in64_ptr_;
     /// Silence for the tail, one block, all zeros.
     std::vector<double> silence_;

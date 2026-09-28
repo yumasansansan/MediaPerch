@@ -597,14 +597,17 @@ bool IpcServer::handle(const std::shared_ptr<Client>& client, const ipc::Header&
             return fail("that process would not take a handle");
         }
         const BOOL copied =
-            DuplicateHandle(GetCurrentProcess(), reinterpret_cast<HANDLE>(
-                                                     static_cast<std::uintptr_t>(mine)),
-                            process, &theirs, 0, FALSE, DUPLICATE_SAME_ACCESS);
+            DuplicateHandle(GetCurrentProcess(),
+                            ULongToHandle(static_cast<unsigned long>(mine)), process,
+                            &theirs, 0, FALSE, DUPLICATE_SAME_ACCESS);
         CloseHandle(process);
         if (copied == FALSE) {
             return fail("the surface handle would not duplicate");
         }
-        w.u64(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(theirs)));
+        // The number the handle is, which is what crosses the pipe: Windows
+        // gives it the type void*, and keeps it to 32 bits so that it can cross
+        // into 32-bit code, which HandleToULong and ULongToHandle say.
+        w.u64(HandleToULong(theirs));
         // **And which picture it is.** The handle above is a fresh duplicate on
         // every call, so it cannot answer *is this the one I already have*.
         // This can, and a shell that asks on a timer needs it: without it every

@@ -12,6 +12,7 @@
 
 #include "mediaperch/packet.hpp"
 #include "module_loader.hpp"
+#include "fake_handles.hpp"
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -181,8 +182,8 @@ public:
 /// than a stream that ends on the first pump.
 MpVideoCodec* fake_handle() noexcept
 {
-    static int one = 0;
-    return reinterpret_cast<MpVideoCodec*>(&one);
+    static MpVideoCodec one;
+    return &one;
 }
 
 MpResult MP_CALL fake_open(MpCodec, const MpGraphicsDevice*, const std::uint8_t*,

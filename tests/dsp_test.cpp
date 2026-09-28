@@ -14,6 +14,7 @@
 #include "mediaperch/negotiation.hpp"
 #include "mediaperch/processed.hpp"
 #include "mediaperch/processor.hpp"
+#include "fake_handles.hpp"
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -26,19 +27,8 @@
 #include <vector>
 
 // The host only ever sees a pointer, so the test is free to say what it points
-// at. Nothing else in this binary defines it.
-struct MpDsp {
-    enum class Kind { gain, upsample2, delay, refuse };
-
-    Kind kind = Kind::gain;
-    double gain = 0.5;
-    std::uint32_t channels = 0;
-    std::uint32_t capacity = 0;
-    /// `delay` only: one line per channel, and where in it we are.
-    std::vector<std::vector<double>> line;
-    std::size_t at = 0;
-    std::uint32_t held = 0;
-};
+// at: an MpDsp, which tests/fake_handles.hpp completes for this whole program,
+// fake_dsp.hpp's stage included.
 
 namespace {
 
@@ -817,9 +807,12 @@ TEST_CASE("a gain reaches the samples, and is the only thing that changed",
     REQUIRE(out.size() == in.size());
     CHECK(out != in);
 
-    const auto* src = reinterpret_cast<const std::int16_t*>(in.data());
-    const auto* dst = reinterpret_cast<const std::int16_t*>(out.data());
-    for (std::size_t i = 0; i < out.size() / 2; ++i) {
+    // The samples as the 16-bit integers they are, copied out of the bytes.
+    std::vector<std::int16_t> src(in.size() / 2);
+    std::vector<std::int16_t> dst(out.size() / 2);
+    std::memcpy(src.data(), in.data(), src.size() * sizeof(std::int16_t));
+    std::memcpy(dst.data(), out.data(), dst.size() * sizeof(std::int16_t));
+    for (std::size_t i = 0; i < dst.size(); ++i) {
         // Within one LSB of half: the quantiser rounds, and which way it rounds
         // is its business rather than this test's.
         CHECK(std::abs(dst[i] - src[i] / 2) <= 1);

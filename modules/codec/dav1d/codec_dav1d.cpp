@@ -64,6 +64,7 @@
 #include <memory>
 #include <new>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -114,7 +115,7 @@ struct MpVideoCodec {
 
     /// The configuration OBUs out of the `av1C` record, kept because a reset
     /// sends them again.
-    std::string config;
+    std::vector<std::uint8_t> config;
 
     MpVideoInfo info{};
     bool have_format = false;
@@ -338,16 +339,13 @@ try {
             log_line(MP_LOG_DEBUG, "codec_dav1d: the av1C record has no marker byte");
             return MP_ERR_FORMAT;
         }
-        c->config.assign(reinterpret_cast<const char*>(config) + k_av1c_fixed,
-                         config_bytes - k_av1c_fixed);
+        c->config.assign(config + k_av1c_fixed, config + config_bytes);
 
         // Read before it is sent, so `get_format` answers before the first
         // frame rather than after it. A record with no sequence header in it
         // is not an error: the stream carries one in band.
         Dav1dSequenceHeader seq{};
-        if (dav1d_parse_sequence_header(
-                &seq, reinterpret_cast<const std::uint8_t*>(c->config.data()),
-                c->config.size()) == 0) {
+        if (dav1d_parse_sequence_header(&seq, c->config.data(), c->config.size()) == 0) {
             read_sequence(c.get(), seq);
         }
 

@@ -12,16 +12,37 @@
 
 #pragma once
 
+#include <mediaperch/module.h>
+
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <ostream>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
 
 namespace mp::test {
+
+/// `count` bytes into `out`, a page at a time. A std::ostream writes chars and a
+/// byte is not one, so the bytes are copied into characters rather than looked
+/// at as them; a page of copying costs nothing beside the write it goes to.
+inline void write_bytes(std::ostream& out, const std::uint8_t* bytes, std::size_t count)
+{
+    std::array<char, 4096> page{};
+    while (count > 0) {
+        const std::size_t now = std::min(count, page.size());
+        std::transform(bytes, bytes + now, page.begin(),
+                       [](std::uint8_t byte) { return static_cast<char>(byte); });
+        out.write(page.data(), static_cast<std::streamsize>(now));
+        bytes += now;
+        count -= now;
+    }
+}
 
 /// A path CMake or a module wrote, which is UTF-8. A `char` string on its own
 /// is the ANSI code page to std::filesystem on Windows; this is ISO C++'s way
@@ -46,14 +67,14 @@ namespace mp::test::platform {
 // Shared libraries. A module is one -- a DLL on Windows, a shared object
 // elsewhere -- and ISO C++ has no word for loading one.
 
-/// Any function pointer, as the system hands one back; the caller casts it to
-/// what it knows the function to be, with std::bit_cast.
-using Function = void (*)();
-
 /// The library at `path`, loaded, or null.
 [[nodiscard]] void* open_library(const std::filesystem::path& path) noexcept;
-/// The function `name` exports, or null.
-[[nodiscard]] Function find_function(void* library, const char* name) noexcept;
+/// The module entry the library exports (MP_MODULE_ENTRY_NAME), as the type
+/// the ABI gives it, or null. The system hands back every exported function as
+/// one type, and a function is called through a pointer of its own; the one
+/// conversion between the two is made here, with the name that says which
+/// function it is, rather than by each caller.
+[[nodiscard]] MpModuleEntry find_module_entry(void* library) noexcept;
 /// Lets the library go.
 void close_library(void* library) noexcept;
 

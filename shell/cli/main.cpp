@@ -472,7 +472,7 @@ int main(int argc, char** argv)
                     static_cast<unsigned long long>(generation));
         // **Ours now, so ours to close.** A handle a shell keeps is a
         // composition surface the engine cannot let go of.
-        CloseHandle(reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(handle)));
+        CloseHandle(ULongToHandle(static_cast<unsigned long>(handle)));
         return 0;
     }
     if (command == "engine") {

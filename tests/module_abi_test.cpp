@@ -33,7 +33,6 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -75,7 +74,7 @@ void* load(const std::filesystem::path& path)
 
 Entry entry_of(void* library)
 {
-    return std::bit_cast<Entry>(mp::test::platform::find_function(library, "mp_module_entry"));
+    return mp::test::platform::find_module_entry(library);
 }
 
 void unload(void* library)

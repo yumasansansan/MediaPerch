@@ -22,7 +22,8 @@ Processor::Processor(const Format& source, const Format& wire, std::uint32_t chu
         chain_ != nullptr ? std::max(chain_->output_capacity(), chunk_frames_) : chunk_frames_;
     output_bytes_ = out_frames * wire_frame_bytes_;
     if (chain_ != nullptr) {
-        bus_chunk_.resize(static_cast<std::size_t>(chunk_frames_) * frame_bytes(bus_));
+        // The bus is binary64 (dsp_bus_format), so its chunk is doubles.
+        bus_chunk_.resize(static_cast<std::size_t>(chunk_frames_) * bus_.channels);
         chain_out_.resize(static_cast<std::size_t>(out_frames) * bus_.channels);
     }
 }
@@ -68,8 +69,7 @@ bool Processor::run(const void* src, std::uint32_t frames, void* dst,
     }
     to_bus_.run(src, bus_chunk_.data(), frames);
     std::uint32_t produced = 0;
-    if (!chain_->run(reinterpret_cast<const double*>(bus_chunk_.data()), frames, chain_out_,
-                     produced)) {
+    if (!chain_->run(bus_chunk_.data(), frames, chain_out_, produced)) {
         return false;
     }
     emit(produced, dst); // 0 is normal: a stage may still be filling its history

@@ -355,9 +355,14 @@ void Player::play(std::vector<std::string> files, std::size_t first)
         files_ = files;
         requests_.clear();
         requests_.push_back(Request{std::move(files), first, 0});
+        // The engine thread is inside a graph, and this is how it is told to
+        // leave. **Raised under the lock the request is taken with**, as the
+        // thread lowers it when it takes one (`run`): raised after, it could
+        // land once the thread had taken this very request and lowered it,
+        // and stop the run it asked for -- which a Linux run of the suite
+        // did, a player just started never reaching `playing`.
+        stop_wanted_.store(true, std::memory_order_release);
     }
-    // The engine thread is inside a graph, and this is how it is told to leave.
-    stop_wanted_.store(true, std::memory_order_release);
     wake_.notify_all();
 }
 
@@ -426,8 +431,9 @@ void Player::clear()
         const std::lock_guard lock{mutex_};
         files_.clear();
         requests_.clear();
+        // Under the lock, as `play` raises it.
+        stop_wanted_.store(true, std::memory_order_release);
     }
-    stop_wanted_.store(true, std::memory_order_release);
     wake_.notify_all();
 }
 
@@ -474,8 +480,10 @@ void Player::stop()
     {
         const std::lock_guard lock{mutex_};
         requests_.clear();
+        // Under the lock, as `play` raises it: raised after, it could land on
+        // a run somebody asked for after this.
+        stop_wanted_.store(true, std::memory_order_release);
     }
-    stop_wanted_.store(true, std::memory_order_release);
     wake_.notify_all();
 }
 
@@ -632,12 +640,18 @@ ipc::Status Player::status() const
         s.underruns += graph_b_->stats().underruns;
     }
     s.clock_rate = clock_rate_;
-    if (alone_ != nullptr && alone_->own_clock() != nullptr) {
+    if (alone_ != nullptr || alone_opening_) {
         // A picture on its own clock: one entry, its own timeline, counted in
-        // `VideoPath::k_own_rate`. No queue to convert through.
-        s.position = alone_->own_clock()->position();
-        s.item_position = s.position;
+        // `VideoPath::k_own_rate`. No queue to convert through. Its length is
+        // the container's and its start is the run's, both known from the
+        // moment the run names the track, so they are said while the picture
+        // is still opening too: a status that said "playing" and a length of
+        // nothing was what a look in that window got.
         s.length = alone_length_;
+        if (alone_ != nullptr && alone_->own_clock() != nullptr) {
+            s.position = alone_->own_clock()->position();
+        }
+        s.item_position = s.position;
     }
     if (queue_ != nullptr) {
         s.length = queue_->length_frames();
@@ -1494,10 +1508,12 @@ void Player::run()
                 request = std::move(requests_.front());
                 requests_.pop_front();
             }
+            // Consumed here rather than in `play`: whatever asked for this run
+            // also asked the previous one to end, and that flag has done its
+            // work. Under the lock it is raised with, so that a request made
+            // after this one was taken raises it after this, and it stays up.
+            stop_wanted_.store(false, std::memory_order_release);
         }
-        // Consumed here rather than in `play`: whatever asked for this run also
-        // asked the previous one to end, and that flag has done its work.
-        stop_wanted_.store(false, std::memory_order_release);
         if (measuring) {
             run_sweep(sweep);
         } else {
@@ -1515,10 +1531,11 @@ void Player::calibrate(std::vector<std::string> files, CalibrationPlan plan)
     {
         const std::lock_guard lock{mutex_};
         sweeps_.push_back(Sweeping{std::move(files), plan});
+        // What is playing stops, so that the measurement is of a machine
+        // playing the file under test and nothing else. Under the lock, as
+        // `play` raises it.
+        stop_wanted_.store(true, std::memory_order_release);
     }
-    // What is playing stops, so that the measurement is of a machine playing
-    // the file under test and nothing else.
-    stop_wanted_.store(true, std::memory_order_release);
     wake_.notify_all();
 }
 
@@ -1923,6 +1940,11 @@ Player::RunEnd Player::play_alone(Playlist& playlist, std::size_t index, std::ui
     {
         const std::lock_guard lock{mutex_};
         config = config_;
+        // A flag raised for a run that has not started describes nothing,
+        // exactly as `play_run` treats it: lowered with the copy of the
+        // configuration the run is made from, under the lock a setting is
+        // written with (see `play_run`).
+        rebuild_wanted_.store(false, std::memory_order_release);
     }
     {
         const std::lock_guard lock{mutex_};
@@ -1940,13 +1962,14 @@ Player::RunEnd Player::play_alone(Playlist& playlist, std::size_t index, std::ui
         index_ = static_cast<std::uint32_t>(index);
         clock_rate_ = VideoPath::k_own_rate;
         alone_length_ = media->picture().duration_ms * VideoPath::k_own_rate / 1000;
+        // Where the picture will start, until its clock is there to say where
+        // it is: `status` would otherwise give the last run's position, in
+        // whatever that run counted in.
+        position_ = from;
         state_ = ipc::State::playing;
         alone_opening_ = true;
     }
     note("playing " + playlist.path(index) + " on the picture's own clock (no audio in it)");
-    // A flag raised for a run that has not started describes nothing, exactly
-    // as `play_run` treats it: read it fresh from here on.
-    rebuild_wanted_.store(false, std::memory_order_release);
 
     open_video(media, 0);
     const std::shared_ptr<VideoPath> video = picture();
@@ -2072,9 +2095,15 @@ Player::RunEnd Player::play_run(Queue& queue, Playlist& playlist, std::uint64_t&
     {
         const std::lock_guard lock{mutex_};
         config = config_;
+        // **A flag raised for a run that has not started describes nothing**:
+        // the run is made from the configuration copied here. Lowered with the
+        // copy, under the lock a setting is written with: lowered after it, a
+        // setting written in between -- after the copy, its flag raised before
+        // this -- was lost for the whole run, which went on with the
+        // configuration from before it.
+        rebuild_wanted_.store(false, std::memory_order_release);
     }
     position = queue.position();
-    rebuild_wanted_.store(false, std::memory_order_release);
 
     const Format source_format = queue.format();
     DspChain chain;
@@ -2137,6 +2166,11 @@ Player::RunEnd Player::play_run(Queue& queue, Playlist& playlist, std::uint64_t&
         fidelity_ = static_cast<std::uint32_t>(negotiated.fidelity);
         processed_ = processing;
         index_ = static_cast<std::uint32_t>(queue.index());
+        // Where the graph will start, until it is there to say where it is:
+        // `status` reads the entry and the offset off this queue at the
+        // position, and the last run's -- another queue's, or a picture's
+        // milliseconds -- could name an entry this one is not on.
+        position_ = queue.position();
         state_ = ipc::State::playing;
     }
     note("playing " + playlist.path(queue.index()) + " on " + device + " as " +

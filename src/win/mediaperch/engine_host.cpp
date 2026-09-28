@@ -5,6 +5,7 @@
 #include "mediaperch/display_win.hpp"
 #include "mediaperch/packet.hpp"
 #include "mediaperch/result.hpp"
+#include "mediaperch/win_headers.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -39,8 +40,10 @@ void* waitable_of(Presenter& presenter)
         if (at == nullptr) {
             return nullptr;
         }
-        return reinterpret_cast<void*>(
-            static_cast<std::uintptr_t>(std::strtoull(at + 11, nullptr, 16)));
+        // A handle is a number that Windows gives the type void*, 32 bits wide
+        // so that it can cross into 32-bit code; ULongToHandle is the SDK's
+        // word for making one of the number.
+        return ULongToHandle(std::strtoul(at + 11, nullptr, 16));
     }
     return nullptr;
 }

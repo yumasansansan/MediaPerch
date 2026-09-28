@@ -8,6 +8,7 @@
 #include <dxgi1_2.h>
 
 #include <atomic>
+#include <memory>
 #include <thread>
 
 namespace mp::win {
@@ -15,6 +16,8 @@ namespace mp::win {
 namespace {
 
 constexpr wchar_t k_video_class[] = L"MediaPerchVideo";
+/// The property the window keeps its closed flag under (see `open`).
+constexpr wchar_t k_closed_property[] = L"MediaPerchVideoClosed";
 
 std::wstring widen(const std::string& utf8)
 {
@@ -35,7 +38,10 @@ std::wstring widen(const std::string& utf8)
 LRESULT CALLBACK video_proc(HWND window, UINT message, WPARAM w, LPARAM l)
 {
     if (message == WM_CLOSE || message == WM_DESTROY) {
-        auto* closed = reinterpret_cast<bool*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+        // The flag `open` attached, found by its name: a property keeps a
+        // pointer as the pointer it is, where the window's user data would
+        // keep it as a number.
+        auto* closed = static_cast<bool*>(GetPropW(window, k_closed_property));
         if (closed != nullptr) {
             *closed = true;
         }
@@ -45,6 +51,10 @@ LRESULT CALLBACK video_proc(HWND window, UINT message, WPARAM w, LPARAM l)
             // them is a use-after-free with a nicer name.
             return 0;
         }
+    }
+    if (message == WM_NCDESTROY) {
+        // A property is the window's to give back before it goes.
+        RemovePropW(window, k_closed_property);
     }
     if (message == WM_ERASEBKGND) {
         // The swap chain paints every pixel. Erasing first is a flash of white
@@ -105,8 +115,7 @@ std::unique_ptr<VBlankClock> VBlankClock::open(void* window)
     }
 
     IDXGIFactory1* factory = nullptr;
-    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1),
-                                  reinterpret_cast<void**>(&factory)))) {
+    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), std::out_ptr<void*>(factory)))) {
         return nullptr;
     }
 
@@ -222,7 +231,11 @@ bool VideoWindow::open(const std::string& title, std::uint32_t width, std::uint3
         return false;
     }
     closed_ = false;
-    SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&closed_));
+    if (SetPropW(window, k_closed_property, &closed_) == FALSE) {
+        DestroyWindow(window);
+        why = "could not give the window the flag it says it was closed with";
+        return false;
+    }
     window_ = window;
     ShowWindow(window, SW_SHOW);
     UpdateWindow(window);
@@ -245,9 +258,7 @@ WaitForCompositorClock compositor_clock()
         if (dcomp == nullptr) {
             return static_cast<WaitForCompositorClock>(nullptr);
         }
-        return reinterpret_cast<WaitForCompositorClock>(
-            reinterpret_cast<void*>(
-                GetProcAddress(dcomp, "DCompositionWaitForCompositorClock")));
+        return exported<WaitForCompositorClock>(dcomp, "DCompositionWaitForCompositorClock");
     }();
     return found;
 }

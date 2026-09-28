@@ -95,7 +95,11 @@ bool from_wave_format(const WAVEFORMATEX& wfx, MpFormat& out) noexcept
 
     if (wfx.wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
         wfx.cbSize >= sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)) {
-        const auto& ext = reinterpret_cast<const WAVEFORMATEXTENSIBLE&>(wfx);
+        // The extensible form's fields, copied out of the bytes that follow the
+        // head: the head is all this reference's type says is there, and cbSize
+        // says the rest is.
+        WAVEFORMATEXTENSIBLE ext{};
+        std::memcpy(&ext, &wfx, sizeof(ext));
         out.channel_mask = ext.dwChannelMask;
         valid = ext.Samples.wValidBitsPerSample;
         is_float = std::memcmp(&ext.SubFormat, &subtype_ieee_float, sizeof(GUID)) == 0;

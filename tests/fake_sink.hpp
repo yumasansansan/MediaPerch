@@ -23,6 +23,19 @@
 #include <thread>
 #include <vector>
 
+
+namespace mp::test {
+class FakeSink;
+} // namespace mp::test
+
+/// The module ABI's handle for a sink, completed for the test program by the
+/// one sink it implements: a member of each FakeSink that says which one it
+/// is, so that the handle is an object of its own type and the thunks find
+/// their sink through it rather than by taking the handle for the sink.
+struct MpSink {
+    mp::test::FakeSink* owner = nullptr;
+};
+
 namespace mp::test {
 
 /// The device's clock: test_platform.hpp says why it is a timer of the
@@ -116,7 +129,7 @@ public:
     /// the Sink destructor cannot take the test's object with it.
     [[nodiscard]] Sink handle() noexcept
     {
-        return Sink{&vtbl_, reinterpret_cast<MpSink*>(this)};
+        return Sink{&vtbl_, &as_handle_};
     }
 
     [[nodiscard]] const std::vector<Format>& offered() const noexcept { return offered_; }
@@ -137,7 +150,7 @@ public:
     }
 
 private:
-    static FakeSink& self(MpSink* s) noexcept { return *reinterpret_cast<FakeSink*>(s); }
+    static FakeSink& self(MpSink* s) noexcept { return *s->owner; }
 
     static MpResult MP_CALL get_position_thunk(MpSink* s, std::uint64_t* frames,
                                                std::uint64_t* ticks)
@@ -247,6 +260,8 @@ private:
     }
 
     MpSinkVtbl vtbl_{};
+    /// The handle the vtable is handed back, which says whose it is.
+    MpSink as_handle_{this};
     std::uint64_t clock_frames_ = 0;
     std::uint64_t clock_ticks_ = 0;
     /// Whether anybody has said where the device is. Until somebody has, it

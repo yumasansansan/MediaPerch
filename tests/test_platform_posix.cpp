@@ -21,9 +21,11 @@ void* open_library(const std::filesystem::path& path) noexcept
     return ::dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
 }
 
-Function find_function(void* library, const char* name) noexcept
+MpModuleEntry find_module_entry(void* library) noexcept
 {
-    return std::bit_cast<Function>(::dlsym(library, name));
+    // dlsym answers every name as a void*; the entry is a function of
+    // MpModuleEntry's type, which is what the name promises.
+    return std::bit_cast<MpModuleEntry>(::dlsym(library, MP_MODULE_ENTRY_NAME));
 }
 
 void close_library(void* library) noexcept
@@ -38,11 +40,9 @@ bool write_sparse(const std::filesystem::path& path, const std::vector<std::uint
     // temporary directory lives, leave a hole where a write past the end
     // skipped, and a hole reads back as zeros and takes no disk.
     std::ofstream file{path, std::ios::binary | std::ios::trunc};
-    file.write(reinterpret_cast<const char*>(head.data()),
-               static_cast<std::streamsize>(head.size()));
+    write_bytes(file, head.data(), head.size());
     file.seekp(static_cast<std::streamoff>(tail_at));
-    file.write(reinterpret_cast<const char*>(tail.data()),
-               static_cast<std::streamsize>(tail.size()));
+    write_bytes(file, tail.data(), tail.size());
     file.close();
     return !file.fail();
 }
@@ -55,7 +55,7 @@ std::filesystem::path long_form(const std::filesystem::path& path)
 bool overwrite(const std::filesystem::path& path, const std::uint8_t* data, std::size_t size)
 {
     std::ofstream file{path, std::ios::binary | std::ios::trunc};
-    file.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
+    write_bytes(file, data, size);
     file.close();
     return !file.fail();
 }

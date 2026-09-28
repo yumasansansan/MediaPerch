@@ -40,6 +40,8 @@
 #include <mediaperch/module.h>
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -151,6 +153,17 @@ public:
             p_->Release();
             p_ = nullptr;
         }
+    }
+
+    /// What std::out_ptr needs to stand for the `void**` a call writes an
+    /// interface through, as the presenter's has: the call writes a `void*` of
+    /// the out_ptr's own, handed here as a `T*` once the call's expression is
+    /// done, its reference counted already.
+    using pointer = T*;
+    void reset(T* p) noexcept
+    {
+        reset();
+        p_ = p;
     }
 
 private:
@@ -339,12 +352,13 @@ bool read_output_format(MpVideoCodec* c)
     c->coded_height = height;
     c->crop_x = 0;
     c->crop_y = 0;
-    MFVideoArea aperture{};
+    // The blob is bytes, read as bytes and made the struct they are by value.
+    std::array<UINT8, sizeof(MFVideoArea)> blob{};
     UINT32 aperture_bytes = 0;
-    const bool stated = SUCCEEDED(type->GetBlob(MF_MT_MINIMUM_DISPLAY_APERTURE,
-                                                reinterpret_cast<UINT8*>(&aperture),
-                                                sizeof aperture, &aperture_bytes)) &&
-                        aperture_bytes == sizeof aperture;
+    const bool stated = SUCCEEDED(type->GetBlob(MF_MT_MINIMUM_DISPLAY_APERTURE, blob.data(),
+                                                sizeof blob, &aperture_bytes)) &&
+                        aperture_bytes == sizeof blob;
+    const auto aperture = std::bit_cast<MFVideoArea>(blob);
     if (stated && aperture.Area.cx > 0 && aperture.Area.cy > 0 && aperture.OffsetX.value >= 0 &&
         aperture.OffsetY.value >= 0 &&
         static_cast<UINT32>(aperture.OffsetX.value) + static_cast<UINT32>(aperture.Area.cx) <=
@@ -556,7 +570,7 @@ bool activate(MpVideoCodec* c, bool want_hardware, std::string& why)
             continue;
         }
         if (!made && SUCCEEDED(activates[i]->ActivateObject(
-                         IID_PPV_ARGS(c->transform.put())))) {
+                         __uuidof(IMFTransform), std::out_ptr<void*>(c->transform)))) {
             made = true;
         }
         activates[i]->Release();
@@ -680,9 +694,14 @@ try {
         UINT token = 0;
         if (SUCCEEDED(::MFCreateDXGIDeviceManager(&token, c->manager.put())) &&
             SUCCEEDED(c->manager->ResetDevice(d3d, token)) &&
+            // **The one pointer this module hands over as a number.**
+            // ProcessMessage takes every message's argument as a ULONG_PTR,
+            // and this message's is the manager's interface, which the
+            // transform takes back as the pointer it is; the API leaves no
+            // other way to say it.
             SUCCEEDED(c->transform->ProcessMessage(
                 MFT_MESSAGE_SET_D3D_MANAGER,
-                reinterpret_cast<ULONG_PTR>(c->manager.get())))) {
+                std::bit_cast<ULONG_PTR>(c->manager.get())))) {
             d3d->AddRef();
             *c->device.put() = d3d;
             c->on_gpu = true;
@@ -957,9 +976,10 @@ try {
     // decoder hands out a slice of an array it owns, which is why the frame
     // carries an index as well as a pointer.
     Com<IMFDXGIBuffer> dxgi;
-    if (c->on_gpu &&
-        SUCCEEDED(c->out_buffer->QueryInterface(IID_PPV_ARGS(dxgi.put())))) {
-        if (SUCCEEDED(dxgi->GetResource(IID_PPV_ARGS(c->out_texture.put())))) {
+    if (c->on_gpu && SUCCEEDED(c->out_buffer->QueryInterface(__uuidof(IMFDXGIBuffer),
+                                                             std::out_ptr<void*>(dxgi)))) {
+        if (SUCCEEDED(dxgi->GetResource(__uuidof(ID3D11Texture2D),
+                                        std::out_ptr<void*>(c->out_texture)))) {
             UINT slice = 0;
             (void)dxgi->GetSubresourceIndex(&slice);
             D3D11_TEXTURE2D_DESC desc{};
@@ -981,7 +1001,8 @@ try {
     BYTE* scanline0 = nullptr;
     LONG pitch = 0;
 
-    if (SUCCEEDED(c->out_buffer->QueryInterface(IID_PPV_ARGS(c->out_2d.put())))) {
+    if (SUCCEEDED(c->out_buffer->QueryInterface(__uuidof(IMF2DBuffer),
+                                                std::out_ptr<void*>(c->out_2d)))) {
         if (FAILED(c->out_2d->Lock2D(&scanline0, &pitch))) {
             return MP_ERR_INTERNAL;
         }

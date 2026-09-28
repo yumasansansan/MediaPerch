@@ -12,6 +12,7 @@
 #include <cctype>
 #include <cstring>
 #include <iterator>
+#include <type_traits>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
@@ -42,6 +43,43 @@ ComponentHandler& component_handler()
     return handler;
 }
 
+/// The function `name` that `module` exports, as the type the VST3 SDK gives
+/// it, or null. **The one place this file turns a function pointer into another
+/// type**: GetProcAddress answers every name as a FARPROC, a function is called
+/// through a pointer of its own type, and nothing can check the conversion --
+/// that the export has that type is the SDK's promise -- so it is made here
+/// once, for pointers to functions only.
+template <typename Function>
+Function exported(HMODULE module, const char* name) noexcept
+{
+    static_assert(std::is_pointer_v<Function> &&
+                      std::is_function_v<std::remove_pointer_t<Function>>,
+                  "exported() is for a pointer to a function");
+    return std::bit_cast<Function>(::GetProcAddress(module, name));
+}
+
+/// `iid` of `object`, into `to`. The call writes a `void*` of its own, and the
+/// pointer it wrote is a `T*` in `to` before the caller looks at it; a `T**`
+/// seen as a `void**` would be the pointer written as another type than it is.
+template <typename T>
+tresult query(FUnknown* object, const TUID iid, T*& to)
+{
+    void* raw = nullptr;
+    const tresult result = object->queryInterface(iid, &raw);
+    to = static_cast<T*>(raw);
+    return result;
+}
+
+/// A class the factory makes, into `to`, the same way.
+template <typename T>
+tresult create(IPluginFactory* factory, FIDString cid, FIDString iid, T*& to)
+{
+    void* raw = nullptr;
+    const tresult result = factory->createInstance(cid, iid, &raw);
+    to = static_cast<T*>(raw);
+    return result;
+}
+
 std::string narrow(const Vst::TChar* utf16)
 {
     if (utf16 == nullptr) {
@@ -54,14 +92,16 @@ std::string narrow(const Vst::TChar* utf16)
     if (chars == 0) {
         return {};
     }
-    const int bytes = ::WideCharToMultiByte(CP_UTF8, 0, reinterpret_cast<const wchar_t*>(utf16),
-                                            chars, nullptr, 0, nullptr, nullptr);
+    // The same code units, as the wchar_t Windows takes them in: copied, since
+    // a char16_t is not a wchar_t even where the two are the same size.
+    const std::wstring wide(utf16, utf16 + chars);
+    const int bytes =
+        ::WideCharToMultiByte(CP_UTF8, 0, wide.data(), chars, nullptr, 0, nullptr, nullptr);
     if (bytes <= 0) {
         return {};
     }
     std::string out(static_cast<std::size_t>(bytes), '\0');
-    ::WideCharToMultiByte(CP_UTF8, 0, reinterpret_cast<const wchar_t*>(utf16), chars, out.data(),
-                          bytes, nullptr, nullptr);
+    ::WideCharToMultiByte(CP_UTF8, 0, wide.data(), chars, out.data(), bytes, nullptr, nullptr);
     return out;
 }
 
@@ -268,8 +308,7 @@ bool Host::load(const std::string& utf8_path, const std::string& which, std::str
     // `InitDll` is optional and predates the bundle format. A plugin that has
     // one and is not given it may fail later rather than here.
     using InitFn = bool(PLUGIN_API*)();
-    if (auto* init = reinterpret_cast<InitFn>(
-            reinterpret_cast<void*>(::GetProcAddress(module, "InitDll")));
+    if (const auto init = exported<InitFn>(module, "InitDll");
         init != nullptr && !init()) {
         why = utf8_path + ": InitDll said no";
         unload();
@@ -277,8 +316,7 @@ bool Host::load(const std::string& utf8_path, const std::string& which, std::str
     }
 
     using FactoryFn = IPluginFactory*(PLUGIN_API*)();
-    auto* get_factory = reinterpret_cast<FactoryFn>(
-        reinterpret_cast<void*>(::GetProcAddress(module, "GetPluginFactory")));
+    const auto get_factory = exported<FactoryFn>(module, "GetPluginFactory");
     if (get_factory == nullptr) {
         why = utf8_path + " exports no GetPluginFactory, so it is a DLL but not a VST3";
         unload();
@@ -294,9 +332,7 @@ bool Host::load(const std::string& utf8_path, const std::string& which, std::str
     // A factory that can be told about the host is, before anything is created
     // from it: some plugins read the host's name during class construction.
     if (IPluginFactory3* f3 = nullptr;
-        factory_->queryInterface(IPluginFactory3::iid, reinterpret_cast<void**>(&f3)) ==
-            kResultOk &&
-        f3 != nullptr) {
+        query(factory_, IPluginFactory3::iid, f3) == kResultOk && f3 != nullptr) {
         f3->setHostContext(host_application().unknownCast());
         f3->release();
     }
@@ -339,8 +375,7 @@ bool Host::load(const std::string& utf8_path, const std::string& which, std::str
         return false;
     }
 
-    if (factory_->createInstance(info.cid, Vst::IComponent::iid,
-                                 reinterpret_cast<void**>(&component_)) != kResultOk ||
+    if (create(factory_, info.cid, Vst::IComponent::iid, component_) != kResultOk ||
         component_ == nullptr) {
         why = std::string{info.name} + " would not be created";
         unload();
@@ -351,8 +386,7 @@ bool Host::load(const std::string& utf8_path, const std::string& which, std::str
         unload();
         return false;
     }
-    if (component_->queryInterface(Vst::IAudioProcessor::iid,
-                                   reinterpret_cast<void**>(&processor_)) != kResultOk ||
+    if (query(component_, Vst::IAudioProcessor::iid, processor_) != kResultOk ||
         processor_ == nullptr) {
         why = std::string{info.name} + " is an audio effect with no IAudioProcessor";
         unload();
@@ -362,15 +396,14 @@ bool Host::load(const std::string& utf8_path, const std::string& which, std::str
     // The controller. Two shapes: one object wearing both hats, or two objects
     // the host has to introduce to each other. The second is the documented
     // one and the first is what most plugins actually do.
-    if (component_->queryInterface(Vst::IEditController::iid,
-                                   reinterpret_cast<void**>(&controller_)) == kResultOk &&
+    if (query(component_, Vst::IEditController::iid, controller_) == kResultOk &&
         controller_ != nullptr) {
         single_component_ = true;
     } else {
         TUID controller_cid{};
         if (component_->getControllerClassId(controller_cid) == kResultOk &&
-            factory_->createInstance(controller_cid, Vst::IEditController::iid,
-                                     reinterpret_cast<void**>(&controller_)) == kResultOk &&
+            create(factory_, controller_cid, Vst::IEditController::iid, controller_) ==
+                kResultOk &&
             controller_ != nullptr) {
             if (controller_->initialize(host_application().unknownCast()) != kResultOk) {
                 controller_->release();
@@ -385,10 +418,8 @@ bool Host::load(const std::string& utf8_path, const std::string& which, std::str
             // editor and processor disagree about everything.
             Vst::IConnectionPoint* from = nullptr;
             Vst::IConnectionPoint* to = nullptr;
-            if (component_->queryInterface(Vst::IConnectionPoint::iid,
-                                           reinterpret_cast<void**>(&from)) == kResultOk &&
-                controller_->queryInterface(Vst::IConnectionPoint::iid,
-                                            reinterpret_cast<void**>(&to)) == kResultOk) {
+            if (query(component_, Vst::IConnectionPoint::iid, from) == kResultOk &&
+                query(controller_, Vst::IConnectionPoint::iid, to) == kResultOk) {
                 from->connect(to);
                 to->connect(from);
             }
@@ -404,9 +435,7 @@ bool Host::load(const std::string& utf8_path, const std::string& which, std::str
     name_ = info.name;
     if (PClassInfo2 info2{}; factory_ != nullptr) {
         IPluginFactory2* f2 = nullptr;
-        if (factory_->queryInterface(IPluginFactory2::iid, reinterpret_cast<void**>(&f2)) ==
-                kResultOk &&
-            f2 != nullptr) {
+        if (query(factory_, IPluginFactory2::iid, f2) == kResultOk && f2 != nullptr) {
             if (f2->getClassInfo2(chosen, &info2) == kResultOk) {
                 vendor_ = info2.vendor;
                 version_ = info2.version;
@@ -504,11 +533,14 @@ bool Host::configure(std::uint32_t channels, std::uint32_t wave_mask, double sam
     const std::size_t block = static_cast<std::size_t>(channels) * max_frames;
     out64_.assign(block, 0.0);
     out64_ptr_.resize(channels);
+    in64_.assign(sample_size64_ ? block : 0, 0.0);
     in64_ptr_.resize(channels);
     silence_.assign(block, 0.0);
     silence_ptr_.resize(channels);
     for (std::uint32_t c = 0; c < channels; ++c) {
         out64_ptr_[c] = out64_.data() + static_cast<std::size_t>(c) * max_frames;
+        in64_ptr_[c] = sample_size64_ ? in64_.data() + static_cast<std::size_t>(c) * max_frames
+                                      : nullptr;
         silence_ptr_[c] = silence_.data() + static_cast<std::size_t>(c) * max_frames;
     }
     if (!sample_size64_) {
@@ -562,11 +594,11 @@ bool Host::process(const double* const* in, std::uint32_t frames, double* const*
     output.numChannels = static_cast<int32>(channels_);
 
     if (sample_size64_) {
-        // const_cast: VST3's `AudioBusBuffers` has no const input variant, and
-        // a plugin that writes into its input is one that asked to process in
-        // place. This host never hands it the same pointers, so it cannot.
+        // Copied into the host's own input buffers: VST3's `AudioBusBuffers`
+        // has no const form, and a plugin that wrote into its input would
+        // otherwise write into the chain's arrays.
         for (std::uint32_t c = 0; c < channels_; ++c) {
-            in64_ptr_[c] = const_cast<double*>(in[c]);
+            std::copy_n(in[c], frames, in64_ptr_[c]);
         }
         input.channelBuffers64 = in64_ptr_.data();
         output.channelBuffers64 = out64_ptr_.data();
@@ -768,8 +800,7 @@ void Host::unload()
     if (library_ != nullptr) {
         auto* module = static_cast<HMODULE>(library_);
         using ExitFn = bool(PLUGIN_API*)();
-        if (auto* exit_dll = reinterpret_cast<ExitFn>(
-                reinterpret_cast<void*>(::GetProcAddress(module, "ExitDll")));
+        if (const auto exit_dll = exported<ExitFn>(module, "ExitDll");
             exit_dll != nullptr) {
             exit_dll();
         }

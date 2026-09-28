@@ -23,7 +23,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <new>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -115,6 +117,12 @@ struct MpCodecInstance {
     MpFormat format{};
     unsigned channels = 0;
     const std::uint8_t* order = nullptr;
+    /// A copy of the packet being decoded: libvorbis reads a packet through a
+    /// pointer to bytes it could write, so it reads this rather than the
+    /// caller's bytes with their const taken off. It grows to the largest
+    /// packet and stays that size.
+    std::unique_ptr<unsigned char[]> packet;
+    std::size_t packet_room = 0;
 };
 
 namespace {
@@ -129,9 +137,17 @@ bool headers_in(vorbis_info& info, vorbis_comment& comment, const std::uint8_t* 
     if (!split_headers(config, bytes, packets, sizes)) {
         return false;
     }
+    // libvorbis reads a packet through a pointer to bytes it could write, so
+    // it reads a copy of the headers of its own rather than the caller's bytes
+    // with their const taken off.
+    const std::unique_ptr<unsigned char[]> copy(new (std::nothrow) unsigned char[bytes]);
+    if (copy == nullptr) {
+        return false;
+    }
+    std::memcpy(copy.get(), config, bytes);
     for (int i = 0; i < 3; ++i) {
         ogg_packet packet{};
-        packet.packet = const_cast<unsigned char*>(packets[i]);
+        packet.packet = copy.get() + (packets[i] - config);
         packet.bytes = static_cast<long>(sizes[i]);
         packet.b_o_s = i == 0 ? 1 : 0;
         packet.packetno = i;
@@ -268,8 +284,17 @@ MpResult MP_CALL codec_decode(MpCodecInstance* c, const void* packet,
         return MP_ERR_INVALID;
     }
 
+    if (packet_bytes > c->packet_room) {
+        std::unique_ptr<unsigned char[]> bigger(new (std::nothrow) unsigned char[packet_bytes]);
+        if (bigger == nullptr) {
+            return MP_ERR_NO_MEMORY;
+        }
+        c->packet = std::move(bigger);
+        c->packet_room = packet_bytes;
+    }
+    std::memcpy(c->packet.get(), packet, packet_bytes);
     ogg_packet op{};
-    op.packet = static_cast<unsigned char*>(const_cast<void*>(packet));
+    op.packet = c->packet.get();
     op.bytes = static_cast<long>(packet_bytes);
     if (vorbis_synthesis(&c->block, &op) == 0) {
         vorbis_synthesis_blockin(&c->dsp, &c->block);

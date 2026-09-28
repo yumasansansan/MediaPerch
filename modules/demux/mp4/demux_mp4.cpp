@@ -263,9 +263,9 @@ MpStreamKind kind_for(AP4_Track::Type type) noexcept
 /// the first layout has one child, `alac`; the second has `wave` and `chan`, and
 /// looking only in the first place is what made this module decline every `.mov`
 /// with "nothing here decodes that codec".
-bool alac_config(const AP4_SampleDescription& desc, std::vector<std::uint8_t>& out)
+bool alac_config(AP4_SampleDescription& desc, std::vector<std::uint8_t>& out)
 {
-    auto& details = const_cast<AP4_AtomParent&>(desc.GetDetails());
+    AP4_AtomParent& details = desc.UseDetails();
     AP4_Atom* box = details.GetChild(AP4_ATOM_TYPE_ALAC);
     if (box == nullptr) {
         box = details.FindChild("wave/alac");
@@ -305,9 +305,9 @@ bool alac_config(const AP4_SampleDescription& desc, std::vector<std::uint8_t>& o
 /// record this module reassembled would be this module's opinion of the file
 /// rather than the file. `av1C` is not a full box, so what follows the eight
 /// byte header is the record itself, marker and version byte first.
-bool av1c_config(const AP4_SampleDescription& desc, std::vector<std::uint8_t>& out)
+bool av1c_config(AP4_SampleDescription& desc, std::vector<std::uint8_t>& out)
 {
-    auto& details = const_cast<AP4_AtomParent&>(desc.GetDetails());
+    AP4_AtomParent& details = desc.UseDetails();
     AP4_Atom* box = details.GetChild(AP4_ATOM_TYPE_AV1C);
     if (box == nullptr) {
         return false;
@@ -336,10 +336,10 @@ bool av1c_config(const AP4_SampleDescription& desc, std::vector<std::uint8_t>& o
 /// `clli` are not boxes Bento4 parses, so what comes back is an unknown atom
 /// and the only way to its bytes is to ask it to write itself. Neither is a
 /// full box, so the payload starts eight bytes in.
-bool raw_box(const AP4_SampleDescription& desc, AP4_Atom::Type type,
+bool raw_box(AP4_SampleDescription& desc, AP4_Atom::Type type,
              std::vector<std::uint8_t>& out)
 {
-    auto& details = const_cast<AP4_AtomParent&>(desc.GetDetails());
+    AP4_AtomParent& details = desc.UseDetails();
     AP4_Atom* box = details.GetChild(type);
     if (box == nullptr) {
         return false;
@@ -387,7 +387,7 @@ std::uint32_t be32(const std::uint8_t* at) noexcept
 /// primaries and produces a mastering display that is a plausible triangle in
 /// the wrong place. `MpVideoInfo`'s comment says so and this is the code that
 /// has to know it.
-void read_mastering(const AP4_SampleDescription& desc, MpVideoInfo& info)
+void read_mastering(AP4_SampleDescription& desc, MpVideoInfo& info)
 {
     std::vector<std::uint8_t> box;
     if (raw_box(desc, AP4_ATOM_TYPE('m', 'd', 'c', 'v'), box) && box.size() >= 24) {
@@ -526,7 +526,7 @@ std::uint64_t composition_reach(Stream& s)
     if (s.track == nullptr) {
         return 0;
     }
-    auto* trak = const_cast<AP4_TrakAtom*>(s.track->GetTrakAtom());
+    AP4_TrakAtom* trak = s.track->UseTrakAtom();
     if (trak == nullptr) {
         return 0;
     }
@@ -572,7 +572,7 @@ std::uint64_t composition_reach(Stream& s)
 /// always the same one.
 void read_edit(Stream& s)
 {
-    auto* trak = const_cast<AP4_TrakAtom*>(s.track->GetTrakAtom());
+    AP4_TrakAtom* trak = s.track->UseTrakAtom();
     if (trak == nullptr) {
         return;
     }

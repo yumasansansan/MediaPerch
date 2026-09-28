@@ -26,13 +26,15 @@ std::wstring inproc_server(const std::wstring& clsid)
     if (::RegOpenKeyExW(HKEY_CLASSES_ROOT, path.c_str(), 0, KEY_READ, &key) != ERROR_SUCCESS) {
         return {};
     }
+    // RegGetValueW takes the buffer as the void* it is to the registry, and
+    // only the string types asked for; the path is read as it stands.
     wchar_t data[1024];
     DWORD bytes = sizeof(data);
-    DWORD type = 0;
-    const LSTATUS r = ::RegQueryValueExW(key, nullptr, nullptr, &type,
-                                         reinterpret_cast<LPBYTE>(data), &bytes);
+    const LSTATUS r = ::RegGetValueW(key, nullptr, nullptr,
+                                     RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND, nullptr,
+                                     data, &bytes);
     ::RegCloseKey(key);
-    if (r != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ)) {
+    if (r != ERROR_SUCCESS) {
         return {};
     }
     const std::size_t chars = bytes / sizeof(wchar_t);
@@ -69,10 +71,8 @@ std::vector<Registered> registered_drivers()
         const auto read = [&](const wchar_t* value) -> std::wstring {
             wchar_t data[512];
             DWORD bytes = sizeof(data);
-            DWORD type = 0;
-            if (::RegQueryValueExW(key, value, nullptr, &type,
-                                   reinterpret_cast<LPBYTE>(data), &bytes) != ERROR_SUCCESS ||
-                type != REG_SZ) {
+            if (::RegGetValueW(key, nullptr, value, RRF_RT_REG_SZ, nullptr, data, &bytes) !=
+                ERROR_SUCCESS) {
                 return {};
             }
             data[(bytes / sizeof(wchar_t)) < 512 ? (bytes / sizeof(wchar_t)) : 511] = L'\0';

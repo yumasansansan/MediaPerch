@@ -74,6 +74,12 @@ struct MpVideoCodec {
 
     avm_codec_ctx_t ctx{};
     bool started = false;
+    /// The time of the packet decoded last, which is the time of every frame
+    /// the decoder hands back after it: avm gives each image the `user_priv`
+    /// of the latest decode call, so the time is kept here rather than dressed
+    /// up as a pointer in that slot -- which avm, built with its inspection
+    /// support, reads as a pointer to a record of its own.
+    std::uint64_t pts = 0;
 
     /// The image handed out by the last `next_frame`. avm owns it and keeps it
     /// valid until the next `avm_codec_decode`, which is exactly the promise the
@@ -256,13 +262,13 @@ try {
     // unconditionally because cheap and every time beats remembering once.
     c->threads.fix();
     // avm takes a whole packet or fails, so there is no partial state to carry
-    // and no MP_ERR_BUSY to report. The timestamp goes through `user_priv`,
-    // which avm hands back on the image it produced.
+    // and no MP_ERR_BUSY to report. The timestamp is the instance's until the
+    // next packet (see `pts`).
     c->image = nullptr;
     c->iter = nullptr;
+    c->pts = pts;
     const avm_codec_err_t r = avm_codec_decode(
-        &c->ctx, static_cast<const std::uint8_t*>(packet), bytes,
-        reinterpret_cast<void*>(static_cast<std::uintptr_t>(pts)));
+        &c->ctx, static_cast<const std::uint8_t*>(packet), bytes, nullptr);
     if (r != AVM_CODEC_OK) {
         const char* detail = avm_codec_error_detail(&c->ctx);
         c->trouble = detail != nullptr ? detail : "avm could not decode this packet";
@@ -291,8 +297,7 @@ try {
     out->width = img->d_w;
     out->height = img->d_h;
     out->layout = layout_of(*img);
-    out->pts = static_cast<std::uint64_t>(
-        reinterpret_cast<std::uintptr_t>(img->user_priv));
+    out->pts = c->pts;
 
     const std::uint32_t planes = mp_pixel_planes(&out->layout);
     for (std::uint32_t i = 0; i < planes; ++i) {

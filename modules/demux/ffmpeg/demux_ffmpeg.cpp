@@ -114,9 +114,13 @@ std::wstring find_program(const wchar_t* name)
 {
     wchar_t module_path[MAX_PATH * 2]{};
     HMODULE self = nullptr;
+    // Any address inside this module names it, and GetModuleHandleExW takes
+    // the address as an LPCWSTR: a character of this module's own is one
+    // already, where a function's address would be a pointer to another type.
+    static constexpr wchar_t inside_this_module = L'\0';
     ::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                              GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                         reinterpret_cast<LPCWSTR>(&find_program), &self);
+                         &inside_this_module, &self);
     if (::GetModuleFileNameW(self, module_path, static_cast<DWORD>(std::size(module_path)))
         != 0) {
         std::wstring beside{module_path};

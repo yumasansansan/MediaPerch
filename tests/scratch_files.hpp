@@ -95,7 +95,7 @@ private:
             return false;
         }
         if (size != 0) {
-            out.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
+            write_bytes(out, data, size);
         }
         out.close();
         return !out.fail();

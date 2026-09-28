@@ -10,6 +10,7 @@
 #include <impulse.hpp>
 
 #include "temp_path.hpp"
+#include "test_platform.hpp"
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -75,8 +76,7 @@ std::string write_wav(const std::string& name, const std::vector<std::vector<dou
 
     std::ofstream out(path, std::ios::binary);
     REQUIRE(out.is_open());
-    out.write(reinterpret_cast<const char*>(file.data()),
-              static_cast<std::streamsize>(file.size()));
+    mp::test::write_bytes(out, file.data(), file.size());
     REQUIRE(out.good());
     return path.string();
 }

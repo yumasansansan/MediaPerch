@@ -27,6 +27,7 @@
 #include <mediaperch/module.h>
 
 #include "module_loader.hpp"
+#include "test_platform.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -114,8 +115,7 @@ TEST_CASE("libde265 and the HEVC reference agree on every sample",
     {
         std::ofstream out(bitstream_path, std::ios::binary | std::ios::trunc);
         REQUIRE(out.good());
-        out.write(reinterpret_cast<const char*>(elementary.data()),
-                  static_cast<std::streamsize>(elementary.size()));
+        mp::test::write_bytes(out, elementary.data(), elementary.size());
     }
 
     // ---- HM, as a program --------------------------------------------------

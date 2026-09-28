@@ -151,6 +151,66 @@ TEST_CASE("a file with no audio plays its picture on the video engine's own cloc
     player.shutdown();
 }
 
+TEST_CASE("a picture on its own says its length and its start while it opens",
+          "[player][video]")
+{
+    // **Between naming the track and the picture being there.** The run says
+    // which track it is, and that it plays, before the picture has opened; a
+    // look at the status in that window got a length of nothing and whatever
+    // position the run before had left behind -- the test above saw the first
+    // once, when a poll landed in it. Here the decoder is held in `open`, so
+    // the window stays open for as long as the test looks.
+    mp::test::presenter_log().reset();
+    mp::test::decoder_log().reset();
+    {
+        const std::lock_guard lock{mp::test::decoder_log().mutex};
+        mp::test::decoder_log().frames = 30;
+    }
+    Host host;
+    host.add("song", pattern(4096, 2));
+    host.add_silent("clip", 1200);
+    host.pace_with([] { return std::make_unique<Endless>(); });
+
+    mp::Player player{host};
+    // Let go on the way out whatever happens, or a failed check would leave
+    // the engine thread in `open` and the player's destructor waiting for it.
+    struct Release {
+        Release() = default;
+        Release(const Release&) = delete;
+        Release& operator=(const Release&) = delete;
+        ~Release()
+        {
+            mp::test::decoder_log().hold_open.store(false);
+            mp::test::decoder_log().hold_open.notify_all();
+        }
+    } release;
+    player.start();
+
+    // A run before it, which leaves a position of its own behind.
+    player.play({"song"});
+    REQUIRE(wait_for_run(player));
+    REQUIRE(player.status().position != 0u);
+
+    mp::test::decoder_log().hold_open.store(true);
+    player.play({"clip"});
+    REQUIRE(wait_for([] { return mp::test::decoder_log().opening.load(); }));
+    const mp::ipc::Status opening = player.status();
+    CHECK(opening.state == mp::ipc::State::playing);
+    CHECK(opening.track == "clip");
+    CHECK(opening.clock_rate == 1000u);
+    CHECK(opening.length == 1200u);
+    CHECK(opening.position == 0u);
+    CHECK(opening.item_position == 0u);
+
+    mp::test::decoder_log().hold_open.store(false);
+    mp::test::decoder_log().hold_open.notify_all();
+    REQUIRE(wait_for([&] { return player.status().item_position >= 100u; }));
+    CHECK(player.status().length == 1200u);
+    REQUIRE(wait_for([&] { return player.status().state == mp::ipc::State::stopped; }, 8000));
+    CHECK(player.status().error.empty());
+    player.shutdown();
+}
+
 TEST_CASE("a playlist walks from a song into a silent picture and out again",
           "[player][video]")
 {

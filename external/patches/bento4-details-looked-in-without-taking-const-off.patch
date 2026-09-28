@@ -1,0 +1,17 @@
+Bento4: a sample description's details can be looked in without taking their const off
+
+AP4_SampleDescription gives its details -- the boxes of its sample entry it does not parse itself, such as alac, av1C, mdcv and clli -- only as a const AP4_AtomParent&, and AP4_AtomParent's lookups, GetChild and FindChild, are not const, since FindChild can create what it does not find. So a reader that wants a box out of the details has nothing to call but a const_cast, which takes away the one thing the type was saying. AP4_Track has the same pair for its trak atom and answers it with UseTrakAtom() beside GetTrakAtom(); the description gets UseDetails() beside GetDetails(), in the same way and under the same name.
+
+Against v1.6.0-641-119-gb8c50a0.
+
+diff --git a/Source/C++/Core/Ap4SampleDescription.h b/Source/C++/Core/Ap4SampleDescription.h
+--- a/Source/C++/Core/Ap4SampleDescription.h
++++ b/Source/C++/Core/Ap4SampleDescription.h
+@@ -147,6 +147,7 @@ class AP4_SampleDescription
+     Type                  GetType()    const { return m_Type;    }
+     AP4_UI32              GetFormat()  const { return m_Format;  }
+     const AP4_AtomParent& GetDetails() const { return m_Details; }
++    AP4_AtomParent&       UseDetails()       { return m_Details; }
+ 
+     // info
+     virtual AP4_Result GetCodecString(AP4_String& codec);

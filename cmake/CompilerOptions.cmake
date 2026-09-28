@@ -194,6 +194,18 @@ if(WIN32)
         NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
 endif()
 
+# **Type-based alias analysis on Windows too.** For an MSVC target the driver
+# passes -relaxed-aliasing unless told otherwise, because MSVC does no such
+# analysis and code written for it may read memory as another type than it was
+# written as. This tree's own code does not -- it has no reinterpret_cast or
+# const_cast left, and every other system has compiled it with the analysis all
+# along -- so it is asked for here as it is everywhere else: a store through a
+# double* then no longer makes the compiler load again every int and pointer it
+# had in a register.
+if(WIN32)
+    target_compile_options(mediaperch_flags INTERFACE -fstrict-aliasing)
+endif()
+
 # ---------------------------------------------------------------------------
 # Hardening, global
 # ---------------------------------------------------------------------------

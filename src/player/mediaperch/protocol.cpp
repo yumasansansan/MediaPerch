@@ -248,7 +248,8 @@ std::string Reader::str()
         bad_ = true;
         return {};
     }
-    std::string out(reinterpret_cast<const char*>(data_ + at_), n);
+    // The bytes copied into characters, rather than looked at as them.
+    std::string out(data_ + at_, data_ + at_ + n);
     at_ += n;
     return out;
 }

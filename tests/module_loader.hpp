@@ -25,7 +25,6 @@
 
 #include <mediaperch/module.h>
 
-#include <bit>
 #include <cstdint>
 
 namespace mp::test {
@@ -35,13 +34,11 @@ struct Module {
     /// handed by CMake is.
     Module(const char* path, MpKind kind)
     {
-        using Entry = const MpModuleDesc*(MP_CALL*)(std::uint32_t);
         library = platform::open_library(utf8_path(path));
         if (library == nullptr) {
             return;
         }
-        auto* entry =
-            std::bit_cast<Entry>(platform::find_function(library, "mp_module_entry"));
+        const MpModuleEntry entry = platform::find_module_entry(library);
         if (entry == nullptr) {
             return;
         }

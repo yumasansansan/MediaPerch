@@ -102,7 +102,7 @@ private:
     /// nothing is being thrown away.
     Converter to_bus_;
     DspChain* chain_ = nullptr;
-    std::vector<std::uint8_t> bus_chunk_;
+    std::vector<double> bus_chunk_;
     std::vector<double> chain_out_;
     std::uint32_t chunk_frames_ = 0;
     std::uint32_t source_frame_bytes_ = 0;

@@ -13,6 +13,18 @@
 #include <string_view>
 
 namespace mp::win {
+
+/// The window procedure with the types Windows declares one with. Tray::proc
+/// has the same numbers under names the header can say without <windows.h>,
+/// and a function called through a pointer of another type than its own is
+/// not a call the language defines -- so Windows calls this, which calls that.
+struct TrayWindow {
+    static LRESULT CALLBACK proc(HWND window, UINT message, WPARAM w, LPARAM l)
+    {
+        return Tray::proc(window, message, w, l);
+    }
+};
+
 namespace {
 
 constexpr UINT k_callback = WM_APP + 1;
@@ -29,6 +41,8 @@ enum Command : unsigned {
 };
 
 const wchar_t* k_class = L"MediaPerchTray";
+/// The property the window keeps its Tray under (see `show`).
+constexpr wchar_t k_tray_property[] = L"MediaPerchTrayObject";
 
 std::wstring widen(const std::string& utf8)
 {
@@ -78,7 +92,14 @@ long long __stdcall Tray::proc(void* window, unsigned message, unsigned long lon
                                long long l)
 {
     const HWND hwnd = static_cast<HWND>(window);
-    auto* self = reinterpret_cast<Tray*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    // The Tray `show` attached, found by its name: a property keeps a pointer
+    // as the pointer it is, where the window's user data would keep it as a
+    // number. Null for the messages that come before it is attached.
+    auto* self = static_cast<Tray*>(GetPropW(hwnd, k_tray_property));
+    if (message == WM_NCDESTROY) {
+        // A property is the window's to give back before it goes.
+        RemovePropW(hwnd, k_tray_property);
+    }
     if (self != nullptr) {
         switch (message) {
         case k_callback:
@@ -108,7 +129,7 @@ bool Tray::show(std::string& why)
 {
     WNDCLASSEXW cls{};
     cls.cbSize = sizeof(cls);
-    cls.lpfnWndProc = reinterpret_cast<WNDPROC>(&Tray::proc);
+    cls.lpfnWndProc = &TrayWindow::proc;
     cls.hInstance = GetModuleHandleW(nullptr);
     cls.lpszClassName = k_class;
     // A class that is already registered is not an error: two engines in one
@@ -123,7 +144,11 @@ bool Tray::show(std::string& why)
         why = "could not create the window the notification icon needs";
         return false;
     }
-    SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+    if (SetPropW(window, k_tray_property, this) == FALSE) {
+        why = "could not attach the notification icon to its window";
+        DestroyWindow(window);
+        return false;
+    }
     window_ = window;
 
     NOTIFYICONDATAW icon{};

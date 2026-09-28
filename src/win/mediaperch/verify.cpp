@@ -4,6 +4,7 @@
 #include "mediaperch/platform.hpp"
 #include "mediaperch/win_headers.hpp"
 
+#include "com_out.hpp"
 #include "wave_format.hpp"
 
 #include <audioclient.h>
@@ -104,18 +105,21 @@ void Sha256::update(const void* data, std::size_t bytes) noexcept
     if (hash_ == nullptr || data == nullptr) {
         return;
     }
-    // BCryptHashData takes a ULONG. An hour of 768 kHz stereo 32-bit is 22 GB,
-    // so the chunking is not theoretical.
+    // BCryptHashData takes its input as bytes it could write, though it only
+    // reads them, so it is handed a copy of its own a chunk at a time rather
+    // than the caller's bytes with their const taken off. Copying a chunk costs
+    // a fraction of hashing it, and a chunk also keeps each call's length
+    // within the ULONG it is.
     const auto* p = static_cast<const std::uint8_t*>(data);
-    constexpr std::size_t chunk = 1u << 30;
+    std::array<UCHAR, 16384> chunk{};
     while (bytes > 0) {
-        const ULONG now = static_cast<ULONG>(bytes < chunk ? bytes : chunk);
+        const std::size_t now = std::min(bytes, chunk.size());
+        std::copy_n(p, now, chunk.data());
         // Checked, because a digest of most of the bytes is worse than none:
         // `verify` exists to say whether what reached the device was what was
         // sent, and a hash that silently skipped a chunk would say yes.
-        if (!BCRYPT_SUCCESS(::BCryptHashData(
-                static_cast<BCRYPT_HASH_HANDLE>(hash_),
-                const_cast<PUCHAR>(reinterpret_cast<const UCHAR*>(p)), now, 0))) {
+        if (!BCRYPT_SUCCESS(::BCryptHashData(static_cast<BCRYPT_HASH_HANDLE>(hash_),
+                                             chunk.data(), static_cast<ULONG>(now), 0))) {
             failed_ = true;
             return;
         }
@@ -189,8 +193,7 @@ try {
     out.size = sizeof(MpDeviceInfo);
 
     ComPtr<IMMDeviceEnumerator> enumerator;
-    HRESULT hr = ::CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
-                                    IID_PPV_ARGS(&enumerator));
+    HRESULT hr = mp::wasapi::make_enumerator(enumerator);
     if (FAILED(hr)) {
         return map_hr(hr);
     }
@@ -257,8 +260,7 @@ MpResult Capture::open(const std::string& device_id)
     release();
 
     ComPtr<IMMDeviceEnumerator> enumerator;
-    HRESULT hr = ::CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
-                                    IID_PPV_ARGS(&enumerator));
+    HRESULT hr = mp::wasapi::make_enumerator(enumerator);
     if (FAILED(hr)) {
         return map_hr(hr);
     }
@@ -286,11 +288,10 @@ MpResult Capture::negotiate(const MpFormat& want)
     if (!mp::wasapi::to_wave_format(want, wfx)) {
         return MP_ERR_UNSUPPORTED;
     }
-    auto* base = reinterpret_cast<WAVEFORMATEX*>(&wfx);
+    WAVEFORMATEX* base = &wfx.Format;
 
     auto activate = [this](IAudioClient** out) {
-        return static_cast<IMMDevice*>(device_)->Activate(
-            __uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(out));
+        return mp::wasapi::activate(static_cast<IMMDevice*>(device_), *out);
     };
 
     if (capture_ != nullptr) {
@@ -346,7 +347,7 @@ MpResult Capture::negotiate(const MpFormat& want)
     }
     IAudioCaptureClient* capture = nullptr;
     if (SUCCEEDED(hr)) {
-        hr = client->GetService(IID_PPV_ARGS(&capture));
+        hr = mp::wasapi::service(client, capture);
     }
     if (FAILED(hr)) {
         client->Release();
@@ -435,8 +436,7 @@ void Capture::record_loop() noexcept
 float endpoint_volume(const std::string& device_id, bool capture) noexcept
 try {
     ComPtr<IMMDeviceEnumerator> enumerator;
-    if (FAILED(::CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
-                                  IID_PPV_ARGS(&enumerator)))) {
+    if (FAILED(mp::wasapi::make_enumerator(enumerator))) {
         return -1.0F;
     }
     ComPtr<IMMDevice> device;
@@ -451,8 +451,7 @@ try {
     }
 
     ComPtr<IAudioEndpointVolume> volume;
-    if (FAILED(device->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr,
-                                reinterpret_cast<void**>(volume.GetAddressOf())))) {
+    if (FAILED(mp::wasapi::activate(device.Get(), volume))) {
         return -1.0F;
     }
     float level = -1.0F;

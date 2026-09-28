@@ -57,6 +57,20 @@
 #include <vector>
 
 namespace {
+class TeeSink;
+} // namespace
+
+/// The module ABI's handle for a sink, completed for this program by the one
+/// sink it implements itself: a member of the TeeSink that says which one it
+/// is, so that the handle is an object of its own type and the thunks find
+/// their sink through it rather than by taking the handle for the sink. The
+/// handles of the real sinks, which the tee wraps, are the modules' own and are
+/// only ever handed back to them.
+struct MpSink {
+    TeeSink* owner = nullptr;
+};
+
+namespace {
 
 struct Options {
     std::string command = "devices";
@@ -3580,6 +3594,9 @@ int compare_command(mp::win::EngineHost& host, const Options& options)
 /// render thread still allocates nothing.
 class TeeSink {
 public:
+    TeeSink(const TeeSink&) = delete;
+    TeeSink& operator=(const TeeSink&) = delete;
+
     TeeSink(const MpSinkVtbl& inner, MpSink* handle) : inner_(&inner), handle_(handle)
     {
         // Every entry that takes a handle has to be wrapped, not just the two
@@ -3608,7 +3625,7 @@ public:
     /// device.
     [[nodiscard]] mp::Sink sink() noexcept
     {
-        return mp::Sink{&vtbl_, reinterpret_cast<MpSink*>(this)};
+        return mp::Sink{&vtbl_, &as_handle_};
     }
 
     /// Called after negotiation, when the frame size is known and before
@@ -3626,7 +3643,7 @@ public:
     [[nodiscard]] bool overflowed() const noexcept { return overflowed_; }
 
 private:
-    static TeeSink& self(MpSink* s) noexcept { return *reinterpret_cast<TeeSink*>(s); }
+    static TeeSink& self(MpSink* s) noexcept { return *s->owner; }
 
     static MpResult MP_CALL negotiate_thunk(MpSink* s, const MpFormat* want, MpFormat* out)
     {
@@ -3698,6 +3715,8 @@ private:
     }
 
     MpSinkVtbl vtbl_{};
+    /// The handle the vtable is handed back, which says whose it is.
+    MpSink as_handle_{this};
     const MpSinkVtbl* inner_;
     MpSink* handle_;
     std::vector<std::uint8_t> buffer_;
@@ -4288,12 +4307,12 @@ int main(int argc, char** argv)
     // past this point -- the ABI, the module boundary, every path in this file
     // -- is UTF-8, so take the arguments from the command line Windows actually
     // kept rather than from the lossy copy the CRT made.
-    const std::vector<std::string> args = mp::win::command_line_utf8();
+    std::vector<std::string> args = mp::win::command_line_utf8();
     std::vector<char*> utf8_argv;
     if (static_cast<int>(args.size()) == argc) {
         utf8_argv.reserve(args.size());
-        for (const std::string& arg : args) {
-            utf8_argv.push_back(const_cast<char*>(arg.c_str()));
+        for (std::string& arg : args) {
+            utf8_argv.push_back(arg.data());
         }
         argv = utf8_argv.data();
     }

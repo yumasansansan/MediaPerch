@@ -63,6 +63,7 @@ function(mediaperch_patch directory patch)
 endfunction()
 
 mediaperch_patch("external/Bento4" "bento4-stts-entries-the-box-holds.patch")
+mediaperch_patch("external/Bento4" "bento4-details-looked-in-without-taking-const-off.patch")
 mediaperch_patch("external/libebml" "libebml-msvc-swap_big32.patch")
 mediaperch_patch("external/libebml" "libebml-a-void-of-any-size.patch")
 mediaperch_patch("external/libmatroska" "libmatroska-lace-size-that-is-no-number.patch")

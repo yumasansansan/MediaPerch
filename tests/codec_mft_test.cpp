@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -819,7 +820,8 @@ TEST_CASE("a hardware decoder decodes into a texture the presenter samples in pl
     // as WARP, and neither can decode.
     ID3D11VideoDevice* video_device = nullptr;
     if (FAILED(static_cast<ID3D11Device*>(graphics.device)
-                   ->QueryInterface(IID_PPV_ARGS(&video_device)))) {
+                   ->QueryInterface(__uuidof(ID3D11VideoDevice),
+                                    std::out_ptr<void*>(video_device)))) {
         video->close(presenter);
         SKIP("the presenter's device has no ID3D11VideoDevice, so there is nothing "
              "to decode with -- WARP, a remote session, or an adapter with no video "

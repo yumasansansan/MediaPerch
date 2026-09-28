@@ -158,8 +158,7 @@ std::unique_ptr<LoadedModule> LoadedModule::load(const std::filesystem::path& pa
         return nullptr;
     }
 
-    auto entry = reinterpret_cast<MpModuleEntry>(
-        reinterpret_cast<void*>(::GetProcAddress(handle, MP_MODULE_ENTRY_NAME)));
+    const auto entry = exported<MpModuleEntry>(handle, MP_MODULE_ENTRY_NAME);
     if (entry == nullptr) {
         logf(MP_LOG_WARN, "%s has no " MP_MODULE_ENTRY_NAME, path.string().c_str());
         ::FreeLibrary(handle);

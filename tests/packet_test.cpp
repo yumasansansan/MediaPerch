@@ -10,6 +10,7 @@
 // demuxer is written, so the first one has something to be wrong against.
 
 #include "mediaperch/packet.hpp"
+#include "fake_handles.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -73,7 +74,9 @@ World g;
 MpResult MP_CALL demux_open(const char*, MpDemux** out)
 {
     g.next_packet = 0;
-    *out = reinterpret_cast<MpDemux*>(&g);
+    // A handle of its own type; the world is `g`.
+    static MpDemux demux;
+    *out = &demux;
     return MP_OK;
 }
 void MP_CALL demux_close(MpDemux*) {}
@@ -223,7 +226,8 @@ MpResult MP_CALL codec_open(MpCodec codec, const std::uint8_t* config,
         return MP_ERR_FORMAT;
     }
     g.decoded_packets = 0;
-    *out = reinterpret_cast<MpCodecInstance*>(&g);
+    static MpCodecInstance instance;
+    *out = &instance;
     return MP_OK;
 }
 void MP_CALL codec_close(MpCodecInstance*) {}

@@ -5,6 +5,7 @@
 #include <dxgi1_2.h>
 
 #include <cstdio>
+#include <memory>
 #include <utility>
 
 #pragma comment(lib, "dxgi.lib")
@@ -24,8 +25,7 @@ IDXGIOutput* output_for(void* window, DXGI_OUTPUT_DESC& desc)
             : nullptr;
 
     IDXGIFactory1* factory = nullptr;
-    if (FAILED(::CreateDXGIFactory1(__uuidof(IDXGIFactory1),
-                                    reinterpret_cast<void**>(&factory)))) {
+    if (FAILED(::CreateDXGIFactory1(__uuidof(IDXGIFactory1), std::out_ptr<void*>(factory)))) {
         return nullptr;
     }
     IDXGIOutput* found = nullptr;

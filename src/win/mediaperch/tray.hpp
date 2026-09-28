@@ -49,6 +49,10 @@ public:
     void run(const std::function<bool()>& keep_going);
 
 private:
+    /// Windows' types under the header's own names, so the header needs no
+    /// <windows.h>; TrayWindow (tray.cpp) is the window procedure Windows
+    /// calls, with its types, and it hands each message to this.
+    friend struct TrayWindow;
     static long long __stdcall proc(void* window, unsigned message, unsigned long long w,
                                     long long l);
     void on_command(unsigned id);

@@ -72,10 +72,12 @@
 
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <new>
 #include <string>
 #include <vector>
@@ -500,14 +502,18 @@ try {
         return MP_ERR_IO;
     }
     using GetClassObject = HRESULT(__stdcall*)(REFCLSID, REFIID, void**);
-    auto* get_class_object =
-        reinterpret_cast<GetClassObject>(::GetProcAddress(dll, "DllGetClassObject"));
+    // **The one function pointer this module turns into another type.**
+    // GetProcAddress answers every name as a FARPROC, a function is called
+    // through a pointer of its own type, and nothing can check the conversion:
+    // that DllGetClassObject has this type is COM's promise.
+    const auto get_class_object =
+        std::bit_cast<GetClassObject>(::GetProcAddress(dll, "DllGetClassObject"));
     if (get_class_object == nullptr) {
         ::FreeLibrary(dll);
         return MP_ERR_IO;
     }
     IClassFactory* factory = nullptr;
-    HRESULT hr = get_class_object(clsid, IID_IClassFactory, reinterpret_cast<void**>(&factory));
+    HRESULT hr = get_class_object(clsid, IID_IClassFactory, std::out_ptr<void*>(factory));
     if (FAILED(hr) || factory == nullptr) {
         ::FreeLibrary(dll);
         log_fmt(MP_LOG_DEBUG, "%s: DllGetClassObject failed: 0x%08lx",

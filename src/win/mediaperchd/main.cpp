@@ -178,8 +178,8 @@ int main(int argc, char** argv)
     std::vector<char*> utf8_argv;
     if (!args.empty()) {
         utf8_argv.reserve(args.size());
-        for (const std::string& arg : args) {
-            utf8_argv.push_back(const_cast<char*>(arg.c_str()));
+        for (std::string& arg : args) {
+            utf8_argv.push_back(arg.data());
         }
         argc = static_cast<int>(utf8_argv.size());
         argv = utf8_argv.data();

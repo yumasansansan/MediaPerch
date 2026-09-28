@@ -139,11 +139,9 @@ public:
     }
     tresult PLUGIN_API getState(IBStream* state) override
     {
-        const double value = g_gain.load();
+        double value = g_gain.load(); // not const: IBStream::write takes a void*
         int32 wrote = 0;
-        return state != nullptr &&
-                       state->write(const_cast<double*>(&value), sizeof(value), &wrote) ==
-                           kResultOk
+        return state != nullptr && state->write(&value, sizeof(value), &wrote) == kResultOk
                    ? kResultOk
                    : kResultFalse;
     }
@@ -251,16 +249,18 @@ public:
         // The call a host with no IHostApplication cannot serve. Sending it
         // here is the point: it is how the test knows the host allocated one.
         if (host_ != nullptr) {
-            Vst::IHostApplication* app = nullptr;
-            if (host_->queryInterface(Vst::IHostApplication::iid,
-                                      reinterpret_cast<void**>(&app)) == kResultOk &&
-                app != nullptr) {
-                Vst::IMessage* message = nullptr;
+            // Each interface through a void* of the call's own, turned back
+            // into what it is before it is looked at.
+            void* raw_app = nullptr;
+            const tresult found = host_->queryInterface(Vst::IHostApplication::iid, &raw_app);
+            auto* app = static_cast<Vst::IHostApplication*>(raw_app);
+            if (found == kResultOk && app != nullptr) {
                 TUID message_iid{};
                 std::memcpy(message_iid, Vst::IMessage::iid.toTUID(), sizeof(TUID));
-                if (app->createInstance(message_iid, message_iid,
-                                        reinterpret_cast<void**>(&message)) == kResultOk &&
-                    message != nullptr) {
+                void* raw_message = nullptr;
+                const tresult made = app->createInstance(message_iid, message_iid, &raw_message);
+                auto* message = static_cast<Vst::IMessage*>(raw_message);
+                if (made == kResultOk && message != nullptr) {
                     message->setMessageID("hello");
                     if (peer_ != nullptr) {
                         peer_->notify(message);

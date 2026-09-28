@@ -139,8 +139,10 @@ TEST_CASE("the passes are Butterworth at Q = 1/sqrt(2)", "[eq]")
     // to the right prototype.
     const auto low = configured("lowpass:1000::0.7071067811865476");
     CHECK(low.magnitude_db(1000.0) == Catch::Approx(-3.0103).margin(0.02));
-    CHECK(measured_db(const_cast<mp::biquad::Cascade&>(low), 1000.0) ==
-          Catch::Approx(-3.0103).margin(0.05));
+    // Measured on a copy: a signal through it moves its state, and `low` is
+    // const.
+    mp::biquad::Cascade running = low;
+    CHECK(measured_db(running, 1000.0) == Catch::Approx(-3.0103).margin(0.05));
     CHECK(low.magnitude_db(4000.0) < -22.0); // 12 dB an octave, two octaves up
 
     const auto high = configured("highpass:1000::0.7071067811865476");

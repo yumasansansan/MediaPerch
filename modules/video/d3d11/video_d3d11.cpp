@@ -161,6 +161,18 @@ public:
         }
     }
 
+    /// What std::out_ptr needs to stand for the `void**` a call writes an
+    /// interface through: the call writes a `void*` of the out_ptr's own, and
+    /// the out_ptr hands it here as a `T*` once the call's expression is done,
+    /// its reference counted already. A `T**` seen as a `void**` would be the
+    /// pointer written as another type than it is.
+    using pointer = T*;
+    void reset(T* p) noexcept
+    {
+        reset();
+        p_ = p;
+    }
+
 private:
     T* p_ = nullptr;
 };
@@ -766,7 +778,7 @@ bool output_for(IDXGIFactory2* factory, HWND window, Com<IDXGIOutput6>& six)
         return false;
     }
     if (FAILED(output->QueryInterface(__uuidof(IDXGIOutput6),
-                                      reinterpret_cast<void**>(six.put())))) {
+                                      std::out_ptr<void*>(six)))) {
         six.reset();
         return false;
     }
@@ -1471,9 +1483,9 @@ bool tone_map_by_driver(MpVideo* v, std::string& why)
     Com<ID3D11VideoDevice> video_device;
     Com<ID3D11VideoContext> video_context;
     if (FAILED(v->device->QueryInterface(__uuidof(ID3D11VideoDevice),
-                                         reinterpret_cast<void**>(video_device.put()))) ||
+                                         std::out_ptr<void*>(video_device))) ||
         FAILED(v->context->QueryInterface(
-            __uuidof(ID3D11VideoContext), reinterpret_cast<void**>(video_context.put())))) {
+            __uuidof(ID3D11VideoContext), std::out_ptr<void*>(video_context)))) {
         why = "this device has no video processor";
         return false;
     }
@@ -1513,7 +1525,7 @@ bool tone_map_by_driver(MpVideo* v, std::string& why)
 
     Com<ID3D11VideoContext1> video_context1;
     if (SUCCEEDED(video_context->QueryInterface(
-            __uuidof(ID3D11VideoContext1), reinterpret_cast<void**>(video_context1.put())))) {
+            __uuidof(ID3D11VideoContext1), std::out_ptr<void*>(video_context1)))) {
         // **This is the whole request.** PQ on BT.2020 in, the display's own
         // space out; everything the driver does follows from the pair.
         video_context1->VideoProcessorSetStreamColorSpace1(
@@ -1527,7 +1539,7 @@ bool tone_map_by_driver(MpVideo* v, std::string& why)
 
     Com<ID3D11VideoContext2> video_context2;
     if (SUCCEEDED(video_context->QueryInterface(
-            __uuidof(ID3D11VideoContext2), reinterpret_cast<void**>(video_context2.put())))) {
+            __uuidof(ID3D11VideoContext2), std::out_ptr<void*>(video_context2)))) {
         if (mp_video_has_mastering(&v->graded)) {
             // §9.7.2 step six: what the content was graded on. Ours reads it
             // as the peak its roll-off starts from; the driver reads it as it
@@ -1581,7 +1593,7 @@ bool make_d2d(MpVideo* v, std::string& why)
     }
     Com<IDXGIDevice> dxgi;
     if (FAILED(v->device->QueryInterface(__uuidof(IDXGIDevice),
-                                         reinterpret_cast<void**>(dxgi.put())))) {
+                                         std::out_ptr<void*>(dxgi)))) {
         why = "this device is not a DXGI device";
         return false;
     }
@@ -1618,9 +1630,9 @@ bool tone_map_by_d2d(MpVideo* v, std::string& why)
     Com<IDXGISurface> in_surface;
     Com<IDXGISurface> out_surface;
     if (FAILED(v->graded_target->QueryInterface(
-            __uuidof(IDXGISurface), reinterpret_cast<void**>(in_surface.put()))) ||
+            __uuidof(IDXGISurface), std::out_ptr<void*>(in_surface))) ||
         FAILED(v->target->QueryInterface(__uuidof(IDXGISurface),
-                                         reinterpret_cast<void**>(out_surface.put())))) {
+                                         std::out_ptr<void*>(out_surface)))) {
         why = "these textures are not DXGI surfaces";
         return false;
     }
@@ -1703,7 +1715,7 @@ void set_hdr_metadata(MpVideo* v) noexcept
     }
     Com<IDXGISwapChain4> chain4;
     if (FAILED(v->swap_chain->QueryInterface(__uuidof(IDXGISwapChain4),
-                                             reinterpret_cast<void**>(chain4.put())))) {
+                                             std::out_ptr<void*>(chain4)))) {
         return;
     }
 
@@ -1798,20 +1810,20 @@ bool make_device(MpVideo* v, std::string& why)
     // known when it is made.
     Com<ID3D11Multithread> threading;
     if (SUCCEEDED(v->device->QueryInterface(__uuidof(ID3D11Multithread),
-                                            reinterpret_cast<void**>(threading.put())))) {
+                                            std::out_ptr<void*>(threading)))) {
         threading->SetMultithreadProtected(TRUE);
     }
 
     Com<IDXGIDevice> dxgi;
     if (FAILED(v->device->QueryInterface(__uuidof(IDXGIDevice),
-                                         reinterpret_cast<void**>(dxgi.put())))) {
+                                         std::out_ptr<void*>(dxgi)))) {
         why = "the device is not a DXGI device, which cannot happen";
         return false;
     }
     Com<IDXGIAdapter> adapter;
     if (FAILED(dxgi->GetAdapter(adapter.put())) ||
         FAILED(adapter->GetParent(__uuidof(IDXGIFactory2),
-                                  reinterpret_cast<void**>(v->factory.put())))) {
+                                  std::out_ptr<void*>(v->factory)))) {
         why = "no DXGI factory";
         return false;
     }
@@ -2154,7 +2166,7 @@ bool make_target(MpVideo* v, std::string& why)
 
         Com<IDXGIFactoryMedia> media;
         if (FAILED(v->factory->QueryInterface(__uuidof(IDXGIFactoryMedia),
-                                              reinterpret_cast<void**>(media.put())))) {
+                                              std::out_ptr<void*>(media)))) {
             why = "this DXGI has no factory for composition surfaces";
             return false;
         }
@@ -2166,7 +2178,7 @@ bool make_target(MpVideo* v, std::string& why)
 
         Com<IDXGISwapChain3> chain3;
         if (SUCCEEDED(v->swap_chain->QueryInterface(
-                __uuidof(IDXGISwapChain3), reinterpret_cast<void**>(chain3.put())))) {
+                __uuidof(IDXGISwapChain3), std::out_ptr<void*>(chain3)))) {
             const DXGI_COLOR_SPACE_TYPE space = colour_space_of(v->plan);
             UINT support = 0;
             if (SUCCEEDED(chain3->CheckColorSpaceSupport(space, &support)) &&
@@ -2182,12 +2194,12 @@ bool make_target(MpVideo* v, std::string& why)
         // compositor sets instead. Whoever drives the loop waits on it.
         Com<IDXGISwapChain2> chain2;
         if (SUCCEEDED(v->swap_chain->QueryInterface(
-                __uuidof(IDXGISwapChain2), reinterpret_cast<void**>(chain2.put())))) {
+                __uuidof(IDXGISwapChain2), std::out_ptr<void*>(chain2)))) {
             v->waitable = chain2->GetFrameLatencyWaitableObject();
         }
 
         if (FAILED(v->swap_chain->GetBuffer(0, __uuidof(ID3D11Texture2D),
-                                            reinterpret_cast<void**>(v->target.put())))) {
+                                            std::out_ptr<void*>(v->target)))) {
             why = "no back buffer on the composition chain";
             return false;
         }
@@ -2215,7 +2227,7 @@ bool make_target(MpVideo* v, std::string& why)
 
         Com<IDXGISwapChain3> chain3;
         if (SUCCEEDED(v->swap_chain->QueryInterface(
-                __uuidof(IDXGISwapChain3), reinterpret_cast<void**>(chain3.put())))) {
+                __uuidof(IDXGISwapChain3), std::out_ptr<void*>(chain3)))) {
             const DXGI_COLOR_SPACE_TYPE space = colour_space_of(v->plan);
             UINT support = 0;
             if (SUCCEEDED(chain3->CheckColorSpaceSupport(space, &support)) &&
@@ -2226,7 +2238,7 @@ bool make_target(MpVideo* v, std::string& why)
         }
         set_hdr_metadata(v);
         if (FAILED(v->swap_chain->GetBuffer(0, __uuidof(ID3D11Texture2D),
-                                            reinterpret_cast<void**>(v->target.put())))) {
+                                            std::out_ptr<void*>(v->target)))) {
             why = "no back buffer";
             return false;
         }
@@ -2435,7 +2447,7 @@ bool resize_target(MpVideo* v)
         return false;
     }
     if (FAILED(v->swap_chain->GetBuffer(0, __uuidof(ID3D11Texture2D),
-                                        reinterpret_cast<void**>(v->target.put())))) {
+                                        std::out_ptr<void*>(v->target)))) {
         v->trouble = "no back buffer after the resize";
         return false;
     }
@@ -3527,13 +3539,13 @@ try {
         // printing it is how a settings surface carries one.
         if (v->composition != nullptr) {
             const HANDLE waitable = v->waitable;
+            // A handle is a number Windows gives the type void*, 32 bits wide
+            // so that it can cross into 32-bit code; HandleToULong is the
+            // SDK's word for that number.
             std::snprintf(out, out_bytes,
-                          "surface\tcomposition 0x%llx, waitable 0x%llx"
+                          "surface\tcomposition 0x%lx, waitable 0x%lx"
                           "\twhere it draws and what paces it (read only)",
-                          static_cast<unsigned long long>(
-                              reinterpret_cast<std::uintptr_t>(v->composition)),
-                          static_cast<unsigned long long>(
-                              reinterpret_cast<std::uintptr_t>(waitable)));
+                          HandleToULong(v->composition), HandleToULong(waitable));
         } else {
             std::snprintf(out, out_bytes, "surface\t%s\twhere it draws (read only)",
                           v->window != nullptr ? "a window" : "off-screen");

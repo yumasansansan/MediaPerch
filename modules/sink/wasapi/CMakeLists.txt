@@ -11,6 +11,7 @@
 # is not there. Depends on the ABI header and Windows, never on the core or the
 # head, so a module linking it does not gain a route to the host.
 add_library(mediaperch_waveformat STATIC
+    com_out.hpp
     wave_format.cpp
     wave_format.hpp
     win_headers.hpp

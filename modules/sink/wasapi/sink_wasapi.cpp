@@ -4,6 +4,7 @@
 //
 // Everything interesting in this file is in negotiate(). The rest is plumbing.
 
+#include "com_out.hpp"
 #include "wave_format.hpp"
 #include "win_headers.hpp"
 
@@ -14,7 +15,10 @@
 
 namespace {
 
+using mp::wasapi::activate;
 using mp::wasapi::ComPtr;
+using mp::wasapi::make_enumerator;
+using mp::wasapi::service;
 
 const MpHost* g_host = nullptr;
 
@@ -83,12 +87,6 @@ void copy_into(char (&dst)[256], const std::string& src) noexcept
     const std::size_t n = src.size() < 255 ? src.size() : 255;
     std::memcpy(dst, src.data(), n);
     dst[n] = '\0';
-}
-
-HRESULT make_enumerator(ComPtr<IMMDeviceEnumerator>& out) noexcept
-{
-    return ::CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
-                              IID_PPV_ARGS(&out));
 }
 
 } // namespace
@@ -186,8 +184,7 @@ try {
     // enumeration. See MP_DEVICE_ENDPOINT_VOLUME for what the answer does and
     // does not mean -- it is a weaker claim than the API's constant name.
     ComPtr<IAudioEndpointVolume> endpoint_volume;
-    if (SUCCEEDED(device->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr,
-                                   reinterpret_cast<void**>(endpoint_volume.GetAddressOf())))) {
+    if (SUCCEEDED(activate(device.Get(), endpoint_volume))) {
         DWORD hardware = 0;
         if (SUCCEEDED(endpoint_volume->QueryHardwareSupport(&hardware)) &&
             (hardware & ENDPOINT_HARDWARE_SUPPORT_VOLUME) != 0) {
@@ -271,7 +268,7 @@ try {
     if (!mp::wasapi::to_wave_format(*want, wfx)) {
         return MP_ERR_UNSUPPORTED;
     }
-    auto* base = reinterpret_cast<WAVEFORMATEX*>(&wfx);
+    WAVEFORMATEX* base = &wfx.Format;
 
     // A fresh client for every attempt. An IAudioClient whose Initialize failed
     // is spent -- calling Initialize on it again returns AUDCLNT_E_ALREADY_
@@ -283,8 +280,7 @@ try {
     sink->clock2.Reset();
     sink->client.Reset();
 
-    HRESULT hr = sink->device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
-                                        reinterpret_cast<void**>(sink->client.GetAddressOf()));
+    HRESULT hr = activate(sink->device.Get(), sink->client);
     if (FAILED(hr)) {
         return map_hr(hr);
     }
@@ -346,8 +342,7 @@ try {
             log(MP_LOG_INFO, "buffer size not aligned; retrying on a fresh client");
 
             sink->client.Reset();
-            hr = sink->device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
-                                        reinterpret_cast<void**>(sink->client.GetAddressOf()));
+            hr = activate(sink->device.Get(), sink->client);
             if (FAILED(hr)) {
                 return map_hr(hr);
             }
@@ -371,12 +366,12 @@ try {
     if (FAILED(hr)) {
         return map_hr(hr);
     }
-    hr = sink->client->GetService(IID_PPV_ARGS(&sink->render));
+    hr = service(sink->client.Get(), sink->render);
     if (FAILED(hr)) {
         return map_hr(hr);
     }
     // Position is best-effort: a device that cannot report it still plays.
-    sink->client->GetService(IID_PPV_ARGS(&sink->clock));
+    service(sink->client.Get(), sink->clock);
     if (sink->clock) {
         sink->clock.As(&sink->clock2);
     }

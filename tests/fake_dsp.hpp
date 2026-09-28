@@ -12,6 +12,8 @@
 #ifndef MEDIAPERCH_TESTS_FAKE_DSP_HPP
 #define MEDIAPERCH_TESTS_FAKE_DSP_HPP
 
+#include "fake_handles.hpp"
+
 #include <mediaperch/module.h>
 
 #include <cstdint>
@@ -23,25 +25,21 @@
 namespace mp::test {
 namespace detail {
 
-/// One instance's only state. A pointer to this is the handle, which is what
-/// makes two stages in one chain two things rather than one.
-struct FakeDsp {
-    double amount = 1.0;
-    MpFormat format{};
-};
+// A stage's state is an MpDsp's `amount` and `format` (fake_handles.hpp): the
+// handle is the stage's own object, one for each stage opened.
 
 inline MpResult MP_CALL dsp_open(MpDsp** out) noexcept
 {
     if (out == nullptr) {
         return MP_ERR_INVALID;
     }
-    *out = reinterpret_cast<MpDsp*>(new (std::nothrow) FakeDsp());
+    *out = new (std::nothrow) MpDsp();
     return *out != nullptr ? MP_OK : MP_ERR_NO_MEMORY;
 }
 
 inline void MP_CALL dsp_close(MpDsp* d) noexcept
 {
-    delete reinterpret_cast<FakeDsp*>(d);
+    delete d;
 }
 
 inline MpResult MP_CALL dsp_configure(MpDsp* d, const MpFormat* in, std::uint32_t,
@@ -50,7 +48,7 @@ inline MpResult MP_CALL dsp_configure(MpDsp* d, const MpFormat* in, std::uint32_
     if (d == nullptr || in == nullptr || out == nullptr || out_max == nullptr) {
         return MP_ERR_INVALID;
     }
-    reinterpret_cast<FakeDsp*>(d)->format = *in;
+    d->format = *in;
     *out = *in;
     *out_max = 0; // no more frames out than in
     return MP_OK;
@@ -63,7 +61,7 @@ inline MpResult MP_CALL dsp_process(MpDsp* d, const double* const* in,
     if (d == nullptr || out_frames == nullptr) {
         return MP_ERR_INVALID;
     }
-    const auto* self = reinterpret_cast<const FakeDsp*>(d);
+    const MpDsp* self = d;
     const std::uint32_t channels = self->format.channels;
     for (std::uint32_t c = 0; c < channels; ++c) {
         for (std::uint32_t f = 0; f < in_frames; ++f) {
@@ -109,7 +107,7 @@ inline MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) no
     if (end == value || *end != '\0') {
         return MP_ERR_INVALID;
     }
-    reinterpret_cast<FakeDsp*>(d)->amount = amount;
+    d->amount = amount;
     return MP_OK;
 }
 
@@ -122,7 +120,7 @@ inline MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
     if (index == 0) {
         std::snprintf(out, out_bytes,
                       "amount\t%g\twhat every sample is multiplied by\tnumber min=0 step=0.5",
-                      reinterpret_cast<const FakeDsp*>(d)->amount);
+                      d->amount);
         return MP_OK;
     }
     // **A measurement, spelled the way every module in this tree spells one.**
@@ -132,7 +130,7 @@ inline MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
     // this row is what makes that checkable without a real module.
     if (index == 1) {
         std::snprintf(out, out_bytes, "peak\t%.6f\tloudest sample seen (read only)",
-                      reinterpret_cast<const FakeDsp*>(d)->amount);
+                      d->amount);
         return MP_OK;
     }
     return MP_END;

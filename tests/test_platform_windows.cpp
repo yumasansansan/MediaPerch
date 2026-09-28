@@ -24,9 +24,12 @@ void* open_library(const std::filesystem::path& path) noexcept
     return ::LoadLibraryW(path.c_str());
 }
 
-Function find_function(void* library, const char* name) noexcept
+MpModuleEntry find_module_entry(void* library) noexcept
 {
-    return std::bit_cast<Function>(::GetProcAddress(static_cast<HMODULE>(library), name));
+    // GetProcAddress answers every name as a FARPROC; the entry is a function
+    // of MpModuleEntry's type, which is what the name promises.
+    return std::bit_cast<MpModuleEntry>(
+        ::GetProcAddress(static_cast<HMODULE>(library), MP_MODULE_ENTRY_NAME));
 }
 
 void close_library(void* library) noexcept

@@ -36,14 +36,13 @@ using mp::test::wait_for_state;
 
 /// A name nothing else is using. Two test runs at once is a normal thing on a
 /// build machine, and a fixed name would make them each other's problem -- so
-/// the address of a static in this process stands in for a process id, and a
-/// counter separates the cases within one run.
+/// the process id separates this run from any other, and a counter separates
+/// the cases within one run.
 std::string unique_pipe(const char* tag)
 {
     static std::atomic<int> counter{0};
     return std::string{"\\\\.\\pipe\\mediaperch-test-"} + tag + "-" +
-           std::to_string(static_cast<unsigned long long>(
-               reinterpret_cast<std::uintptr_t>(&counter))) +
+           std::to_string(mp::test::platform::process_id()) +
            "-" + std::to_string(counter.fetch_add(1));
 }
 
@@ -305,8 +304,10 @@ TEST_CASE("a shell that dies holding the picture takes nothing with it",
     REQUIRE(stands_in != nullptr);
     {
         const std::lock_guard lock{mp::test::presenter_log().mutex};
-        mp::test::presenter_log().surface =
-            static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(stands_in));
+        // A handle is a number that Windows gives the type void*, and the
+        // presenter reports it as that number (video_d3d11's `surface` row);
+        // HandleToULong is the SDK's word for it.
+        mp::test::presenter_log().surface = HandleToULong(stands_in);
     }
 
     Engine engine{"picture"};
@@ -350,10 +351,9 @@ TEST_CASE("a shell that dies holding the picture takes nothing with it",
         // **A different number for the same thing**, which is the whole reason
         // the generation is on the wire beside it: a duplicate is valid in the
         // process that asked and says nothing about which picture it is.
-        CHECK(handle != static_cast<std::uint64_t>(
-                            reinterpret_cast<std::uintptr_t>(stands_in)));
+        CHECK(handle != HandleToULong(stands_in));
         CHECK(generation != 0);
-        ours = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(handle));
+        ours = ULongToHandle(static_cast<unsigned long>(handle));
         // Real, not merely non-zero.
         DWORD flags = 0;
         CHECK(GetHandleInformation(ours, &flags) != FALSE);
@@ -366,7 +366,7 @@ TEST_CASE("a shell that dies holding the picture takes nothing with it",
         const std::uint64_t twice = second.u64();
         CHECK(second.u64() == generation);
         CHECK(twice != handle);
-        CloseHandle(reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(twice)));
+        CloseHandle(ULongToHandle(static_cast<unsigned long>(twice)));
         // And no goodbye, which is what a killed process looks like from here.
     }
 
@@ -412,7 +412,7 @@ TEST_CASE("a shell that dies holding the picture takes nothing with it",
         REQUIRE(r.complete());
         REQUIRE(again != 0);
         DWORD flags = 0;
-        const HANDLE reopened = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(again));
+        const HANDLE reopened = ULongToHandle(static_cast<unsigned long>(again));
         CHECK(GetHandleInformation(reopened, &flags) != FALSE);
         CloseHandle(reopened);
     }

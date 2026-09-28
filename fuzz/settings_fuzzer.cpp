@@ -15,11 +15,14 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <string_view>
 
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size)
 {
-    const std::string_view text{reinterpret_cast<const char*>(data), size};
+    // The bytes copied into characters, rather than looked at as them.
+    const std::string copy(data, data + size);
+    const std::string_view text{copy};
     const mp::SettingsFile file = mp::read_settings(text, "fuzz");
 
     // Touch everything it produced, so that a length or an index that is wrong
