@@ -515,6 +515,13 @@ struct MpDemux {
     /// first version of this file did -- throws away a whole cluster of audio.
     std::unique_ptr<EbmlElement> cluster;
     std::unique_ptr<EbmlElement> pending;
+    /// **The same for a BlockGroup read whole** (`read_whole`): one that states
+    /// more than it holds runs into what follows it. A child of the cluster is
+    /// the next child to take; a level-1 element is `pending`, and the cluster
+    /// ends once the block in hand has been handed out -- the block keeps its
+    /// cluster until then, for its timestamp.
+    std::unique_ptr<EbmlElement> pending_child;
+    bool cluster_ended = false;
     std::uint64_t cluster_ts = 0; ///< unscaled
     /// Whether the cluster's Timestamp has been read and libmatroska told it.
     bool cluster_timed = false;
@@ -577,6 +584,54 @@ EbmlElement* next_level1(MpDemux* d)
 {
     return d->stream->FindNextElement(EBML_CONTEXT(d->segment.get()), d->upper,
                                       0xFFFFFFFFFFFFFFFFull, true, 1);
+}
+
+/// What reading a master whole stopped on, when that belongs above the master.
+struct Above {
+    std::unique_ptr<EbmlElement> element;
+    /// 1 for the master's sibling, 2 for its parent's, and so on.
+    int levels = 0;
+};
+
+/// Reads `el` whole: a master and everything in it, or a block and its data.
+///
+/// **libebml ends a master that states more than it holds on whatever follows
+/// it**, as it ends a cluster: the element it met is handed back through
+/// `Read`'s last two arguments, its header read and the stream at its data,
+/// with how many levels above the master's children it belongs. It is the
+/// caller's, and the next element of its level -- dropping it leaked it, and
+/// the walk went on from inside its data. With the count at 0 the pointer is
+/// not handed back: libebml can leave in it an element it took as a child,
+/// which the master owns.
+///
+/// **The level counter passed to `Read` must be a fresh one.** libebml uses it
+/// as scratch while it descends, and handing it the walk's own counter left an
+/// Info read as an empty master -- silently, so the file simply had no
+/// duration and no timestamp scale. Every `Read` here gets its own.
+Above read_whole(MpDemux* d, EbmlElement& el)
+{
+    int level = 0;
+    EbmlElement* found = nullptr;
+    el.Read(*d->stream, EBML_CONTEXT(&el), level, found, true);
+    Above above;
+    if (level > 0 && found != nullptr) {
+        above.element.reset(found);
+        above.levels = level;
+    }
+    return above;
+}
+
+/// Steps over `el`, and hands back what doing so ran into.
+///
+/// **An element of unknown size is stepped over by reading through it** --
+/// only a segment or a cluster may have one, and a muxer that writes as it
+/// records leaves every cluster's size unknown, ending one where the next
+/// begins. libebml reads on until an element that is none of its own and
+/// hands that element back, header read, as `Read` does: the caller's, and
+/// what comes next. One of known size is a seek, and nothing comes back.
+std::unique_ptr<EbmlElement> skip_whole(MpDemux* d, EbmlElement& el)
+{
+    return std::unique_ptr<EbmlElement>{el.SkipData(*d->stream, EBML_CONTEXT(&el))};
 }
 
 void read_track_entry(MpDemux* d, KaxTrackEntry& entry)
@@ -802,15 +857,9 @@ bool read_head(MpDemux* d)
     std::unique_ptr<EbmlElement> el{next_level1(d)};
     while (el) {
         const EbmlId id = EbmlId(*el);
+        Above above;
         if (id == EBML_ID(KaxInfo)) {
-            // **The level counter passed to `Read` must be a fresh one.**
-            // libebml uses it as scratch while it descends, and handing it the
-            // walk's own counter left this element read as an empty master --
-            // silently, so the file simply had no duration and no timestamp
-            // scale. Every `Read` here gets its own.
-            int level = 0;
-            EbmlElement* dummy = nullptr;
-            el->Read(*d->stream, EBML_CONTEXT(el.get()), level, dummy, true);
+            above = read_whole(d, *el);
             auto& info = static_cast<EbmlMaster&>(*el);
             if (auto* scale = FindChild<KaxTimestampScale>(info)) {
                 const auto value = static_cast<std::uint64_t>(*scale);
@@ -822,9 +871,7 @@ bool read_head(MpDemux* d)
                 d->duration_scaled = float_of(d, *duration);
             }
         } else if (id == EBML_ID(KaxTracks)) {
-            int level = 0;
-            EbmlElement* dummy = nullptr;
-            el->Read(*d->stream, EBML_CONTEXT(el.get()), level, dummy, true);
+            above = read_whole(d, *el);
             auto& tracks = static_cast<EbmlMaster&>(*el);
             // `EbmlMaster::operator[]` indexes with an `unsigned`, and
             // `ListSize` answers in `size_t`. The loop counts in what the
@@ -838,9 +885,7 @@ bool read_head(MpDemux* d)
             // **Matroska's own seek index**, and the reason seeking here is a
             // lookup rather than a walk. It is almost always at the end of the
             // file, which is why this walk does not stop at the first cluster.
-            int level = 0;
-            EbmlElement* dummy = nullptr;
-            el->Read(*d->stream, EBML_CONTEXT(el.get()), level, dummy, true);
+            above = read_whole(d, *el);
             auto& cues = static_cast<EbmlMaster&>(*el);
             for (unsigned i = 0; i < cues.ListSize(); ++i) {
                 if (EbmlId(*cues[i]) != EBML_ID(KaxCuePoint)) {
@@ -864,11 +909,21 @@ bool read_head(MpDemux* d)
             if (d->first_cluster == 0) {
                 d->first_cluster = el->GetElementPosition();
             }
-            el->SkipData(*d->stream, EBML_CONTEXT(el.get()));
+            above = Above{skip_whole(d, *el), 1};
         } else {
-            el->SkipData(*d->stream, EBML_CONTEXT(el.get()));
+            above = Above{skip_whole(d, *el), 1};
         }
-        el.reset(next_level1(d));
+        // What a read or a step ran into is the next element here, its header
+        // read: looking for one from where the stream stands would start
+        // inside it. One above the segment ends the walk.
+        if (above.element) {
+            if (above.levels != 1) {
+                break;
+            }
+            el = std::move(above.element);
+        } else {
+            el.reset(next_level1(d));
+        }
     }
     // Cue positions are relative to the segment's data, and the index here is
     // absolute, so they are made absolute once. A cue at the start of the audio
@@ -894,6 +949,8 @@ bool restart_at(MpDemux* d, std::uint64_t at)
     d->block_owner.reset();
     d->cluster.reset();
     d->pending.reset();
+    d->pending_child.reset();
+    d->cluster_ended = false;
     d->next_lace = 0;
     d->ended = false;
     d->upper = 0;
@@ -907,12 +964,17 @@ bool restart_at(MpDemux* d, std::uint64_t at)
 bool next_block(MpDemux* d)
 {
     for (int guard = 0; guard < (1 << 24); ++guard) {
+        if (d->cluster_ended) {
+            d->cluster_ended = false;
+            d->cluster.reset();
+            d->pending_child.reset();
+        }
         if (!d->cluster) {
             std::unique_ptr<EbmlElement> el{d->pending ? d->pending.release()
                                                        : next_level1(d)};
             while (el && EbmlId(*el) != EBML_ID(KaxCluster)) {
-                el->SkipData(*d->stream, EBML_CONTEXT(el.get()));
-                el.reset(next_level1(d));
+                std::unique_ptr<EbmlElement> after = skip_whole(d, *el);
+                el = after ? std::move(after) : std::unique_ptr<EbmlElement>{next_level1(d)};
             }
             if (!el) {
                 return false;
@@ -923,8 +985,14 @@ bool next_block(MpDemux* d)
             d->upper = 0;
         }
 
-        std::unique_ptr<EbmlElement> child{d->stream->FindNextElement(
-            EBML_CONTEXT(d->cluster.get()), d->upper, 0xFFFFFFFFFFFFFFFFull, true, 1)};
+        std::unique_ptr<EbmlElement> child;
+        if (d->pending_child) {
+            child = std::move(d->pending_child);
+            d->upper = 0;
+        } else {
+            child.reset(d->stream->FindNextElement(EBML_CONTEXT(d->cluster.get()), d->upper,
+                                                   0xFFFFFFFFFFFFFFFFull, true, 1));
+        }
         if (!child) {
             d->cluster.reset();
             return false;
@@ -971,9 +1039,13 @@ bool next_block(MpDemux* d)
         // short final frame needs. Reading only the first kind loses exactly one
         // packet per file, which is how this was found.
         if (id == EBML_ID(KaxSimpleBlock) || id == EBML_ID(KaxBlockGroup)) {
-            int inner_upper = 0;
-            EbmlElement* dummy = nullptr;
-            child->Read(*d->stream, EBML_CONTEXT(child.get()), inner_upper, dummy, true);
+            Above above = read_whole(d, *child);
+            if (above.levels == 1) {
+                d->pending_child = std::move(above.element);
+            } else if (above.element) {
+                d->pending = std::move(above.element);
+                d->cluster_ended = true;
+            }
 
             KaxInternalBlock* block = nullptr;
             if (id == EBML_ID(KaxSimpleBlock)) {
@@ -1041,7 +1113,9 @@ bool next_block(MpDemux* d)
             d->next_lace = 0;
             return true;
         }
-        child->SkipData(*d->stream, EBML_CONTEXT(child.get()));
+        // Nothing comes back: only a segment or a cluster may leave its size
+        // unknown, and a cluster's children all state theirs.
+        skip_whole(d, *child);
     }
     return false;
 }
@@ -1262,10 +1336,9 @@ try {
     if (!head || EbmlId(*head) != EBML_ID(EbmlHead)) {
         return MP_ERR_UNSUPPORTED;
     }
+    Above after_head;
     {
-        int level = 0;
-        EbmlElement* dummy = nullptr;
-        head->Read(*d->stream, EBML_CONTEXT(head.get()), level, dummy, true);
+        after_head = read_whole(d.get(), *head);
         auto& master = static_cast<EbmlMaster&>(*head);
         if (auto* type = FindChild<EDocType>(master)) {
             const std::string doc(*type);
@@ -1281,11 +1354,16 @@ try {
     // before it -- a Void at the top level is legal -- so one that is not the
     // segment is skipped rather than taken for it. `FindNextID` gives up by
     // itself on an element of unknown size that is not the one asked for, and
-    // every other is skipped whole, so the walk ends.
-    d->segment.reset(d->stream->FindNextID(EBML_INFO(KaxSegment), 0xFFFFFFFFFFFFFFFFull));
+    // every other is skipped whole, so the walk ends. An element the header's
+    // read ran into is the first one after it.
+    d->segment = after_head.element ? std::move(after_head.element)
+                                    : std::unique_ptr<EbmlElement>{d->stream->FindNextID(
+                                          EBML_INFO(KaxSegment), 0xFFFFFFFFFFFFFFFFull)};
     while (d->segment && EbmlId(*d->segment) != EBML_ID(KaxSegment)) {
-        d->segment->SkipData(*d->stream, EBML_CONTEXT(d->segment.get()));
-        d->segment.reset(d->stream->FindNextID(EBML_INFO(KaxSegment), 0xFFFFFFFFFFFFFFFFull));
+        std::unique_ptr<EbmlElement> after = skip_whole(d.get(), *d->segment);
+        d->segment = after ? std::move(after)
+                           : std::unique_ptr<EbmlElement>{d->stream->FindNextID(
+                                 EBML_INFO(KaxSegment), 0xFFFFFFFFFFFFFFFFull)};
     }
     if (!d->segment) {
         return MP_ERR_UNSUPPORTED;

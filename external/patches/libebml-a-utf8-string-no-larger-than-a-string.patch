@@ -1,0 +1,17 @@
+libebml: a UTF-8 string is no larger than a string
+
+EbmlUnicodeString::SizeIsValid accepts any size, and its ReadData makes a std::string of that size and reads the element into it. EbmlString, whose ReadData does the same, allows less than 0x7FFFFFFF bytes, as EbmlBinary does for the same reason. So a Matroska file of 74 bytes -- a MuxingApp stating 2^44 bytes inside an Info stating a little more, in a Segment of unknown size -- has the reader ask for sixteen tebibytes from inside EbmlMaster::Read: AddressSanitizer stops it as larger than any allocation it makes, and a build without it throws std::bad_alloc when the system refuses. It was made after MediaPerch's Matroska fuzzer met a block element doing the same, whose bound libmatroska had dropped, to see whether any other element did. EbmlUnicodeString takes EbmlString's bound, so FindNextElement goes on looking past a UTF-8 string no string element may have, as it does past a binary one. Against release-1.4.3-535-g928e273.
+
+diff --git a/ebml/EbmlUnicodeString.h b/ebml/EbmlUnicodeString.h
+index 5b2304b..7845f61 100644
+--- a/ebml/EbmlUnicodeString.h
++++ b/ebml/EbmlUnicodeString.h
+@@ -68,7 +68,7 @@ class EBML_DLL_API EbmlUnicodeString : public EbmlElementDefaultStorage<const wc
+   public:
+     EbmlUnicodeString(const EbmlCallbacksDefault<const wchar_t *> &);
+ 
+-    bool SizeIsValid(std::uint64_t /*size*/) const override {return true;} // any size is possible
++    bool SizeIsValid(std::uint64_t size) const override {return size < 0x7FFFFFFF;} // ReadData allocates the whole size, as EbmlString's does
+     filepos_t RenderData(IOCallback & output, bool bForceRender, const ShouldWrite & writeFilter = WriteSkipDefault) override;
+     filepos_t ReadData(IOCallback & input, ScopeMode ReadFully = SCOPE_ALL_DATA) override;
+     filepos_t UpdateSize(const ShouldWrite & writeFilter = WriteSkipDefault, bool bForceRender = false) override;

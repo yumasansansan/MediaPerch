@@ -1,0 +1,32 @@
+libebml: an element a master adopts is read or deleted, never dropped
+
+When a child of a master stops on an element that belongs to the master, EbmlMaster::Read adopts it as the master's next child, and two of the ways on from there drop it: it is neither read into the master nor deleted, FoundElt still points at it with UpperEltFound back at zero, which no caller takes for an element to own, and it leaks with whatever it held.
+
+An element ending after the master -- a file with data missing in the middle, as 372b681 put it -- makes the master stop reading and go to processCrc. It is deleted there now and FoundElt cleared, as the branch's other way out does when nothing is left to read (1c85d47).
+
+Before going round again the branch sets MaxSizeToRead to what is left after the element, and the loop runs only while that is above zero, so an element ending exactly where the master ends was never read. The loop works out the room after an element itself, once it has read it; what the adoption needs is the room from where the element starts, which it fits, and that is what it takes now.
+
+MediaPerch's Matroska fuzzer, built for Linux with LeakSanitizer, found both: a TrackOperation met inside a child of a TrackEntry and ending past the TrackEntry, on its 171st input, and a CuePoint that a sibling's reading ran into and that ended with the Cues, 176 bytes and the point lost at every reading. Against release-1.4.3-535-g928e273.
+
+diff --git a/src/EbmlMaster.cpp b/src/EbmlMaster.cpp
+index 50f63d3..f892304 100644
+--- a/src/EbmlMaster.cpp
++++ b/src/EbmlMaster.cpp
+@@ -385,9 +385,15 @@ void EbmlMaster::Read(EbmlStream & inDataStream, const EbmlSemanticContext & sCo
+         ElementLevelA = FoundElt;
+         if (IsFiniteSize() && ElementLevelA->IsFiniteSize()) {
+           if (ElementLevelA->GetEndPosition() > GetEndPosition()) {
+-            goto processCrc; // found an upper element that ends after this, we were truncated
++            // found an upper element that ends after this, we were truncated
++            delete FoundElt;
++            FoundElt = nullptr;
++            goto processCrc;
+           }
+-          MaxSizeToRead = GetEndPosition() - ElementLevelA->GetEndPosition(); // even if it's the default value
++          // the room from where it starts, which it fits: the loop works out
++          // what is left after it once it is read, and a room of zero here
++          // dropped one ending where this does
++          MaxSizeToRead = GetEndPosition() - ElementLevelA->GetElementPosition();
+         }
+         continue;
+       }

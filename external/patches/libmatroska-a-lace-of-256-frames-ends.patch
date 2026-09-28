@@ -1,0 +1,31 @@
+libmatroska: a lace of 256 frames ends
+
+A lace states its count of frames less one in a byte, FrameNum, and KaxInternalBlock::ReadData counts up to it with a std::uint8_t Index. For a lace of 256 frames FrameNum is 255, `Index <= FrameNum` holds for every value Index can take, and Index goes round from 255 to 0: fixed lacing never leaves the loop that sizes the frames, and Xiph and EBML lacing make the frames over again from the block's end. Frames of any bytes then run past the end, which throws, and a lace the file had right is dropped as a broken block; frames of no bytes never throw, and the loop makes frames until memory runs out. MediaPerch's Matroska fuzzer found the second with a file of 767 bytes, which had taken 2.3 GB when libFuzzer stopped it. Index counts in std::size_t in both ReadData's readings, the whole block's and the partial one. Against release-1.7.0-289-g67166f0.
+
+diff --git a/src/KaxBlock.cpp b/src/KaxBlock.cpp
+index 55162b1..d6560fc 100644
+--- a/src/KaxBlock.cpp
++++ b/src/KaxBlock.cpp
+@@ -545,8 +545,9 @@ filepos_t KaxInternalBlock::ReadData(IOCallback & input, ScopeMode ReadFully)
+         // read the number of frames in the lace
+         std::uint32_t LastBufferSize = GetSize() - BlockHeadSize - 1; // 1 for number of frame
+         const std::uint8_t FrameNum = Mem.GetUInt8(); // number of frames in the lace - 1
+-        // read the list of frame sizes
+-        std::uint8_t Index;
++        // read the list of frame sizes; counted wider than FrameNum, which a
++        // lace of 256 frames makes 255, so that `Index <= FrameNum` ends
++        std::size_t Index;
+         std::int32_t FrameSize;
+         std::uint32_t SizeRead;
+         std::uint64_t SizeUnknown;
+@@ -673,8 +674,8 @@ filepos_t KaxInternalBlock::ReadData(IOCallback & input, ScopeMode ReadFully)
+         const std::uint32_t TotalLacedSize = GetSize() - BlockHeadSize - 1; // 1 for number of frame
+         std::uint32_t LastBufferSize = TotalLacedSize;
+         const std::uint8_t FrameNum = _TempHead[0]; // number of frames in the lace - 1
+-        // read the list of frame sizes
+-        std::uint8_t Index;
++        // read the list of frame sizes; counted wider than FrameNum, as above
++        std::size_t Index;
+         std::uint32_t FrameSize;
+         std::uint32_t SizeRead;
+         std::uint64_t SizeUnknown;

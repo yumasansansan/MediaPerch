@@ -1,0 +1,19 @@
+libmatroska: a block is a binary element, and no larger than one
+
+KaxInternalBlock is an EbmlBinary, and EbmlBinary::SizeIsValid allows less than 0x7FFFFFFF bytes because a binary element's ReadData allocates its size and reads it in. KaxInternalBlock's own SizeIsValid replaced that with `size >= 4` and nothing above it, while its ReadData still hands the whole block to EbmlBinary::ReadData: so FindNextElement accepts a SimpleBlock or a Block stating any size an EBML number holds, and reading it asks malloc for all of it. MediaPerch's Matroska fuzzer met a 960-byte file with a SimpleBlock stating 0x28100f00096 bytes, 2.7 TiB, which AddressSanitizer stops as larger than any allocation it makes; a build without it asks the system for the terabytes and throws when refused. The block keeps its least of four bytes and takes the binary element's most, so a size no binary element may have is no block either, and FindNextElement goes on looking past it as it does past any other. Against release-1.7.0-289-g67166f0.
+
+diff --git a/matroska/KaxBlock.h b/matroska/KaxBlock.h
+index 99e24f3..9fe0e16 100644
+--- a/matroska/KaxBlock.h
++++ b/matroska/KaxBlock.h
+@@ -186,7 +186,9 @@ class MATROSKA_DLL_API KaxInternalBlock : public libebml::EbmlBinary {
+     ~KaxInternalBlock() override;
+     bool SizeIsValid(std::uint64_t size) const override
+     {
+-      return size >= 4; /// for the moment
++      // The track number, the timestamp and the flags at least, and no more
++      // than any binary element: ReadData allocates the whole size.
++      return size >= 4 && EbmlBinary::SizeIsValid(size);
+     }
+ 
+     std::uint16_t TrackNum() const {return TrackNumber;}

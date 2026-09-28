@@ -1,0 +1,18 @@
+libmatroska: the frames of a block found broken are deleted, not dropped
+
+KaxInternalBlock::ReadData makes a DataBuffer for each frame of a laced block and only then checks that the frames tile the block, and a lace whose sizes do not, or a skip past the end while the frames are made, throws EndOfStreamX. The handler clears myBuffers without deleting what is in it; ReleaseFrames, which the destructor calls, would have, but the list it walks is empty by then. MediaPerch's Matroska fuzzer, built for Linux with LeakSanitizer, found a file with a broken block of 147 frames that lost all 147 each time the block was read, three times in one reading of the file: 17640 bytes in 441 allocations. The handler releases the frames before it clears the list. Against release-1.7.0-289-g67166f0.
+
+diff --git a/src/KaxBlock.cpp b/src/KaxBlock.cpp
+index fb6bcd3..55162b1 100644
+--- a/src/KaxBlock.cpp
++++ b/src/KaxBlock.cpp
+@@ -752,6 +752,9 @@ filepos_t KaxInternalBlock::ReadData(IOCallback & input, ScopeMode ReadFully)
+   } catch (const SafeReadIOCallback::EndOfStreamX&) {
+     SetValueIsSet(false);
+ 
++    // the frames made before the fault: deleted, while the bytes they point
++    // into stay the block's
++    ReleaseFrames();
+     myBuffers.clear();
+     SizeList.clear();
+     Timestamp          = 0;

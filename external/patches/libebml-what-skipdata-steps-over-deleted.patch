@@ -1,0 +1,21 @@
+libebml: what SkipData steps over is deleted
+
+SkipData steps over an element of unknown size by reading the elements after it, and each one known in the context is stepped over in turn -- `Result = Result->SkipData(...)` -- which puts what that returned where the element's own pointer was, so the element itself is never deleted. Stepping over a cluster of unknown size loses every child of it, and then every element it goes on to step over in the parent's context, the following clusters and their children among them: only a segment or a cluster may leave its size unknown, and a muxer that writes as it records leaves every cluster's so. MediaPerch's Matroska demuxer steps over the clusters when it first walks a file, and on a file of two such clusters of two blocks and one LeakSanitizer reported 1264 bytes in 11 allocations, every one made inside SkipData: the second cluster, both Timestamps, a BlockGroup, two SimpleBlocks and what they hold. A recording an hour long loses every block it has. The element stepped over is deleted once it has been. Against release-1.4.3-535-g928e273.
+
+diff --git a/src/EbmlElement.cpp b/src/EbmlElement.cpp
+index 4bfa807..bda50ec 100644
+--- a/src/EbmlElement.cpp
++++ b/src/EbmlElement.cpp
+@@ -381,8 +381,10 @@ EbmlElement * EbmlElement::SkipData(EbmlStream & DataStream, const EbmlSemanticC
+           const auto & MasterContext = static_cast<const EbmlSemanticContextMaster &>(Context);
+           for (EltIndex = 0; EltIndex < EBML_CTX_SIZE(MasterContext); EltIndex++) {
+             if (EbmlId(*Result) == EBML_CTX_IDX_ID(MasterContext,EltIndex)) {
+-              // skip the data with its own context
+-              Result = Result->SkipData(DataStream, EBML_SEM_CONTEXT(EBML_CTX_IDX(MasterContext,EltIndex)), nullptr);
++              // skip the data with its own context, and the element with it
++              EbmlElement * const Skipped = Result;
++              Result = Skipped->SkipData(DataStream, EBML_SEM_CONTEXT(EBML_CTX_IDX(MasterContext,EltIndex)), nullptr);
++              delete Skipped;
+               break; // let's go to the next ID
+             }
+           }

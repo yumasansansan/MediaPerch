@@ -34,8 +34,10 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iterator>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <vector>
 
@@ -468,6 +470,157 @@ bool ebml_header(const std::vector<char>& file, std::size_t at, EbmlHeader& out)
     return true;
 }
 
+/// An element made here: its ID as the specification writes it, its size as an
+/// eight-byte EBML number, and its content -- which `over` bytes more of the
+/// size than it holds run into whatever follows.
+std::vector<char> element(std::uint32_t id, const std::vector<char>& content,
+                          std::uint64_t over = 0)
+{
+    std::vector<char> out;
+    for (int i = (std::bit_width(id) + 7) / 8 - 1; i >= 0; --i) {
+        out.push_back(static_cast<char>(id >> (8 * i)));
+    }
+    const std::uint64_t size = content.size() + over;
+    out.push_back('\x01');
+    for (int i = 6; i >= 0; --i) {
+        out.push_back(static_cast<char>(size >> (8 * i)));
+    }
+    out.insert(out.end(), content.begin(), content.end());
+    return out;
+}
+
+std::vector<char> join(std::initializer_list<std::vector<char>> parts)
+{
+    std::vector<char> out;
+    for (const auto& part : parts) {
+        out.insert(out.end(), part.begin(), part.end());
+    }
+    return out;
+}
+
+/// Eight bytes, most significant first, as EBML stores a number.
+std::vector<char> big_endian(std::uint64_t value)
+{
+    std::vector<char> out;
+    for (int i = 7; i >= 0; --i) {
+        out.push_back(static_cast<char>(value >> (8 * i)));
+    }
+    return out;
+}
+
+/// The three frames of the file `made_mkv` makes: four samples of 16-bit mono
+/// PCM each, numbered so that a frame out of place is one with other numbers.
+std::vector<std::vector<std::uint8_t>> made_frames()
+{
+    return {{1, 0, 2, 0, 3, 0, 4, 0}, {5, 0, 6, 0, 7, 0, 8, 0}, {9, 0, 10, 0, 11, 0, 12, 0}};
+}
+
+/// How `made_mkv` gets its file wrong, or right.
+struct Made {
+    /// Bytes Tracks states beyond what it holds, running into the header of
+    /// the first cluster: five for a cluster of unknown size, twelve for one
+    /// whose size takes eight bytes.
+    std::uint64_t tracks_over = 0;
+    /// Bytes the BlockGroup states beyond what it holds, running into the
+    /// header of the SimpleBlock after it: two.
+    std::uint64_t group_over = 0;
+    /// The clusters' sizes left unknown, each ended by what follows it, as a
+    /// muxer that writes while it records leaves them.
+    bool live = false;
+    /// Frames for the last block to carry as a Xiph lace in place of its one
+    /// frame, each under 255 bytes so that its size takes one.
+    std::vector<std::vector<std::uint8_t>> laced;
+};
+
+/// **A Matroska file made here, byte by byte**, for what no muxer writes on
+/// purpose: one track of 16-bit mono PCM at 48 kHz and two clusters, the first
+/// holding a BlockGroup and then a SimpleBlock and the second a SimpleBlock --
+/// the frames of `made_frames`, in that order.
+std::vector<char> made_mkv(const Made& how)
+{
+    const auto frames = made_frames();
+    const auto number = [](std::uint32_t id, std::uint64_t value) {
+        return element(id, big_endian(value));
+    };
+    const auto text = [](std::uint32_t id, std::string_view value) {
+        return element(id, std::vector<char>(value.begin(), value.end()));
+    };
+    // A block's content: its track as an EBML number, its timestamp as a
+    // 16-bit offset from its cluster's, its flags and its frame.
+    const auto block = [](std::int16_t at, std::uint8_t flags,
+                          const std::vector<std::uint8_t>& frame) {
+        const auto offset = static_cast<std::uint16_t>(at);
+        std::vector<char> out{'\x81', static_cast<char>(offset >> 8),
+                              static_cast<char>(offset & 0xFFu), static_cast<char>(flags)};
+        out.insert(out.end(), frame.begin(), frame.end());
+        return out;
+    };
+    // A SimpleBlock with its size in one byte, so that its header is two.
+    const auto simple = [&](std::int16_t at, const std::vector<std::uint8_t>& frame) {
+        const auto content = block(at, 0x80, frame); // a keyframe
+        std::vector<char> out{'\xA3', static_cast<char>(0x80u | content.size())};
+        out.insert(out.end(), content.begin(), content.end());
+        return out;
+    };
+    // A SimpleBlock carrying a Xiph lace: the count of frames less one, each
+    // size but the last in a byte, and then the frames.
+    const auto xiph = [&](std::int16_t at, const std::vector<std::vector<std::uint8_t>>& lace) {
+        std::vector<std::uint8_t> payload{static_cast<std::uint8_t>(lace.size() - 1)};
+        for (std::size_t i = 0; i + 1 < lace.size(); ++i) {
+            payload.push_back(static_cast<std::uint8_t>(lace[i].size()));
+        }
+        for (const auto& frame : lace) {
+            payload.insert(payload.end(), frame.begin(), frame.end());
+        }
+        return element(0xA3, block(at, 0x82, payload)); // a keyframe, laced the Xiph way
+    };
+    const auto cluster = [&](std::uint64_t at, const std::vector<char>& blocks) {
+        const auto content = join({number(0xE7, at), blocks});
+        if (!how.live) {
+            return element(0x1F43B675, content);
+        }
+        // The size unknown, in one byte: all its bits set.
+        std::vector<char> out{'\x1F', '\x43', '\xB6', '\x75', '\xFF'};
+        out.insert(out.end(), content.begin(), content.end());
+        return out;
+    };
+
+    const auto head =
+        element(0x1A45DFA3, join({number(0x4286, 1), number(0x42F7, 1), number(0x42F2, 4),
+                                  number(0x42F3, 8), text(0x4282, "matroska"),
+                                  number(0x4287, 4), number(0x4285, 2)}));
+    // The segment's size unknown too, which lets it be made in one pass.
+    const std::vector<char> segment{'\x18', '\x53', '\x80', '\x67', '\x01', '\xFF',
+                                    '\xFF', '\xFF', '\xFF', '\xFF', '\xFF', '\xFF'};
+    const auto info = element(0x1549A966, number(0x2AD7B1, 1000000));
+    const auto audio =
+        element(0xE1, join({element(0xB5, big_endian(std::bit_cast<std::uint64_t>(48000.0))),
+                            number(0x9F, 1), number(0x6264, 16)}));
+    const auto entry = element(0xAE, join({number(0xD7, 1), number(0x73C5, 1), number(0x83, 2),
+                                           text(0x86, "A_PCM/INT/LIT"), audio}));
+    const auto tracks = element(0x1654AE6B, entry, how.tracks_over);
+    const auto group = element(0xA0, element(0xA1, block(0, 0x00, frames[0])), how.group_over);
+    return join({head, segment, info, tracks, cluster(0, join({group, simple(1, frames[1])})),
+                 cluster(2, how.laced.empty() ? simple(0, frames[2]) : xiph(0, how.laced))});
+}
+
+/// The packets `made_mkv`'s file gives, read as the host reads them.
+std::vector<std::vector<std::uint8_t>> made_packets(const MpDemuxVtbl& vtbl, const Made& how,
+                                                    const char* name)
+{
+    const auto path = mp::test::temp_path(name);
+    write_file(path, made_mkv(how));
+    std::vector<std::vector<std::uint8_t>> out;
+    {
+        mp::Demux demux;
+        if (demux.open(vtbl, path.string().c_str()) == MP_OK) {
+            out = all_packets(demux);
+        }
+    }
+    std::filesystem::remove(path);
+    return out;
+}
+
 } // namespace
 
 TEST_CASE("a file that is not Matroska is refused, not read as its header",
@@ -600,6 +753,71 @@ TEST_CASE("a block before its cluster's Timestamp is skipped, not placed", "[abi
                          expected.end() - static_cast<std::ptrdiff_t>(got.size())));
     }
     std::filesystem::remove(path);
+}
+
+TEST_CASE("a Matroska made here reads as it was made, its clusters sized or not",
+          "[abi][demux][mkv]")
+{
+    // The file the next test breaks, read whole: three frames, in order,
+    // whether its clusters state their sizes or leave them unknown -- as a
+    // muxer that writes while it records does, each ended where the next
+    // begins.
+    Module module{mkv_module(), MP_KIND_DEMUX};
+    REQUIRE(module.as<MpDemuxVtbl>() != nullptr);
+    const MpDemuxVtbl& vtbl = *module.as<MpDemuxVtbl>();
+    CHECK(made_packets(vtbl, Made{}, "made.mkv") == made_frames());
+    Made live;
+    live.live = true;
+    CHECK(made_packets(vtbl, live, "made_live.mkv") == made_frames());
+}
+
+TEST_CASE("a master that states more than it holds hands over what follows it",
+          "[abi][demux][mkv]")
+{
+    // **libebml ends a master on the first element that is none of its
+    // children's kinds** and hands that element back, header read, as the
+    // next element of its level -- and a master that states more bytes than
+    // it holds runs into whatever follows it that way. This module read the
+    // master and dropped what came back: the element leaked, and the walk went
+    // on from inside its data. Tracks running into the first cluster lost
+    // that cluster; a BlockGroup running into the SimpleBlock after it lost
+    // that block.
+    Module module{mkv_module(), MP_KIND_DEMUX};
+    REQUIRE(module.as<MpDemuxVtbl>() != nullptr);
+    const MpDemuxVtbl& vtbl = *module.as<MpDemuxVtbl>();
+    Made over_live;
+    over_live.tracks_over = 5;
+    over_live.live = true;
+    CHECK(made_packets(vtbl, over_live, "tracks_over_live.mkv") == made_frames());
+    Made over;
+    over.tracks_over = 12;
+    CHECK(made_packets(vtbl, over, "tracks_over.mkv") == made_frames());
+    Made group_over;
+    group_over.group_over = 2;
+    CHECK(made_packets(vtbl, group_over, "group_over.mkv") == made_frames());
+}
+
+TEST_CASE("a lace of 256 frames is read, every frame of it", "[abi][demux][mkv]")
+{
+    // **A lace states its count of frames less one in a byte**, so 256 is the
+    // most a lace holds -- and libmatroska counted up to that byte in a byte of
+    // its own. `Index <= FrameNum` held for every value it could take, the
+    // count went round from 255 to 0, and the frames were made over again from
+    // past the block's end: that threw, and the whole block was dropped as a
+    // broken one. With frames of no bytes nothing threw, and it made frames
+    // until memory ran out, which is how the fuzzer found it.
+    Module module{mkv_module(), MP_KIND_DEMUX};
+    REQUIRE(module.as<MpDemuxVtbl>() != nullptr);
+    std::vector<std::vector<std::uint8_t>> laced;
+    for (unsigned i = 0; i < 256; ++i) {
+        laced.push_back({static_cast<std::uint8_t>(i), static_cast<std::uint8_t>(255 - i)});
+    }
+    auto expected = made_frames();
+    expected.pop_back();
+    expected.insert(expected.end(), laced.begin(), laced.end());
+    Made made;
+    made.laced = laced;
+    CHECK(made_packets(*module.as<MpDemuxVtbl>(), made, "laced.mkv") == expected);
 }
 
 TEST_CASE("a Matroska with no audio in it still opens", "[abi][demux][mkv]")
