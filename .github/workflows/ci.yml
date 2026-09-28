@@ -371,6 +371,29 @@ jobs:
           # day a row moves, the first question is whether this line changed.
           ffmpeg -version | Select-Object -First 1
 
+      # See the `windows` job for why these two are here: without them the
+      # configure stops, since the tree is not built without its AV1, VP8 and
+      # VP9 decoders.
+      - name: Meson and nasm, which build external/dav1d
+        run: |
+          & "$env:CONDA\Scripts\conda.exe" create -y -n mediaperch-build -c conda-forge meson nasm
+          $root = "$env:CONDA\envs\mediaperch-build"
+          Add-Content -Path $env:GITHUB_PATH -Value "$root\Scripts"
+          Add-Content -Path $env:GITHUB_PATH -Value "$root\Library\bin"
+
+      - name: make, from the MSYS2 the image already has
+        run: |
+          $pacman = "C:\msys64\usr\bin\pacman.exe"
+          $installed = $false
+          try {
+              & $pacman -S --noconfirm --needed --disable-download-timeout make
+              $installed = $LASTEXITCODE -eq 0
+          } catch { }
+          if (-not $installed) {
+              & $pacman -Sy --noconfirm --disable-download-timeout
+              & $pacman -S --noconfirm --needed --disable-download-timeout make
+          }
+
       - name: LLVM, pinned
         shell: bash
         run: bash ci/setup.sh

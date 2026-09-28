@@ -392,7 +392,12 @@ set_target_properties(mediaperch_tests PROPERTIES FOLDER "tests")
 
 list(APPEND CMAKE_MODULE_PATH "${catch2_SOURCE_DIR}/extras")
 include(Catch)
-catch_discover_tests(mediaperch_tests)
+# The tests are listed when CTest runs them rather than when the program is
+# built, since listing them runs the program: the AVX-512 build is built on
+# every runner and run only where the processor has AVX-512 (see the CI), and
+# listed at build time it stopped the build at the first instruction the
+# runner lacked.
+catch_discover_tests(mediaperch_tests DISCOVERY_MODE PRE_TEST)
 
 # **Either engine, alone.** Two programs that link one engine and not the
 # other, and use it: the link line is the proof, because a reference across

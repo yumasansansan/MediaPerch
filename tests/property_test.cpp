@@ -18,6 +18,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -35,10 +36,16 @@ public:
         return static_cast<std::uint32_t>(state_ >> 33);
     }
 
-    /// Inclusive.
-    std::uint32_t between(std::uint32_t lo, std::uint32_t hi) noexcept
+    /// Inclusive, from `lo` to `hi`, which must not be below it: an empty range
+    /// has nothing to give, and says so rather than dividing by zero. The span
+    /// is counted in 64 bits, where the whole 32-bit range is not zero either.
+    std::uint32_t between(std::uint32_t lo, std::uint32_t hi)
     {
-        return lo + next() % (hi - lo + 1);
+        if (hi < lo) {
+            throw std::invalid_argument("Rng::between: hi is below lo");
+        }
+        const std::uint64_t span = std::uint64_t{hi} - lo + 1;
+        return static_cast<std::uint32_t>(lo + next() % span);
     }
 
     template <typename T, std::size_t N>
