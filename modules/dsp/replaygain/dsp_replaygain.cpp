@@ -200,8 +200,10 @@ try {
     if (d == nullptr || out == nullptr || out_bytes < 64) {
         return MP_ERR_INVALID;
     }
-    const double measured = d->meter.integrated_lufs();
-    const bool heard = measured > mp::loudness::Meter::silence() / 2.0;
+    // The integrated loudness goes over every block the meter has closed, so
+    // it is asked for by the two rows that show it and by no other: asked at
+    // the top, a sweep of the rows went over them all nine times.
+    const auto heard = [](double lufs) { return lufs > mp::loudness::Meter::silence() / 2.0; };
 
     switch (index) {
     case 0:
@@ -240,9 +242,10 @@ try {
         std::snprintf(out, out_bytes, "applied\t%+.2f\tdB actually applied (read only)",
                       d->applied > 0.0 ? 20.0 * std::log10(d->applied) : -400.0);
         return MP_OK;
-    case 6:
+    case 6: {
         // What the meter heard, so far. On a whole track this is the scan.
-        if (heard) {
+        const double measured = d->meter.integrated_lufs();
+        if (heard(measured)) {
             std::snprintf(out, out_bytes,
                           "loudness\t%.2f\tLUFS integrated so far (read only)", measured);
         } else {
@@ -251,22 +254,26 @@ try {
                           "(read only)");
         }
         return MP_OK;
+    }
     case 7:
         std::snprintf(out, out_bytes,
                       "measured_peak\t%.2f\tdBFS, sample peak not true peak (read only)",
                       d->meter.sample_peak_db());
         return MP_OK;
-    case 8:
-        if (heard) {
+    case 8: {
+        // replay_gain_db()'s own difference, from the one measurement.
+        const double measured = d->meter.integrated_lufs();
+        if (heard(measured)) {
             std::snprintf(out, out_bytes,
                           "suggested\t%+.2f\tdB this would need to reach the target "
                           "(read only)",
-                          d->meter.replay_gain_db(d->target_lufs));
+                          d->target_lufs - measured);
         } else {
             std::snprintf(out, out_bytes,
                           "suggested\t--\tnot enough audio to say yet (read only)");
         }
         return MP_OK;
+    }
     default:
         return MP_END;
     }

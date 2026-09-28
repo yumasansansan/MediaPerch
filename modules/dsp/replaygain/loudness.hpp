@@ -86,15 +86,29 @@ private:
     /// `step_` -- three quarters of the way through the last.
     std::uint32_t block_ = 0;
     std::uint32_t step_ = 0;
-    /// The running sum of squares per channel, for each block still open.
-    std::vector<std::vector<double>> partial_;
+    /// The running sum of squares per channel, for each block still open, and
+    /// how many frames each has: a ring of `slots_` blocks, the oldest at
+    /// `head_`, `open_` of them in use.
+    ///
+    /// **Made once, at configure.** A block opens every hundred milliseconds,
+    /// and a list of them that grew by one at the back and shrank from the
+    /// front allocated a block's worth each time, on the thread that plays.
+    std::vector<double> partial_;
     std::vector<std::uint32_t> filled_;
+    std::size_t slots_ = 0;
+    std::size_t head_ = 0;
+    std::size_t open_ = 0;
     /// Frames seen, which is what decides when a block starts.
     std::uint64_t position_ = 0;
 
     /// Every closed block's weighted mean square. The gates need all of them,
-    /// and one double per hundred milliseconds is a megabyte per day.
+    /// and one double per hundred milliseconds is seven megabytes a day.
     std::vector<double> loudness_;
+    /// The blocks the absolute gate let through, summed as they closed, in
+    /// the order a pass over `loudness_` would add them: that gate does not
+    /// move, so asking for the integrated loudness need not apply it again.
+    double absolute_sum_ = 0.0;
+    std::size_t absolute_count_ = 0;
     std::uint64_t blocks_ = 0;
     double peak_ = 0.0;
 

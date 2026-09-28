@@ -21,6 +21,58 @@ void lay_out(std::vector<double>& storage, std::vector<double*>& planes,
     }
 }
 
+// Interleaved frames into planes and back. One channel is a copy and two are
+// loops with the count known to the compiler, which makes vectors of them;
+// any other count stores each sample at a stride known only at run time.
+
+void deinterleave(const double* in, std::uint32_t channels, std::uint32_t frames,
+                  double* const* planes) noexcept
+{
+    if (channels == 1) {
+        std::copy_n(in, frames, planes[0]);
+        return;
+    }
+    if (channels == 2) {
+        double* left = planes[0];
+        double* right = planes[1];
+        for (std::uint32_t n = 0; n < frames; ++n) {
+            left[n] = in[2 * static_cast<std::size_t>(n)];
+            right[n] = in[(2 * static_cast<std::size_t>(n)) + 1];
+        }
+        return;
+    }
+    for (std::uint32_t c = 0; c < channels; ++c) {
+        double* plane = planes[c];
+        for (std::uint32_t n = 0; n < frames; ++n) {
+            plane[n] = in[(static_cast<std::size_t>(n) * channels) + c];
+        }
+    }
+}
+
+void interleave(const double* const* planes, std::uint32_t channels, std::uint32_t frames,
+                double* out) noexcept
+{
+    if (channels == 1) {
+        std::copy_n(planes[0], frames, out);
+        return;
+    }
+    if (channels == 2) {
+        const double* left = planes[0];
+        const double* right = planes[1];
+        for (std::uint32_t n = 0; n < frames; ++n) {
+            out[2 * static_cast<std::size_t>(n)] = left[n];
+            out[(2 * static_cast<std::size_t>(n)) + 1] = right[n];
+        }
+        return;
+    }
+    for (std::uint32_t c = 0; c < channels; ++c) {
+        const double* plane = planes[c];
+        for (std::uint32_t n = 0; n < frames; ++n) {
+            out[(static_cast<std::size_t>(n) * channels) + c] = plane[n];
+        }
+    }
+}
+
 } // namespace
 
 Format dsp_bus_format(const Format& source) noexcept
@@ -258,12 +310,7 @@ bool DspChain::push(std::size_t from, const double* const* input, std::uint32_t 
     // Back to interleaved for the quantiser at the end of Path B.
     const std::uint32_t channels = output_.channels;
     out.resize(static_cast<std::size_t>(current_frames) * channels);
-    for (std::uint32_t c = 0; c < channels; ++c) {
-        const double* plane = current[c];
-        for (std::uint32_t n = 0; n < current_frames; ++n) {
-            out[static_cast<std::size_t>(n) * channels + c] = plane[n];
-        }
-    }
+    interleave(current, channels, current_frames, out.data());
     out_frames = current_frames;
     return true;
 }
@@ -285,13 +332,7 @@ bool DspChain::run(const double* interleaved, std::uint32_t frames, std::vector<
         return true;
     }
 
-    const std::uint32_t channels = input_.channels;
-    for (std::uint32_t c = 0; c < channels; ++c) {
-        double* plane = scratch_planes_[c];
-        for (std::uint32_t n = 0; n < frames; ++n) {
-            plane[n] = interleaved[static_cast<std::size_t>(n) * channels + c];
-        }
-    }
+    deinterleave(interleaved, input_.channels, frames, scratch_planes_.data());
     return push(0, scratch_planes_.data(), frames, out, out_frames);
 }
 

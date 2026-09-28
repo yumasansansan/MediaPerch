@@ -149,6 +149,54 @@ FLAC__StreamDecoderReadStatus read_callback(const FLAC__StreamDecoder*, FLAC__by
     return FLAC__STREAM_DECODER_READ_STATUS_CONTINUE;
 }
 
+/// A frame's samples interleaved into containers of `Bytes`, each moved up by
+/// `shift` to sit at the top of its container and written a byte at a time.
+/// `Channels` is the channel count where the compiler is told it, and 0 where
+/// it is `channels`.
+///
+/// **The sizes known to the compiler, and the rest held here.** The loop read
+/// the container's size, the shift and each channel's samples from memory for
+/// every byte it wrote, since a byte written could have been any of them as
+/// far as the compiler knew; with the sizes known and the rest in locals, the
+/// loop for each container is one the compiler makes vectors of.
+template <std::uint32_t Bytes, std::uint32_t Channels>
+void interleave(const FLAC__int32* const buffer[], std::uint32_t channels,
+                std::uint32_t frames, std::uint32_t shift, std::uint8_t* out) noexcept
+{
+    const std::uint32_t count = Channels != 0 ? Channels : channels;
+    const FLAC__int32* planes[FLAC__MAX_CHANNELS];
+    for (std::uint32_t ch = 0; ch < count; ++ch) {
+        planes[ch] = buffer[ch];
+    }
+    const std::size_t stride = static_cast<std::size_t>(count) * Bytes;
+    for (std::uint32_t i = 0; i < frames; ++i) {
+        std::uint8_t* o = out + i * stride;
+        for (std::uint32_t ch = 0; ch < count; ++ch) {
+            const auto value = static_cast<std::uint32_t>(planes[ch][i]) << shift;
+            for (std::uint32_t b = 0; b < Bytes; ++b) {
+                o[(ch * Bytes) + b] = static_cast<std::uint8_t>(value >> (8 * b));
+            }
+        }
+    }
+}
+
+template <std::uint32_t Bytes>
+void interleave(const FLAC__int32* const buffer[], std::uint32_t channels,
+                std::uint32_t frames, std::uint32_t shift, std::uint8_t* out) noexcept
+{
+    switch (channels) {
+    case 1:
+        interleave<Bytes, 1>(buffer, channels, frames, shift, out);
+        break;
+    case 2:
+        interleave<Bytes, 2>(buffer, channels, frames, shift, out);
+        break;
+    default:
+        interleave<Bytes, 0>(buffer, channels, frames, shift, out);
+        break;
+    }
+}
+
 FLAC__StreamDecoderWriteStatus write_callback(const FLAC__StreamDecoder*,
                                               const FLAC__Frame* frame,
                                               const FLAC__int32* const buffer[],
@@ -171,6 +219,10 @@ FLAC__StreamDecoderWriteStatus write_callback(const FLAC__StreamDecoder*,
     }
     const std::uint32_t frames = frame->header.blocksize;
     const std::uint32_t channels = c->format.channels;
+    if (channels > FLAC__MAX_CHANNELS) {
+        c->failed = true;
+        return FLAC__STREAM_DECODER_WRITE_STATUS_ABORT;
+    }
     const std::size_t needed = static_cast<std::size_t>(frames) * c->frame_bytes;
     if (c->out == nullptr || c->out_bytes + needed > c->out_room) {
         c->overflowed = true;
@@ -179,15 +231,19 @@ FLAC__StreamDecoderWriteStatus write_callback(const FLAC__StreamDecoder*,
 
     // libFLAC hands over the sample's own value, sign-extended into an int32 and
     // right-aligned. Our containers are left-justified, which for 16, 24 and 32
-    // bits is the same thing and for 20 or 12 is not.
+    // bits is the same thing and for 20 or 12 is not. The container is two,
+    // three or four bytes (mp::pcm::container_for).
     std::uint8_t* out = c->out + c->out_bytes;
-    for (std::uint32_t i = 0; i < frames; ++i) {
-        for (std::uint32_t ch = 0; ch < channels; ++ch) {
-            const auto value = static_cast<std::uint32_t>(buffer[ch][i]) << c->shift;
-            for (std::uint32_t b = 0; b < c->container; ++b) {
-                *out++ = static_cast<std::uint8_t>((value >> (b * 8)) & 0xFFu);
-            }
-        }
+    switch (c->container) {
+    case 2:
+        interleave<2>(buffer, channels, frames, c->shift, out);
+        break;
+    case 3:
+        interleave<3>(buffer, channels, frames, c->shift, out);
+        break;
+    default:
+        interleave<4>(buffer, channels, frames, c->shift, out);
+        break;
     }
     c->out_bytes += needed;
     c->wrote = true;

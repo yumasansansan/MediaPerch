@@ -2,11 +2,14 @@
 
 #include "compare.hpp"
 
+#include <transform.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <cstdint>
 #include <cstdio>
-#include <numbers>
+#include <vector>
 
 namespace mp {
 namespace {
@@ -21,37 +24,28 @@ double db(double ratio) noexcept
     return 10.0 * std::log10(ratio);
 }
 
-/// Iterative radix-2, decimation in time. Small, and small on purpose: the band
-/// check needs a spectrum and nothing else in this tree does, so this is 30
-/// lines rather than a dependency. `tests/compare_test.cpp` checks it against
-/// signals whose transform is known by hand.
-void fft(std::complex<double>* a, unsigned n) noexcept
-{
-    for (unsigned i = 1, j = 0; i < n; ++i) {
-        unsigned bit = n >> 1;
-        for (; (j & bit) != 0; bit >>= 1) {
-            j ^= bit;
-        }
-        j ^= bit;
-        if (i < j) {
-            std::swap(a[i], a[j]);
-        }
-    }
-    for (unsigned len = 2; len <= n; len <<= 1) {
-        const double theta = -2.0 * std::numbers::pi / static_cast<double>(len);
-        const std::complex<double> step{std::cos(theta), std::sin(theta)};
-        for (unsigned i = 0; i < n; i += len) {
-            std::complex<double> w{1.0, 0.0};
-            for (unsigned k = 0; k < len / 2; ++k) {
-                const std::complex<double> u = a[i + k];
-                const std::complex<double> v = a[i + k + len / 2] * w;
-                a[i + k] = u + v;
-                a[i + k + len / 2] = u - v;
-                w *= step;
-            }
+/// What the band check transforms with: one plan and one window for every
+/// spectrum a comparison takes, and the room a window's worth works in.
+///
+/// The transform is transform.hpp's, planned, and each twiddle computed rather
+/// than stepped to: this file had a radix-2 transform of its own whose
+/// twiddles were each the one before times a step, and whose window was made
+/// again for every spectrum.
+struct Spectra {
+    transform::RealFft plan{k_fft};
+    std::vector<double> window = std::vector<double>(k_fft);
+    std::vector<double> scratch = std::vector<double>(k_fft);
+    std::vector<std::complex<double>> bins = std::vector<std::complex<double>>(k_fft / 2 + 1);
+
+    Spectra()
+    {
+        // Hann's window, its cosine by transform::unit, which brings the angle
+        // down to an eighth of a turn in whole numbers before it rounds it.
+        for (unsigned i = 0; i < k_fft; ++i) {
+            window[i] = 0.5 - 0.5 * transform::unit(i, k_fft).real();
         }
     }
-}
+};
 
 /// Mean energy per FFT bin, over as many windows as the signal holds.
 ///
@@ -59,26 +53,20 @@ void fft(std::complex<double>* a, unsigned n) noexcept
 /// a stationary spectrum out of a signal: the point here is the *ratio* of two
 /// such spectra, and any consistent estimator gives the same ratio.
 void spectrum(const float* x, std::uint64_t frames, unsigned channels, unsigned channel,
-              std::vector<double>& out)
+              Spectra& with, std::vector<double>& out)
 {
     out.assign(k_fft / 2 + 1, 0.0);
     if (frames < k_fft) {
         return;
     }
-    std::vector<double> window(k_fft);
-    for (unsigned i = 0; i < k_fft; ++i) {
-        window[i] = 0.5 - 0.5 * std::cos(2.0 * std::numbers::pi * i / k_fft);
-    }
-    std::vector<std::complex<double>> buffer(k_fft);
     std::uint64_t windows = 0;
     for (std::uint64_t at = 0; at + k_fft <= frames; at += k_fft / 2) {
         for (unsigned i = 0; i < k_fft; ++i) {
-            const double v = static_cast<double>(x[(at + i) * channels + channel]);
-            buffer[i] = std::complex<double>{v * window[i], 0.0};
+            with.scratch[i] = static_cast<double>(x[(at + i) * channels + channel]) * with.window[i];
         }
-        fft(buffer.data(), k_fft);
+        with.plan.forward(with.scratch.data(), with.bins.data());
         for (unsigned k = 0; k <= k_fft / 2; ++k) {
-            out[k] += std::norm(buffer[k]);
+            out[k] += std::norm(with.bins[k]);
         }
         ++windows;
     }
@@ -139,6 +127,144 @@ double correlation(const float* a, const float* b, std::uint64_t frames, unsigne
     return sum / std::sqrt(ea * eb);
 }
 
+/// Every lag's cross term -- the sum of a[n] b[n + lag] over the n for which
+/// both are among the `frames` -- for each lag from -max_lag to max_lag, at
+/// [lag + max_lag].
+///
+/// **By blocks of `a`, each transformed with the stretch of `b` it meets.** One
+/// block's terms at every lag at once are the inverse transform of the one's
+/// transform times the other's conjugate, and the blocks' terms add up to the
+/// whole's. Lag by lag, the whole overlap was summed for every one of the
+/// 2 max_lag + 1 lags; transformed, it is three transforms of 2^16 points for
+/// every 61440 frames at the usual 2048 lags, and the error of each block's
+/// terms is a transform's -- a few times 1e-16 of the product of the two
+/// blocks' norms -- where one running sum over millions of products collected a
+/// rounding for each of them.
+std::vector<double> cross_terms(const float* a, const float* b, std::uint64_t frames,
+                                std::size_t max_lag)
+{
+    const std::size_t lags = 2 * max_lag + 1;
+    const std::size_t size = transform::next_power_of_two(std::max<std::size_t>(4 * lags, 1u << 16));
+    const std::size_t block = size - (lags - 1);
+    transform::RealFft plan(size);
+    std::vector<double> x(size);
+    std::vector<double> y(size);
+    std::vector<double> back(size);
+    std::vector<std::complex<double>> fx(size / 2 + 1);
+    std::vector<std::complex<double>> fy(size / 2 + 1);
+    std::vector<double> out(lags, 0.0);
+    for (std::uint64_t start = 0; start < frames; start += block) {
+        const auto length = static_cast<std::size_t>(std::min<std::uint64_t>(block, frames - start));
+        // The block, and after it nothing.
+        for (std::size_t i = 0; i < length; ++i) {
+            x[i] = static_cast<double>(a[start + i]);
+        }
+        std::fill(x.begin() + static_cast<std::ptrdiff_t>(length), x.end(), 0.0);
+        // What the block meets of `b`, from max_lag before it to max_lag after
+        // it, and nothing where that is outside the signal.
+        for (std::size_t j = 0; j < size; ++j) {
+            const auto m = static_cast<std::int64_t>(start + j) - static_cast<std::int64_t>(max_lag);
+            const bool inside = j < length + lags - 1 && m >= 0 &&
+                                static_cast<std::uint64_t>(m) < frames;
+            y[j] = inside ? static_cast<double>(b[static_cast<std::uint64_t>(m)]) : 0.0;
+        }
+        plan.forward(x.data(), fx.data());
+        plan.forward(y.data(), fy.data());
+        // The conjugate of one times the other, on the real and imaginary parts:
+        // a std::complex product carries a branch for Annex G's infinities in
+        // libstdc++, which keeps a loop with it scalar.
+        for (std::size_t k = 0; k < fy.size(); ++k) {
+            const double ar = fx[k].real();
+            const double ai = -fx[k].imag();
+            const double br = fy[k].real();
+            const double bi = fy[k].imag();
+            fy[k] = {(ar * br) - (ai * bi), (ar * bi) + (ai * br)};
+        }
+        plan.inverse(fy.data(), back.data());
+        // back[j] is the sum of x[i] y[i + j]: the block against `b` at the lag
+        // j - max_lag. Nothing wraps round: x ends at `length` and y at
+        // `length + lags - 1`, which is at most `size`.
+        for (std::size_t j = 0; j < lags; ++j) {
+            out[j] += back[j];
+        }
+    }
+    return out;
+}
+
+/// A signal's energy in the parts a lag leaves out or keeps, for `frames` of
+/// at least twice `max_lag`: the head's from each point to its end, the
+/// middle's, and the tail's from its start to each point. The energy of the
+/// part in the overlap at any lag is a sum of three of these, and nothing is
+/// ever subtracted -- so a lag that leaves most of the energy outside the
+/// overlap loses nothing to cancellation.
+struct Edges {
+    std::vector<double> head_from; ///< [k]: x[k]^2 + ... + x[max_lag - 1]^2
+    double middle = 0.0;           ///< x[max_lag]^2 + ... + x[frames - max_lag - 1]^2
+    std::vector<double> tail_to;   ///< [j]: x[frames - max_lag]^2 + ... + j of them
+};
+
+Edges edges_of(const float* x, std::uint64_t frames, std::size_t max_lag)
+{
+    Edges e;
+    e.head_from.assign(max_lag + 1, 0.0);
+    for (std::size_t k = max_lag; k-- > 0;) {
+        const auto v = static_cast<double>(x[k]);
+        e.head_from[k] = e.head_from[k + 1] + (v * v);
+    }
+    const auto middle = static_cast<std::size_t>(frames - (2 * max_lag));
+    e.middle = transform::sum_of(middle, [x, max_lag](std::size_t i) {
+        const auto v = static_cast<double>(x[max_lag + i]);
+        return v * v;
+    });
+    e.tail_to.assign(max_lag + 1, 0.0);
+    const float* tail = x + (frames - max_lag);
+    for (std::size_t j = 0; j < max_lag; ++j) {
+        const auto v = static_cast<double>(tail[j]);
+        e.tail_to[j + 1] = e.tail_to[j] + (v * v);
+    }
+    return e;
+}
+
+/// The normalised correlation of `a` and `b` at every lag from -max_lag to
+/// max_lag, at [lag + max_lag]: what correlation() gives, for all of them.
+std::vector<double> correlations(const float* a, const float* b, std::uint64_t frames,
+                                 std::size_t max_lag)
+{
+    const std::size_t lags = 2 * max_lag + 1;
+    std::vector<double> out(lags, 0.0);
+    if (frames < 2 * static_cast<std::uint64_t>(max_lag) + 1) {
+        // Too short for a head and a tail apart: lag by lag, as it was.
+        const auto l = static_cast<std::int64_t>(max_lag);
+        for (std::int64_t lag = -l; lag <= l; ++lag) {
+            out[static_cast<std::size_t>(lag + l)] = correlation(a, b, frames, 1, 0, 0, lag);
+        }
+        return out;
+    }
+    const std::vector<double> cross = cross_terms(a, b, frames, max_lag);
+    const Edges ea = edges_of(a, frames, max_lag);
+    const Edges eb = edges_of(b, frames, max_lag);
+    for (std::size_t i = 0; i < lags; ++i) {
+        double energy_a = 0.0;
+        double energy_b = 0.0;
+        if (i >= max_lag) {
+            // lag = i - max_lag, from 0 up: `a` loses the end of its tail and
+            // `b` the start of its head.
+            const std::size_t lag = i - max_lag;
+            energy_a = ea.head_from[0] + ea.middle + ea.tail_to[max_lag - lag];
+            energy_b = eb.head_from[lag] + eb.middle + eb.tail_to[max_lag];
+        } else {
+            // lag = -(max_lag - i): the other way round.
+            const std::size_t back = max_lag - i;
+            energy_a = ea.head_from[back] + ea.middle + ea.tail_to[max_lag];
+            energy_b = eb.head_from[0] + eb.middle + eb.tail_to[max_lag - back];
+        }
+        if (energy_a > 0.0 && energy_b > 0.0) {
+            out[i] = cross[i] / std::sqrt(energy_a * energy_b);
+        }
+    }
+    return out;
+}
+
 } // namespace
 
 Comparison compare(const float* reference, std::uint64_t reference_frames, const float* subject,
@@ -168,12 +294,16 @@ Comparison compare(const float* reference, std::uint64_t reference_frames, const
     // result: a fidelity figure that is meaningless and does not look it.
     const std::vector<float> flat_reference = downmix(reference, reference_frames, channels);
     const std::vector<float> flat_subject = downmix(subject, subject_frames, channels);
+    const auto search = static_cast<std::size_t>(std::max(max_lag, 0));
+    const std::vector<double> scores =
+        correlations(flat_reference.data(), flat_subject.data(), overlap, search);
+    const auto score_at = [&](int lag) {
+        return scores[static_cast<std::size_t>(lag + static_cast<int>(search))];
+    };
     double best = -2.0;
-    for (int lag = -max_lag; lag <= max_lag; ++lag) {
-        const double c =
-            correlation(flat_reference.data(), flat_subject.data(), overlap, 1, 0, 0, lag);
-        if (c > best) {
-            best = c;
+    for (int lag = -static_cast<int>(search); lag <= static_cast<int>(search); ++lag) {
+        if (score_at(lag) > best) {
+            best = score_at(lag);
             out.lag = lag;
         }
     }
@@ -185,12 +315,11 @@ Comparison compare(const float* reference, std::uint64_t reference_frames, const
     // anything these files contain and far short of a codec delay.
     constexpr int k_guard = 16;
     double elsewhere = -2.0;
-    for (int lag = -max_lag; lag <= max_lag; ++lag) {
+    for (int lag = -static_cast<int>(search); lag <= static_cast<int>(search); ++lag) {
         if (std::abs(lag - out.lag) < k_guard) {
             continue;
         }
-        elsewhere = std::max(elsewhere, correlation(flat_reference.data(), flat_subject.data(),
-                                                    overlap, 1, 0, 0, lag));
+        elsewhere = std::max(elsewhere, score_at(lag));
     }
     out.lag_margin_db = db(std::max(best, 0.0) / std::max(elsewhere, 1e-12));
 
@@ -239,6 +368,51 @@ Comparison compare(const float* reference, std::uint64_t reference_frames, const
     // every reference channel is the only way to tell a permutation from a
     // decode that is simply wrong, and it is what caught Media Foundation
     // rearranging multichannel ALAC.
+    //
+    // Every pair's products and every channel's energy in one pass, a block of
+    // frames at a time laid out as doubles, each sum by transform::dot: each
+    // pair was a pass of its own over every frame, which summed both channels'
+    // energies again.
+    const std::size_t pairs = static_cast<std::size_t>(channels) * channels;
+    std::vector<double> products(pairs, 0.0);
+    std::vector<double> energy_r(channels, 0.0);
+    std::vector<double> energy_s(channels, 0.0);
+    {
+        constexpr std::size_t k_block = 4096;
+        std::vector<double> planes_r(static_cast<std::size_t>(channels) * k_block);
+        std::vector<double> planes_s(static_cast<std::size_t>(channels) * k_block);
+        for (std::uint64_t at = 0; at < n; at += k_block) {
+            const auto length = static_cast<std::size_t>(std::min<std::uint64_t>(k_block, n - at));
+            for (unsigned c = 0; c < channels; ++c) {
+                double* r = planes_r.data() + (c * k_block);
+                double* s = planes_s.data() + (c * k_block);
+                for (std::size_t f = 0; f < length; ++f) {
+                    r[f] = static_cast<double>(reference[((at + f) * channels) + c]);
+                    s[f] = static_cast<double>(subject[((at + f) * channels) + c]);
+                }
+            }
+            for (unsigned d = 0; d < channels; ++d) {
+                const double* r = planes_r.data() + (d * k_block);
+                energy_r[d] += transform::dot(r, r, length);
+                for (unsigned c = 0; c < channels; ++c) {
+                    const double* s = planes_s.data() + (c * k_block);
+                    products[(d * channels) + c] += transform::dot(r, s, length);
+                }
+            }
+            for (unsigned c = 0; c < channels; ++c) {
+                const double* s = planes_s.data() + (c * k_block);
+                energy_s[c] += transform::dot(s, s, length);
+            }
+        }
+    }
+    // What correlation() gives at no lag: reference channel d against subject
+    // channel c, normalised.
+    const auto pair_score = [&](unsigned d, unsigned c) {
+        if (energy_r[d] <= 0.0 || energy_s[c] <= 0.0) {
+            return 0.0;
+        }
+        return products[(d * channels) + c] / std::sqrt(energy_r[d] * energy_s[c]);
+    };
     out.best_for.assign(channels, 0);
     out.channel_margin_db = 999.0;
     for (unsigned c = 0; c < channels; ++c) {
@@ -247,7 +421,7 @@ Comparison compare(const float* reference, std::uint64_t reference_frames, const
         unsigned winner = 0;
         double winning = -2.0;
         for (unsigned d = 0; d < channels; ++d) {
-            const double score = std::abs(correlation(reference, subject, n, channels, d, c, 0));
+            const double score = std::abs(pair_score(d, c));
             if (score > winning) {
                 winning = score;
                 winner = d;
@@ -276,9 +450,10 @@ Comparison compare(const float* reference, std::uint64_t reference_frames, const
         std::vector<double> ss;
         std::vector<double> total_r(k_fft / 2 + 1, 0.0);
         std::vector<double> total_s(k_fft / 2 + 1, 0.0);
+        Spectra with;
         for (unsigned c = 0; c < channels; ++c) {
-            spectrum(reference, n, channels, c, sr);
-            spectrum(subject, n, channels, c, ss);
+            spectrum(reference, n, channels, c, with, sr);
+            spectrum(subject, n, channels, c, with, ss);
             for (unsigned k = 0; k <= k_fft / 2; ++k) {
                 total_r[k] += sr[k];
                 total_s[k] += ss[k];

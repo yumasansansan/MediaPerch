@@ -90,6 +90,9 @@ add_library(mediaperch_abi INTERFACE)
 add_library(MediaPerch::abi ALIAS mediaperch_abi)
 target_include_directories(mediaperch_abi INTERFACE "${CMAKE_CURRENT_LIST_DIR}/include")
 
+# The transforms before the engine, which measures spectra and cross-
+# correlations with them (compare.cpp); the modules use them as well.
+add_subdirectory(modules/shared/transform)
 add_subdirectory(src/engine)
 add_subdirectory(src/player)
 
@@ -160,7 +163,6 @@ if(MEDIAPERCH_BUILD_PLATFORM)
     add_subdirectory(modules/shared/cube)
     add_subdirectory(modules/shared/kernels)
     add_subdirectory(modules/shared/pcm_format)
-    add_subdirectory(modules/shared/transform)
     add_subdirectory(modules/shared/biquad)
     add_subdirectory(modules/shared/convolve)
     add_subdirectory(modules/dsp/mix)

@@ -200,6 +200,20 @@ struct MpDemux {
 
 namespace {
 
+/// Each word's low `Bytes` bytes, in little-endian order. With the count known
+/// to the compiler this is a loop it makes vectors of; with the count known
+/// only at run time, the bytes of every sample were a loop of their own.
+template <unsigned Bytes>
+void low_bytes(const std::int32_t* in, std::uint8_t* out, std::size_t samples) noexcept
+{
+    for (std::size_t i = 0; i < samples; ++i) {
+        const auto v = static_cast<std::uint32_t>(in[i]);
+        for (unsigned b = 0; b < Bytes; ++b) {
+            out[(i * Bytes) + b] = static_cast<std::uint8_t>(v >> (8u * b));
+        }
+    }
+}
+
 MpResult MP_CALL demux_probe(const char* path, const std::uint8_t* head, std::size_t bytes,
                              std::uint32_t* out_score) noexcept
 {
@@ -435,12 +449,17 @@ try {
             o[i] = static_cast<std::uint8_t>(in[i] & 0xFF);
         }
     } else {
-        const unsigned bytes = d->is_float ? 4u : d->container;
-        for (std::size_t i = 0; i < samples; ++i) {
-            const auto v = static_cast<std::uint32_t>(in[i]);
-            for (unsigned b = 0; b < bytes; ++b) {
-                o[i * bytes + b] = static_cast<std::uint8_t>((v >> (8u * b)) & 0xFFu);
-            }
+        // Two, three or four bytes: the containers open took, or a float's.
+        switch (d->is_float ? 4u : d->container) {
+        case 2:
+            low_bytes<2>(in, o, samples);
+            break;
+        case 3:
+            low_bytes<3>(in, o, samples);
+            break;
+        default:
+            low_bytes<4>(in, o, samples);
+            break;
         }
     }
 

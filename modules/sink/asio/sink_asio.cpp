@@ -220,6 +220,21 @@ namespace {
 // The driver's thread
 // --------------------------------------------------------------------------
 
+/// One channel's samples of `Width` bytes out of interleaved frames `stride`
+/// bytes apart. With the width known to the compiler, each sample is a copy of
+/// a size it knows -- a load and a store -- where it was a call to memcpy for
+/// every sample, and the stride read from the sink again after each, since the
+/// copy could have written it.
+template <std::size_t Width>
+void deinterleave(const std::uint8_t* in, std::size_t stride, std::uint32_t frames,
+                  std::uint8_t* out) noexcept
+{
+    for (std::uint32_t f = 0; f < frames; ++f) {
+        std::memcpy(out + (static_cast<std::size_t>(f) * Width),
+                    in + (static_cast<std::size_t>(f) * stride), Width);
+    }
+}
+
 /// Interleaved host frames into the driver's per-channel buffers.
 ///
 /// **MP_RT in everything but name.** It runs on the driver's own thread, which
@@ -254,13 +269,22 @@ void fill_buffers(MpSink* s, long index) noexcept
             }
         }
     } else {
-        const std::size_t width = s->frame_bytes / channels;
+        // Two, three or four bytes: asio_container_bytes() is all open takes.
+        const std::size_t stride = s->frame_bytes;
+        const std::size_t width = stride / channels;
         for (std::size_t c = 0; c < channels; ++c) {
             auto* out = static_cast<std::uint8_t*>(s->buffers[c].buffers[index]);
-            for (std::uint32_t f = 0; f < frames; ++f) {
-                std::memcpy(out + f * width,
-                            in + static_cast<std::size_t>(f) * s->frame_bytes + c * width,
-                            width);
+            const std::uint8_t* from = in + (c * width);
+            switch (width) {
+            case 2:
+                deinterleave<2>(from, stride, frames, out);
+                break;
+            case 3:
+                deinterleave<3>(from, stride, frames, out);
+                break;
+            default:
+                deinterleave<4>(from, stride, frames, out);
+                break;
             }
             const std::size_t wrote = static_cast<std::size_t>(frames) * width;
             if (wrote < s->channel_bytes) {

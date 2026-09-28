@@ -19,6 +19,14 @@ constexpr double k_offset = -0.691;
 constexpr double k_absolute_gate = -70.0;
 constexpr double k_relative_gate = -10.0;
 
+/// The gates as powers, which is what a block's weighted mean square is: a
+/// block is louder than L LUFS when its power is above 10^((L - offset) / 10),
+/// and 10 LU below the mean of the blocks is a tenth of their mean power. So
+/// the gates compare powers, as the standard's equations do before they take
+/// a logarithm, and no block's logarithm is needed at all.
+const double k_absolute_power = std::pow(10.0, (k_absolute_gate - k_offset) / 10.0);
+const double k_relative_power = std::pow(10.0, k_relative_gate / 10.0);
+
 } // namespace
 
 std::vector<mp::biquad::Coefficients> k_weighting(double sample_rate)
@@ -114,6 +122,11 @@ bool Meter::configure(double sample_rate, std::uint32_t channels,
         why = "that rate is too low to have a four-hundred-millisecond block";
         return false;
     }
+    // As many blocks as can be open at once: one opens every step and each
+    // lasts a block, and the oldest closes before the next one opens.
+    slots_ = (block_ + step_ - 1) / step_;
+    partial_.assign(slots_ * channels_, 0.0);
+    filled_.assign(slots_, 0);
     reset();
     return true;
 }
@@ -121,9 +134,11 @@ bool Meter::configure(double sample_rate, std::uint32_t channels,
 void Meter::reset()
 {
     filter_.reset();
-    partial_.clear();
-    filled_.clear();
+    head_ = 0;
+    open_ = 0;
     loudness_.clear();
+    absolute_sum_ = 0.0;
+    absolute_count_ = 0;
     position_ = 0;
     blocks_ = 0;
     peak_ = 0.0;
@@ -133,14 +148,22 @@ void Meter::close_block()
 {
     // The weighted mean square of the oldest open block, which is what a
     // gate later compares.
-    double sum = 0.0;
+    // The block's length is divided out once, where each channel's share was
+    // divided by it: one rounding where there were as many as channels.
+    const double* oldest = partial_.data() + head_ * channels_;
+    double weighted = 0.0;
     for (std::uint32_t c = 0; c < channels_; ++c) {
-        sum += weights_[c] * partial_.front()[c] / static_cast<double>(block_);
+        weighted += weights_[c] * oldest[c];
     }
-    loudness_.push_back(sum);
+    const double power = weighted / static_cast<double>(block_);
+    loudness_.push_back(power);
+    if (power > k_absolute_power) {
+        absolute_sum_ += power;
+        ++absolute_count_;
+    }
     ++blocks_;
-    partial_.erase(partial_.begin());
-    filled_.erase(filled_.begin());
+    head_ = head_ + 1 == slots_ ? 0 : head_ + 1;
+    --open_;
 }
 
 void Meter::add(const double* const* in, std::uint32_t frames)
@@ -164,30 +187,37 @@ void Meter::add(const double* const* in, std::uint32_t frames)
     // channel's sum of squares over the run is made once, by transform::dot,
     // and added to each of them. Frame by frame it was one running sum per
     // block and channel, which the compiler may not split.
+    // The `b`th open block's place in the ring, oldest first.
+    const auto slot = [this](std::size_t b) {
+        const std::size_t at = head_ + b;
+        return at < slots_ ? at : at - slots_;
+    };
     std::uint32_t n = 0;
     while (n < frames) {
         // A new block every `step_` frames, so four of them overlap at any
         // moment and each one covers 400 ms.
         if (position_ % step_ == 0) {
-            partial_.emplace_back(channels_, 0.0);
-            filled_.push_back(0);
+            const std::size_t at = slot(open_);
+            std::fill_n(partial_.data() + at * channels_, channels_, 0.0);
+            filled_[at] = 0;
+            ++open_;
         }
         std::uint64_t run = std::min<std::uint64_t>(step_ - position_ % step_, frames - n);
-        if (!filled_.empty()) {
-            run = std::min<std::uint64_t>(run, block_ - filled_.front());
+        if (open_ != 0) {
+            run = std::min<std::uint64_t>(run, block_ - filled_[head_]);
         }
         const auto length = static_cast<std::uint32_t>(run);
         for (std::uint32_t c = 0; c < channels_; ++c) {
             const double* v = planes_[c] + n;
             const double squares = mp::transform::dot(v, v, length);
-            for (std::vector<double>& block : partial_) {
-                block[c] += squares;
+            for (std::size_t b = 0; b < open_; ++b) {
+                partial_[slot(b) * channels_ + c] += squares;
             }
         }
-        for (std::uint32_t& count : filled_) {
-            count += length;
+        for (std::size_t b = 0; b < open_; ++b) {
+            filled_[slot(b)] += length;
         }
-        while (!filled_.empty() && filled_.front() >= block_) {
+        while (open_ != 0 && filled_[head_] >= block_) {
             close_block();
         }
         position_ += length;
@@ -197,30 +227,20 @@ void Meter::add(const double* const* in, std::uint32_t frames)
 
 double Meter::integrated_lufs() const
 {
-    if (loudness_.empty()) {
+    // The absolute gate was applied as each block closed.
+    if (absolute_count_ == 0) {
         return silence();
     }
-    // The absolute gate first.
-    double sum = 0.0;
-    std::size_t count = 0;
-    for (const double z : loudness_) {
-        if (z > 0.0 && k_offset + 10.0 * std::log10(z) > k_absolute_gate) {
-            sum += z;
-            ++count;
-        }
-    }
-    if (count == 0) {
-        return silence();
-    }
-    // Then the relative one, from the mean of what survived.
+    // Then the relative one, from the mean power of what survived. Both
+    // compare powers, so a pass over every block is comparisons and sums: it
+    // took one to three logarithms of each block, every time it was asked.
     const double relative =
-        k_offset + 10.0 * std::log10(sum / static_cast<double>(count)) + k_relative_gate;
+        absolute_sum_ / static_cast<double>(absolute_count_) * k_relative_power;
     double gated = 0.0;
     std::size_t kept = 0;
-    for (const double z : loudness_) {
-        if (z > 0.0 && k_offset + 10.0 * std::log10(z) > k_absolute_gate &&
-            k_offset + 10.0 * std::log10(z) > relative) {
-            gated += z;
+    for (const double power : loudness_) {
+        if (power > k_absolute_power && power > relative) {
+            gated += power;
             ++kept;
         }
     }

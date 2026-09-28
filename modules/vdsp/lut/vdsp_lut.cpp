@@ -207,6 +207,9 @@ struct MpVideoDsp {
     Com<ID3D11Texture3D> table;
     Com<ID3D11ShaderResourceView> table_view;
     mp::CubeLut lut;
+    /// Whether `lut` is the identity, found as the table is uploaded: finding
+    /// it goes through every entry, and `describe` asked every time.
+    bool identity = true;
     std::string file;
     float strength = 1.0f;
 
@@ -291,6 +294,7 @@ bool upload_table(MpVideoDsp* d, std::string& why)
 {
     d->table_view.reset();
     d->table.reset();
+    d->identity = d->lut.identity(1e-6f);
 
     const std::uint32_t n = d->lut.size;
     std::vector<float> rgba(static_cast<std::size_t>(n) * n * n * 4);
@@ -637,8 +641,7 @@ MpResult MP_CALL lut_describe(MpVideoDsp* d, std::uint32_t index, char* out,
     case 3:
         std::snprintf(out, out_bytes,
                       "size\t%u\tentries per axis, and %s (read only)", d->lut.size,
-                      d->lut.identity(1e-6f) ? "it is the identity"
-                                             : "it changes the picture");
+                      d->identity ? "it is the identity" : "it changes the picture");
         return MP_OK;
     case 4:
         std::snprintf(out, out_bytes,

@@ -84,7 +84,9 @@ add_library(mediaperch_audio STATIC
     mediaperch/wiring.hpp
 )
 add_library(MediaPerch::audio ALIAS mediaperch_audio)
-target_link_libraries(mediaperch_audio PUBLIC MediaPerch::core PRIVATE mediaperch_flags)
+target_link_libraries(mediaperch_audio
+    PUBLIC MediaPerch::core
+    PRIVATE mediaperch_flags mediaperch_transform)
 set_target_properties(mediaperch_audio PROPERTIES FOLDER "core")
 
 add_library(mediaperch_video STATIC

@@ -135,6 +135,31 @@ TEST_CASE("the gates keep silence from counting", "[loudness]")
     CHECK(measured == Catch::Approx(-23.0).margin(0.15));
 }
 
+TEST_CASE("the relative gate keeps a passage far below the rest from counting",
+          "[loudness]")
+{
+    // Tone at -23 then at -40, twenty seconds each: both pass the absolute
+    // gate, the mean of what passed is about -26, and the quiet half is more
+    // than 10 LU below that, so the reading is the loud half's. At -30 the
+    // quiet half is within 10 LU and counts: the reading is the mean power of
+    // the two, 10 log10((10^-2.3 + 10^-3) / 2), about -25.22.
+    const double rate = 48000.0;
+    const auto half = static_cast<std::size_t>(rate * 20.0);
+    const auto passage = [&](double quiet) {
+        auto channel = sine(half, 1000.0, rate, -23.0);
+        const auto rest = sine(half, 1000.0, rate, quiet);
+        channel.insert(channel.end(), rest.begin(), rest.end());
+        return measure({channel, channel}, rate);
+    };
+    const double far_below = passage(-40.0);
+    INFO("-23 then -40 gave " << far_below);
+    CHECK(far_below == Catch::Approx(-23.0).margin(0.15));
+    const double within = passage(-30.0);
+    INFO("-23 then -30 gave " << within);
+    CHECK(within == Catch::Approx(10.0 * std::log10((std::pow(10.0, -2.3) + 1e-3) / 2.0))
+                        .margin(0.15));
+}
+
 TEST_CASE("ReplayGain is the distance to the target", "[loudness]")
 {
     const double rate = 48000.0;

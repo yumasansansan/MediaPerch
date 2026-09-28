@@ -2,8 +2,11 @@
 
 #include "cube.hpp"
 
+#include <charconv>
 #include <cmath>
 #include <cstdlib>
+#include <string>
+#include <system_error>
 
 namespace mp {
 namespace {
@@ -54,15 +57,30 @@ std::string_view word(std::string_view s, std::size_t& at)
 /// **Finite, or not a number at all.** A LUT with an infinity in it is a LUT
 /// that produces one, and a NaN survives every arithmetic downstream and shows
 /// up as a black pixel nobody can explain.
+///
+/// **std::from_chars reads the number where it lies**, where each one was
+/// copied into a string for strtod: a 65-point table is 824,000 of them. Both
+/// round a decimal number correctly, to the same double. What from_chars does
+/// not take -- a leading `+`, a hexadecimal float, a number beyond a double's
+/// range, which strtod rounds to what it can -- goes to strtod as it always
+/// did, so a table reads exactly as it did.
 bool number(std::string_view text, float& out)
 {
     if (text.empty()) {
         return false;
     }
-    const std::string held{text};
-    char* end = nullptr;
-    const double value = std::strtod(held.c_str(), &end);
-    if (end != held.c_str() + held.size() || !std::isfinite(value)) {
+    double value = 0.0;
+    const char* const last = text.data() + text.size();
+    const auto [end, error] = std::from_chars(text.data(), last, value);
+    if (error != std::errc{} || end != last) {
+        const std::string held{text};
+        char* stop = nullptr;
+        value = std::strtod(held.c_str(), &stop);
+        if (stop != held.c_str() + held.size()) {
+            return false;
+        }
+    }
+    if (!std::isfinite(value)) {
         return false;
     }
     out = static_cast<float>(value);
