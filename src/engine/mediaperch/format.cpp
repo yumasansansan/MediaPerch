@@ -34,21 +34,6 @@ constexpr const char* encoding_name(Encoding e) noexcept
 
 } // namespace
 
-std::uint32_t container_bytes(SampleType type) noexcept
-{
-    switch (type) {
-    case SampleType::none: return 0;
-    case SampleType::s16: return 2;
-    case SampleType::s24_packed: return 3;
-    case SampleType::s24_in_32: return 4;
-    case SampleType::s32: return 4;
-    case SampleType::f32: return 4;
-    case SampleType::u8: return 1;
-    case SampleType::f64: return 8;
-    }
-    return 0;
-}
-
 std::uint32_t natural_valid_bits(SampleType type) noexcept
 {
     switch (type) {

@@ -17,6 +17,7 @@
 
 #include <abi_guard.hpp>
 #include <mediaperch/module.h>
+#include <peak.hpp>
 
 #include <cmath>
 #include <cstdint>
@@ -89,18 +90,20 @@ try {
         return MP_ERR_INVALID;
     }
 
+    // The gain and the peak are read once: a store to an output sample could be
+    // to either of them, as far as the compiler knows, and it read the gain
+    // again after every sample it wrote.
+    const double gain = d->gain;
+    double peak = d->peak;
     for (std::uint32_t c = 0; c < d->format.channels; ++c) {
         const double* src = in[c];
         double* dst = out[c];
         for (std::uint32_t n = 0; n < in_frames; ++n) {
-            const double v = src[n] * d->gain;
-            dst[n] = v;
-            const double magnitude = v < 0.0 ? -v : v;
-            if (magnitude > d->peak) {
-                d->peak = magnitude;
-            }
+            dst[n] = src[n] * gain;
         }
+        peak = mp::peak::loudest(dst, in_frames, peak);
     }
+    d->peak = peak;
     *out_frames = in_frames;
     return MP_OK;
 }

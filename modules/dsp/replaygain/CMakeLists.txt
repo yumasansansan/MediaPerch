@@ -8,7 +8,8 @@
 add_library(mediaperch_loudness STATIC loudness.cpp)
 target_include_directories(mediaperch_loudness PUBLIC "${CMAKE_CURRENT_LIST_DIR}")
 target_link_libraries(mediaperch_loudness
-    PUBLIC MediaPerch::abi mediaperch_biquad PRIVATE mediaperch_flags)
+    PUBLIC MediaPerch::abi mediaperch_biquad
+    PRIVATE mediaperch_flags mediaperch_peak mediaperch_transform)
 set_target_properties(mediaperch_loudness PROPERTIES FOLDER "modules")
 
 mediaperch_add_module(mp_dsp_replaygain

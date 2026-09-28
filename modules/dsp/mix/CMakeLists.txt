@@ -16,5 +16,5 @@ set_target_properties(mediaperch_mix PROPERTIES FOLDER "modules")
 mediaperch_add_module(mp_dsp_mix
     KIND dsp
     SOURCES dsp_mix.cpp
-    LINK mediaperch_mix)
+    LINK mediaperch_mix mediaperch_peak)
 

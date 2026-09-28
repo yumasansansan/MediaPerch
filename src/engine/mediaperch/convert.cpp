@@ -178,6 +178,22 @@ void convert_to_integer(const std::uint8_t* in, std::uint8_t* out, std::size_t f
     const double per_step = q.per_step;
     const double floor = q.floor;
     const double ceiling = q.ceiling;
+
+    // **Without dither, every sample alike.** Nothing then depends on the
+    // channel a sample is in or on the samples before it, and one loop over all
+    // of them is a loop the compiler makes vectors of; asking at every sample
+    // whether there was dither, with the dither's calls beside the answer, kept
+    // it scalar. The clamp is the one below, for the reasons given there.
+    if (noise == nullptr) {
+        const std::size_t samples = frames * channels;
+        for (std::size_t i = 0; i < samples; ++i) {
+            const double lsb = read_sample(in + i * in_step, From) * gain * scale * per_step;
+            write_sample(out + i * out_step, To,
+                         std::clamp(std::round(lsb) * step, floor, ceiling));
+        }
+        return;
+    }
+
     std::size_t i = 0;
     for (std::size_t f = 0; f < frames; ++f) {
         for (unsigned c = 0; c < channels; ++c, ++i) {
@@ -187,27 +203,21 @@ void convert_to_integer(const std::uint8_t* in, std::uint8_t* out, std::size_t f
             // dither and noise shaping are both defined in.
             const double lsb = v * scale * per_step;
 
-            double clamped = 0.0;
-            if (noise != nullptr) {
-                Dither& dither = noise[c];
-                // Add what the filter says this sample owes for the errors
-                // before it, quantise, and hand back what this one cost. Adding
-                // rather than subtracting is SSRC's convention and the one its
-                // curves are written for; the other way round the same numbers
-                // shape the noise *into* the midband.
-                const double shaped = lsb + dither.feedback();
-                const double quantised = std::round(shaped + dither.next());
+            Dither& dither = noise[c];
+            // Add what the filter says this sample owes for the errors before
+            // it, quantise, and hand back what this one cost. Adding rather
+            // than subtracting is SSRC's convention and the one its curves are
+            // written for; the other way round the same numbers shape the noise
+            // *into* the midband.
+            const double shaped = lsb + dither.feedback();
+            const double quantised = std::round(shaped + dither.next());
 
-                // The clamp is not paranoia: a gain above unity, a float source
-                // that legitimately exceeds full scale -- which float WAV
-                // routinely does -- and a shaper handed a transient all land
-                // outside.
-                clamped = std::clamp(quantised * step, floor, ceiling);
-                const bool clipped = clamped != quantised * step;
-                dither.accept(clamped * per_step - shaped, clipped);
-            } else {
-                clamped = std::clamp(std::round(lsb) * step, floor, ceiling);
-            }
+            // The clamp is not paranoia: a gain above unity, a float source
+            // that legitimately exceeds full scale -- which float WAV routinely
+            // does -- and a shaper handed a transient all land outside.
+            const double clamped = std::clamp(quantised * step, floor, ceiling);
+            const bool clipped = clamped != quantised * step;
+            dither.accept(clamped * per_step - shaped, clipped);
 
             write_sample(out + i * out_step, To, clamped);
         }

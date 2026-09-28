@@ -21,6 +21,7 @@
 
 #include <abi_guard.hpp>
 #include <mediaperch/module.h>
+#include <peak.hpp>
 
 #include <cmath>
 #include <cstdio>
@@ -135,12 +136,7 @@ try {
                 dst[n] += coefficient * src[n];
             }
         }
-        for (std::uint32_t n = 0; n < in_frames; ++n) {
-            const double magnitude = dst[n] < 0.0 ? -dst[n] : dst[n];
-            if (magnitude > d->peak) {
-                d->peak = magnitude;
-            }
-        }
+        d->peak = mp::peak::loudest(dst, in_frames, d->peak);
     }
     *out_frames = in_frames;
     return MP_OK;

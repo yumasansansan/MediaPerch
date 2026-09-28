@@ -3,6 +3,8 @@
 #include "loudness.hpp"
 
 #include <mediaperch/module.h>
+#include <peak.hpp>
+#include <transform.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -153,32 +155,43 @@ void Meter::add(const double* const* in, std::uint32_t frames)
     for (std::uint32_t c = 0; c < channels_; ++c) {
         planes_[c] = scratch_.data() + static_cast<std::size_t>(c) * frames;
         // The peak is of what came in, not of what the weighting made of it.
-        const double* src = in[c];
-        for (std::uint32_t n = 0; n < frames; ++n) {
-            const double magnitude = src[n] < 0.0 ? -src[n] : src[n];
-            peak_ = std::max(peak_, magnitude);
-        }
+        peak_ = mp::peak::loudest(in[c], frames, peak_);
     }
     filter_.process(in, frames, planes_.data());
 
-    for (std::uint32_t n = 0; n < frames; ++n) {
+    // **A run of frames at a time, not a frame.** Until the next block starts
+    // or the oldest one is full, every open block takes the same frames, so a
+    // channel's sum of squares over the run is made once, by transform::dot,
+    // and added to each of them. Frame by frame it was one running sum per
+    // block and channel, which the compiler may not split.
+    std::uint32_t n = 0;
+    while (n < frames) {
         // A new block every `step_` frames, so four of them overlap at any
         // moment and each one covers 400 ms.
         if (position_ % step_ == 0) {
             partial_.emplace_back(channels_, 0.0);
             filled_.push_back(0);
         }
-        for (std::size_t b = 0; b < partial_.size(); ++b) {
-            for (std::uint32_t c = 0; c < channels_; ++c) {
-                const double v = planes_[c][n];
-                partial_[b][c] += v * v;
+        std::uint64_t run = std::min<std::uint64_t>(step_ - position_ % step_, frames - n);
+        if (!filled_.empty()) {
+            run = std::min<std::uint64_t>(run, block_ - filled_.front());
+        }
+        const auto length = static_cast<std::uint32_t>(run);
+        for (std::uint32_t c = 0; c < channels_; ++c) {
+            const double* v = planes_[c] + n;
+            const double squares = mp::transform::dot(v, v, length);
+            for (std::vector<double>& block : partial_) {
+                block[c] += squares;
             }
-            ++filled_[b];
+        }
+        for (std::uint32_t& count : filled_) {
+            count += length;
         }
         while (!filled_.empty() && filled_.front() >= block_) {
             close_block();
         }
-        ++position_;
+        position_ += length;
+        n += length;
     }
 }
 

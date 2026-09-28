@@ -15,8 +15,12 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -164,6 +168,44 @@ TEST_CASE("silence is silence rather than a very small number", "[loudness]")
     // And a gain of nothing rather than of infinity, which is what a naive
     // meter hands a player at a track boundary.
     CHECK(meter.replay_gain_db() == 0.0);
+}
+
+TEST_CASE("how the signal is handed over does not change what the meter reads",
+          "[loudness]")
+{
+    // The meter sums a run of frames at a time: up to where the next block
+    // starts, where the oldest one is full, or where what it was handed ends.
+    // Handed the same signal all at once, in blocks of 977 and a frame at a
+    // time, it has to close the same blocks and read the same loudness, but
+    // for the last bits the order of the additions leaves -- at 48 kHz, and at
+    // 11025 Hz, where a block of 4410 frames is not four steps of 1103.
+    for (const double rate : {48000.0, 11025.0}) {
+        const auto frames = static_cast<std::size_t>(rate * 2.5);
+        const std::vector<std::vector<double>> stereo{sine(frames, 997.0, rate, -20.0),
+                                                      sine(frames, 443.0, rate, -26.0)};
+        const auto read = [&](std::size_t block) {
+            mp::loudness::Meter meter;
+            std::string why;
+            REQUIRE(meter.configure(rate, 2, 0, why));
+            std::vector<const double*> planes(2);
+            for (std::size_t at = 0; at < frames; at += block) {
+                const auto n = static_cast<std::uint32_t>(std::min(block, frames - at));
+                planes[0] = stereo[0].data() + at;
+                planes[1] = stereo[1].data() + at;
+                meter.add(planes.data(), n);
+            }
+            return std::pair{meter.blocks(), meter.integrated_lufs()};
+        };
+        const auto whole = read(frames);
+        const auto awkward = read(977);
+        const auto single = read(1);
+        INFO(rate << " Hz");
+        CHECK(whole.first > 10);
+        CHECK(awkward.first == whole.first);
+        CHECK(single.first == whole.first);
+        CHECK(awkward.second == Catch::Approx(whole.second).epsilon(1e-12));
+        CHECK(single.second == Catch::Approx(whole.second).epsilon(1e-12));
+    }
 }
 
 TEST_CASE("the K-weighting is derived at the rate, not transcribed at one",

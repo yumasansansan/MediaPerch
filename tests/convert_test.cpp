@@ -716,3 +716,57 @@ TEST_CASE("f32 to f64 through Path B loses nothing either", "[convert][f64]")
         REQUIRE(got == static_cast<double>(input[i]));
     }
 }
+
+TEST_CASE("what comes out does not depend on how many frames go in at once", "[convert]")
+{
+    // Every pair of types, each converted twice from the same input by two
+    // converters made alike: once all at once and once a frame at a time. The
+    // loops without dither are the compiler's vectors with a tail a sample at a
+    // time, and a frame at a time runs only the tail; the loop with dither
+    // carries its generator and its shaper from one call to the next. Either
+    // way the bytes have to be the same.
+    const mp::SampleType types[] = {mp::SampleType::u8,        mp::SampleType::s16,
+                                    mp::SampleType::s24_packed, mp::SampleType::s24_in_32,
+                                    mp::SampleType::s32,       mp::SampleType::f32,
+                                    mp::SampleType::f64};
+    constexpr std::size_t frames = 301;
+    for (const mp::SampleType from : types) {
+        const std::size_t in_bytes = mp::container_bytes(from);
+        std::vector<std::uint8_t> input(frames * 2 * in_bytes);
+        std::uint32_t state = 2024;
+        const auto next = [&state] {
+            state = state * 1664525u + 1013904223u;
+            return state;
+        };
+        if (from == mp::SampleType::f32 || from == mp::SampleType::f64) {
+            // A little past full scale either way, so the clamp is in it.
+            for (std::size_t i = 0; i < frames * 2; ++i) {
+                const double v = (static_cast<double>(next() >> 8) / 8388608.0 - 1.0) * 1.2;
+                if (from == mp::SampleType::f32) {
+                    const auto f = static_cast<float>(v);
+                    std::memcpy(input.data() + i * 4, &f, 4);
+                } else {
+                    std::memcpy(input.data() + i * 8, &v, 8);
+                }
+            }
+        } else {
+            for (auto& byte : input) {
+                byte = static_cast<std::uint8_t>(next() >> 24);
+            }
+        }
+        for (const mp::SampleType to : types) {
+            mp::Converter whole{make(from), make(to)};
+            mp::Converter framewise{make(from), make(to)};
+            REQUIRE(whole.possible());
+            const std::size_t out_bytes = mp::container_bytes(to) * 2;
+            std::vector<std::uint8_t> a(frames * out_bytes);
+            std::vector<std::uint8_t> b(frames * out_bytes);
+            whole.run(input.data(), a.data(), frames);
+            for (std::size_t f = 0; f < frames; ++f) {
+                framewise.run(input.data() + f * 2 * in_bytes, b.data() + f * out_bytes, 1);
+            }
+            INFO(mp::describe(make(from)) << " to " << mp::describe(make(to)));
+            CHECK(a == b);
+        }
+    }
+}

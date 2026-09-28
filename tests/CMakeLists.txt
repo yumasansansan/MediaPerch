@@ -160,6 +160,13 @@ if(TARGET mediaperch_loudness)
     target_link_libraries(mediaperch_tests PRIVATE mediaperch_loudness)
 endif()
 
+# The peak the DSP stages report is claimed to be the one a single running peak
+# finds, bit for bit, so the test writes that loop out and compares.
+if(TARGET mediaperch_peak)
+    target_sources(mediaperch_tests PRIVATE peak_test.cpp)
+    target_link_libraries(mediaperch_tests PRIVATE mediaperch_peak)
+endif()
+
 # The pipe, with a real pipe on the other side of it. Windows-only because the
 # transport is: the protocol above it is in the core and is tested there, and
 # the Linux head will bring its own socket and its own version of this file.

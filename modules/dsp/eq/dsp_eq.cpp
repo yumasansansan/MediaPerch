@@ -19,6 +19,7 @@
 #include <convolve.hpp>
 #include <abi_guard.hpp>
 #include <mediaperch/module.h>
+#include <peak.hpp>
 #include <transform.hpp>
 
 #include <cmath>
@@ -244,13 +245,7 @@ try {
     }
 
     for (std::uint32_t c = 0; c < d->format.channels; ++c) {
-        const double* dst = out[c];
-        for (std::uint32_t n = 0; n < made; ++n) {
-            const double magnitude = dst[n] < 0.0 ? -dst[n] : dst[n];
-            if (magnitude > d->peak) {
-                d->peak = magnitude;
-            }
-        }
+        d->peak = mp::peak::loudest(out[c], made, d->peak);
     }
     *out_frames = made;
     return MP_OK;

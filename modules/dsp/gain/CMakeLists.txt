@@ -5,5 +5,6 @@
 
 mediaperch_add_module(mp_dsp_gain
     KIND dsp
-    SOURCES dsp_gain.cpp)
+    SOURCES dsp_gain.cpp
+    LINK mediaperch_peak)
 

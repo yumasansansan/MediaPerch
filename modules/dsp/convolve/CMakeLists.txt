@@ -22,5 +22,5 @@ set_target_properties(mediaperch_impulse PROPERTIES FOLDER "modules")
 mediaperch_add_module(mp_dsp_convolve
     KIND dsp
     SOURCES dsp_convolve.cpp
-    LINK mediaperch_convolve mediaperch_impulse)
+    LINK mediaperch_convolve mediaperch_impulse mediaperch_peak)
 

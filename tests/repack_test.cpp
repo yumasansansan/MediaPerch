@@ -3,9 +3,12 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <vector>
 
 namespace {
 
@@ -103,6 +106,53 @@ TEST_CASE("a repack round trip is the identity", "[repack]")
     REQUIRE(mp::repack(wide.data(), mp::SampleType::s24_packed, back.data(),
                        mp::SampleType::s16, 16, 32));
     CHECK(back == original);
+}
+
+TEST_CASE("every pair of containers keeps the top bytes, at every length", "[repack]")
+{
+    // The rule byte by byte -- the top `min(from, to)` bytes of each sample,
+    // zeros below them -- against every pair of different containers, at
+    // lengths either side of what a vector holds. Each pair is a loop the
+    // compiler makes vectors of, with the samples a vector does not fill done
+    // one at a time, and a mistake in either half shows at some lengths and
+    // not at others.
+    const mp::SampleType types[] = {mp::SampleType::s16, mp::SampleType::s24_packed,
+                                    mp::SampleType::s24_in_32, mp::SampleType::s32};
+    const std::size_t lengths[] = {0, 1, 2, 3, 7, 8, 9, 15, 16, 17, 31, 32, 33,
+                                   63, 64, 65, 127, 128, 129, 1000};
+    for (const mp::SampleType from : types) {
+        for (const mp::SampleType to : types) {
+            const std::uint32_t from_bytes = mp::container_bytes(from);
+            const std::uint32_t to_bytes = mp::container_bytes(to);
+            if (from_bytes == to_bytes) {
+                continue;
+            }
+            const std::uint32_t kept = std::min(from_bytes, to_bytes);
+            const std::uint32_t pad = to_bytes - kept;
+            const std::uint32_t skip = from_bytes - kept;
+            for (const std::size_t samples : lengths) {
+                std::vector<std::uint8_t> in(samples * from_bytes);
+                for (std::size_t i = 0; i < in.size(); ++i) {
+                    in[i] = static_cast<std::uint8_t>((i * 131u + 7u) & 0xFFu);
+                }
+                std::vector<std::uint8_t> out(samples * to_bytes, 0xA5);
+                REQUIRE(mp::repack(in.data(), from, out.data(), to, 8 * kept, samples));
+
+                std::size_t wrong = 0;
+                for (std::size_t i = 0; i < samples; ++i) {
+                    for (std::uint32_t b = 0; b < to_bytes; ++b) {
+                        const std::uint8_t want =
+                            b < pad ? std::uint8_t{0} : in[i * from_bytes + skip + (b - pad)];
+                        if (out[i * to_bytes + b] != want) {
+                            ++wrong;
+                        }
+                    }
+                }
+                INFO(from_bytes << " bytes into " << to_bytes << ", " << samples << " samples");
+                CHECK(wrong == 0);
+            }
+        }
+    }
 }
 
 TEST_CASE("same container is a copy however the type is spelled", "[repack]")

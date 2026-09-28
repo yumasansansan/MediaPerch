@@ -8,4 +8,5 @@
 mediaperch_add_module(mp_dsp_eq
     KIND dsp
     SOURCES dsp_eq.cpp autoeq.cpp
-    LINK mediaperch_biquad mediaperch_convolve mediaperch_transform mediaperch_module_log)
+    LINK mediaperch_biquad mediaperch_convolve mediaperch_transform mediaperch_module_log
+         mediaperch_peak)

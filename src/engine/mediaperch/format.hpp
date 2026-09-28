@@ -42,7 +42,25 @@ struct Format {
 };
 
 /// Bytes one sample of this type occupies in a buffer.
-[[nodiscard]] std::uint32_t container_bytes(SampleType type) noexcept;
+///
+/// Here rather than in format.cpp so that a loop over samples of a type known
+/// when it is compiled knows its stride: convert.cpp's loops were kept scalar
+/// for a 24-bit packed destination, whose three byte stores a stride unknown
+/// to the compiler could make overlap from one sample to the next.
+[[nodiscard]] constexpr std::uint32_t container_bytes(SampleType type) noexcept
+{
+    switch (type) {
+    case SampleType::none: return 0;
+    case SampleType::s16: return 2;
+    case SampleType::s24_packed: return 3;
+    case SampleType::s24_in_32: return 4;
+    case SampleType::s32: return 4;
+    case SampleType::f32: return 4;
+    case SampleType::u8: return 1;
+    case SampleType::f64: return 8;
+    }
+    return 0;
+}
 
 /// Bits of that container which carry signal when nothing says otherwise.
 [[nodiscard]] std::uint32_t natural_valid_bits(SampleType type) noexcept;
