@@ -18,3 +18,9 @@ mediaperch_add_module(mp_vdsp_scale
     KIND vdsp
     SOURCES vdsp_scale.cpp
     LINK mediaperch_kernels mediaperch_module_log)
+# Optimised, IEEE-strict, and a warning is an error: the flags the stage
+# compiled its shader with at run time, as fxc spells them.
+mediaperch_add_shaders(mp_vdsp_scale
+    SOURCE scale.hlsl
+    ENTRIES vs_main:vs_5_0 ps_axis:ps_5_0
+    FLAGS /O3 /Gis /WX)

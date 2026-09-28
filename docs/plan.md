@@ -2488,7 +2488,7 @@ Three locks, each on what it can actually hold:
 
 | | guards | how |
 |---|---|---|
-| `static_assert` in the module | the **flag** | against `k_compile_flags`, the named constant the flags are passed as, so it checks the value rather than the spelling |
+| `mediaperch_add_shaders` in `cmake/Shaders.cmake` | the **flag** | against the flags fxc is actually given -- a `static_assert` against `k_compile_flags` while the shaders were compiled at run time -- so it checks the value rather than the spelling |
 | `cmake/ShaderPrecision.cmake` | the **types** | a grep the compiler cannot do, run as a test beside `core_purity` |
 | `hdr_transfer_test.cpp` | the **result** | one step of a twelve-bit code, which half cannot resolve at that magnitude |
 

@@ -20,3 +20,9 @@ mediaperch_add_module(mp_vdsp_lut
     KIND vdsp
     SOURCES vdsp_lut.cpp
     LINK mediaperch_cube mediaperch_module_log)
+# Optimised, IEEE-strict, and a warning is an error: the flags the stage
+# compiled its shader with at run time, as fxc spells them.
+mediaperch_add_shaders(mp_vdsp_lut
+    SOURCE lut.hlsl
+    ENTRIES vs_main:vs_5_0 ps_main:ps_5_0
+    FLAGS /O3 /Gis /WX)

@@ -13,11 +13,12 @@
 #
 # **What actually reduces precision, and what only looks as though it does.**
 #
-# `D3DCOMPILE_PARTIAL_PRECISION` is the flag people reach for this question
-# with, and on the targets here it does nothing: FXC honours it for shader model
-# 2 and 3 and ignores it from 4 onward, and these compile as `vs_5_0` and
-# `ps_5_0`. It is banned anyway, by a `static_assert` in the module rather than
-# by this script -- a flag that is inert today is a flag that is not inert after
+# `/Gpp` -- `D3DCOMPILE_PARTIAL_PRECISION` when the shaders were compiled at run
+# time -- is the flag people reach for this question with, and on the targets
+# here it does nothing: FXC honours it for shader model 2 and 3 and ignores it
+# from 4 onward, and these compile as `vs_5_0` and `ps_5_0`. It is banned
+# anyway, by `mediaperch_add_shaders` in cmake/Shaders.cmake rather than by
+# this script -- a flag that is inert today is a flag that is not inert after
 # a move to DXC.
 #
 # What *would* bite is a type. `min16float` is the shader model 6.2 spelling of
@@ -47,13 +48,12 @@ set(forbidden
 
 # **The flag is not in that list, and that is the division of labour.**
 #
-# `D3DCOMPILE_PARTIAL_PRECISION` is banned by a `static_assert` in the module,
-# against the named constant the flags are actually passed as -- which checks
-# the *value* rather than the spelling and cannot be fooled by a rearrangement.
-# A grep for the name would only ever find the assertion that bans it, which is
-# how this check first failed. Each lock holds what it can hold: the compiler
-# guards the flag, this guards the types, and the twelve-bit measurement in
-# `hdr_transfer_test.cpp` guards the result.
+# `/Gpp` is refused by the function that passes fxc its flags, against the
+# flags it is actually given -- which a grep of the sources cannot see, and
+# which a grep for the name would only ever find in the refusal, which is how
+# this check first failed against the run-time flag. Each lock holds what it
+# can hold: the build guards the flag, this guards the types, and the
+# twelve-bit measurement in `hdr_transfer_test.cpp` guards the result.
 
 set(sources "")
 foreach(dir IN LISTS MEDIAPERCH_SHADER_DIR)

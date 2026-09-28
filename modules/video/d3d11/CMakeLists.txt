@@ -3,11 +3,12 @@
 # The first MpVideoVtbl.
 #
 # Nothing is vendored: Direct3D 11, DXGI and the shader compiler all come from
-# the Windows SDK, which the build already requires. `d3dcompiler` is the one
-# worth a word -- the colour shader is compiled at run time rather than baked
-# in, because a shader that can be read next to the comment explaining it is a
-# shader somebody can check, and `d3dcompiler_47.dll` has shipped in Windows
-# since 10.
+# the Windows SDK, which the build already requires. The colour shader is
+# colour.hlsl, beside this, with the comments that explain it -- a shader that
+# can be read next to its explanation is a shader somebody can check -- and it
+# is compiled with the build by the SDK's fxc and embedded as bytecode
+# (cmake/Shaders.cmake), where it was compiled by d3dcompiler_47 every time a
+# device was made: 170 to 200 ms of every start.
 
 if(NOT WIN32)
     # Direct3D is the whole module. The Linux head brings a different presenter
@@ -31,4 +32,12 @@ target_include_directories(mp_video_d3d11 PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 # function and needs no composition device. §9.7.1 chose this shape precisely so
 # that the engine links that and builds no visual tree.
 target_link_libraries(mp_video_d3d11
-    PRIVATE mediaperch_kernels d3d11 dxgi d3dcompiler user32 d2d1 dxguid dcomp)
+    PRIVATE mediaperch_kernels d3d11 dxgi user32 d2d1 dxguid dcomp)
+
+# Optimised, and a warning is an error: the flags the presenter compiled its
+# shader with at run time, as fxc spells them.
+mediaperch_add_shaders(mp_video_d3d11
+    SOURCE colour.hlsl
+    ENTRIES vs_main:vs_5_0 ps_rgba:ps_5_0 ps_nv12:ps_5_0 ps_planar:ps_5_0
+            ps_chroma_across:ps_5_0
+    FLAGS /O3 /WX)

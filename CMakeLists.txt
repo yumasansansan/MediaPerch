@@ -65,6 +65,8 @@ endif()
 
 include(CompilerOptions)
 include(Module)
+# fxc, and the function that compiles the Direct3D modules' shaders with the build.
+include(Shaders)
 include(Rust)
 # Before anything adds a submodule: external/patches/, applied.
 include(Patches)

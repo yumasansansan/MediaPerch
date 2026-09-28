@@ -72,9 +72,10 @@ granted under this license."* That is a patent notice and not a licence restrict
 applies to HEVC generally rather than to HM.
 
 `modules/video/d3d11` vendors nothing at all: Direct3D 11, DXGI and the shader compiler are
-in the Windows SDK the build already requires. The colour shader is compiled at run time
-rather than baked in, because a shader that sits next to the comment explaining it is one
-somebody can check -- and `d3dcompiler_47.dll` has shipped in Windows since 10.
+in the Windows SDK the build already requires. The colour shader is `colour.hlsl`, beside the
+module and next to the comments explaining it, because a shader that sits next to its
+explanation is one somebody can check; the SDK's `fxc` compiles it with the build and the
+module embeds the bytecode (`cmake/Shaders.cmake`), as the video stages do theirs.
 
 **A patch a submodule needs is kept beside it, and applied.** `external/patches/` holds the
 diffs for faults found in the libraries this tree ships, and `cmake/Patches.cmake` applies

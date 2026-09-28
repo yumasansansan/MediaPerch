@@ -571,6 +571,82 @@ TEST_CASE("past the display's gamut a colour keeps its luminance, and the bars s
     }
 }
 
+TEST_CASE("a colour reaching the display's white goes to white by degrees, not by a step",
+          "[video][scaler][hdr]")
+{
+    // A grade whose brightest pixel is stated at 150 nits needs no roll-off to
+    // 203, so what is brighter than that statement reaches the target as it
+    // is, and a BT.2020 yellow's luminance crosses the display's white there,
+    // at about 216 nits. Below the white the compression moves a colour
+    // towards grey of its own luminance, taking more of its saturation the
+    // closer it is; at and above the white there is only white. The step
+    // this holds against: clipping each component at the white, which took a
+    // yellow that had come to (1, 0.99, 0.76) back to (1, 1, 0).
+    Module module{MEDIAPERCH_VIDEO_D3D11, MP_KIND_VIDEO};
+    REQUIRE(module.as<MpVideoVtbl>() != nullptr);
+    Canvas canvas{*module.as<MpVideoVtbl>()};
+    REQUIRE(canvas.ok());
+
+    MpVideoInfo info{};
+    info.size = sizeof(info);
+    info.width = 4;
+    info.height = 4;
+    info.display_width = 4;
+    info.display_height = 4;
+    info.primaries = 9; // BT.2020
+    info.transfer = 16; // PQ
+    info.matrix = 2;
+    info.timescale = 24000;
+    info.max_content_light_level = 150;
+    REQUIRE(canvas.set("size", "native") == MP_OK);
+    REQUIRE(canvas.configure(info) == MP_OK);
+    REQUIRE(canvas.described("gamut") == "desaturate");
+
+    std::vector<std::uint8_t> bgra(4u * 4u * 4u);
+    std::array<double, 3> previous{0.0, 0.0, 0.0};
+    bool white = false;
+    for (int code = 140; code < 160; ++code) {
+        for (std::size_t at = 0; at + 3 < bgra.size(); at += 4) {
+            bgra[at] = 0;                                   // blue
+            bgra[at + 1] = static_cast<std::uint8_t>(code); // green
+            bgra[at + 2] = static_cast<std::uint8_t>(code); // red
+            bgra[at + 3] = 0xff;
+        }
+        MpVideoFrame frame{};
+        frame.size = sizeof(frame);
+        frame.layout = MP_LAYOUT_BGRA8;
+        frame.width = 4;
+        frame.height = 4;
+        frame.plane[0] = bgra.data();
+        frame.stride[0] = 16;
+        REQUIRE(canvas.present(frame) == MP_OK);
+        std::uint32_t w = 0;
+        std::uint32_t h = 0;
+        const std::vector<float> got = canvas.pixels(w, h);
+        REQUIRE(got.size() >= 4u);
+        const double nits = pq_to_nits(code / 255.0);
+        // BT.2020's luma weights: the luminance the yellow has, in units of
+        // the display's white.
+        const double y = (0.2627 + 0.6780) * nits / 203.0;
+        INFO("code " << code << ", " << nits << " nits, luminance " << y);
+        for (std::size_t c = 0; c < 3; ++c) {
+            // Inside the display's gamut, and no component falling as the
+            // light rises.
+            CHECK(got[c] >= -1e-4);
+            CHECK(got[c] <= 1.0 + 1e-4);
+            CHECK(got[c] >= previous[c] - 1e-4);
+            previous[c] = got[c];
+        }
+        if (y > 1.0 + 1e-3) {
+            white = true;
+            for (std::size_t c = 0; c < 3; ++c) {
+                CHECK(got[c] == Approx(1.0).margin(1e-4));
+            }
+        }
+    }
+    CHECK(white); // the sweep did reach past the white
+}
+
 TEST_CASE("the roll-off starts from the tighter of the two peaks the stream states",
           "[video][scaler][hdr]")
 {
