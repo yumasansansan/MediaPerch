@@ -501,8 +501,8 @@ TEST_CASE("the shell says which display, and the engine tells the presenter",
     mp::Player player{host};
     mp::VideoPath::DisplayIs display;
     display.hdr = true;
-    display.white_nits = 480.0f;
-    display.peak_nits = 600.0f;
+    display.white_nits = 480.0;
+    display.peak_nits = 600.0;
     std::string why;
     // **Before anything is playing**, and it is remembered rather than
     // refused: a shell should not have to wait for a track to say where its
@@ -521,14 +521,14 @@ TEST_CASE("the shell says which display, and the engine tells the presenter",
         return !mp::test::presenter_log().setting("display").empty();
     }));
     CHECK(mp::test::presenter_log().setting("display") ==
-          "hdr=1,wide=0,white=480.0000,peak=600.0000");
+          "hdr=1,wide=0,white=480,peak=600");
 
     // Said again while it is playing, which is a window crossing a monitor.
     display.hdr = false;
-    display.white_nits = 240.0f;
+    display.white_nits = 240.0;
     REQUIRE(player.set_display(true, display, why));
     CHECK(mp::test::presenter_log().setting("display") ==
-          "hdr=0,wide=0,white=240.0000,peak=600.0000");
+          "hdr=0,wide=0,white=240,peak=600");
 
     // And stopping knowing is a message too, not a silence.
     REQUIRE(player.set_display(false, display, why));

@@ -3364,14 +3364,16 @@ int decode(mp::ISource& source, const mp::win::ModuleRegistry& registry,
 #if MEDIAPERCH_DIAGNOSTICS
 
 
-/// Reads a whole file as interleaved float, whatever the decoder hands back.
+/// Reads a whole file as interleaved doubles, whatever the decoder hands back.
 ///
 /// The conversion is the encoder's: an integer sample divided by the magnitude
 /// of its own full scale, which is what every encoder does to its input and
 /// therefore the only division that makes a comparison with the source mean
 /// anything. It is a conversion, and it belongs here in a measuring tool rather
-/// than in any decoder.
-bool read_as_float(mp::ISource& input, mp::Format& format, std::vector<float>& out)
+/// than in any decoder. **Exact, every format**: each is a power of two away
+/// from an integer a double holds, where single precision rounded 32-bit
+/// samples and 64-bit floats.
+bool read_as_double(mp::ISource& input, mp::Format& format, std::vector<double>& out)
 {
     format = input.format();
     const std::size_t stride = mp::frame_bytes(format);
@@ -3395,12 +3397,12 @@ bool read_as_float(mp::ISource& input, mp::Format& format, std::vector<float>& o
     for (std::size_t i = 0; i < samples; ++i) {
         switch (format.sample_type) {
         case mp::SampleType::u8:
-            out[i] = (static_cast<float>(p[i]) - 128.0F) / 128.0F;
+            out[i] = (static_cast<double>(p[i]) - 128.0) / 128.0;
             break;
         case mp::SampleType::s16: {
             std::int16_t v = 0;
             std::memcpy(&v, p + i * 2, 2);
-            out[i] = static_cast<float>(v) / 32768.0F;
+            out[i] = static_cast<double>(v) / 32768.0;
             break;
         }
         case mp::SampleType::s24_packed: {
@@ -3408,25 +3410,25 @@ bool read_as_float(mp::ISource& input, mp::Format& format, std::vector<float>& o
                 (static_cast<std::uint32_t>(p[i * 3 + 2]) << 24) |
                 (static_cast<std::uint32_t>(p[i * 3 + 1]) << 16) |
                 (static_cast<std::uint32_t>(p[i * 3 + 0]) << 8));
-            out[i] = static_cast<float>(v >> 8) / 8388608.0F;
+            out[i] = static_cast<double>(v >> 8) / 8388608.0;
             break;
         }
         case mp::SampleType::s24_in_32:
         case mp::SampleType::s32: {
             std::int32_t v = 0;
             std::memcpy(&v, p + i * 4, 4);
-            out[i] = static_cast<float>(static_cast<double>(v) / 2147483648.0);
+            out[i] = static_cast<double>(v) / 2147483648.0;
             break;
         }
-        case mp::SampleType::f32:
-            std::memcpy(&out[i], p + i * 4, 4);
-            break;
-        case mp::SampleType::f64: {
-            double v = 0.0;
-            std::memcpy(&v, p + i * 8, 8);
-            out[i] = static_cast<float>(v);
+        case mp::SampleType::f32: {
+            float v = 0.0F;
+            std::memcpy(&v, p + i * 4, 4);
+            out[i] = static_cast<double>(v);
             break;
         }
+        case mp::SampleType::f64:
+            std::memcpy(&out[i], p + i * 8, 8);
+            break;
         case mp::SampleType::none:
             return false;
         }
@@ -3460,7 +3462,7 @@ int compare_command(mp::win::EngineHost& host, const Options& options)
         return 1;
     }
     mp::Format source_format;
-    std::vector<float> source;
+    std::vector<double> source;
     // **A file with no sound opens now** -- it plays its picture on the video
     // engine's own clock -- so the half this compares may not be there, and
     // that is said rather than dereferenced.
@@ -3470,7 +3472,7 @@ int compare_command(mp::win::EngineHost& host, const Options& options)
                      options.source.c_str());
         return 1;
     }
-    if (!read_as_float(*source_audio, source_format, source)) {
+    if (!read_as_double(*source_audio, source_format, source)) {
         std::fprintf(stderr, "cannot read the source %s\n", options.source.c_str());
         return 1;
     }
@@ -3480,13 +3482,13 @@ int compare_command(mp::win::EngineHost& host, const Options& options)
         return 1;
     }
     mp::Format subject_format;
-    std::vector<float> subject;
+    std::vector<double> subject;
     mp::ISource* const subject_audio = subject_input->audio();
     if (subject_audio == nullptr) {
         std::fprintf(stderr, "%s has no audio to compare\n", options.file.c_str());
         return 1;
     }
-    if (!read_as_float(*subject_audio, subject_format, subject)) {
+    if (!read_as_double(*subject_audio, subject_format, subject)) {
         std::fprintf(stderr, "cannot decode %s\n", options.file.c_str());
         return 1;
     }
@@ -3523,9 +3525,9 @@ int compare_command(mp::win::EngineHost& host, const Options& options)
         if (rival_input) {
             const std::string rival_id = rival_input->decoder();
             mp::Format rival_format;
-            std::vector<float> other;
+            std::vector<double> other;
             mp::ISource* const rival_audio = rival_input->audio();
-            if (rival_audio != nullptr && read_as_float(*rival_audio, rival_format, other) &&
+            if (rival_audio != nullptr && read_as_double(*rival_audio, rival_format, other) &&
                 rival_format.channels == channels) {
                 const mp::Comparison theirs = mp::compare(
                     source.data(), source_frames, other.data(), other.size() / channels, channels,

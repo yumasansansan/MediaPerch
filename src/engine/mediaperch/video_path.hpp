@@ -95,11 +95,11 @@ public:
         bool wide = false;
         /// `DISPLAYCONFIG_SDR_WHITE_LEVEL` in nits. 80 is scRGB's reference and
         /// what a display that does not say is assumed to use.
-        float white_nits = 80.0f;
+        double white_nits = 80.0;
         /// The brightest it claims. **HLG needs it and PQ does not**: PQ states
         /// absolute nits, HLG's OOTF has a system gamma that is a function of
         /// this. 1000 is BT.2100's reference display.
-        float peak_nits = 1000.0f;
+        double peak_nits = 1000.0;
     };
 
     /// What it turned out to be, for whoever reports the run.

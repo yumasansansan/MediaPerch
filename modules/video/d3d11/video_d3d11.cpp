@@ -86,6 +86,7 @@
 #include <mediaperch/module.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -196,11 +197,11 @@ private:
 // than as lookups is what lets each of those be a formula a test can hold to
 // a standard.
 //
-// **In two halves, with the kernels between them.** The chroma passes call
-// `kernel_support` and `kernel_weight`, which are `modules/shared/kernels`'s
-// so that this and the scaler stage compile one formula set; the source is
-// the head below, that text, and the tail, joined once by `shader_source`.
-constexpr char k_shader_head[] = R"HLSL(
+// **The kernels' weights come from a table.** The chroma passes read the
+// weights `modules/shared/kernels` works out in double for each phase, so that
+// this and the scaler stage share one formula set and neither evaluates a
+// kernel per pixel.
+constexpr char k_shader[] = R"HLSL(
 Texture2D<float4> rgba     : register(t0);  // the BGRA8 path
 Texture2D<float>  luma     : register(t1);  // Y, semi-planar and planar alike
 Texture2D<float2> chroma   : register(t2);  // semi-planar CbCr, interleaved
@@ -212,6 +213,11 @@ Texture2D<float>  chroma_v : register(t4);  // planar Cr
 // rather than one of thirty-six -- which on an Iris Xe at 4K60 was the
 // difference between a fifth of the frames dropped and almost none.
 Texture2D<float2> chroma_wide : register(t5);
+// **The chroma reconstruction's weights**: four runs of `chroma_taps`, across
+// at an even luma column and at an odd one, then down at an even luma row and
+// at an odd one -- the two phases a subsampled axis has. Normalised, and zero
+// past each run's own taps.
+StructuredBuffer<float> chroma_weights : register(t6);
 SamplerState bilinear : register(s0);
 
 cbuffer Constants : register(b0)
@@ -233,7 +239,7 @@ cbuffer Constants : register(b0)
     uint  transfer_kind;  // 0 sRGB, 1 a pure power, 2 PQ, 3 HLG
     float has_chroma;     // 0 for 4:0:0, where there is no chroma plane to read
 
-    float hlg_peak;       // §9.9.1: the OOTF's system gamma is a function of it
+    float hlg_peak;       // §9.9.1: the display's peak, which the OOTF scales by
     float tone_peak;      // where the roll-off aims, in nits -- and the unit the
                           // output is in when it maps -- or 0 for no tone mapping
     // **Write HDR10 instead of scRGB.** A provider that is not ours does its
@@ -248,9 +254,9 @@ cbuffer Constants : register(b0)
     uint  emit_linear;
 
     uint  linear_in;
-    float tone_source;    // where the roll-off starts: the mastering peak, in nits
+    float hlg_gamma1;     // the OOTF's system gamma, less one, from hlg_peak
     uint  gamut_mode;     // past the display's gamut: 0 clip, 1 desaturate at constant luminance
-    uint  chroma_kernel;  // kernels.hpp's Kernel, for the chroma reconstruction
+    uint  pad_a;
 
     // Source primaries to the buffer's, in linear light. Identity unless they
     // differ, which is the usual case and costs three dots either way.
@@ -258,20 +264,28 @@ cbuffer Constants : register(b0)
     float4 gamut1;
     float4 gamut2;
 
-    // **The chroma reconstruction** (siting.hpp, kernels.hpp). Where chroma
-    // sample 0 sits against luma sample 0 and how many chroma samples there
-    // are per luma sample, per axis; the chroma plane's picture size, for the
-    // edge clamp; and the kernel's own parameters.
-    float2 chroma_off;
+    // **The chroma reconstruction** (siting.hpp, kernels.hpp). How many chroma
+    // samples there are per luma sample, per axis, and the chroma plane's
+    // picture size, for the edge clamp; then, for each of the four runs of
+    // `chroma_weights`, the first chroma sample it reaches, counted from the
+    // one at half the luma sample's position -- where the siting went -- and
+    // how long every run is, a multiple of eight.
     float2 chroma_step;
     float2 chroma_size;
-    uint   chroma_lobes;  // Lanczos's
-    float  chroma_b;      // the cubic's
-
-    float  chroma_c;
+    int4   chroma_first;
+    uint   chroma_taps;
     uint   chroma_planar; // 1 when Cb and Cr are two planes, 0 when interleaved
-    uint   pad_a;
-    uint   pad_b;
+
+    // **BT.2390's EETF, as far as it is the same for every pixel**, worked out
+    // in double from where the roll-off starts (the mastering peak) and where
+    // it aims: the start as a PQ code value and its reciprocal, the target
+    // over the start in PQ, the knee, and one over the span above the knee.
+    float  tone_source_pq;
+    float  tone_source_inv;
+    float  tone_mt;
+    float  tone_ks;
+    float  tone_span_inv;
+    float  tone_peak_inv;  // one over tone_peak: the output's unit, as a factor
 };
 
 struct Vertex {
@@ -345,8 +359,9 @@ float3 hlg_to_nits(float3 e, float peak)
     // BT.2020's luma coefficients, because HLG's OOTF is defined on BT.2100,
     // whose primaries are BT.2020's.
     float y = dot(scene, float3(0.2627, 0.6780, 0.0593));
-    float gamma = 1.2 + 0.42 * log10(max(peak, 1.0) / 1000.0);
-    return peak * pow(max(y, 1e-6), gamma - 1.0) * scene;
+    // The system gamma, 1.2 + 0.42 log10(peak / 1000), is the display's and
+    // the same for every pixel: `hlg_gamma1` is it less one, from the host.
+    return peak * pow(max(y, 1e-6), hlg_gamma1) * scene;
 }
 
 /// **BT.2390's EETF**, which is what §9.2 says those bug reports have been
@@ -362,22 +377,22 @@ float3 hlg_to_nits(float3 e, float peak)
 /// target, and flattened everything above it: a 1000-nit grade's reference
 /// white at two thirds of the display, its midtones lifted towards that and
 /// its highlights crushed into the third that was left.
-/// `e` and both peaks are PQ code values.
-float eetf_bt2390(float e, float max_source, float max_target)
+/// `e` is a PQ code value; the peaks' own, their ratio `tone_mt`, the knee
+/// `tone_ks` and one over the span above it are the same for every pixel and
+/// come worked out from the host.
+float eetf_bt2390(float e)
 {
-    float e1 = e / max_source;
-    float mt = max_target / max_source;
-    float ks = 1.5 * mt - 0.5;
-    float t = saturate((e1 - ks) / max(1.0 - ks, 1e-6));
+    float e1 = e * tone_source_inv;
+    float t = saturate((e1 - tone_ks) * tone_span_inv);
     float t2 = t * t;
     float t3 = t2 * t;
-    float knee = (2.0 * t3 - 3.0 * t2 + 1.0) * ks +
-                 (t3 - 2.0 * t2 + t) * (1.0 - ks) +
-                 (-2.0 * t3 + 3.0 * t2) * mt;
+    float knee = (2.0 * t3 - 3.0 * t2 + 1.0) * tone_ks +
+                 (t3 - 2.0 * t2 + t) * (1.0 - tone_ks) +
+                 (-2.0 * t3 + 3.0 * t2) * tone_mt;
     // Nothing above the target, however far past its stated peak the source
     // strays, and nothing rolled off below the knee.
-    float mapped = e1 < ks ? e1 : min(knee, mt);
-    return mapped * max_source;
+    float mapped = e1 < tone_ks ? e1 : min(knee, tone_mt);
+    return mapped * tone_source_pq;
 }
 
 /// **On the brightest component, and the other two follow in ratio.** BT.2390
@@ -386,11 +401,9 @@ float eetf_bt2390(float e, float max_source, float max_target)
 /// different hue and greyer. The ratio form keeps the hue and the saturation
 /// and rolls off the brightness, which is the thing a display cannot show.
 /// A source the display can show whole is passed through untouched.
-float3 tone_map_bt2390(float3 nits, float source_peak, float peak)
+float3 tone_map_bt2390(float3 nits)
 {
-    float max_source = nits_to_pq(float3(source_peak, source_peak, source_peak)).x;
-    float max_target = nits_to_pq(float3(peak, peak, peak)).x;
-    if (max_target >= max_source) {
+    if (tone_mt >= 1.0) {
         return nits;
     }
     float brightest = max(nits.r, max(nits.g, nits.b));
@@ -398,7 +411,7 @@ float3 tone_map_bt2390(float3 nits, float source_peak, float peak)
         return nits;
     }
     float e = nits_to_pq(float3(brightest, brightest, brightest)).x;
-    float mapped = pq_to_nits(float3(1.0, 1.0, 1.0) * eetf_bt2390(e, max_source, max_target)).x;
+    float mapped = pq_to_nits(float3(1.0, 1.0, 1.0) * eetf_bt2390(e)).x;
     return nits * (mapped / brightest);
 }
 
@@ -421,11 +434,6 @@ float3 decode(float3 c)
     return sdr_to_linear(c) * sdr_scale;
 }
 
-)HLSL";
-
-/// The second half: the chroma reconstruction, the colour pipeline and the
-/// pixel shaders, after the kernels' text.
-constexpr char k_shader_tail[] = R"HLSL(
 // **Chroma, reconstructed at the luma samples' positions, in two halves.**
 // Chroma sample k of an axis sits at luma sample k / step + off, so the chroma
 // position for luma sample p is (p - off) * step and the kernel is centred
@@ -433,6 +441,16 @@ constexpr char k_shader_tail[] = R"HLSL(
 // chroma *row* into `chroma_wide` -- the luma's width at the chroma's height
 // -- and the main pass takes the vertical taps from that. Edge samples repeat
 // past the plane's *picture*, which is the crop and not the texture.
+//
+// **Two phases per axis, and a run of weights for each.** A subsampled axis
+// has one chroma sample per two luma samples, so where the kernel sits
+// against the chroma samples is one thing at an even luma sample and another
+// at an odd one, and the weights for each are worked out on the host
+// (`chroma_weights`). The taps are a loop of fixed length: eight, unrolled,
+// which every kernel here fits but a Lanczos of five lobes or more, and that
+// takes as many eights as it needs. The reads of eight taps are issued
+// together, where a loop as long as the kernel's reach issued them one after
+// another.
 float2 chroma_sample(int2 c)
 {
     return chroma_planar != 0 ? float2(chroma_u.Load(int3(c, 0)).r, chroma_v.Load(int3(c, 0)).r)
@@ -448,23 +466,26 @@ float2 chroma_across(int2 p)
     if (chroma_step.x == 1.0) {
         result = chroma_sample(p); // 4:4:4: nothing to reconstruct across
     } else {
-        float k = (float(p.x) - chroma_off.x) * chroma_step.x;
-        uint kind = chroma_kernel;
-        float reach = kernel_support(kind, chroma_lobes);
-        int lo = int(ceil(k - reach));
-        int hi = int(floor(k + reach));
+        int phase = p.x & 1;
+        int first = (p.x >> 1) + chroma_first[phase];
+        uint base = uint(phase) * chroma_taps;
         int last = int(chroma_size.x) - 1;
         float2 sum = float2(0.0, 0.0);
-        float weights = 0.0;
-        [loop] for (int i = lo; i <= hi; ++i) {
-            float w = kernel_weight(kind, chroma_lobes, chroma_b, chroma_c, k - float(i));
-            if (w != 0.0) {
-                int ic = clamp(i, 0, last);
-                sum += w * chroma_sample(int2(ic, p.y));
-                weights += w;
+        if (chroma_taps == 8) {
+            [unroll] for (int t = 0; t < 8; ++t) {
+                sum += chroma_weights[base + uint(t)] *
+                       chroma_sample(int2(clamp(first + t, 0, last), p.y));
+            }
+        } else {
+            [loop] for (uint g = 0; g < chroma_taps; g += 8) {
+                [unroll] for (int u = 0; u < 8; ++u) {
+                    int t = int(g) + u;
+                    sum += chroma_weights[base + uint(t)] *
+                           chroma_sample(int2(clamp(first + t, 0, last), p.y));
+                }
             }
         }
-        result = sum / max(weights, 1e-6);
+        result = sum;
     }
     return result;
 }
@@ -476,23 +497,26 @@ float2 chroma_at(int2 p)
     if (chroma_step.y == 1.0) {
         result = chroma_wide.Load(int3(p, 0)).rg; // 4:2:2 and 4:4:4: no vertical siting
     } else {
-        float k = (float(p.y) - chroma_off.y) * chroma_step.y;
-        uint kind = chroma_kernel;
-        float reach = kernel_support(kind, chroma_lobes);
-        int lo = int(ceil(k - reach));
-        int hi = int(floor(k + reach));
+        int phase = p.y & 1;
+        int first = (p.y >> 1) + chroma_first[2 + phase];
+        uint base = uint(2 + phase) * chroma_taps;
         int last = int(chroma_size.y) - 1;
         float2 sum = float2(0.0, 0.0);
-        float weights = 0.0;
-        [loop] for (int j = lo; j <= hi; ++j) {
-            float w = kernel_weight(kind, chroma_lobes, chroma_b, chroma_c, k - float(j));
-            if (w != 0.0) {
-                int jc = clamp(j, 0, last);
-                sum += w * chroma_wide.Load(int3(p.x, jc, 0)).rg;
-                weights += w;
+        if (chroma_taps == 8) {
+            [unroll] for (int t = 0; t < 8; ++t) {
+                sum += chroma_weights[base + uint(t)] *
+                       chroma_wide.Load(int3(p.x, clamp(first + t, 0, last), 0)).rg;
+            }
+        } else {
+            [loop] for (uint g = 0; g < chroma_taps; g += 8) {
+                [unroll] for (int u = 0; u < 8; ++u) {
+                    int t = int(g) + u;
+                    sum += chroma_weights[base + uint(t)] *
+                           chroma_wide.Load(int3(p.x, clamp(first + t, 0, last), 0)).rg;
+                }
             }
         }
-        result = sum / max(weights, 1e-6);
+        result = sum;
     }
     return result;
 }
@@ -565,7 +589,7 @@ float3 to_scrgb(float3 c)
         // of PQ comes out as 1.0 on an SDR display, exactly where an SDR
         // film's white is. With the target at scRGB's 80 the unit and the
         // target agreed with each other and were both the wrong number.
-        light = tone_map_bt2390(light * 80.0, tone_source, tone_peak) / tone_peak;
+        light = tone_map_bt2390(light * 80.0) * tone_peak_inv;
     }
     float3 moved = float3(dot(gamut0.xyz, light), dot(gamut1.xyz, light),
                           dot(gamut2.xyz, light));
@@ -670,37 +694,109 @@ struct Constants {
     std::uint32_t emit_linear = 0;
 
     std::uint32_t linear_in = 0;
-    float tone_source = 1000.0f;
+    float hlg_gamma1 = 0.2f; // a 1000-nit display's 1.2, less one
     std::uint32_t gamut_mode = 1;
-    std::uint32_t chroma_kernel = 9; // kernels.hpp: lanczos
+    std::uint32_t pad_a = 0;
 
     float gamut0[4] = {1.0f, 0.0f, 0.0f, 0.0f};
     float gamut1[4] = {0.0f, 1.0f, 0.0f, 0.0f};
     float gamut2[4] = {0.0f, 0.0f, 1.0f, 0.0f};
 
-    float chroma_off[2] = {0.0f, 0.5f};
     float chroma_step[2] = {0.5f, 0.5f};
     float chroma_size[2] = {1.0f, 1.0f};
-    std::uint32_t chroma_lobes = 3;
-    float chroma_b = 1.0f / 3.0f;
 
-    float chroma_c = 1.0f / 3.0f;
+    std::int32_t chroma_first[4] = {0, 0, 0, 0};
+
+    std::uint32_t chroma_taps = 8;
     std::uint32_t chroma_planar = 0;
-    std::uint32_t pad_a = 0;
-    std::uint32_t pad_b = 0;
+    float tone_source_pq = 1.0f;
+    float tone_source_inv = 1.0f;
+
+    float tone_mt = 1.0f; // no roll-off until one is worked out
+    float tone_ks = 1.0f;
+    float tone_span_inv = 1.0f;
+    float tone_peak_inv = 0.0f;
 };
-static_assert(sizeof(Constants) % 16 == 0, "a constant buffer is a whole number of rows");
+static_assert(sizeof(Constants) == 12 * 16, "twelve rows, as the cbuffer packs them");
+
+/// A 3x3 matrix, row by row, in double.
+using Matrix3 = std::array<double, 9>;
+
+constexpr Matrix3 multiply(const Matrix3& a, const Matrix3& b) noexcept
+{
+    Matrix3 out{};
+    for (std::size_t i = 0; i < 3; ++i) {
+        for (std::size_t j = 0; j < 3; ++j) {
+            out[(i * 3) + j] = (a[i * 3] * b[j]) + (a[(i * 3) + 1] * b[3 + j]) +
+                               (a[(i * 3) + 2] * b[6 + j]);
+        }
+    }
+    return out;
+}
+
+constexpr Matrix3 inverse(const Matrix3& a) noexcept
+{
+    const double det = (a[0] * ((a[4] * a[8]) - (a[5] * a[7]))) -
+                       (a[1] * ((a[3] * a[8]) - (a[5] * a[6]))) +
+                       (a[2] * ((a[3] * a[7]) - (a[4] * a[6])));
+    return Matrix3{((a[4] * a[8]) - (a[5] * a[7])) / det, ((a[2] * a[7]) - (a[1] * a[8])) / det,
+                   ((a[1] * a[5]) - (a[2] * a[4])) / det, ((a[5] * a[6]) - (a[3] * a[8])) / det,
+                   ((a[0] * a[8]) - (a[2] * a[6])) / det, ((a[2] * a[3]) - (a[0] * a[5])) / det,
+                   ((a[3] * a[7]) - (a[4] * a[6])) / det, ((a[1] * a[6]) - (a[0] * a[7])) / det,
+                   ((a[0] * a[4]) - (a[1] * a[3])) / det};
+}
+
+/// RGB to XYZ for a set of primaries and a white point, as SMPTE RP 177
+/// derives it: the primaries' XYZ at unit luminance, each scaled so that
+/// equal RGB is the white.
+constexpr Matrix3 rgb_to_xyz(double xr, double yr, double xg, double yg, double xb, double yb,
+                             double xw, double yw) noexcept
+{
+    const Matrix3 p{xr / yr, xg / yg, xb / yb, 1.0, 1.0, 1.0, (1.0 - xr - yr) / yr,
+                    (1.0 - xg - yg) / yg, (1.0 - xb - yb) / yb};
+    const Matrix3 q = inverse(p);
+    const double w[3] = {xw / yw, 1.0, (1.0 - xw - yw) / yw};
+    double s[3] = {0.0, 0.0, 0.0};
+    for (std::size_t i = 0; i < 3; ++i) {
+        s[i] = (q[i * 3] * w[0]) + (q[(i * 3) + 1] * w[1]) + (q[(i * 3) + 2] * w[2]);
+    }
+    Matrix3 out{};
+    for (std::size_t i = 0; i < 3; ++i) {
+        for (std::size_t j = 0; j < 3; ++j) {
+            out[(i * 3) + j] = p[(i * 3) + j] * s[j];
+        }
+    }
+    return out;
+}
 
 /// BT.2020 primaries to BT.709's, in linear light.
 ///
 /// **Needed the moment PQ works**, because HDR content is graded on BT.2100 and
 /// scRGB is BT.709: presenting one as the other is oversaturation, and it is
 /// the kind that looks like a deliberate choice rather than a fault.
-constexpr float k_bt2020_to_bt709[9] = {
-    1.6605f,  -0.5876f, -0.0728f,
-    -0.1246f, 1.1329f,  -0.0083f,
-    -0.0182f, -0.1006f, 1.1187f,
-};
+///
+/// **Derived, in double, from the two recommendations' chromaticities and
+/// D65**, and rounded once, into the constants: BT.2020's (0.708, 0.292),
+/// (0.170, 0.797), (0.131, 0.046) into XYZ and out through BT.709's (0.640,
+/// 0.330), (0.300, 0.600), (0.150, 0.060). The table it replaced was BT.2087's
+/// four decimals, which are this matrix rounded to within 5e-5.
+constexpr Matrix3 k_bt2020_to_bt709 =
+    multiply(inverse(rgb_to_xyz(0.640, 0.330, 0.300, 0.600, 0.150, 0.060, 0.3127, 0.3290)),
+             rgb_to_xyz(0.708, 0.292, 0.170, 0.797, 0.131, 0.046, 0.3127, 0.3290));
+
+/// ST.2084's inverse EOTF, nits to a PQ code value, in double, for what the
+/// shader is given worked out: its constants as the standard writes them,
+/// ratios of small integers, as the shader's are.
+[[nodiscard]] double nits_to_pq(double nits) noexcept
+{
+    constexpr double m1 = 2610.0 / 16384.0;
+    constexpr double m2 = 2523.0 / 4096.0 * 128.0;
+    constexpr double c1 = 3424.0 / 4096.0;
+    constexpr double c2 = 2413.0 / 4096.0 * 32.0;
+    constexpr double c3 = 2392.0 / 4096.0 * 32.0;
+    const double y = std::pow(std::max(nits, 0.0) / 10000.0, m1);
+    return std::pow((c1 + (c2 * y)) / (1.0 + (c3 * y)), m2);
+}
 
 /// How much of the window is on this output, in pixels.
 ///
@@ -800,7 +896,7 @@ bool output_for(IDXGIFactory2* factory, HWND window, Com<IDXGIOutput6>& six)
 /// module gets a host vtable and not the head's code (§3).
 /// What one walk of the CCD API can say about the monitor a window is on.
 struct AdvancedColour {
-    float sdr_white_nits = 80.0f;
+    double sdr_white_nits = 80.0;
     /// Advanced Color is on and the mode is SDR: a wide-gamut display doing its
     /// own colour management. **§9.4 says `IDXGIOutput6` cannot tell this from a
     /// plain SDR display**, and it cannot -- but the CCD API can, and the walk
@@ -869,7 +965,7 @@ AdvancedColour advanced_colour_of(HWND window)
         // the SDR brightness slider, which is the case §9.6 exists for.
         if (DisplayConfigGetDeviceInfo(&white.header) == ERROR_SUCCESS &&
             white.SDRWhiteLevel != 0) {
-            out.sdr_white_nits = static_cast<float>(white.SDRWhiteLevel) * 80.0f / 1000.0f;
+            out.sdr_white_nits = static_cast<double>(white.SDRWhiteLevel) * 80.0 / 1000.0;
         }
 
         // **The one §9.4 said could not be told.** `IDXGIOutput6` reports
@@ -940,6 +1036,21 @@ mp::video::Display probe_display(IDXGIFactory2* factory, HWND window)
     return display;
 }
 
+/// **The chroma reconstruction's weights, and what they were worked out
+/// for**: the kernel and its parameters, the siting and which axes are
+/// subsampled. `first` and `taps` are what the constants say about the four
+/// runs in the buffer (see `chroma_weights` in the shader).
+struct ChromaTable {
+    mp::kernels::KernelParams kernel{};
+    double off_x = 0.0;
+    double off_y = 0.0;
+    bool across = false;
+    bool down = false;
+    bool built = false;
+    std::int32_t first[4] = {0, 0, 0, 0};
+    std::uint32_t taps = 8;
+};
+
 } // namespace
 
 struct MpVideo {
@@ -1003,6 +1114,13 @@ struct MpVideo {
     Com<ID3D11ShaderResourceView> chroma_wide_srv;
     std::uint32_t chroma_wide_width = 0;
     std::uint32_t chroma_wide_height = 0;
+    /// The chroma reconstruction's weights, worked out again when the kernel,
+    /// the siting or the subsampling changes and made larger when a longer
+    /// kernel needs the room; `chroma_weights_room` is how many floats it has.
+    Com<ID3D11Buffer> chroma_weights;
+    Com<ID3D11ShaderResourceView> chroma_weights_view;
+    std::uint32_t chroma_weights_room = 0;
+    ChromaTable chroma_table;
     Com<ID3D11SamplerState> sampler;
     Com<ID3D11Buffer> constants;
 
@@ -1036,8 +1154,8 @@ struct MpVideo {
     /// its keys are the stage's.
     mp::kernels::Kernel chroma_kernel = mp::kernels::Kernel::lanczos;
     std::uint32_t chroma_lobes = 3;
-    float chroma_b = 1.0f / 3.0f;
-    float chroma_c = 1.0f / 3.0f;
+    double chroma_b = 1.0 / 3.0;
+    double chroma_c = 1.0 / 3.0;
     static constexpr std::uint32_t k_siting_auto = 0xffffffffu;
     /// A person's `siting`, or `k_siting_auto` for the stream's own.
     std::uint32_t siting_asked = k_siting_auto;
@@ -1214,20 +1332,10 @@ constexpr UINT k_compile_flags =
 static_assert((k_compile_flags & D3DCOMPILE_PARTIAL_PRECISION) == 0,
               "the colour shader is computed at single precision; see plan.md §9.10");
 
-/// The shader, joined once: the head, the kernels the scaler stage shares,
-/// and the tail.
-const std::string& shader_source()
-{
-    static const std::string source =
-        std::string{k_shader_head} + mp::kernels::k_kernel_hlsl + k_shader_tail;
-    return source;
-}
-
 bool compile(const char* entry, const char* target, Com<ID3DBlob>& out, std::string& why)
 {
     Com<ID3DBlob> errors;
-    const std::string& source = shader_source();
-    const HRESULT hr = ::D3DCompile(source.data(), source.size(), "colour.hlsl", nullptr,
+    const HRESULT hr = ::D3DCompile(k_shader, sizeof(k_shader) - 1, "colour.hlsl", nullptr,
                                     nullptr, entry, target, k_compile_flags, 0, out.put(),
                                     errors.put());
     if (SUCCEEDED(hr)) {
@@ -1565,9 +1673,11 @@ bool tone_map_by_driver(MpVideo* v, std::string& why)
         }
         // What the display can show, which is the other half of the request.
         DXGI_HDR_METADATA_HDR10 out_hdr{};
+        // Whole units, as HDR10's metadata has them: the nearest, from the
+        // display's figure in double.
         out_hdr.MaxMasteringLuminance =
-            static_cast<UINT>(v->display.peak_nits * 10000.0f);
-        out_hdr.MaxContentLightLevel = static_cast<UINT16>(v->display.peak_nits);
+            static_cast<UINT>(std::llround(v->display.peak_nits * 10000.0));
+        out_hdr.MaxContentLightLevel = static_cast<UINT16>(std::lround(v->display.peak_nits));
         video_context2->VideoProcessorSetOutputHDRMetaData(
             processor.get(), DXGI_HDR_METADATA_TYPE_HDR10, sizeof(out_hdr), &out_hdr);
     }
@@ -1662,14 +1772,17 @@ bool tone_map_by_d2d(MpVideo* v, std::string& why)
     effect->SetInput(0, in_bitmap.get());
     // **The two luminances are the whole of the request**, exactly as they are
     // for the driver: what the content can reach, and what the display can.
-    const float content = mp_video_has_mastering(&v->graded) &&
-                                  v->graded.mastering_max_luminance != 0u
-                              ? static_cast<float>(v->graded.mastering_max_luminance) /
-                                    10000.0f
-                              : 10000.0f;
-    (void)effect->SetValue(D2D1_HDRTONEMAP_PROP_INPUT_MAX_LUMINANCE, content);
+    // Worked out in double and handed over as the effect's floats, which are
+    // what its properties are.
+    const double content = mp_video_has_mastering(&v->graded) &&
+                                   v->graded.mastering_max_luminance != 0u
+                               ? static_cast<double>(v->graded.mastering_max_luminance) /
+                                     10000.0
+                               : 10000.0;
+    (void)effect->SetValue(D2D1_HDRTONEMAP_PROP_INPUT_MAX_LUMINANCE,
+                           static_cast<float>(content));
     (void)effect->SetValue(D2D1_HDRTONEMAP_PROP_OUTPUT_MAX_LUMINANCE,
-                           v->display.sdr_white_nits);
+                           static_cast<float>(v->display.sdr_white_nits));
     (void)effect->SetValue(D2D1_HDRTONEMAP_PROP_DISPLAY_MODE,
                            v->display.hdr ? D2D1_HDRTONEMAP_DISPLAY_MODE_HDR
                                           : D2D1_HDRTONEMAP_DISPLAY_MODE_SDR);
@@ -2331,12 +2444,97 @@ bool make_chroma_wide(MpVideo* v, std::uint32_t width, std::uint32_t height, std
            (v->width != v->source_width || v->height != v->source_height);
 }
 
+/// **The chroma reconstruction's weights, worked out when what they depend on
+/// changed.** For each subsampled axis, the run at an even luma sample and
+/// the run at an odd one: the kernel sits (phase - offset) / 2 chroma samples
+/// past the chroma sample at half the luma sample's position, and `taps_at`
+/// gives the samples it reaches and their weights, in double. Zero weights at
+/// either end are left off -- at a phase that lands on a chroma sample an
+/// interpolating kernel is that one sample -- and every run is padded with
+/// zeros to the longest, rounded up to eight, which is the loop the shader
+/// unrolls.
+bool update_chroma_table(MpVideo* v, double off_x, double off_y, bool across, bool down)
+{
+    const mp::kernels::KernelParams kernel{v->chroma_kernel, v->chroma_lobes, v->chroma_b,
+                                           v->chroma_c};
+    ChromaTable& table = v->chroma_table;
+    if (table.built && table.kernel.kind == kernel.kind && table.kernel.lobes == kernel.lobes &&
+        table.kernel.b == kernel.b && table.kernel.c == kernel.c && table.off_x == off_x &&
+        table.off_y == off_y && table.across == across && table.down == down) {
+        return true;
+    }
+    std::vector<mp::kernels::Taps> runs(4);
+    const double offsets[2] = {off_x, off_y};
+    const bool subsampled[2] = {across, down};
+    std::size_t longest = 1;
+    for (std::size_t axis = 0; axis < 2; ++axis) {
+        if (!subsampled[axis]) {
+            continue;
+        }
+        for (std::size_t phase = 0; phase < 2; ++phase) {
+            const double centre = (static_cast<double>(phase) - offsets[axis]) * 0.5;
+            mp::kernels::Taps taps = mp::kernels::taps_at(kernel, centre, 1.0);
+            std::size_t lead = 0;
+            std::size_t end = taps.weights.size();
+            while (lead < end && taps.weights[lead] == 0.0) {
+                ++lead;
+            }
+            while (end > lead && taps.weights[end - 1] == 0.0) {
+                --end;
+            }
+            taps.first += static_cast<std::int64_t>(lead);
+            taps.weights.assign(taps.weights.begin() + static_cast<std::ptrdiff_t>(lead),
+                                taps.weights.begin() + static_cast<std::ptrdiff_t>(end));
+            longest = std::max(longest, taps.weights.size());
+            runs[(axis * 2) + phase] = std::move(taps);
+        }
+    }
+    const std::size_t stride = (longest + 7) / 8 * 8;
+    std::vector<float> weights(4 * stride, 0.0f);
+    for (std::size_t run = 0; run < 4; ++run) {
+        mp::kernels::round_run(runs[run].weights, weights.data() + (run * stride));
+        table.first[run] = static_cast<std::int32_t>(runs[run].first);
+    }
+
+    const auto room = static_cast<std::uint32_t>(weights.size());
+    if (!v->chroma_weights || v->chroma_weights_room < room) {
+        v->chroma_weights_view.reset();
+        v->chroma_weights.reset();
+        v->chroma_weights_room = 0;
+        D3D11_BUFFER_DESC desc{};
+        desc.ByteWidth = room * static_cast<std::uint32_t>(sizeof(float));
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+        desc.StructureByteStride = sizeof(float);
+        const D3D11_SUBRESOURCE_DATA initial{weights.data(), 0, 0};
+        if (FAILED(v->device->CreateBuffer(&desc, &initial, v->chroma_weights.put())) ||
+            FAILED(v->device->CreateShaderResourceView(v->chroma_weights.get(), nullptr,
+                                                       v->chroma_weights_view.put()))) {
+            v->trouble = "no buffer for the chroma reconstruction's weights";
+            return false;
+        }
+        v->chroma_weights_room = room;
+    } else {
+        const D3D11_BOX box{0, 0, 0, room * static_cast<std::uint32_t>(sizeof(float)), 1, 1};
+        v->context->UpdateSubresource(v->chroma_weights.get(), 0, &box, weights.data(), 0, 0);
+    }
+    table.kernel = kernel;
+    table.off_x = off_x;
+    table.off_y = off_y;
+    table.across = across;
+    table.down = down;
+    table.taps = static_cast<std::uint32_t>(stride);
+    table.built = true;
+    return true;
+}
+
 /// **What the fetch needs to know about chroma, and which kernels.** Where a
 /// chroma sample sits is H.273's table (kernels.hpp), applied per axis by the
 /// layout's subsampling: 4:2:2 has no vertical siting and 4:4:4 has none at
 /// all. A person's `siting` wins; then the stream's own statement; then type
 /// 0, which is what MPEG-2, H.264, HEVC and AV1 mean by silence.
-void fill_resampling(MpVideo* v, Constants& constants) noexcept
+bool fill_resampling(MpVideo* v, Constants& constants)
 {
     const MpPixelLayout& layout = v->source_layout;
     const bool subsampled_x = layout.chroma == MP_CHROMA_420 || layout.chroma == MP_CHROMA_422;
@@ -2346,8 +2544,11 @@ void fill_resampling(MpVideo* v, Constants& constants) noexcept
                                    ? v->stream_siting - 1u
                                    : mp::video::k_siting_left;
     v->siting = type;
-    constants.chroma_off[0] = subsampled_x ? mp::video::siting_offset_x(type) : 0.0f;
-    constants.chroma_off[1] = subsampled_y ? mp::video::siting_offset_y(type) : 0.0f;
+    const double off_x = subsampled_x ? mp::video::siting_offset_x(type) : 0.0;
+    const double off_y = subsampled_y ? mp::video::siting_offset_y(type) : 0.0;
+    if (!update_chroma_table(v, off_x, off_y, subsampled_x, subsampled_y)) {
+        return false;
+    }
     constants.chroma_step[0] = subsampled_x ? 0.5f : 1.0f;
     constants.chroma_step[1] = subsampled_y ? 0.5f : 1.0f;
     const bool has_chroma = layout.chroma != MP_CHROMA_RGB && layout.chroma != MP_CHROMA_MONO;
@@ -2357,11 +2558,12 @@ void fill_resampling(MpVideo* v, Constants& constants) noexcept
         has_chroma ? mp_pixel_chroma_height(&layout, v->source_height) : 1u;
     constants.chroma_size[0] = static_cast<float>(chroma_width != 0 ? chroma_width : 1u);
     constants.chroma_size[1] = static_cast<float>(chroma_height != 0 ? chroma_height : 1u);
-    constants.chroma_kernel = static_cast<std::uint32_t>(v->chroma_kernel);
-    constants.chroma_lobes = v->chroma_lobes;
-    constants.chroma_b = v->chroma_b;
-    constants.chroma_c = v->chroma_c;
+    for (std::size_t run = 0; run < 4; ++run) {
+        constants.chroma_first[run] = v->chroma_table.first[run];
+    }
+    constants.chroma_taps = v->chroma_table.taps;
     constants.gamut_mode = static_cast<std::uint32_t>(v->gamut);
+    return true;
 }
 
 /// **Where the roll-off starts from**, out of what the stream stated. The
@@ -2373,16 +2575,16 @@ void fill_resampling(MpVideo* v, Constants& constants) noexcept
 /// range on highlights that never come. Measured on a set of test patterns
 /// whose every combination of the two is a separate folder. Zero when neither
 /// is stated, and the plan then assumes BT.2408's 1000.
-[[nodiscard]] float source_peak_of(const MpVideoInfo* in) noexcept
+[[nodiscard]] double source_peak_of(const MpVideoInfo* in) noexcept
 {
     if (in->size < offsetof(MpVideoInfo, max_frame_average_light_level) + sizeof(std::uint32_t)) {
-        return 0.0f;
+        return 0.0;
     }
-    const float mastering = in->mastering_max_luminance != 0
-                                ? static_cast<float>(in->mastering_max_luminance) / 10000.0f
-                                : 0.0f;
-    const float content = static_cast<float>(in->max_content_light_level);
-    if (content > 0.0f && (mastering <= 0.0f || content < mastering)) {
+    const double mastering = in->mastering_max_luminance != 0
+                                 ? static_cast<double>(in->mastering_max_luminance) / 10000.0
+                                 : 0.0;
+    const auto content = static_cast<double>(in->max_content_light_level);
+    if (content > 0.0 && (mastering <= 0.0 || content < mastering)) {
         return content;
     }
     return mastering;
@@ -2829,7 +3031,7 @@ try {
     }
 
     Constants constants{};
-    constants.sdr_scale = v->plan.sdr_scale;
+    constants.sdr_scale = static_cast<float>(v->plan.sdr_scale);
 
     // **The transfer, by the code point the container stated.** sRGB gets the
     // piecewise curve; BT.709 and BT.601 video gets BT.1886, a pure 2.4, which
@@ -2857,7 +3059,11 @@ try {
     } else {
         constants.transfer_kind = 1;
     }
-    constants.hlg_peak = v->plan.hlg_peak_nits;
+    constants.hlg_peak = static_cast<float>(v->plan.hlg_peak_nits);
+    // BT.2100's system gamma for that peak, less one, in double: the same for
+    // every pixel, where the shader took a logarithm of it at every one.
+    constants.hlg_gamma1 = static_cast<float>(
+        0.2 + (0.42 * std::log10(std::max(v->plan.hlg_peak_nits, 1.0) / 1000.0)));
 
     // **Ours, and only ours.** §9.3 keeps four names and this shader is one of
     // them; `driver` and `d2d` are other people's code on other passes, and a
@@ -2866,9 +3072,28 @@ try {
     // also what an HDR display gets.
     constants.tone_peak =
         v->plan.tone_mapping && v->plan.tone_map == mp::video::ToneMap::shader
-            ? v->plan.tone_target_nits
+            ? static_cast<float>(v->plan.tone_target_nits)
             : 0.0f;
-    constants.tone_source = v->plan.tone_source_nits;
+    // **The EETF's part that is the same for every pixel**, in double: the
+    // shader worked out both peaks' PQ code values, four powers, at every
+    // pixel, and the knee from them in single precision.
+    {
+        const double source = nits_to_pq(v->plan.tone_source_nits);
+        const double target = nits_to_pq(v->plan.tone_target_nits);
+        const double mt = target / source;
+        const double ks = (1.5 * mt) - 0.5;
+        constants.tone_source_pq = static_cast<float>(source);
+        constants.tone_source_inv = static_cast<float>(1.0 / source);
+        constants.tone_mt = static_cast<float>(mt);
+        constants.tone_ks = static_cast<float>(ks);
+        constants.tone_span_inv = static_cast<float>(1.0 / std::max(1.0 - ks, 1e-6));
+        // And the output's unit as a factor: a division at every pixel was
+        // two and a half units in the last place, as Direct3D allows it, where
+        // this is one rounding here and one there.
+        constants.tone_peak_inv = v->plan.tone_target_nits > 0.0
+                                      ? static_cast<float>(1.0 / v->plan.tone_target_nits)
+                                      : 0.0f;
+    }
     // **Stop one step short for the other two.** They map in their own pass and
     // want what a display would be sent, so the shader decodes and then
     // re-encodes as PQ rather than converting to scRGB and moving the gamut.
@@ -2882,11 +3107,11 @@ try {
     const std::uint32_t primaries = mp::video::assumed_primaries(v->stream);
     if (primaries == mp::video::k_primaries_bt2020 &&
         v->plan.encoding == mp::video::Encoding::linear) {
-        for (int row = 0; row < 3; ++row) {
+        for (std::size_t row = 0; row < 3; ++row) {
             float* into = row == 0 ? constants.gamut0
                                    : (row == 1 ? constants.gamut1 : constants.gamut2);
-            for (int col = 0; col < 3; ++col) {
-                into[col] = k_bt2020_to_bt709[row * 3 + col];
+            for (std::size_t col = 0; col < 3; ++col) {
+                into[col] = static_cast<float>(k_bt2020_to_bt709[(row * 3) + col]);
             }
         }
     }
@@ -2926,7 +3151,9 @@ try {
 
     // **The resampling, and where chroma sits**, read by the fetch in every
     // pass that touches a plane.
-    fill_resampling(v, constants);
+    if (!fill_resampling(v, constants)) {
+        return MP_ERR_UNSUPPORTED;
+    }
 
     // **Where the first pass lands, and how many there are.** The picture is
     // the target's size and no chain is in the path: one pass, straight into
@@ -2962,7 +3189,7 @@ try {
     // on the input; Direct3D unbinds one of the two silently otherwise.
     const auto draw = [&](ID3D11PixelShader* pixel, ID3D11RenderTargetView* into,
                           std::uint32_t width, std::uint32_t height,
-                          ID3D11ShaderResourceView* const (&sources)[6]) {
+                          ID3D11ShaderResourceView* const (&sources)[7]) {
         const D3D11_VIEWPORT viewport{0.0f,
                                       0.0f,
                                       static_cast<float>(width),
@@ -2970,10 +3197,10 @@ try {
                                       0.0f,
                                       1.0f};
         ID3D11RenderTargetView* none[] = {nullptr};
-        ID3D11ShaderResourceView* unbound[6] = {nullptr, nullptr, nullptr,
+        ID3D11ShaderResourceView* unbound[7] = {nullptr, nullptr, nullptr, nullptr,
                                                 nullptr, nullptr, nullptr};
         v->context->OMSetRenderTargets(1, none, nullptr);
-        v->context->PSSetShaderResources(0, 6, unbound);
+        v->context->PSSetShaderResources(0, 7, unbound);
         ID3D11RenderTargetView* views[] = {into};
         ID3D11SamplerState* samplers[] = {v->sampler.get()};
         ID3D11Buffer* buffers[] = {v->constants.get()};
@@ -2983,7 +3210,7 @@ try {
         v->context->IASetInputLayout(nullptr); // the triangle comes from SV_VertexID
         v->context->VSSetShader(v->vertex_shader.get(), nullptr, 0);
         v->context->PSSetShader(pixel, nullptr, 0);
-        v->context->PSSetShaderResources(0, 6, sources);
+        v->context->PSSetShaderResources(0, 7, sources);
         v->context->PSSetSamplers(0, 1, samplers);
         v->context->PSSetConstantBuffers(0, 1, buffers);
         v->context->Draw(3, 0);
@@ -2991,10 +3218,10 @@ try {
 
     ID3D11RenderTargetView* const final_target =
         second_pass ? v->graded_view.get() : v->target_view.get();
-    // Six slots, of which a frame uses one, two, three or four. Binding all
-    // six each time keeps a stale view from a previous frame's shape out of
-    // the one being drawn -- and an unused slot is a null the current shader
-    // does not declare, rather than a texture it might read.
+    // Seven slots, of which a frame uses one to five. Binding all seven each
+    // time keeps a stale view from a previous frame's shape out of the one
+    // being drawn -- and an unused slot is a null the current shader does not
+    // declare, rather than a texture it might read.
     // **The chroma's horizontal half first**, for a frame that has chroma:
     // the luma's width at the chroma's height, from the planes, so that the
     // main pass takes its taps downwards from that rather than a square of
@@ -3008,15 +3235,17 @@ try {
         }
         constants.chroma_planar = mp_pixel_planes(&v->source_layout) == 3u ? 1u : 0u;
         upload_constants();
-        ID3D11ShaderResourceView* const from_planes[6] = {
-            v->source_view.get(),   v->luma_view.get(), v->chroma_view.get(),
-            v->chroma_u_view.get(), v->chroma_v_view.get(), nullptr};
+        ID3D11ShaderResourceView* const from_planes[7] = {
+            v->source_view.get(),   v->luma_view.get(),     v->chroma_view.get(),
+            v->chroma_u_view.get(), v->chroma_v_view.get(), nullptr,
+            v->chroma_weights_view.get()};
         draw(v->pixel_chroma_across.get(), v->chroma_wide_view.get(), v->source_width,
              v->chroma_wide_height, from_planes);
     }
-    ID3D11ShaderResourceView* const planes[6] = {v->source_view.get(),   v->luma_view.get(),
-                                                 v->chroma_view.get(),   v->chroma_u_view.get(),
-                                                 v->chroma_v_view.get(), v->chroma_wide_srv.get()};
+    ID3D11ShaderResourceView* const planes[7] = {
+        v->source_view.get(),   v->luma_view.get(),     v->chroma_view.get(),
+        v->chroma_u_view.get(), v->chroma_v_view.get(), v->chroma_wide_srv.get(),
+        v->chroma_weights_view.get()};
 
     if (fits && !chained) {
         upload_constants();
@@ -3088,7 +3317,7 @@ try {
         constants.emit_linear = 0;
         constants.linear_in = 1;
         upload_constants();
-        ID3D11ShaderResourceView* const from_light[6] = {light,   nullptr, nullptr,
+        ID3D11ShaderResourceView* const from_light[7] = {light,   nullptr, nullptr, nullptr,
                                                          nullptr, nullptr, nullptr};
         draw(v->pixel_rgba.get(), final_target, v->width, v->height, from_light);
     }
@@ -3125,7 +3354,7 @@ try {
             // supposed to be invisible. From here on `maps_elsewhere` is false
             // and there is one pass again.
             constants.emit_pq = 0;
-            constants.tone_peak = v->plan.tone_target_nits;
+            constants.tone_peak = static_cast<float>(v->plan.tone_target_nits);
             D3D11_MAPPED_SUBRESOURCE again{};
             if (SUCCEEDED(v->context->Map(v->constants.get(), 0, D3D11_MAP_WRITE_DISCARD, 0,
                                           &again))) {
@@ -3323,9 +3552,9 @@ try {
                 } else if (std::strcmp(name, "wide") == 0) {
                     said.wide = number != 0.0;
                 } else if (std::strcmp(name, "white") == 0) {
-                    said.sdr_white_nits = static_cast<float>(number);
+                    said.sdr_white_nits = number;
                 } else if (std::strcmp(name, "peak") == 0) {
-                    said.peak_nits = static_cast<float>(number);
+                    said.peak_nits = number;
                 } else {
                     v->trouble = std::string{"a display has no `"} + name +
                                  "`; it has hdr, wide, white and peak";
@@ -3375,7 +3604,7 @@ try {
             v->trouble = std::string{key} + " is a number";
             return MP_ERR_INVALID;
         }
-        (key[7] == 'b' ? v->chroma_b : v->chroma_c) = static_cast<float>(number);
+        (key[7] == 'b' ? v->chroma_b : v->chroma_c) = number;
         return MP_OK;
     }
     if (std::strcmp(key, "siting") == 0) {
@@ -3560,8 +3789,7 @@ try {
                       "display\t%s, white %.0f nits, peak %.0f nits"
                       "\twhat it turned out to be (read only)",
                       v->display.hdr ? "HDR" : "SDR",
-                      static_cast<double>(v->display.sdr_white_nits),
-                      static_cast<double>(v->display.peak_nits));
+                      v->display.sdr_white_nits, v->display.peak_nits);
         return MP_OK;
     case 5:
         std::snprintf(out, out_bytes,
@@ -3575,7 +3803,7 @@ try {
     case 7:
         std::snprintf(out, out_bytes,
                       "sdr_scale\t%.4f\twhat SDR content is multiplied by (read only)",
-                      static_cast<double>(v->plan.sdr_scale));
+                      v->plan.sdr_scale);
         return MP_OK;
     case 8:
         std::snprintf(out, out_bytes, "frames\t%llu\tpresented so far (read only)",
@@ -3661,8 +3889,7 @@ try {
                           "target\t%.0f nits from %.0f\twhere the roll-off aims (BT.2408's "
                           "reference white on an SDR display) and the source peak it "
                           "starts from (read only)",
-                          static_cast<double>(v->plan.tone_target_nits),
-                          static_cast<double>(v->plan.tone_source_nits));
+                          v->plan.tone_target_nits, v->plan.tone_source_nits);
         } else {
             std::snprintf(out, out_bytes,
                           "target\tnone\twhere the roll-off aims; nothing is rolled off "
@@ -3685,13 +3912,13 @@ try {
         std::snprintf(out, out_bytes,
                       "chroma_b\t%.4f\tthe cubic's B, when chroma=bicubic\tnumber step=0.05 "
                       "group=Chroma when=chroma=bicubic",
-                      static_cast<double>(v->chroma_b));
+                      v->chroma_b);
         return MP_OK;
     case 20:
         std::snprintf(out, out_bytes,
                       "chroma_c\t%.4f\tthe cubic's C, when chroma=bicubic\tnumber step=0.05 "
                       "group=Chroma when=chroma=bicubic",
-                      static_cast<double>(v->chroma_c));
+                      v->chroma_c);
         return MP_OK;
     case 21:
         // **Which siting, and whose.** A person's, the stream's, or the

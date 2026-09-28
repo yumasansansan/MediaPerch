@@ -3058,9 +3058,11 @@ the names `up`, `down` and `chroma` take:
 | `bilinear` | 2 | — | the triangle: what the fetch was |
 | `box` | 1 | — | an area average when downscaling by an integer, nearest when upscaling |
 
-The weights are computed in the shader from the formulas, once per tap; a Lanczos weight is
-snapped to nought at the integers, where single-precision sin(π) is a hundred-millionth
-rather than zero, so that one to one is the identity to the last bit. The stage's keys are
+The weights are worked out on the host, in double, from the formulas -- once per phase for
+the chroma and once per output column or row for the stage -- normalised in double and
+rounded once into a table the shader reads (`kernels.hpp` says what that bought); a Lanczos
+weight is snapped to nought at the integers, where sin(π) is a rounding rather than zero, so
+that one to one is the identity to the last bit. The stage's keys are
 `up`, `up_lobes`, `up_b`, `up_c`, the same four for `down`, `antiring`, `light`, `gamma`,
 `sigmoid_center`, `sigmoid_slope` and `sigmoid_range`, each with a fourth `describe` field
 that says what it takes and when it matters (§10); the presenter keeps `chroma`,

@@ -59,7 +59,7 @@ struct Stream {
     /// started rolling a 1000-nit grade off at about four nits: its midtones
     /// lifted towards a reference white that reached two thirds of the
     /// display, and its highlights crushed into the third that was left.
-    float mastering_peak_nits = 0.0f;
+    double mastering_peak_nits = 0.0;
 };
 
 /// **HDR reference white, in nits: what an SDR display's white means to HDR
@@ -71,10 +71,10 @@ struct Stream {
 /// brightness on the same panel. 80 is scRGB's unit and was the wrong number
 /// here: it is where the compositor puts *SDR* white in scene-referred terms,
 /// not a luminance the panel is known to show.
-constexpr float k_reference_white_nits = 203.0f;
+constexpr double k_reference_white_nits = 203.0;
 /// What a PQ stream that states no mastering display is taken to have been
 /// graded to. BT.2408's own assumption, and what most of them were.
-constexpr float k_assumed_mastering_nits = 1000.0f;
+constexpr double k_assumed_mastering_nits = 1000.0;
 
 /// What the display turned out to be, out of §9.4's three calls.
 struct Display {
@@ -88,13 +88,13 @@ struct Display {
     bool wide = false;
     /// `DISPLAYCONFIG_SDR_WHITE_LEVEL`, in nits. 80 is the scRGB reference and
     /// what a display that does not say is assumed to use.
-    float sdr_white_nits = 80.0f;
+    double sdr_white_nits = 80.0;
     /// The brightest the display claims, from `DXGI_OUTPUT_DESC1::MaxLuminance`
     /// or its equivalent. **HLG needs it and PQ does not**: PQ states absolute
     /// nits, while HLG is scene-referred and its OOTF has a system gamma that
     /// is a function of the display's peak. 1000 is the reference HLG display
     /// and the assumption BT.2100 makes when nothing says otherwise.
-    float peak_nits = 1000.0f;
+    double peak_nits = 1000.0;
 };
 
 /// §9.3's four, in the order §9.7 wants them tried.
@@ -168,7 +168,7 @@ struct Plan {
     /// The peak the HLG OOTF was derived for, in nits. Meaningless unless
     /// `convert` is `hlg_to_linear`, and carried here so the shader does not
     /// have to ask a display anything.
-    float hlg_peak_nits = 1000.0f;
+    double hlg_peak_nits = 1000.0;
     /// Whether anything is drawn over the video, which rules out a packed
     /// format that cannot blend -- and is a fact about the *player*, not about
     /// any platform's format list.
@@ -179,7 +179,7 @@ struct Plan {
     /// scene-referred, so an OSD drawn at 1.0 appears dim and grey next to the
     /// video -- the single most common HDR bug in players. On an SDR display
     /// 1.0 is already the display's white and this is 1.
-    float sdr_scale = 1.0f;
+    double sdr_scale = 1.0;
     /// True when the stream carries more than the display can show as-is.
     bool tone_mapping = false;
     /// **Where the shader's roll-off aims, in the content's nits, and the unit
@@ -187,10 +187,10 @@ struct Plan {
     /// display, so that 203 nits of PQ becomes scRGB 1.0 -- the display's
     /// white -- and zero when nothing is mapped. The other providers map in
     /// their own pass and do not read it.
-    float tone_target_nits = 0.0f;
+    double tone_target_nits = 0.0;
     /// Where it starts from: the mastering display's peak when the stream
     /// stated one, `k_assumed_mastering_nits` when it did not.
-    float tone_source_nits = k_assumed_mastering_nits;
+    double tone_source_nits = k_assumed_mastering_nits;
 };
 
 /// Whether a transfer function means high dynamic range.
@@ -268,7 +268,7 @@ struct Plan {
         plan.tone_mapping = true;
         plan.encoding = Encoding::linear;
         plan.tone_target_nits = k_reference_white_nits;
-        plan.tone_source_nits = stream.mastering_peak_nits > 0.0f ? stream.mastering_peak_nits
+        plan.tone_source_nits = stream.mastering_peak_nits > 0.0 ? stream.mastering_peak_nits
                                                                   : k_assumed_mastering_nits;
     }
 
@@ -286,9 +286,9 @@ struct Plan {
     // including the case where the video needs no mapping at all, because the
     // subtitles still do. A PQ buffer states absolute nits and needs no scale.
     plan.sdr_scale = display.hdr && plan.encoding == Encoding::linear
-                         ? (display.sdr_white_nits > 0.0f ? display.sdr_white_nits / 80.0f
-                                                          : 1.0f)
-                         : 1.0f;
+                         ? (display.sdr_white_nits > 0.0 ? display.sdr_white_nits / 80.0
+                                                         : 1.0)
+                         : 1.0;
     return plan;
 }
 

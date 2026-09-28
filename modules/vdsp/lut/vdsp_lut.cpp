@@ -106,9 +106,9 @@ SamplerState point_clamp : register(s0);
 cbuffer Grade : register(b0)
 {
     float3 domain_min;
-    float  size;        // entries per axis, as a float because it is divided by
-    float3 domain_span; // domain_max - domain_min, precomputed
-    float  strength;    // 0 is the input, 1 is the table. Between is a mix.
+    float  size;         // entries per axis, as a float because it bounds a float
+    float3 domain_scale; // (size - 1) / (domain_max - domain_min), worked out in double
+    float  strength;     // 0 is the input, 1 is the table. Between is a mix.
 };
 
 struct Vertex {
@@ -137,7 +137,11 @@ float3 tetrahedral(float3 rgb)
     // Into the table's own domain, and clamped there. A value outside it has no
     // entry -- a table over 0..1 shown scene light above one has nothing to say
     // about it -- and a LUT meant for high dynamic range states DOMAIN_MAX.
-    float3 t = saturate((rgb - domain_min) / domain_span) * (size - 1.0);
+    // One multiplication into table steps and then the clamp, which is the
+    // same thing as the clamp to the domain and the steps after it: a division
+    // at every pixel was two and a half units in the last place, as Direct3D
+    // allows it.
+    float3 t = clamp((rgb - domain_min) * domain_scale, 0.0, size - 1.0);
     int3 i = int3(floor(t));
     float3 f = t - float3(i);
 
@@ -187,7 +191,7 @@ float4 ps_main(Vertex input) : SV_Target
 struct Constants {
     float domain_min[3] = {0.0f, 0.0f, 0.0f};
     float size = 2.0f;
-    float domain_span[3] = {1.0f, 1.0f, 1.0f};
+    float domain_scale[3] = {1.0f, 1.0f, 1.0f};
     float strength = 1.0f;
 };
 
@@ -211,7 +215,8 @@ struct MpVideoDsp {
     /// it goes through every entry, and `describe` asked every time.
     bool identity = true;
     std::string file;
-    float strength = 1.0f;
+    /// As a person set it; rounded once, into the constants.
+    double strength = 1.0;
 
     /// The picture, and what it is drawn into.
     std::uint32_t width = 0;
@@ -294,14 +299,15 @@ bool upload_table(MpVideoDsp* d, std::string& why)
 {
     d->table_view.reset();
     d->table.reset();
-    d->identity = d->lut.identity(1e-6f);
+    d->identity = d->lut.identity(1e-6);
 
     const std::uint32_t n = d->lut.size;
     std::vector<float> rgba(static_cast<std::size_t>(n) * n * n * 4);
     for (std::size_t i = 0, at = 0; i < rgba.size(); i += 4, at += 3) {
-        rgba[i + 0] = d->lut.table[at + 0];
-        rgba[i + 1] = d->lut.table[at + 1];
-        rgba[i + 2] = d->lut.table[at + 2];
+        // Rounded here, once: a float texture is what the sampler reads.
+        rgba[i + 0] = static_cast<float>(d->lut.table[at + 0]);
+        rgba[i + 1] = static_cast<float>(d->lut.table[at + 1]);
+        rgba[i + 2] = static_cast<float>(d->lut.table[at + 2]);
         rgba[i + 3] = 1.0f;
     }
 
@@ -476,12 +482,14 @@ try {
     }
 
     Constants constants;
-    for (int c = 0; c < 3; ++c) {
-        constants.domain_min[c] = d->lut.domain_min[c];
-        constants.domain_span[c] = d->lut.domain_max[c] - d->lut.domain_min[c];
+    for (std::size_t c = 0; c < 3; ++c) {
+        constants.domain_min[c] = static_cast<float>(d->lut.domain_min[c]);
+        constants.domain_scale[c] =
+            static_cast<float>((static_cast<double>(d->lut.size) - 1.0) /
+                               (d->lut.domain_max[c] - d->lut.domain_min[c]));
     }
     constants.size = static_cast<float>(d->lut.size);
-    constants.strength = d->strength;
+    constants.strength = static_cast<float>(d->strength);
 
     D3D11_MAPPED_SUBRESOURCE mapped{};
     if (SUCCEEDED(d->context->Map(d->constants.get(), 0, D3D11_MAP_WRITE_DISCARD, 0,
@@ -608,7 +616,7 @@ try {
         // and below zero extrapolates the other way; both are things a colourist
         // does on purpose, and refusing them here would be this file having an
         // opinion about somebody's grade.
-        d->strength = static_cast<float>(amount);
+        d->strength = amount;
         return MP_OK;
     }
     return MP_ERR_UNSUPPORTED;
@@ -632,7 +640,7 @@ MpResult MP_CALL lut_describe(MpVideoDsp* d, std::uint32_t index, char* out,
         std::snprintf(out, out_bytes,
                       "strength\t%.4f\t0 is the picture, 1 is the table, and either "
                       "side of that extrapolates\tnumber step=0.05",
-                      static_cast<double>(d->strength));
+                      d->strength);
         return MP_OK;
     case 2:
         std::snprintf(out, out_bytes, "title\t%s\twhat the table calls itself (read only)",
@@ -647,8 +655,7 @@ MpResult MP_CALL lut_describe(MpVideoDsp* d, std::uint32_t index, char* out,
         std::snprintf(out, out_bytes,
                       "domain\t%.4f..%.4f\tthe range the table covers; outside it is "
                       "clamped (read only)",
-                      static_cast<double>(d->lut.domain_min[0]),
-                      static_cast<double>(d->lut.domain_max[0]));
+                      d->lut.domain_min[0], d->lut.domain_max[0]);
         return MP_OK;
     case 5:
         std::snprintf(out, out_bytes, "trouble\t%s\twhat went wrong (read only)",

@@ -78,11 +78,11 @@ TEST_CASE("HDR content on an SDR display is mapped, because composition clips",
     CHECK(plan.tone_map == ToneMap::shader);
     // BT.2408: an SDR display's white is HDR's reference white, 203 nits; and
     // a stream that stated no mastering display is taken to be a 1000-nit grade.
-    CHECK(plan.tone_target_nits == Approx(203.0f));
-    CHECK(plan.tone_source_nits == Approx(1000.0f));
+    CHECK(plan.tone_target_nits == Approx(203.0));
+    CHECK(plan.tone_source_nits == Approx(1000.0));
     Stream mastered = hdr10_2160p();
-    mastered.mastering_peak_nits = 4000.0f;
-    CHECK(plan_for(mastered, sdr).tone_source_nits == Approx(4000.0f));
+    mastered.mastering_peak_nits = 4000.0;
+    CHECK(plan_for(mastered, sdr).tone_source_nits == Approx(4000.0));
 
     // And what a person asked for is honoured where it can be.
     CHECK(plan_for(hdr10_2160p(), sdr, ToneMap::driver).tone_map == ToneMap::driver);
@@ -127,7 +127,7 @@ TEST_CASE("SDR content on an HDR display is scaled to the display's white",
     // therefore arrive dim and grey next to the video.
     Display hdr{};
     hdr.hdr = true;
-    hdr.sdr_white_nits = 240.0f;
+    hdr.sdr_white_nits = 240.0;
 
     const Plan plan = plan_for(sdr_1080p(), hdr);
     CHECK(plan.sdr_scale == Catch::Approx(3.0)); // 240 / 80
@@ -138,7 +138,7 @@ TEST_CASE("SDR content on an HDR display is scaled to the display's white",
 
     // An SDR display already draws its own white at 1.0.
     Display sdr{};
-    sdr.sdr_white_nits = 240.0f; // stated, and irrelevant
+    sdr.sdr_white_nits = 240.0; // stated, and irrelevant
     CHECK(plan_for(sdr_1080p(), sdr).sdr_scale == Catch::Approx(1.0));
 
     // A display that says nothing is the scRGB reference, which is a scale of
@@ -150,7 +150,7 @@ TEST_CASE("SDR content on an HDR display is scaled to the display's white",
     // And nothing is divided by zero when it says something impossible.
     Display broken{};
     broken.hdr = true;
-    broken.sdr_white_nits = 0.0f;
+    broken.sdr_white_nits = 0.0;
     CHECK(plan_for(sdr_1080p(), broken).sdr_scale == Catch::Approx(1.0));
 }
 
@@ -215,7 +215,7 @@ TEST_CASE("HLG does not pass through, even on a display that can show it",
     // and wrongly graded -- and it would have looked like a tone mapping fault.
     Display hdr{};
     hdr.hdr = true;
-    hdr.peak_nits = 600.0f;
+    hdr.peak_nits = 600.0;
 
     Stream pq = hdr10_2160p();
     Stream hlg = hdr10_2160p();
@@ -242,7 +242,7 @@ TEST_CASE("HLG does not pass through, even on a display that can show it",
 
     // The OOTF needs the display's peak, so the plan carries it rather than
     // making a shader ask a display anything.
-    CHECK(hlg_plan.hlg_peak_nits == Catch::Approx(600.0f));
+    CHECK(hlg_plan.hlg_peak_nits == Catch::Approx(600.0));
 
     // On an SDR display it is both converted and mapped.
     Display sdr{};

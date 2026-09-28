@@ -225,12 +225,14 @@ Mat3 bt2020_to_bt709_derived()
     return out;
 }
 
-/// BT.2020's primaries into BT.709's, in linear light -- what scRGB needs.
+/// BT.2020's primaries into BT.709's, in linear light -- what scRGB needs: the
+/// matrix derived above, which is how the module has it too.
 Rgb bt2020_to_bt709(const Rgb& c)
 {
-    return Rgb{1.6605 * c.r - 0.5876 * c.g - 0.0728 * c.b,
-               -0.1246 * c.r + 1.1329 * c.g - 0.0083 * c.b,
-               -0.0182 * c.r - 0.1006 * c.g + 1.1187 * c.b};
+    static const Mat3 m = bt2020_to_bt709_derived();
+    return Rgb{m[0][0] * c.r + m[0][1] * c.g + m[0][2] * c.b,
+               m[1][0] * c.r + m[1][1] * c.g + m[1][2] * c.b,
+               m[2][0] * c.r + m[2][1] * c.g + m[2][2] * c.b};
 }
 
 // ------------------------------------------------------------- the presenter
@@ -1063,22 +1065,20 @@ TEST_CASE("a colour rolls off in ratio through the real shader, on the derived g
     const double source = presenter.source_nits();
     REQUIRE(target > 0.0);
 
-    // The matrix the module carries, checked against one derived here from
-    // the two sets of primaries and D65 -- so a digit wrong in either is a
-    // disagreement rather than two copies of one mistake.
+    // The matrix, derived here from the two sets of primaries and D65 as the
+    // module derives it, against the four decimals ITU-R BT.2087 publishes
+    // for it -- so a digit wrong in any chromaticity is a disagreement rather
+    // than two copies of one mistake. Every entry is within half a unit of
+    // the fourth decimal.
     const auto derived = bt2020_to_bt709_derived();
-    const Rgb red = bt2020_to_bt709(Rgb{1.0, 0.0, 0.0});
-    const Rgb green = bt2020_to_bt709(Rgb{0.0, 1.0, 0.0});
-    const Rgb blue = bt2020_to_bt709(Rgb{0.0, 0.0, 1.0});
-    CHECK(red.r == Approx(derived[0][0]).margin(2e-3));
-    CHECK(green.r == Approx(derived[0][1]).margin(2e-3));
-    CHECK(blue.r == Approx(derived[0][2]).margin(2e-3));
-    CHECK(red.g == Approx(derived[1][0]).margin(2e-3));
-    CHECK(green.g == Approx(derived[1][1]).margin(2e-3));
-    CHECK(blue.g == Approx(derived[1][2]).margin(2e-3));
-    CHECK(red.b == Approx(derived[2][0]).margin(2e-3));
-    CHECK(green.b == Approx(derived[2][1]).margin(2e-3));
-    CHECK(blue.b == Approx(derived[2][2]).margin(2e-3));
+    const double published[3][3] = {{1.6605, -0.5876, -0.0728},
+                                    {-0.1246, 1.1329, -0.0083},
+                                    {-0.0182, -0.1006, 1.1187}};
+    for (std::size_t i = 0; i < 3; ++i) {
+        for (std::size_t j = 0; j < 3; ++j) {
+            CHECK(derived[i][j] == Approx(published[i][j]).margin(5e-5));
+        }
+    }
 
     // A bright, saturated orange in PQ: past the knee on its red, well below
     // it on its blue. `present` takes the bytes in the order BGRA8 stores them.

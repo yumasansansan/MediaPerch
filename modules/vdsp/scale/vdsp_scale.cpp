@@ -43,6 +43,7 @@
 #include <memory>
 #include <new>
 #include <string>
+#include <vector>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
@@ -130,21 +131,26 @@ const char* name_of(Light light) noexcept
 /// weights are normalised so that a flat field stays flat whatever the phase.
 /// The other axis is carried across untouched, and the edge is clamped.
 ///
-/// The head is here and the kernels are pasted in after it from
-/// `kernels.hpp`; the tail, below, is what calls them.
-constexpr char k_shader_head[] = R"HLSL(
+/// **The weights are the host's** (`axis_table`, from kernels.hpp's
+/// `taps_at`, in double): one run of `taps` for every output sample along the
+/// axis, and where each run starts. What the shader does per tap is a fetch,
+/// the light and a multiply-add, in a loop of fixed length: eight, unrolled,
+/// or as many eights as the longest run needs.
+constexpr char k_shader[] = R"HLSL(
 Texture2D<float4> source : register(t0);
+// **The weights and where they start**, for every output sample along the
+// axis: `taps` weights each, normalised, and zero past the sample's own taps;
+// and the first source sample, the first and last tap within one stretched
+// tap of the centre -- what antiringing bounds the result by -- and how many
+// taps are the sample's own.
+StructuredBuffer<float> weights : register(t1);
+StructuredBuffer<int4>  starts  : register(t2);
 
 cbuffer Axis : register(b0)
 {
     uint  axis;           // 0 across, 1 down
-    uint  kind;           // kernels.hpp's Kernel
-    uint  lobes;          // Lanczos's
-    float b;              // the cubic's
-
-    float c;
+    uint  taps;           // weights per output sample, a multiple of eight
     float src;            // samples along the axis, in
-    float dst;            // and out
     float antiring;       // 0 leaves a kernel's overshoot, 1 removes it
 
     uint  light;          // 0 linear, 1 gamma, 2 sigmoid
@@ -152,10 +158,25 @@ cbuffer Axis : register(b0)
     uint  decode;         // this pass writes the result, so it brings it back
     float gamma;
 
+    // **The curves' constants, worked out on the host in double**: one over
+    // the gamma; the sigmoid's centre and slope and one over the slope; its
+    // range and one over that; and the logistic at 0, its span to 1, and one
+    // over the span -- two exponentials the shader took at every component of
+    // every tap.
+    float gamma_inv;
     float sigmoid_center;
     float sigmoid_slope;
-    float sigmoid_range;  // the linear value at the top of the curve
-    float pad;
+    float sigmoid_slope_inv;
+
+    float sigmoid_range;
+    float sigmoid_range_inv;
+    float sigmoid_offset;
+    float sigmoid_scale;
+
+    float sigmoid_scale_inv;
+    float pad_a;
+    float pad_b;
+    float pad_c;
 };
 
 struct Vertex {
@@ -170,9 +191,7 @@ Vertex vs_main(uint id : SV_VertexID)
     out_vertex.position = float4(out_vertex.uv * float2(2, -2) + float2(-1, 1), 0, 1);
     return out_vertex;
 }
-)HLSL";
 
-constexpr char k_shader_tail[] = R"HLSL(
 // --------------------------------------------------------------------------
 // The light
 // --------------------------------------------------------------------------
@@ -187,22 +206,12 @@ constexpr char k_shader_tail[] = R"HLSL(
 
 float3 gamma_encode(float3 v)
 {
-    return sign(v) * pow(abs(v), 1.0 / gamma);
+    return sign(v) * pow(abs(v), gamma_inv);
 }
 
 float3 gamma_decode(float3 v)
 {
     return sign(v) * pow(abs(v), gamma);
-}
-
-float sigmoid_offset()
-{
-    return 1.0 / (1.0 + exp(sigmoid_slope * sigmoid_center));
-}
-
-float sigmoid_scale()
-{
-    return 1.0 / (1.0 + exp(sigmoid_slope * (sigmoid_center - 1.0))) - sigmoid_offset();
 }
 
 // One component: inside 0..1 the inverse logistic, outside it the line. The
@@ -211,7 +220,7 @@ float sigmoid_encode_one(float x)
 {
     float r = x;
     if (x > 0.0 && x < 1.0) {
-        r = sigmoid_center - log(1.0 / (x * sigmoid_scale() + sigmoid_offset()) - 1.0) / sigmoid_slope;
+        r = sigmoid_center - log(1.0 / (x * sigmoid_scale + sigmoid_offset) - 1.0) * sigmoid_slope_inv;
     }
     return r;
 }
@@ -220,14 +229,14 @@ float sigmoid_decode_one(float y)
 {
     float r = y;
     if (y > 0.0 && y < 1.0) {
-        r = (1.0 / (1.0 + exp(sigmoid_slope * (sigmoid_center - y))) - sigmoid_offset()) / sigmoid_scale();
+        r = (1.0 / (1.0 + exp(sigmoid_slope * (sigmoid_center - y))) - sigmoid_offset) * sigmoid_scale_inv;
     }
     return r;
 }
 
 float3 sigmoid_encode(float3 v)
 {
-    float3 x = v / sigmoid_range;
+    float3 x = v * sigmoid_range_inv;
     return float3(sigmoid_encode_one(x.r), sigmoid_encode_one(x.g), sigmoid_encode_one(x.b));
 }
 
@@ -263,43 +272,53 @@ float3 from_light(float3 v)
 // One axis
 // --------------------------------------------------------------------------
 
+// One tap: the source sample `t` taps past the run's first, in the light,
+// weighed into the sum -- unless its weight is nothing, which a tap past the
+// sample's own run always is -- and into the bounds when it is within one
+// stretched tap of the centre. **Antiringing** (libplacebo's): the source
+// samples the output sits between bound what a kernel with negative lobes
+// may overshoot past.
+void take(int t, int2 p, int4 start, uint base, int last, inout float4 sum, inout float4 low,
+          inout float4 high)
+{
+    int jc = clamp(start.x + t, 0, last);
+    int3 at = axis == 0 ? int3(jc, p.y, 0) : int3(p.x, jc, 0);
+    float4 texel = source.Load(at);
+    if (encode != 0) {
+        texel.rgb = to_light(texel.rgb);
+    }
+    float w = weights[base + uint(t)];
+    if (w != 0.0) {
+        sum += w * texel;
+    }
+    if (t >= start.y && t <= start.z) {
+        low = min(low, texel);
+        high = max(high, texel);
+    }
+}
+
 float4 ps_axis(Vertex input) : SV_Target
 {
     int2 p = int2(input.position.xy);
-    float ratio = src / dst;
-    float stretch = max(ratio, 1.0);
-    float i = axis == 0 ? float(p.x) : float(p.y);
-    float s = (i + 0.5) * ratio - 0.5;
-    float reach = kernel_support(kind, lobes) * stretch;
-    int lo = int(ceil(s - reach));
-    int hi = int(floor(s + reach));
+    int i = axis == 0 ? p.x : p.y;
+    int4 start = starts[i];
+    uint base = uint(i) * taps;
     int last = int(src) - 1;
     float4 sum = float4(0.0, 0.0, 0.0, 0.0);
-    float weights = 0.0;
-    // **Antiringing** (libplacebo's): the two source samples the output sits
-    // between -- at a stretch, the samples within one stretched tap -- bound
-    // what a kernel with negative lobes may overshoot past.
     float4 low = float4(1e30, 1e30, 1e30, 1e30);
     float4 high = float4(-1e30, -1e30, -1e30, -1e30);
-    [loop] for (int j = lo; j <= hi; ++j) {
-        float d = (s - float(j)) / stretch;
-        float w = kernel_weight(kind, lobes, b, c, d);
-        int jc = clamp(j, 0, last);
-        int3 at = axis == 0 ? int3(jc, p.y, 0) : int3(p.x, jc, 0);
-        float4 texel = source.Load(at);
-        if (encode != 0) {
-            texel.rgb = to_light(texel.rgb);
+    if (taps == 8) {
+        [unroll] for (int t = 0; t < 8; ++t) {
+            take(t, p, start, base, last, sum, low, high);
         }
-        if (w != 0.0) {
-            sum += w * texel;
-            weights += w;
-        }
-        if (abs(d) < 1.0) {
-            low = min(low, texel);
-            high = max(high, texel);
+    } else {
+        [loop] for (uint g = 0; g < taps; g += 8) {
+            [unroll] for (int u = 0; u < 8; ++u) {
+                take(int(g) + u, p, start, base, last, sum, low, high);
+            }
         }
     }
-    float4 result = sum / (abs(weights) < 1e-6 ? 1.0 : weights);
+    float4 result = sum;
     if (antiring != 0.0) {
         result = lerp(result, clamp(result, low, high), antiring);
     }
@@ -313,13 +332,8 @@ float4 ps_axis(Vertex input) : SV_Target
 /// Mirrors the `cbuffer` above, which HLSL packs in four-float rows.
 struct Constants {
     std::uint32_t axis = 0;
-    std::uint32_t kind = 9;
-    std::uint32_t lobes = 3;
-    float b = 1.0f / 3.0f;
-
-    float c = 1.0f / 3.0f;
+    std::uint32_t taps = 8;
     float src = 1.0f;
-    float dst = 1.0f;
     float antiring = 0.0f;
 
     std::uint32_t light = 0;
@@ -327,12 +341,40 @@ struct Constants {
     std::uint32_t decode = 0;
     float gamma = 2.2f;
 
+    float gamma_inv = 1.0f / 2.2f;
     float sigmoid_center = 0.75f;
     float sigmoid_slope = 6.5f;
+    float sigmoid_slope_inv = 1.0f / 6.5f;
+
     float sigmoid_range = 1.0f;
-    float pad = 0.0f;
+    float sigmoid_range_inv = 1.0f;
+    float sigmoid_offset = 0.0f;
+    float sigmoid_scale = 1.0f;
+
+    float sigmoid_scale_inv = 1.0f;
+    float pad_a = 0.0f;
+    float pad_b = 0.0f;
+    float pad_c = 0.0f;
 };
-static_assert(sizeof(Constants) % 16 == 0, "a constant buffer is a whole number of rows");
+static_assert(sizeof(Constants) == 5 * 16, "five rows, as the cbuffer packs them");
+
+/// **One axis's weights and starts** (see `weights` and `starts` in the
+/// shader), and what they were worked out for: the sizes and the kernel.
+/// Grown when a longer kernel or a larger picture needs the room; the
+/// `_room`s are how many elements each buffer has.
+struct AxisTable {
+    std::uint32_t src = 0;
+    std::uint32_t dst = 0;
+    mp::kernels::KernelParams kernel{};
+    std::uint32_t taps = 8;
+    bool built = false;
+    Com<ID3D11Buffer> weights;
+    Com<ID3D11ShaderResourceView> weights_view;
+    std::uint32_t weights_room = 0;
+    Com<ID3D11Buffer> starts;
+    Com<ID3D11ShaderResourceView> starts_view;
+    std::uint32_t starts_room = 0;
+};
 
 /// One fp32 texture with a render target view and a shader resource view.
 struct Surface {
@@ -366,14 +408,16 @@ struct MpVideoDsp {
     /// Lanczos-3 up is the usual choice and sharp; Hermite down has no
     /// negative lobes and cannot ring, which on a field of one-pixel rulers is
     /// the difference between a picture and a moiré of dark haloes.
-    mp::kernels::KernelParams up{mp::kernels::Kernel::lanczos, 3, 1.0f / 3.0f, 1.0f / 3.0f};
-    mp::kernels::KernelParams down{mp::kernels::Kernel::hermite, 3, 1.0f / 3.0f, 1.0f / 3.0f};
-    float antiring = 0.0f;
+    mp::kernels::KernelParams up{mp::kernels::Kernel::lanczos, 3, 1.0 / 3.0, 1.0 / 3.0};
+    mp::kernels::KernelParams down{mp::kernels::Kernel::hermite, 3, 1.0 / 3.0, 1.0 / 3.0};
+    /// In double, as a person typed them, and rounded once, into the
+    /// constants, with what the curves derive from them.
+    double antiring = 0.0;
     Light light = Light::linear;
-    float gamma = 2.2f;
-    float sigmoid_center = 0.75f;
-    float sigmoid_slope = 6.5f;
-    float sigmoid_range = 1.0f;
+    double gamma = 2.2;
+    double sigmoid_center = 0.75;
+    double sigmoid_slope = 6.5;
+    double sigmoid_range = 1.0;
 
     /// The geometry: what comes in and what goes out, as `configure` settled
     /// them. Equal is the identity.
@@ -385,6 +429,10 @@ struct MpVideoDsp {
     /// height -- and the target. Remade when the geometry changes.
     Surface across;
     Surface target;
+    /// The weights of each axis, worked out when the geometry or the kernel
+    /// changes.
+    AxisTable across_table;
+    AxisTable down_table;
     /// A view over whatever texture the last `process` was given. Remade when
     /// the texture changes, which for a presenter's intermediate is never after
     /// the first frame.
@@ -405,12 +453,9 @@ bool make_shaders(MpVideoDsp* d, std::string& why)
     // partial precision anywhere near a picture.
     const UINT flags = D3DCOMPILE_OPTIMIZATION_LEVEL3 | D3DCOMPILE_IEEE_STRICTNESS |
                        D3DCOMPILE_WARNINGS_ARE_ERRORS;
-    const std::string source = std::string{k_shader_head} + mp::kernels::k_kernel_hlsl +
-                               k_shader_tail;
-
     Com<ID3DBlob> code;
     Com<ID3DBlob> errors;
-    if (FAILED(D3DCompile(source.data(), source.size(), "vdsp_scale", nullptr, nullptr,
+    if (FAILED(D3DCompile(k_shader, sizeof(k_shader) - 1, "vdsp_scale", nullptr, nullptr,
                           "vs_main", "vs_5_0", flags, 0, code.put(), errors.put()))) {
         why = errors ? static_cast<const char*>(errors->GetBufferPointer())
                      : "the vertex shader would not compile";
@@ -422,7 +467,7 @@ bool make_shaders(MpVideoDsp* d, std::string& why)
         why = "no vertex shader";
         return false;
     }
-    if (FAILED(D3DCompile(source.data(), source.size(), "vdsp_scale", nullptr, nullptr,
+    if (FAILED(D3DCompile(k_shader, sizeof(k_shader) - 1, "vdsp_scale", nullptr, nullptr,
                           "ps_axis", "ps_5_0", flags, 0, code.put(), errors.put()))) {
         why = errors ? static_cast<const char*>(errors->GetBufferPointer())
                      : "the pixel shader would not compile";
@@ -521,7 +566,7 @@ std::uint32_t taps_for(const MpVideoDsp* d, std::uint32_t src, std::uint32_t dst
     }
     const mp::kernels::KernelParams& k = kernel_for(d, src, dst);
     const double stretch = std::max(static_cast<double>(src) / static_cast<double>(dst), 1.0);
-    const double reach = static_cast<double>(mp::kernels::support_of(k.kind, k.lobes)) * stretch;
+    const double reach = mp::kernels::support_of(k.kind, k.lobes) * stretch;
     return static_cast<std::uint32_t>(2.0 * std::ceil(reach));
 }
 
@@ -613,28 +658,130 @@ try {
     return MP_ERR_NO_MEMORY;
 }
 
+/// A structured buffer of at least `count` elements of `stride` bytes, and a
+/// view of all of it, holding `data`: made anew when it is too small, written
+/// over when it is not.
+bool fill_buffer(MpVideoDsp* d, Com<ID3D11Buffer>& buffer, Com<ID3D11ShaderResourceView>& view,
+                 std::uint32_t& room, const void* data, std::uint32_t count, std::uint32_t stride,
+                 std::string& why)
+{
+    if (!buffer || room < count) {
+        view.reset();
+        buffer.reset();
+        room = 0;
+        D3D11_BUFFER_DESC desc{};
+        desc.ByteWidth = count * stride;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+        desc.StructureByteStride = stride;
+        const D3D11_SUBRESOURCE_DATA initial{data, 0, 0};
+        if (FAILED(d->device->CreateBuffer(&desc, &initial, buffer.put())) ||
+            FAILED(d->device->CreateShaderResourceView(buffer.get(), nullptr, view.put()))) {
+            why = "no buffer for the weights";
+            return false;
+        }
+        room = count;
+        return true;
+    }
+    const D3D11_BOX box{0, 0, 0, count * stride, 1, 1};
+    d->context->UpdateSubresource(buffer.get(), 0, &box, data, 0, 0);
+    return true;
+}
+
+/// **One axis's weights, worked out when what they depend on changed.** For
+/// each output sample, `taps_at` at its centre with the kernel stretched by
+/// the downscale factor: the first source sample, the weights, normalised in
+/// double, and which taps lie within one stretched tap of the centre, which
+/// is what antiringing takes its bounds from. Every run is padded with zeros
+/// to the longest, rounded up to eight, which is the loop the shader unrolls.
+bool update_axis_table(MpVideoDsp* d, AxisTable& table, std::uint32_t src, std::uint32_t dst,
+                       std::string& why)
+{
+    const mp::kernels::KernelParams& k = kernel_for(d, src, dst);
+    if (table.built && table.src == src && table.dst == dst && table.kernel.kind == k.kind &&
+        table.kernel.lobes == k.lobes && table.kernel.b == k.b && table.kernel.c == k.c) {
+        return true;
+    }
+    const double ratio = static_cast<double>(src) / static_cast<double>(dst);
+    const double stretch = std::max(ratio, 1.0);
+    std::vector<mp::kernels::Taps> runs(dst);
+    std::vector<std::int32_t> starts(static_cast<std::size_t>(dst) * 4);
+    std::size_t longest = 1;
+    for (std::uint32_t i = 0; i < dst; ++i) {
+        const double centre = ((static_cast<double>(i) + 0.5) * ratio) - 0.5;
+        mp::kernels::Taps& run = runs[i];
+        run = mp::kernels::taps_at(k, centre, stretch);
+        std::int64_t ring_first = 1;
+        std::int64_t ring_last = 0;
+        for (std::size_t t = 0; t < run.weights.size(); ++t) {
+            const auto sample = static_cast<double>(run.first + static_cast<std::int64_t>(t));
+            if (std::fabs((centre - sample) / stretch) < 1.0) {
+                if (ring_first > ring_last) {
+                    ring_first = static_cast<std::int64_t>(t);
+                }
+                ring_last = static_cast<std::int64_t>(t);
+            }
+        }
+        std::int32_t* start = starts.data() + (static_cast<std::size_t>(i) * 4);
+        start[0] = static_cast<std::int32_t>(run.first);
+        start[1] = static_cast<std::int32_t>(ring_first);
+        start[2] = static_cast<std::int32_t>(ring_last);
+        start[3] = static_cast<std::int32_t>(run.weights.size());
+        longest = std::max(longest, run.weights.size());
+    }
+    const std::size_t stride = (longest + 7) / 8 * 8;
+    std::vector<float> weights(static_cast<std::size_t>(dst) * stride, 0.0f);
+    for (std::uint32_t i = 0; i < dst; ++i) {
+        mp::kernels::round_run(runs[i].weights,
+                               weights.data() + (static_cast<std::size_t>(i) * stride));
+    }
+    if (!fill_buffer(d, table.weights, table.weights_view, table.weights_room, weights.data(),
+                     static_cast<std::uint32_t>(weights.size()), sizeof(float), why) ||
+        !fill_buffer(d, table.starts, table.starts_view, table.starts_room, starts.data(), dst,
+                     4 * sizeof(std::int32_t), why)) {
+        return false;
+    }
+    table.src = src;
+    table.dst = dst;
+    table.kernel = k;
+    table.taps = static_cast<std::uint32_t>(stride);
+    table.built = true;
+    return true;
+}
+
 /// One pass: `axis` of `from` into `into`, at `into`'s size.
-void draw_axis(MpVideoDsp* d, std::uint32_t axis, ID3D11ShaderResourceView* from,
+bool draw_axis(MpVideoDsp* d, std::uint32_t axis, ID3D11ShaderResourceView* from,
                const Surface& into, std::uint32_t src, std::uint32_t dst, bool first,
                bool last)
 {
-    const mp::kernels::KernelParams& k = kernel_for(d, src, dst);
+    AxisTable& table = axis == 0 ? d->across_table : d->down_table;
+    if (!update_axis_table(d, table, src, dst, d->trouble)) {
+        return false;
+    }
+    // **Rounded once, here**, from what a person set and what the curves
+    // derive from it in double.
+    const double scale_low = 1.0 / (1.0 + std::exp(d->sigmoid_slope * d->sigmoid_center));
+    const double scale_high =
+        1.0 / (1.0 + std::exp(d->sigmoid_slope * (d->sigmoid_center - 1.0)));
     Constants constants;
     constants.axis = axis;
-    constants.kind = static_cast<std::uint32_t>(k.kind);
-    constants.lobes = k.lobes;
-    constants.b = k.b;
-    constants.c = k.c;
+    constants.taps = table.taps;
     constants.src = static_cast<float>(src);
-    constants.dst = static_cast<float>(dst);
-    constants.antiring = d->antiring;
+    constants.antiring = static_cast<float>(d->antiring);
     constants.light = static_cast<std::uint32_t>(d->light);
     constants.encode = first && d->light != Light::linear ? 1u : 0u;
     constants.decode = last && d->light != Light::linear ? 1u : 0u;
-    constants.gamma = d->gamma;
-    constants.sigmoid_center = d->sigmoid_center;
-    constants.sigmoid_slope = d->sigmoid_slope;
-    constants.sigmoid_range = d->sigmoid_range;
+    constants.gamma = static_cast<float>(d->gamma);
+    constants.gamma_inv = static_cast<float>(1.0 / d->gamma);
+    constants.sigmoid_center = static_cast<float>(d->sigmoid_center);
+    constants.sigmoid_slope = static_cast<float>(d->sigmoid_slope);
+    constants.sigmoid_slope_inv = static_cast<float>(1.0 / d->sigmoid_slope);
+    constants.sigmoid_range = static_cast<float>(d->sigmoid_range);
+    constants.sigmoid_range_inv = static_cast<float>(1.0 / d->sigmoid_range);
+    constants.sigmoid_offset = static_cast<float>(scale_low);
+    constants.sigmoid_scale = static_cast<float>(scale_high - scale_low);
+    constants.sigmoid_scale_inv = static_cast<float>(1.0 / (scale_high - scale_low));
 
     D3D11_MAPPED_SUBRESOURCE mapped{};
     if (SUCCEEDED(d->context->Map(d->constants.get(), 0, D3D11_MAP_WRITE_DISCARD, 0,
@@ -653,11 +800,12 @@ void draw_axis(MpVideoDsp* d, std::uint32_t axis, ID3D11ShaderResourceView* from
     // output before it goes on the input; Direct3D unbinds one of the two
     // silently otherwise.
     ID3D11RenderTargetView* none[] = {nullptr};
-    ID3D11ShaderResourceView* unbound[] = {nullptr};
+    ID3D11ShaderResourceView* unbound[] = {nullptr, nullptr, nullptr};
     d->context->OMSetRenderTargets(1, none, nullptr);
-    d->context->PSSetShaderResources(0, 1, unbound);
+    d->context->PSSetShaderResources(0, 3, unbound);
     ID3D11RenderTargetView* targets[] = {into.target.get()};
-    ID3D11ShaderResourceView* resources[] = {from};
+    ID3D11ShaderResourceView* resources[] = {from, table.weights_view.get(),
+                                             table.starts_view.get()};
     ID3D11Buffer* buffers[] = {d->constants.get()};
     d->context->OMSetRenderTargets(1, targets, nullptr);
     d->context->RSSetViewports(1, &viewport);
@@ -665,10 +813,11 @@ void draw_axis(MpVideoDsp* d, std::uint32_t axis, ID3D11ShaderResourceView* from
     d->context->IASetInputLayout(nullptr);
     d->context->VSSetShader(d->vertex_shader.get(), nullptr, 0);
     d->context->PSSetShader(d->pixel_axis.get(), nullptr, 0);
-    d->context->PSSetShaderResources(0, 1, resources);
+    d->context->PSSetShaderResources(0, 3, resources);
     d->context->PSSetConstantBuffers(0, 1, buffers);
     d->context->Draw(3, 0);
     ++d->passes;
+    return true;
 }
 
 MpResult MP_CALL scale_process(MpVideoDsp* d, const MpVideoFrame* in,
@@ -731,17 +880,21 @@ try {
     // cost of a pass -- or through a non-interpolating one that would not.
     const bool across = d->src_width != d->dst_width;
     const bool down = d->src_height != d->dst_height;
+    bool drawn = false;
     if (across && down) {
-        draw_axis(d, 0, d->source_view.get(), d->across, d->src_width, d->dst_width, true,
-                  false);
-        draw_axis(d, 1, d->across.source.get(), d->target, d->src_height, d->dst_height,
-                  false, true);
+        drawn = draw_axis(d, 0, d->source_view.get(), d->across, d->src_width, d->dst_width,
+                          true, false) &&
+                draw_axis(d, 1, d->across.source.get(), d->target, d->src_height,
+                          d->dst_height, false, true);
     } else if (across) {
-        draw_axis(d, 0, d->source_view.get(), d->target, d->src_width, d->dst_width, true,
-                  true);
+        drawn = draw_axis(d, 0, d->source_view.get(), d->target, d->src_width, d->dst_width,
+                          true, true);
     } else {
-        draw_axis(d, 1, d->source_view.get(), d->target, d->src_height, d->dst_height, true,
-                  true);
+        drawn = draw_axis(d, 1, d->source_view.get(), d->target, d->src_height,
+                          d->dst_height, true, true);
+    }
+    if (!drawn) {
+        return MP_ERR_UNSUPPORTED;
     }
 
     // **Unbound before it is handed on.** Whatever reads this next may not
@@ -785,14 +938,14 @@ bool parse_uint(const char* value, std::uint32_t& out) noexcept
     return true;
 }
 
-bool parse_number(const char* value, float& out) noexcept
+bool parse_number(const char* value, double& out) noexcept
 {
     char* end = nullptr;
     const double n = std::strtod(value, &end);
     if (end == value || *end != '\0' || std::isnan(n)) {
         return false;
     }
-    out = static_cast<float>(n);
+    out = n;
     return true;
 }
 
@@ -829,7 +982,7 @@ try {
             return MP_OK;
         }
         if (std::strcmp(rest, "_b") == 0 || std::strcmp(rest, "_c") == 0) {
-            float number = 0.0f;
+            double number = 0.0;
             if (!parse_number(value, number)) {
                 d->trouble = std::string{key} + " is a number";
                 return MP_ERR_INVALID;
@@ -842,7 +995,7 @@ try {
     if (std::strcmp(key, "antiring") == 0) {
         // 0 to 1 is what it means; past either end it extrapolates, which is
         // a number somebody typed and not a reason to refuse.
-        float number = 0.0f;
+        double number = 0.0;
         if (!parse_number(value, number)) {
             d->trouble = "antiring is a number, 0 for none and 1 for all of it";
             return MP_ERR_INVALID;
@@ -865,8 +1018,8 @@ try {
     }
     if (std::strcmp(key, "gamma") == 0 || std::strcmp(key, "sigmoid_range") == 0) {
         // A power of nought and a range of nought are divisions by it.
-        float number = 0.0f;
-        if (!parse_number(value, number) || number <= 0.0f) {
+        double number = 0.0;
+        if (!parse_number(value, number) || number <= 0.0) {
             d->trouble = std::string{key} + " is a positive number";
             return MP_ERR_INVALID;
         }
@@ -874,7 +1027,7 @@ try {
         return MP_OK;
     }
     if (std::strcmp(key, "sigmoid_center") == 0 || std::strcmp(key, "sigmoid_slope") == 0) {
-        float number = 0.0f;
+        double number = 0.0;
         if (!parse_number(value, number)) {
             d->trouble = std::string{key} + " is a number";
             return MP_ERR_INVALID;
@@ -916,13 +1069,13 @@ MpResult kernel_rows(const MpVideoDsp* d, const char* which, const mp::kernels::
                       "%s_b\t%.4f\tthe cubic's B: 1/3 with C=1/3 is Mitchell, 0 with "
                       "C=1/2 is Catmull-Rom, 1 with C=0 is the B-spline\tnumber "
                       "step=0.05 group=%s when=%s=bicubic",
-                      which, static_cast<double>(k.b), group, which);
+                      which, k.b, group, which);
         return MP_OK;
     case 3:
         std::snprintf(out, out_bytes,
                       "%s_c\t%.4f\tthe cubic's C; more is sharper and rings "
                       "more\tnumber step=0.05 group=%s when=%s=bicubic",
-                      which, static_cast<double>(k.c), group, which);
+                      which, k.c, group, which);
         return MP_OK;
     default:
         break;

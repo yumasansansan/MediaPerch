@@ -34,14 +34,14 @@ constexpr std::uint32_t k_siting_left = 0;
 constexpr std::uint32_t k_siting_centre = 1;
 constexpr std::uint32_t k_siting_types = 6;
 
-[[nodiscard]] constexpr float siting_offset_x(std::uint32_t type) noexcept
+[[nodiscard]] constexpr double siting_offset_x(std::uint32_t type) noexcept
 {
-    return (type % 2u) == 0u ? 0.0f : 0.5f;
+    return (type % 2u) == 0u ? 0.0 : 0.5;
 }
 
-[[nodiscard]] constexpr float siting_offset_y(std::uint32_t type) noexcept
+[[nodiscard]] constexpr double siting_offset_y(std::uint32_t type) noexcept
 {
-    return type < 2u ? 0.5f : (type < 4u ? 0.0f : 1.0f);
+    return type < 2u ? 0.5 : (type < 4u ? 0.0 : 1.0);
 }
 
 [[nodiscard]] constexpr const char* siting_name(std::uint32_t type) noexcept

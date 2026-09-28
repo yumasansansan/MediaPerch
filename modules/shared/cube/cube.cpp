@@ -64,7 +64,7 @@ std::string_view word(std::string_view s, std::size_t& at)
 /// not take -- a leading `+`, a hexadecimal float, a number beyond a double's
 /// range, which strtod rounds to what it can -- goes to strtod as it always
 /// did, so a table reads exactly as it did.
-bool number(std::string_view text, float& out)
+bool number(std::string_view text, double& out)
 {
     if (text.empty()) {
         return false;
@@ -83,11 +83,11 @@ bool number(std::string_view text, float& out)
     if (!std::isfinite(value)) {
         return false;
     }
-    out = static_cast<float>(value);
+    out = value;
     return true;
 }
 
-bool three(std::string_view rest, float out[3])
+bool three(std::string_view rest, double out[3])
 {
     std::size_t at = 0;
     for (int i = 0; i < 3; ++i) {
@@ -105,7 +105,7 @@ std::string said(std::string_view name, std::size_t line, const std::string& wha
 
 } // namespace
 
-bool CubeLut::identity(float tolerance) const noexcept
+bool CubeLut::identity(double tolerance) const noexcept
 {
     if (size < 2 || table.size() != static_cast<std::size_t>(size) * size * size * 3) {
         return false;
@@ -113,18 +113,18 @@ bool CubeLut::identity(float tolerance) const noexcept
     // The identity is only the identity over 0..1: a table whose domain says
     // otherwise maps that domain onto itself, which is a different function.
     for (int c = 0; c < 3; ++c) {
-        if (domain_min[c] != 0.0f || domain_max[c] != 1.0f) {
+        if (domain_min[c] != 0.0 || domain_max[c] != 1.0) {
             return false;
         }
     }
-    const auto step = 1.0f / static_cast<float>(size - 1);
+    const double last = static_cast<double>(size - 1);
     std::size_t at = 0;
     for (std::uint32_t b = 0; b < size; ++b) {
         for (std::uint32_t g = 0; g < size; ++g) {
             for (std::uint32_t r = 0; r < size; ++r) {
-                const float want[3] = {static_cast<float>(r) * step,
-                                       static_cast<float>(g) * step,
-                                       static_cast<float>(b) * step};
+                const double want[3] = {static_cast<double>(r) / last,
+                                        static_cast<double>(g) / last,
+                                        static_cast<double>(b) / last};
                 for (int c = 0; c < 3; ++c) {
                     if (std::fabs(table[at + static_cast<std::size_t>(c)] - want[c]) >
                         tolerance) {
@@ -146,14 +146,14 @@ CubeLut identity_cube(std::uint32_t size)
     }
     out.size = size;
     out.table.resize(static_cast<std::size_t>(size) * size * size * 3);
-    const auto step = 1.0f / static_cast<float>(size - 1);
+    const double last = static_cast<double>(size - 1);
     std::size_t at = 0;
     for (std::uint32_t b = 0; b < size; ++b) {
         for (std::uint32_t g = 0; g < size; ++g) {
             for (std::uint32_t r = 0; r < size; ++r) {
-                out.table[at++] = static_cast<float>(r) * step;
-                out.table[at++] = static_cast<float>(g) * step;
-                out.table[at++] = static_cast<float>(b) * step;
+                out.table[at++] = static_cast<double>(r) / last;
+                out.table[at++] = static_cast<double>(g) / last;
+                out.table[at++] = static_cast<double>(b) / last;
             }
         }
     }
@@ -200,10 +200,10 @@ CubeText parse_cube(std::string_view text, std::string_view name)
                 out.why = said(name, line, "LUT_3D_SIZE is stated twice");
                 return out;
             }
-            float said_size = 0.0f;
+            double said_size = 0.0;
             std::size_t only = 0;
             if (!number(word(rest, only), said_size) || !word(rest, only).empty() ||
-                said_size < 2.0f || said_size > static_cast<float>(k_cube_max_size) ||
+                said_size < 2.0 || said_size > static_cast<double>(k_cube_max_size) ||
                 said_size != std::floor(said_size)) {
                 out.why = said(name, line,
                                "LUT_3D_SIZE is a whole number from 2 to " +
@@ -218,7 +218,7 @@ CubeText parse_cube(std::string_view text, std::string_view name)
             continue;
         }
         if (key == "DOMAIN_MIN" || key == "DOMAIN_MAX") {
-            float* into = key == "DOMAIN_MIN" ? out.lut.domain_min : out.lut.domain_max;
+            double* into = key == "DOMAIN_MIN" ? out.lut.domain_min : out.lut.domain_max;
             if (!three(rest, into)) {
                 out.why = said(name, line, std::string{key} + " is three numbers");
                 return out;
@@ -236,7 +236,7 @@ CubeText parse_cube(std::string_view text, std::string_view name)
             out.why = said(name, line, "more rows than LUT_3D_SIZE says there are");
             return out;
         }
-        float triplet[3] = {0.0f, 0.0f, 0.0f};
+        double triplet[3] = {0.0, 0.0, 0.0};
         std::size_t row = 0;
         if (!number(key, triplet[0]) || !number(word(rest, row), triplet[1]) ||
             !number(word(rest, row), triplet[2]) || !word(rest, row).empty()) {

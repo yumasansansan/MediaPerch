@@ -23,33 +23,33 @@ constexpr unsigned k_rate = 16000;
 
 /// Broadband, deterministic, and different in every channel: the three things
 /// the alignment and channel checks need from a signal.
-std::vector<float> noise(std::uint64_t frames, unsigned channels)
+std::vector<double> noise(std::uint64_t frames, unsigned channels)
 {
-    std::vector<float> out(frames * channels);
+    std::vector<double> out(frames * channels);
     for (unsigned c = 0; c < channels; ++c) {
         std::uint32_t state = 0x2545F491u + c * 0x9E3779B9u;
         for (std::uint64_t n = 0; n < frames; ++n) {
             state = state * 1664525u + 1013904223u;
-            out[n * channels + c] = static_cast<float>(static_cast<std::int32_t>(state)) /
-                                    2147483648.0F * 0.4F;
+            out[n * channels + c] =
+                static_cast<double>(static_cast<std::int32_t>(state)) / 2147483648.0 * 0.4;
         }
     }
     return out;
 }
 
-std::vector<float> tones(std::uint64_t frames, double a_hz, double a_amp, double b_hz,
+std::vector<double> tones(std::uint64_t frames, double a_hz, double a_amp, double b_hz,
                          double b_amp)
 {
-    std::vector<float> out(frames);
+    std::vector<double> out(frames);
     for (std::uint64_t n = 0; n < frames; ++n) {
         const double t = static_cast<double>(n) / k_rate;
-        out[n] = static_cast<float>(a_amp * std::sin(2.0 * std::numbers::pi * a_hz * t) +
-                                    b_amp * std::sin(2.0 * std::numbers::pi * b_hz * t));
+        out[n] = (a_amp * std::sin(2.0 * std::numbers::pi * a_hz * t)) +
+                 (b_amp * std::sin(2.0 * std::numbers::pi * b_hz * t));
     }
     return out;
 }
 
-mp::Comparison run(const std::vector<float>& reference, const std::vector<float>& subject,
+mp::Comparison run(const std::vector<double>& reference, const std::vector<double>& subject,
                    unsigned channels, std::uint32_t band_limit = 0, int max_lag = 256)
 {
     return mp::compare(reference.data(), reference.size() / channels, subject.data(),
@@ -86,7 +86,7 @@ TEST_CASE("a delayed decode is reported as delayed, and measured where it lands"
 
     // The subject is the reference, `delay` frames late: the shape of every
     // gapless failure this project has measured.
-    std::vector<float> late(frames, 0.0F);
+    std::vector<double> late(frames, 0.0);
     for (std::uint64_t n = delay; n < frames; ++n) {
         late[n] = a[n - delay];
     }
@@ -120,7 +120,7 @@ TEST_CASE("two channels swapped is a finding, not a small error")
 {
     constexpr std::uint64_t frames = 8192;
     const auto a = noise(frames, 2);
-    std::vector<float> swapped(a.size());
+    std::vector<double> swapped(a.size());
     for (std::uint64_t n = 0; n < frames; ++n) {
         swapped[n * 2 + 0] = a[n * 2 + 1];
         swapped[n * 2 + 1] = a[n * 2 + 0];
@@ -212,7 +212,7 @@ TEST_CASE("a decode that is not finite is refused before anything else is read")
 {
     const auto a = noise(4096, 1);
     auto broken = a;
-    broken[2000] = std::numeric_limits<float>::quiet_NaN();
+    broken[2000] = std::numeric_limits<double>::quiet_NaN();
 
     const mp::Comparison m = run(a, broken, 1);
     CHECK_FALSE(m.finite);
@@ -226,7 +226,7 @@ TEST_CASE("a shorter decode is a length failure and not a fidelity one")
 {
     constexpr std::uint64_t frames = 8192;
     const auto a = noise(frames, 1);
-    const std::vector<float> cut(a.begin(), a.begin() + 6000);
+    const std::vector<double> cut(a.begin(), a.begin() + 6000);
 
     const mp::Comparison m = mp::compare(a.data(), frames, cut.data(), 6000, 1, k_rate, 0, 256);
     CHECK(m.frames_reference == frames);

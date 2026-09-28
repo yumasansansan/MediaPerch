@@ -40,12 +40,13 @@ struct CubeLut {
     /// is what almost every file states and what the format assumes when it
     /// says nothing -- but a log-space LUT may state otherwise and a reader
     /// that ignored it would apply the table to the wrong range.
-    float domain_min[3] = {0.0f, 0.0f, 0.0f};
-    float domain_max[3] = {1.0f, 1.0f, 1.0f};
+    double domain_min[3] = {0.0, 0.0, 0.0};
+    double domain_max[3] = {1.0, 1.0, 1.0};
     /// `size^3` RGB triplets, **red varying fastest**, then green, then blue.
     /// That is the format's own order and it is also Direct3D's for a 3D
-    /// texture, so the vector uploads without being rearranged.
-    std::vector<float> table;
+    /// texture, so the vector uploads without being rearranged. In double, as
+    /// the file's decimals were read: the texture is where they are rounded.
+    std::vector<double> table;
 
     /// Whether it is the transform that changes nothing.
     ///
@@ -55,7 +56,7 @@ struct CubeLut {
     /// from where the identity puts it -- exactly zero for a table written by
     /// something that computed it, and a little more for one that printed six
     /// decimal places.
-    [[nodiscard]] bool identity(float tolerance = 0.0f) const noexcept;
+    [[nodiscard]] bool identity(double tolerance = 0.0) const noexcept;
 };
 
 /// What `parse_cube` made of a file.

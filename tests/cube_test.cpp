@@ -23,13 +23,13 @@ std::string written(std::uint32_t size, const char* extra = "")
     std::string out = "TITLE \"a test\"\n";
     out += extra;
     out += "LUT_3D_SIZE " + std::to_string(size) + "\n";
-    const auto step = 1.0f / static_cast<float>(size - 1);
+    const double last = static_cast<double>(size - 1);
     for (std::uint32_t b = 0; b < size; ++b) {
         for (std::uint32_t g = 0; g < size; ++g) {
             for (std::uint32_t r = 0; r < size; ++r) {
-                out += std::to_string(static_cast<float>(r) * step) + " " +
-                       std::to_string(static_cast<float>(g) * step) + " " +
-                       std::to_string(static_cast<float>(b) * step) + "\n";
+                out += std::to_string(static_cast<double>(r) / last) + " " +
+                       std::to_string(static_cast<double>(g) / last) + " " +
+                       std::to_string(static_cast<double>(b) / last) + "\n";
             }
         }
     }
@@ -51,12 +51,12 @@ TEST_CASE("a cube LUT is read the way its format states it", "[cube]")
     // for a 3D texture -- so what comes out of here uploads without being
     // rearranged, and getting it backwards would be a picture with its red and
     // blue exchanged in a way no other test would catch.
-    CHECK(read.lut.table[0] == Catch::Approx(0.0f));
-    CHECK(read.lut.table[3] == Catch::Approx(1.0f / 3.0f).margin(1e-5));
-    CHECK(read.lut.table[4] == Catch::Approx(0.0f));
+    CHECK(read.lut.table[0] == Catch::Approx(0.0));
+    CHECK(read.lut.table[3] == Catch::Approx(1.0 / 3.0).margin(1e-5));
+    CHECK(read.lut.table[4] == Catch::Approx(0.0));
     // The second *plane* is the first blue step.
     const std::size_t plane = 4u * 4u * 3u;
-    CHECK(read.lut.table[plane + 2] == Catch::Approx(1.0f / 3.0f).margin(1e-5));
+    CHECK(read.lut.table[plane + 2] == Catch::Approx(1.0 / 3.0).margin(1e-5));
 }
 
 TEST_CASE("an identity table is the identity, which is the one free assertion",
@@ -73,16 +73,16 @@ TEST_CASE("an identity table is the identity, which is the one free assertion",
         // And it survives being written as six decimal places and read back.
         const mp::CubeText read = mp::parse_cube(written(size));
         REQUIRE(read.ok);
-        CHECK(read.lut.identity(1e-5f));
+        CHECK(read.lut.identity(1e-5));
     }
 
     // A table that is not the identity says so, and the check is exact by
     // default: `to_string`'s six places are not free, which is why the file
     // above is read with a tolerance and the computed one without.
     mp::CubeLut moved = mp::identity_cube(4);
-    moved.table[3 * 5 + 1] += 0.01f;
+    moved.table[3 * 5 + 1] += 0.01;
     CHECK_FALSE(moved.identity());
-    CHECK_FALSE(moved.identity(1e-5f));
+    CHECK_FALSE(moved.identity(1e-5));
 }
 
 TEST_CASE("the domain is read, because a log LUT states one", "[cube]")
@@ -90,11 +90,11 @@ TEST_CASE("the domain is read, because a log LUT states one", "[cube]")
     const mp::CubeText read =
         mp::parse_cube(written(2, "DOMAIN_MIN 0.0 0.0 0.0\nDOMAIN_MAX 4.0 4.0 4.0\n"));
     REQUIRE(read.ok);
-    CHECK(read.lut.domain_max[0] == Catch::Approx(4.0f));
+    CHECK(read.lut.domain_max[0] == Catch::Approx(4.0));
     // **And it is not the identity any more**, whatever the table says: a cube
     // over 0..4 that maps 0..1 onto itself is a different function from one
     // over 0..1, and calling both identity would be calling two things one.
-    CHECK_FALSE(read.lut.identity(1e-5f));
+    CHECK_FALSE(read.lut.identity(1e-5));
 }
 
 TEST_CASE("a file that is not a cube is refused with the line", "[cube]")
@@ -151,7 +151,7 @@ TEST_CASE("comments, blank lines and carriage returns are what files have in the
     const mp::CubeText read = mp::parse_cube(text);
     REQUIRE(read.ok);
     CHECK(read.lut.title == "crlf");
-    CHECK(read.lut.table[2] == Catch::Approx(0.125f));
+    CHECK(read.lut.table[2] == Catch::Approx(0.125));
 
     // A file with nothing in it is not a cube, and says so rather than
     // producing an empty one that would grade everything to black.

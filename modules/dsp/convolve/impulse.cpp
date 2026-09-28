@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <vector>
 
@@ -59,9 +60,35 @@ bool load(const std::string& path, Response& out, std::string& why)
 
     const auto frames = static_cast<std::size_t>(wav.totalPCMFrameCount);
     const std::uint32_t channels = wav.channels;
-    std::vector<float> interleaved(frames * channels);
-    const drwav_uint64 read =
-        drwav_read_pcm_frames_f32(&wav, wav.totalPCMFrameCount, interleaved.data());
+    const std::size_t samples = frames * channels;
+    std::vector<double> interleaved(samples);
+    drwav_uint64 read = 0;
+    const bool floats = wav.translatedFormatTag == DR_WAVE_FORMAT_IEEE_FLOAT &&
+                        (wav.bitsPerSample == 32 || wav.bitsPerSample == 64);
+    if (floats) {
+        // The file's own floats, little-endian whatever the container: each
+        // widened to a double, exactly.
+        const std::size_t width = wav.bitsPerSample / 8u;
+        std::vector<unsigned char> raw(samples * width);
+        read = drwav_read_pcm_frames_le(&wav, wav.totalPCMFrameCount, raw.data());
+        for (std::size_t i = 0; i < samples; ++i) {
+            if (width == 4) {
+                float v = 0.0F;
+                std::memcpy(&v, raw.data() + (i * 4), 4);
+                interleaved[i] = static_cast<double>(v);
+            } else {
+                std::memcpy(&interleaved[i], raw.data() + (i * 8), 8);
+            }
+        }
+    } else {
+        // Integers -- and what dr_wav decodes to them, ADPCM, A-law and
+        // mu-law -- as 32-bit samples, over 2^31: exact.
+        std::vector<drwav_int32> ints(samples);
+        read = drwav_read_pcm_frames_s32(&wav, wav.totalPCMFrameCount, ints.data());
+        for (std::size_t i = 0; i < samples; ++i) {
+            interleaved[i] = static_cast<double>(ints[i]) / 2147483648.0;
+        }
+    }
     out.sample_rate = wav.sampleRate;
     drwav_uninit(&wav);
     if (read != frames) {
@@ -73,7 +100,7 @@ bool load(const std::string& path, Response& out, std::string& why)
     for (std::uint32_t c = 0; c < channels; ++c) {
         std::vector<double>& plane = out.channels[c];
         for (std::size_t n = 0; n < frames; ++n) {
-            plane[n] = interleaved[n * channels + c];
+            plane[n] = interleaved[(n * channels) + c];
         }
     }
     return true;

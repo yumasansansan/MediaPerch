@@ -608,11 +608,12 @@ bool VideoPath::set_display(const DisplayIs& display, std::string& why,
     // put the presenter's idea of the display and the shell's out of step the
     // first time one was dropped, and there is nothing to gain: this is sent
     // when a window crosses a monitor, which is rare.
+    // **Seventeen significant digits**, which a double survives the trip
+    // through text and back with, where four decimals rounded it.
     char value[128];
-    std::snprintf(value, sizeof value, "hdr=%d,wide=%d,white=%.4f,peak=%.4f",
-                  display.hdr ? 1 : 0, display.wide ? 1 : 0,
-                  static_cast<double>(display.white_nits),
-                  static_cast<double>(display.peak_nits));
+    std::snprintf(value, sizeof value, "hdr=%d,wide=%d,white=%.17g,peak=%.17g",
+                  display.hdr ? 1 : 0, display.wide ? 1 : 0, display.white_nits,
+                  display.peak_nits);
     return tell("display", value, why, deadline);
 }
 

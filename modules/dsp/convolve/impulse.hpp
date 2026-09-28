@@ -60,9 +60,11 @@ struct Gains {
 
 /// Reads a WAV (and everything else dr_wav reads: RF64, W64, AIFF).
 ///
-/// The path is UTF-8, as the ABI says. Samples come back as `float` from the
-/// reader and are widened -- which loses nothing, because a 24-bit measurement
-/// has 24 bits of mantissa and a 32-bit float has 24.
+/// The path is UTF-8, as the ABI says. **Every sample format arrives exactly**:
+/// a float file's own floats or doubles, widened, and an integer file's
+/// samples as 32-bit integers over 2^31, which a double holds whole -- where
+/// reading through single precision rounded a 32-bit integer measurement and
+/// a 64-bit float one.
 [[nodiscard]] bool load(const std::string& path, Response& out, std::string& why);
 
 [[nodiscard]] Gains measure(const Response& response) noexcept;

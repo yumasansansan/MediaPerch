@@ -23,7 +23,7 @@
 //   * a fidelity floor that does not assume any other decoder is right.
 //
 // No OS headers, no allocation the caller did not ask for beyond scratch, and
-// no I/O: the caller brings two blocks of interleaved float.
+// no I/O: the caller brings two blocks of interleaved doubles.
 
 #ifndef MEDIAPERCH_COMPARE_HPP
 #define MEDIAPERCH_COMPARE_HPP
@@ -94,14 +94,14 @@ struct Comparison {
     unsigned bands_checked = 0;
 };
 
-/// Compares `subject` with `reference`, both interleaved float of `channels`.
+/// Compares `subject` with `reference`, both interleaved doubles of `channels`.
 ///
 /// `band_limit_hz` bounds the spectral check; pass 0 to skip it. `max_lag`
 /// bounds the alignment search in frames -- large enough to see the delay a
 /// broken decoder would introduce (a whole AAC frame is 1024) and no larger,
 /// because the search is linear in it. Zero says the two are known to be
 /// aligned and the search should not run at all.
-Comparison compare(const float* reference, std::uint64_t reference_frames, const float* subject,
+Comparison compare(const double* reference, std::uint64_t reference_frames, const double* subject,
                    std::uint64_t subject_frames, unsigned channels, std::uint32_t sample_rate,
                    std::uint32_t band_limit_hz, int max_lag);
 

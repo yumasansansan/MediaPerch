@@ -692,8 +692,8 @@ bool IpcServer::handle(const std::shared_ptr<Client>& client, const ipc::Header&
         mp::VideoPath::DisplayIs display;
         display.hdr = hdr != 0;
         display.wide = wide != 0;
-        display.white_nits = static_cast<float>(white);
-        display.peak_nits = static_cast<float>(peak);
+        display.white_nits = white;
+        display.peak_nits = peak;
         std::string why;
         if (!player_->set_display(known != 0, display, why)) {
             return fail(why);

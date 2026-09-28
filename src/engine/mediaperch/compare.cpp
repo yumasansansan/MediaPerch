@@ -52,7 +52,7 @@ struct Spectra {
 /// Hann-windowed and hopped by half a window, which is the ordinary way to make
 /// a stationary spectrum out of a signal: the point here is the *ratio* of two
 /// such spectra, and any consistent estimator gives the same ratio.
-void spectrum(const float* x, std::uint64_t frames, unsigned channels, unsigned channel,
+void spectrum(const double* x, std::uint64_t frames, unsigned channels, unsigned channel,
               Spectra& with, std::vector<double>& out)
 {
     out.assign(k_fft / 2 + 1, 0.0);
@@ -62,7 +62,7 @@ void spectrum(const float* x, std::uint64_t frames, unsigned channels, unsigned 
     std::uint64_t windows = 0;
     for (std::uint64_t at = 0; at + k_fft <= frames; at += k_fft / 2) {
         for (unsigned i = 0; i < k_fft; ++i) {
-            with.scratch[i] = static_cast<double>(x[(at + i) * channels + channel]) * with.window[i];
+            with.scratch[i] = x[(at + i) * channels + channel] * with.window[i];
         }
         with.plan.forward(with.scratch.data(), with.bins.data());
         for (unsigned k = 0; k <= k_fft / 2; ++k) {
@@ -89,22 +89,22 @@ void spectrum(const float* x, std::uint64_t frames, unsigned channels, unsigned 
 /// A sum is invariant under permutation, which is exactly the property needed:
 /// it finds the delay whether or not the channels are in order, so the two
 /// findings stay independent.
-std::vector<float> downmix(const float* x, std::uint64_t frames, unsigned channels)
+std::vector<double> downmix(const double* x, std::uint64_t frames, unsigned channels)
 {
-    std::vector<float> out(frames);
+    std::vector<double> out(frames);
     for (std::uint64_t n = 0; n < frames; ++n) {
         double sum = 0.0;
         for (unsigned c = 0; c < channels; ++c) {
-            sum += static_cast<double>(x[n * channels + c]);
+            sum += x[n * channels + c];
         }
-        out[n] = static_cast<float>(sum);
+        out[n] = sum;
     }
     return out;
 }
 
 /// Correlation of two channels, normalised so that 1.0 is identity and 0.0 is
 /// unrelated. Energy rather than amplitude, so it can be quoted in decibels.
-double correlation(const float* a, const float* b, std::uint64_t frames, unsigned channels,
+double correlation(const double* a, const double* b, std::uint64_t frames, unsigned channels,
                    unsigned ca, unsigned cb, std::int64_t lag) noexcept
 {
     double sum = 0.0;
@@ -115,8 +115,8 @@ double correlation(const float* a, const float* b, std::uint64_t frames, unsigne
         if (m < 0 || static_cast<std::uint64_t>(m) >= frames) {
             continue;
         }
-        const double x = static_cast<double>(a[n * channels + ca]);
-        const double y = static_cast<double>(b[static_cast<std::uint64_t>(m) * channels + cb]);
+        const double x = a[n * channels + ca];
+        const double y = b[static_cast<std::uint64_t>(m) * channels + cb];
         sum += x * y;
         ea += x * x;
         eb += y * y;
@@ -140,7 +140,7 @@ double correlation(const float* a, const float* b, std::uint64_t frames, unsigne
 /// terms is a transform's -- a few times 1e-16 of the product of the two
 /// blocks' norms -- where one running sum over millions of products collected a
 /// rounding for each of them.
-std::vector<double> cross_terms(const float* a, const float* b, std::uint64_t frames,
+std::vector<double> cross_terms(const double* a, const double* b, std::uint64_t frames,
                                 std::size_t max_lag)
 {
     const std::size_t lags = 2 * max_lag + 1;
@@ -157,7 +157,7 @@ std::vector<double> cross_terms(const float* a, const float* b, std::uint64_t fr
         const auto length = static_cast<std::size_t>(std::min<std::uint64_t>(block, frames - start));
         // The block, and after it nothing.
         for (std::size_t i = 0; i < length; ++i) {
-            x[i] = static_cast<double>(a[start + i]);
+            x[i] = a[start + i];
         }
         std::fill(x.begin() + static_cast<std::ptrdiff_t>(length), x.end(), 0.0);
         // What the block meets of `b`, from max_lag before it to max_lag after
@@ -166,7 +166,7 @@ std::vector<double> cross_terms(const float* a, const float* b, std::uint64_t fr
             const auto m = static_cast<std::int64_t>(start + j) - static_cast<std::int64_t>(max_lag);
             const bool inside = j < length + lags - 1 && m >= 0 &&
                                 static_cast<std::uint64_t>(m) < frames;
-            y[j] = inside ? static_cast<double>(b[static_cast<std::uint64_t>(m)]) : 0.0;
+            y[j] = inside ? b[static_cast<std::uint64_t>(m)] : 0.0;
         }
         plan.forward(x.data(), fx.data());
         plan.forward(y.data(), fy.data());
@@ -203,23 +203,23 @@ struct Edges {
     std::vector<double> tail_to;   ///< [j]: x[frames - max_lag]^2 + ... + j of them
 };
 
-Edges edges_of(const float* x, std::uint64_t frames, std::size_t max_lag)
+Edges edges_of(const double* x, std::uint64_t frames, std::size_t max_lag)
 {
     Edges e;
     e.head_from.assign(max_lag + 1, 0.0);
     for (std::size_t k = max_lag; k-- > 0;) {
-        const auto v = static_cast<double>(x[k]);
+        const auto v = x[k];
         e.head_from[k] = e.head_from[k + 1] + (v * v);
     }
     const auto middle = static_cast<std::size_t>(frames - (2 * max_lag));
     e.middle = transform::sum_of(middle, [x, max_lag](std::size_t i) {
-        const auto v = static_cast<double>(x[max_lag + i]);
+        const auto v = x[max_lag + i];
         return v * v;
     });
     e.tail_to.assign(max_lag + 1, 0.0);
-    const float* tail = x + (frames - max_lag);
+    const double* tail = x + (frames - max_lag);
     for (std::size_t j = 0; j < max_lag; ++j) {
-        const auto v = static_cast<double>(tail[j]);
+        const auto v = tail[j];
         e.tail_to[j + 1] = e.tail_to[j] + (v * v);
     }
     return e;
@@ -227,7 +227,7 @@ Edges edges_of(const float* x, std::uint64_t frames, std::size_t max_lag)
 
 /// The normalised correlation of `a` and `b` at every lag from -max_lag to
 /// max_lag, at [lag + max_lag]: what correlation() gives, for all of them.
-std::vector<double> correlations(const float* a, const float* b, std::uint64_t frames,
+std::vector<double> correlations(const double* a, const double* b, std::uint64_t frames,
                                  std::size_t max_lag)
 {
     const std::size_t lags = 2 * max_lag + 1;
@@ -267,7 +267,7 @@ std::vector<double> correlations(const float* a, const float* b, std::uint64_t f
 
 } // namespace
 
-Comparison compare(const float* reference, std::uint64_t reference_frames, const float* subject,
+Comparison compare(const double* reference, std::uint64_t reference_frames, const double* subject,
                    std::uint64_t subject_frames, unsigned channels, std::uint32_t sample_rate,
                    std::uint32_t band_limit_hz, int max_lag)
 {
@@ -292,8 +292,8 @@ Comparison compare(const float* reference, std::uint64_t reference_frames, const
     // aligned signals. A decode that starts late is a *separate* failure from a
     // decode that is wrong, and mixing the two produces the worst kind of
     // result: a fidelity figure that is meaningless and does not look it.
-    const std::vector<float> flat_reference = downmix(reference, reference_frames, channels);
-    const std::vector<float> flat_subject = downmix(subject, subject_frames, channels);
+    const std::vector<double> flat_reference = downmix(reference, reference_frames, channels);
+    const std::vector<double> flat_subject = downmix(subject, subject_frames, channels);
     const auto search = static_cast<std::size_t>(std::max(max_lag, 0));
     const std::vector<double> scores =
         correlations(flat_reference.data(), flat_subject.data(), overlap, search);
@@ -341,8 +341,8 @@ Comparison compare(const float* reference, std::uint64_t reference_frames, const
     double error_energy = 0.0;
     double reference_energy = 0.0;
     for (std::uint64_t i = 0; i < n * channels; ++i) {
-        const double r = static_cast<double>(reference[i]);
-        const double s = static_cast<double>(subject[i]);
+        const double r = reference[i];
+        const double s = subject[i];
         const double d = s - r;
         error_energy += d * d;
         reference_energy += r * r;
@@ -357,8 +357,8 @@ Comparison compare(const float* reference, std::uint64_t reference_frames, const
         double sr = 0.0;
         double ss = 0.0;
         for (std::uint64_t f = 0; f < n; ++f) {
-            sr += static_cast<double>(reference[f * channels + c]);
-            ss += static_cast<double>(subject[f * channels + c]);
+            sr += reference[f * channels + c];
+            ss += subject[f * channels + c];
         }
         out.dc_reference = std::max(out.dc_reference, std::abs(sr) / static_cast<double>(n));
         out.dc_subject = std::max(out.dc_subject, std::abs(ss) / static_cast<double>(n));
@@ -387,8 +387,8 @@ Comparison compare(const float* reference, std::uint64_t reference_frames, const
                 double* r = planes_r.data() + (c * k_block);
                 double* s = planes_s.data() + (c * k_block);
                 for (std::size_t f = 0; f < length; ++f) {
-                    r[f] = static_cast<double>(reference[((at + f) * channels) + c]);
-                    s[f] = static_cast<double>(subject[((at + f) * channels) + c]);
+                    r[f] = reference[((at + f) * channels) + c];
+                    s[f] = subject[((at + f) * channels) + c];
                 }
             }
             for (unsigned d = 0; d < channels; ++d) {
