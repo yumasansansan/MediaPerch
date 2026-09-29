@@ -1,0 +1,68 @@
+Bento4: the entries of a sample group description are read out of its box
+
+AP4_SgpdAtom's constructor took every entry out of the whole rest of the box: bytes_available was never reduced by an entry, so a 26-byte box of version 1 whose entries are two bytes each, and whose count says 67,108,865 of them, allocated a buffer for every one -- 2 GB, out of a 1143-byte file MediaPerch's MP4 fuzzer found -- and a box of version 0, whose one entry has no length and is the rest of the box, was read again for every entry its count claimed. Three more faults sat in the same lines. The subtractions of the fixed fields from bytes_available were unchecked, so a box too small for its fields wrapped it round to nearly four gigabytes, which an entry of version 0 then allocated. A box of version 1 with no default length read each entry's length into description_length and overwrote it with ReadUI32's result, which is 0 on success, so every entry came out empty and the lengths and data after it were taken for the next entries' lengths. And a read that failed left an entry holding whatever the heap held. Each entry now comes out of what the box has left, its length read and kept, and the reading stops at the first entry the box cannot hold or the stream cannot give; an entry of version 0 is the only one, and a fixed field is read only when the box holds it. Against v1.6.0-641-119-gb8c50a0.
+
+diff --git a/Source/C++/Core/Ap4SgpdAtom.cpp b/Source/C++/Core/Ap4SgpdAtom.cpp
+index 785ba62..5435133 100644
+--- a/Source/C++/Core/Ap4SgpdAtom.cpp
++++ b/Source/C++/Core/Ap4SgpdAtom.cpp
+@@ -78,20 +78,23 @@ AP4_SgpdAtom::AP4_SgpdAtom(AP4_UI32         size,
+     m_DefaultLength(0)
+ {
+     AP4_Size bytes_available = size-AP4_FULL_ATOM_HEADER_SIZE;
++    if (bytes_available < 4) return;
+     stream.ReadUI32(m_GroupingType);
+     bytes_available -= 4;
+     if (version >= 1) {
++        if (bytes_available < 4) return;
+         stream.ReadUI32(m_DefaultLength);
+         bytes_available -= 4;
+     }
+ 
+     // read the number of entries
++    if (bytes_available < 4) return;
+     AP4_UI32 entry_count = 0;
+     AP4_Result result = stream.ReadUI32(entry_count);
+     if (AP4_FAILED(result)) return;
+     bytes_available -= 4;
+ 
+-    // read all entries
++    // read all entries, each out of what the box has left
+     for (unsigned int i=0; i<entry_count; i++) {
+         AP4_UI32 description_length = m_DefaultLength;
+         if (m_Version == 0) {
+@@ -99,17 +102,27 @@ AP4_SgpdAtom::AP4_SgpdAtom(AP4_UI32         size,
+             description_length = bytes_available;
+         } else {
+             if (m_DefaultLength == 0) {
+-                description_length = stream.ReadUI32(description_length);
++                if (bytes_available < 4) break;
++                result = stream.ReadUI32(description_length);
++                if (AP4_FAILED(result)) break;
++                bytes_available -= 4;
+             }
+         }
+-        if (description_length <= bytes_available) {
+-            AP4_DataBuffer* payload = new AP4_DataBuffer();
+-            if (description_length) {
+-                payload->SetDataSize(description_length);
+-                stream.Read(payload->UseData(), description_length);
++        if (description_length > bytes_available) break;
++        AP4_DataBuffer* payload = new AP4_DataBuffer();
++        if (description_length) {
++            payload->SetDataSize(description_length);
++            result = stream.Read(payload->UseData(), description_length);
++            if (AP4_FAILED(result)) {
++                delete payload;
++                break;
+             }
+-            m_Entries.Add(payload);
+         }
++        m_Entries.Add(payload);
++        bytes_available -= description_length;
++
++        // a version 0 entry is the rest of the box, so there is no other
++        if (m_Version == 0) break;
+     }
+ }
+ 

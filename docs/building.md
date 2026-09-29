@@ -104,9 +104,6 @@ revision that carries it. Seven so far:
   source tree, so every build of that tree wrote one file: the Windows build once ran a
   Linux decoder built from the same checkout. The build says where they go now.
 
-`modules/demux/mp4/mp4_guard.hpp` is from before this rule, and still reads around three
-Bento4 boxes the demuxer never needs.
-
 **Each submodule sits with the one module that needs it**, which is a property of the
 container/codec split rather than a tidying. One module used to bring in four of the Xiph
 libraries at once, because it was the container and both codecs together. libogg belongs to the

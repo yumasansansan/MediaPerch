@@ -73,6 +73,7 @@ mediaperch_patch("external/Bento4" "bento4-a-decoder-configuration-too-short-hol
 mediaperch_patch("external/Bento4" "bento4-a-sample-rate-no-integer-holds-is-none.patch")
 mediaperch_patch("external/Bento4" "bento4-the-entries-of-a-dref-are-read-once.patch")
 mediaperch_patch("external/Bento4" "bento4-a-sound-description-extension-no-larger-than-its-atom.patch")
+mediaperch_patch("external/Bento4" "bento4-sample-group-descriptions-read-out-of-their-box.patch")
 mediaperch_patch("external/libebml" "libebml-msvc-swap_big32.patch")
 mediaperch_patch("external/libebml" "libebml-a-void-of-any-size.patch")
 mediaperch_patch("external/libebml" "libebml-a-utf8-string-no-larger-than-a-string.patch")

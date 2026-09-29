@@ -28,7 +28,6 @@
 // gets them is a table lookup on what `stsd` said, and the configuration blob
 // goes across verbatim.
 
-#include "mp4_guard.hpp"
 
 #include <mediaperch/module.h>
 
@@ -84,8 +83,8 @@ constexpr std::uint64_t k_packet_budget = 100000;
 /// through module_file.hpp, and this is the adapter that lets Bento4 do the
 /// same.
 ///
-/// **The second is the budget, and it is a security control.** Bento4 has more
-/// than one box parser that reads a count out of a file and then loops that many
+/// **The second is the budget, and it is a security control.** Bento4 had more
+/// than one box parser that read a count out of a file and then looped that many
 /// times without checking the count against the bytes the box actually has.
 /// `mp4_fuzzer` found two in the first ten minutes it ran:
 ///
@@ -96,12 +95,15 @@ constexpr std::uint64_t k_packet_budget = 100000;
 ///    each do a `Tell`, two `ReadUI32`s and a `Seek` against nothing. Measured:
 ///    84 seconds, from a 1269-byte file.
 ///
-/// Both are the same defect, and finding two of them in ten minutes is a good
-/// reason to assume more. Suppressing boxes one at a time is whack-a-mole; the
-/// stream is the one thing every parser in the library has to come through, so
-/// the bound goes here. Each entry point arms a budget, and past it every read
-/// and seek reports end-of-stream -- which is a thing every parser in Bento4
-/// already handles, because a truncated file does the same.
+/// Both are patched in Bento4 now (external/patches/, the sample group
+/// descriptions and the dref), and finding two of the same defect in ten
+/// minutes is still a good reason to assume more. Suppressing boxes one at a
+/// time is whack-a-mole; the stream is the one thing every parser in the library
+/// has to come through, so the bound goes here -- on every loop that reads,
+/// which the dref's did not: once its box was drained it spun without touching
+/// the stream, and only its patch bounds it. Each entry point arms a budget, and
+/// past it every read and seek reports end-of-stream -- which is a thing every
+/// parser in Bento4 already handles, because a truncated file does the same.
 ///
 /// The number is deliberately far above any real file: parsing is proportional
 /// to the *boxes* in a file, not its samples, and even a pathological but legal
@@ -804,10 +806,11 @@ try {
     // `moov_only` false: a fragmented file keeps its sample tables in the
     // `moof`s, and the reader needs the whole thing to walk them.
     //
-    // The factory is ours because one box Bento4 parses can be made to allocate
-    // without bound -- see mp4_guard.hpp for the file that does it. It is a
-    // local because `AP4_File` parses in its constructor and does not keep it.
-    mp::mp4::GuardedAtomFactory factory;
+    // A factory of this call's own, not Bento4's shared instance: a factory
+    // keeps the stack of boxes it is inside while it parses, and two files
+    // opened on two threads would share one. It is a local because `AP4_File`
+    // parses in its constructor and does not keep it.
+    AP4_DefaultAtomFactory factory;
     d->stream->arm(k_parse_budget);
     d->file.reset(new (std::nothrow) AP4_File(*d->stream, factory, false));
     if (d->stream->exhausted()) {

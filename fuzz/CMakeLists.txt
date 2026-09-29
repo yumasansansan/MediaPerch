@@ -102,8 +102,7 @@ function(mediaperch_add_fuzzer name source corpus)
         "${CMAKE_SOURCE_DIR}/external/dragonperch/src/core"
         "${CMAKE_SOURCE_DIR}/include"
         "${CMAKE_SOURCE_DIR}/src/engine"
-        "${CMAKE_SOURCE_DIR}/src/player"
-        "${CMAKE_SOURCE_DIR}/modules/demux/mp4")
+        "${CMAKE_SOURCE_DIR}/src/player")
 
     # MSVC's STL annotates container bounds for ASan, and the annotations only
     # agree when every translation unit that touches a container was built the

@@ -17,8 +17,6 @@
 // a fragmented file -- where Bento4's own recent history has a heap overflow in
 // `AP4_BitReader::ReadCache` and a leak in `AP4_LinearReader::Tracker`.
 
-#include "mp4_guard.hpp"
-
 #include <Ap4.h>
 
 #include <cstddef>
@@ -34,8 +32,7 @@ namespace {
 /// The budget is a production defence -- it bounds a parse loop that has gone
 /// wrong so a player does not stop responding. Putting it here too would make
 /// the next unbounded loop in Bento4 look like a clean run, which is the
-/// opposite of what a fuzzer is for. The guarded factory *is* shared, because
-/// that changes which bytes get parsed at all and the two must not diverge.
+/// opposite of what a fuzzer is for.
 class Bytes : public AP4_ByteStream {
 public:
     Bytes(const std::uint8_t* data, std::size_t size) : data_(data), size_(size) {}
@@ -103,10 +100,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 {
     auto* stream = new Bytes(data, size);
     {
-        // **The same factory the module installs**, so this fuzzes what ships.
-        // Without it the corpus fails on its own regression seed, which is the
-        // clearest possible statement of why the two must not diverge.
-        mp::mp4::GuardedAtomFactory factory;
+        // Bento4's own factory, one of this run's as the module has one of each
+        // call's, so that what is parsed here is what the module parses.
+        AP4_DefaultAtomFactory factory;
         AP4_File file(*stream, factory, false);
         AP4_Movie* movie = file.GetMovie();
         if (movie != nullptr) {
