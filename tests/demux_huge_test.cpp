@@ -140,7 +140,7 @@ std::vector<std::uint8_t> read_to_end(const MpDemuxVtbl& v, MpDemux* d, std::uin
         MpPacket packet{};
         packet.size = sizeof(packet);
         MpResult r = v.read_packet(d, buffer.data(), buffer.size(), &packet);
-        if (r == MP_ERR_NO_MEMORY && packet.bytes <= (1u << 26)) {
+        if (r == MP_TOO_SMALL && packet.bytes <= (1u << 26)) {
             buffer.resize(packet.bytes);
             packet = MpPacket{};
             packet.size = sizeof(packet);

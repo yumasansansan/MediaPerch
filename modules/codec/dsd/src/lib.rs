@@ -157,7 +157,7 @@ impl Codec for DsdCodec {
             return Ok(0);
         }
         if dst.len() < needed {
-            return Err(Error::NoMemory);
+            return Err(Error::TooSmall);
         }
         let wrote = dop::pack(packet, self.channels, dst, &mut self.phase);
         if wrote != needed {

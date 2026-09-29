@@ -20,6 +20,7 @@
 #include "mediaperch/display.hpp"
 #include "fake_handles.hpp"
 
+#include <describe_row.hpp>
 #include <mediaperch/module.h>
 
 #include <algorithm>
@@ -209,23 +210,24 @@ inline MpResult MP_CALL video_set(MpVideo*, const char* key, const char* value) 
 }
 
 inline MpResult MP_CALL video_describe(MpVideo*, std::uint32_t index, char* out,
-                                       std::uint32_t out_bytes) noexcept
+                                       std::uint32_t out_bytes, std::uint32_t* out_needed) noexcept
 {
     PresenterLog& log = presenter_log();
     const std::lock_guard lock{log.mutex};
     log.describe_thread.store(std::this_thread::get_id());
+    mp::DescribeRow row{out, out_bytes, out_needed};
     if (index == 0) {
-        std::snprintf(out, out_bytes, "size\t%s\twhat it renders at\tsize group=Picture",
-                      log.size.empty() ? "native" : log.size.c_str());
-        return MP_OK;
+        row.format("size\t%s\twhat it renders at\tsize group=Picture",
+                   log.size.empty() ? "native" : log.size.c_str());
+        return row.result();
     }
     // **Spelled the way the real one spells it**, because what reads this is
     // `VideoPath::surface`, which looks for `composition 0x` and would happily
     // pass a row that meant something else.
     if (index == 1 && log.surface != 0) {
-        std::snprintf(out, out_bytes, "surface\tcomposition 0x%llx\twhere it draws",
-                      static_cast<unsigned long long>(log.surface));
-        return MP_OK;
+        row.format("surface\tcomposition 0x%llx\twhere it draws",
+                   static_cast<unsigned long long>(log.surface));
+        return row.result();
     }
     return MP_END;
 }
@@ -560,16 +562,16 @@ inline MpResult MP_CALL vdsp_set(MpVideoDsp*, const char* key, const char* value
 }
 
 inline MpResult MP_CALL vdsp_describe(MpVideoDsp*, std::uint32_t index, char* out,
-                                      std::uint32_t out_bytes) noexcept
+                                      std::uint32_t out_bytes, std::uint32_t* out_needed) noexcept
 {
+    mp::DescribeRow row{out, out_bytes, out_needed};
     if (index != 0) {
         return MP_END;
     }
     const std::lock_guard lock{stage_log().mutex};
-    std::snprintf(out, out_bytes,
-                  "amount\t%s\twhat this fake stage was told\tnumber step=0.5 group=Gain",
-                  stage_log().amount.c_str());
-    return MP_OK;
+    row.format("amount\t%s\twhat this fake stage was told\tnumber step=0.5 group=Gain",
+               stage_log().amount.c_str());
+    return row.result();
 }
 
 } // namespace detail

@@ -56,6 +56,7 @@
 #include "asio_registry.hpp"
 #include "dop_unpack.hpp"
 
+#include <abi_guard.hpp>
 #include <mediaperch/module.h>
 
 #include "module_log.hpp"
@@ -448,9 +449,8 @@ try {
     copy_into(out->name,
               to_utf8((d.description.empty() ? d.key : d.description).c_str()));
     return MP_OK;
-} catch (...) {
-    return MP_ERR_INTERNAL;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL sink_open(const char* device_id, MpShareMode mode, MpSink** out) noexcept
 try {
@@ -595,9 +595,8 @@ try {
     log_fmt(MP_LOG_DEBUG, "%s: %ld outputs", sink->name.c_str(), sink->outputs);
     *out = sink;
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 void MP_CALL sink_close(MpSink* sink) noexcept
 {
@@ -756,9 +755,8 @@ try {
             sink->name.c_str(), type_name(sink->type), device_rate, sink->buffer_frames,
             sink->period_frames, sink->dsd ? "DoP" : "PCM");
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL sink_get_period(MpSink* sink, std::uint32_t* frames) noexcept
 {

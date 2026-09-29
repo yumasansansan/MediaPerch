@@ -32,6 +32,8 @@
 #include "kernels.hpp"
 #include "module_log.hpp"
 
+#include <abi_guard.hpp>
+#include <describe_row.hpp>
 #include <mediaperch/module.h>
 
 #include <algorithm>
@@ -398,9 +400,8 @@ try {
     }
     *out = d.release();
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 void MP_CALL scale_close(MpVideoDsp* d) noexcept
 {
@@ -442,9 +443,8 @@ try {
     answer.display_height = d->dst_height;
     std::memcpy(out, &answer, std::min<std::size_t>(out->size, sizeof(answer)));
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 /// A structured buffer of at least `count` elements of `stride` bytes, and a
 /// view of all of it, holding `data`: made anew when it is too small, written
@@ -703,9 +703,8 @@ try {
     }
     std::memcpy(out, &answer, std::min<std::size_t>(out->size, sizeof(answer)));
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL scale_reset(MpVideoDsp* d) noexcept
 {
@@ -824,47 +823,42 @@ try {
         return MP_OK;
     }
     return MP_ERR_UNSUPPORTED;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 /// The four rows one kernel takes, for `up` and for `down` alike.
 MpResult kernel_rows(const MpVideoDsp* d, const char* which, const mp::kernels::KernelParams& k,
-                     std::uint32_t index, char* out, std::uint32_t out_bytes) noexcept
+                     std::uint32_t index, mp::DescribeRow& row) noexcept
 {
     const bool up = which[0] == 'u';
     const char* group = up ? "Upscaling" : "Downscaling";
     switch (index) {
     case 0:
-        std::snprintf(out, out_bytes,
-                      "%s\t%s\tthe kernel for an axis that %s: hermite and box cannot "
-                      "ring, the splines ring less than lanczos, mitchell blurs on "
-                      "purpose\tenum:%s group=%s",
-                      which, mp::kernels::name_of(k.kind), up ? "grows" : "shrinks",
-                      mp::kernels::k_kernel_list, group);
-        return MP_OK;
+        row.format("%s\t%s\tthe kernel for an axis that %s: hermite and box cannot "
+                   "ring, the splines ring less than lanczos, mitchell blurs on "
+                   "purpose\tenum:%s group=%s",
+                   which, mp::kernels::name_of(k.kind), up ? "grows" : "shrinks",
+                   mp::kernels::k_kernel_list, group);
+        return row.result();
     case 1:
-        std::snprintf(out, out_bytes,
-                      "%s_lobes\t%u\tLanczos lobes: 3 is the usual, 2 softer, 4 sharper "
-                      "and ringier. Every lobe is two more taps per output sample per "
-                      "axis, and a thousand is thousands -- a draw longer than the GPU "
-                      "allows resets the driver, which the presenter recovers "
-                      "from\tint min=1 step=1 group=%s when=%s=lanczos",
-                      which, k.lobes, group, which);
-        return MP_OK;
+        row.format("%s_lobes\t%u\tLanczos lobes: 3 is the usual, 2 softer, 4 sharper "
+                   "and ringier. Every lobe is two more taps per output sample per "
+                   "axis, and a thousand is thousands -- a draw longer than the GPU "
+                   "allows resets the driver, which the presenter recovers "
+                   "from\tint min=1 step=1 group=%s when=%s=lanczos",
+                   which, k.lobes, group, which);
+        return row.result();
     case 2:
-        std::snprintf(out, out_bytes,
-                      "%s_b\t%.4f\tthe cubic's B: 1/3 with C=1/3 is Mitchell, 0 with "
-                      "C=1/2 is Catmull-Rom, 1 with C=0 is the B-spline\tnumber "
-                      "step=0.05 group=%s when=%s=bicubic",
-                      which, k.b, group, which);
-        return MP_OK;
+        row.format("%s_b\t%.4f\tthe cubic's B: 1/3 with C=1/3 is Mitchell, 0 with "
+                   "C=1/2 is Catmull-Rom, 1 with C=0 is the B-spline\tnumber "
+                   "step=0.05 group=%s when=%s=bicubic",
+                   which, k.b, group, which);
+        return row.result();
     case 3:
-        std::snprintf(out, out_bytes,
-                      "%s_c\t%.4f\tthe cubic's C; more is sharper and rings "
-                      "more\tnumber step=0.05 group=%s when=%s=bicubic",
-                      which, k.c, group, which);
-        return MP_OK;
+        row.format("%s_c\t%.4f\tthe cubic's C; more is sharper and rings "
+                   "more\tnumber step=0.05 group=%s when=%s=bicubic",
+                   which, k.c, group, which);
+        return row.result();
     default:
         break;
     }
@@ -873,90 +867,82 @@ MpResult kernel_rows(const MpVideoDsp* d, const char* which, const mp::kernels::
 }
 
 MpResult MP_CALL scale_describe(MpVideoDsp* d, std::uint32_t index, char* out,
-                                std::uint32_t out_bytes) noexcept
+                                std::uint32_t out_bytes, std::uint32_t* out_needed) noexcept
 {
-    if (d == nullptr || out == nullptr || out_bytes < 64) {
+    if (d == nullptr || out_needed == nullptr) {
         return MP_ERR_INVALID;
     }
+    mp::DescribeRow row{out, out_bytes, out_needed};
     if (index < 4) {
-        return kernel_rows(d, "up", d->up, index, out, out_bytes);
+        return kernel_rows(d, "up", d->up, index, row);
     }
     if (index < 8) {
-        return kernel_rows(d, "down", d->down, index - 4, out, out_bytes);
+        return kernel_rows(d, "down", d->down, index - 4, row);
     }
     switch (index) {
     case 8:
-        std::snprintf(out, out_bytes,
-                      "antiring\t%.4f\thow far a result is pulled back inside the range "
-                      "of the source samples it sits between: 0 leaves a kernel's "
-                      "overshoot, 1 removes it\tnumber min=0 max=1 step=0.05 group=Ringing",
-                      static_cast<double>(d->antiring));
-        return MP_OK;
+        row.format("antiring\t%.4f\thow far a result is pulled back inside the range "
+                   "of the source samples it sits between: 0 leaves a kernel's "
+                   "overshoot, 1 removes it\tnumber min=0 max=1 step=0.05 group=Ringing",
+                   static_cast<double>(d->antiring));
+        return row.result();
     case 9:
-        std::snprintf(out, out_bytes,
-                      "light\t%s\twhat the passes average: linear light, a gamma curve, "
-                      "or a sigmoid that tempers ringing at hard edges\tenum:linear,gamma,"
-                      "sigmoid group=Light",
-                      name_of(d->light));
-        return MP_OK;
+        row.format("light\t%s\twhat the passes average: linear light, a gamma curve, "
+                   "or a sigmoid that tempers ringing at hard edges\tenum:linear,gamma,"
+                   "sigmoid group=Light",
+                   name_of(d->light));
+        return row.result();
     case 10:
-        std::snprintf(out, out_bytes,
-                      "gamma\t%.4f\tthe power, when light=gamma\tnumber step=0.1 "
-                      "group=Light when=light=gamma",
-                      static_cast<double>(d->gamma));
-        return MP_OK;
+        row.format("gamma\t%.4f\tthe power, when light=gamma\tnumber step=0.1 "
+                   "group=Light when=light=gamma",
+                   static_cast<double>(d->gamma));
+        return row.result();
     case 11:
-        std::snprintf(out, out_bytes,
-                      "sigmoid_center\t%.4f\twhere the curve is steepest, 0 to 1\tnumber "
-                      "step=0.05 group=Light when=light=sigmoid",
-                      static_cast<double>(d->sigmoid_center));
-        return MP_OK;
+        row.format("sigmoid_center\t%.4f\twhere the curve is steepest, 0 to 1\tnumber "
+                   "step=0.05 group=Light when=light=sigmoid",
+                   static_cast<double>(d->sigmoid_center));
+        return row.result();
     case 12:
-        std::snprintf(out, out_bytes,
-                      "sigmoid_slope\t%.4f\thow steep; more tempers more\tnumber step=0.5 "
-                      "group=Light when=light=sigmoid",
-                      static_cast<double>(d->sigmoid_slope));
-        return MP_OK;
+        row.format("sigmoid_slope\t%.4f\thow steep; more tempers more\tnumber step=0.5 "
+                   "group=Light when=light=sigmoid",
+                   static_cast<double>(d->sigmoid_slope));
+        return row.result();
     case 13:
-        std::snprintf(out, out_bytes,
-                      "sigmoid_range\t%.4f\tthe linear value at the top of the curve: 1 is "
-                      "SDR white on an SDR display; above it the curve is "
-                      "straight\tnumber step=0.5 group=Light when=light=sigmoid",
-                      static_cast<double>(d->sigmoid_range));
-        return MP_OK;
+        row.format("sigmoid_range\t%.4f\tthe linear value at the top of the curve: 1 is "
+                   "SDR white on an SDR display; above it the curve is "
+                   "straight\tnumber step=0.5 group=Light when=light=sigmoid",
+                   static_cast<double>(d->sigmoid_range));
+        return row.result();
     case 14:
         if (d->src_width == 0) {
-            std::snprintf(out, out_bytes, "scale\tno picture yet\tsource to target, and "
-                                          "the factor per axis (read only)");
+            row.format("scale\tno picture yet\tsource to target, and "
+                       "the factor per axis (read only)");
         } else if (d->src_width == d->dst_width && d->src_height == d->dst_height) {
-            std::snprintf(out, out_bytes,
-                          "scale\t%ux%u 1:1\tsource to target: one to one, handed back "
-                          "untouched (read only)",
-                          d->src_width, d->src_height);
+            row.format("scale\t%ux%u 1:1\tsource to target: one to one, handed back "
+                       "untouched (read only)",
+                       d->src_width, d->src_height);
         } else {
-            std::snprintf(out, out_bytes,
-                          "scale\t%ux%u -> %ux%u, x%.3f across, x%.3f down\tsource to "
-                          "target, and the factor per axis (read only)",
-                          d->src_width, d->src_height, d->dst_width, d->dst_height,
-                          static_cast<double>(d->dst_width) / static_cast<double>(d->src_width),
-                          static_cast<double>(d->dst_height) /
-                              static_cast<double>(d->src_height));
+            row.format("scale\t%ux%u -> %ux%u, x%.3f across, x%.3f down\tsource to "
+                       "target, and the factor per axis (read only)",
+                       d->src_width, d->src_height, d->dst_width, d->dst_height,
+                       static_cast<double>(d->dst_width) / static_cast<double>(d->src_width),
+                       static_cast<double>(d->dst_height) /
+                           static_cast<double>(d->src_height));
         }
-        return MP_OK;
+        return row.result();
     case 15: {
         const std::uint32_t across = taps_for(d, d->src_width, d->dst_width);
         const std::uint32_t down = taps_for(d, d->src_height, d->dst_height);
-        std::snprintf(out, out_bytes,
-                      "cost\t%u taps across, %u down, %u pass%s\tper output sample and "
-                      "per frame: the kernel's width stretched by the downscale factor, "
-                      "and the draws the last frame took (read only)",
-                      across, down, d->passes, d->passes == 1 ? "" : "es");
-        return MP_OK;
+        row.format("cost\t%u taps across, %u down, %u pass%s\tper output sample and "
+                   "per frame: the kernel's width stretched by the downscale factor, "
+                   "and the draws the last frame took (read only)",
+                   across, down, d->passes, d->passes == 1 ? "" : "es");
+        return row.result();
     }
     case 16:
-        std::snprintf(out, out_bytes, "trouble\t%s\twhat went wrong (read only)",
-                      d->trouble.empty() ? "nothing" : d->trouble.c_str());
-        return MP_OK;
+        row.format("trouble\t%s\twhat went wrong (read only)",
+                   d->trouble.empty() ? "nothing" : d->trouble.c_str());
+        return row.result();
     default:
         break;
     }

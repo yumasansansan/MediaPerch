@@ -30,6 +30,7 @@
 // blob the ABI defines. Those are the two places a container and a codec have to
 // agree, and they are exactly what a demuxer is for.
 
+#include <abi_guard.hpp>
 #include <mediaperch/module.h>
 
 #include "module_file.hpp"
@@ -1514,9 +1515,8 @@ try {
 
     *out = d.release();
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL demux_stream_count(MpDemux* d, std::uint32_t* out_count) noexcept
 {
@@ -1595,9 +1595,8 @@ try {
         out->duration_ms = ns / 1'000'000ull;
     }
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL demux_stream_config(MpDemux* d, std::uint32_t index, std::uint8_t* out,
                                      std::uint32_t out_bytes,
@@ -1609,11 +1608,12 @@ MpResult MP_CALL demux_stream_config(MpDemux* d, std::uint32_t index, std::uint8
     const auto& config = d->tracks[index].config;
     const auto needed = static_cast<std::uint32_t>(config.size());
     *out_needed = needed;
-    if (out == nullptr) {
+    if (needed == 0) {
         return MP_OK;
     }
-    if (out_bytes < needed) {
-        return MP_ERR_NO_MEMORY;
+    // A NULL `out` is a buffer of no bytes, which asks how much.
+    if (out == nullptr || out_bytes < needed) {
+        return MP_TOO_SMALL;
     }
     if (needed != 0) {
         std::memcpy(out, config.data(), needed);
@@ -1683,9 +1683,8 @@ try {
 
     std::memcpy(out, &info, std::min<std::size_t>(info.size, sizeof(info)));
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL demux_select_streams(MpDemux* d, const std::uint32_t* indices,
                                       std::uint32_t count) noexcept
@@ -1711,9 +1710,8 @@ try {
     d->selected = std::move(chosen);
     d->reading = d->selected.front();
     return restart_at(d, d->first_cluster) ? MP_OK : MP_ERR_IO;
-} catch (...) {
-    return MP_ERR_IO;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL demux_read_packet(MpDemux* d, void* dst, std::size_t dst_bytes,
                                    MpPacket* out) noexcept
@@ -1747,7 +1745,7 @@ try {
         // Nothing is consumed: the lace stays where it is and the next call
         // hands back the same one.
         out->bytes = static_cast<std::uint32_t>(length);
-        return MP_ERR_NO_MEMORY;
+        return MP_TOO_SMALL;
     }
     std::memcpy(dst, lace.Buffer(), length);
     out->bytes = static_cast<std::uint32_t>(length);
@@ -1775,9 +1773,8 @@ try {
     out->stream = static_cast<std::uint32_t>(d->reading);
     ++d->next_lace;
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL demux_seek(MpDemux* d, std::uint32_t stream,
                             std::uint64_t frame) noexcept
@@ -1817,9 +1814,8 @@ try {
     // of them at once -- each from its own nearest point, which is not the same
     // point, and the host discards what precedes its own target per stream.
     return restart_at(d, best.at) ? MP_OK : MP_ERR_IO;
-} catch (...) {
-    return MP_ERR_IO;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 void MP_CALL demux_close(MpDemux* d) noexcept
 {

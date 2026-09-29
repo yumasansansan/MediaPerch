@@ -150,7 +150,7 @@ impl Codec for AlacCodec {
         let container = self.container as usize;
         let needed = frames * channels * container;
         if dst.len() < needed {
-            return Err(Error::NoMemory);
+            return Err(Error::TooSmall);
         }
 
         // **Apple's channel order into WAVE's**, which is the one thing about

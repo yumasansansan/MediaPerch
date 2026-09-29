@@ -36,6 +36,7 @@
 // least trustworthy path more capable, which is the wrong direction. It stays
 // because it needs nothing installed.
 
+#include <abi_guard.hpp>
 #include <mediaperch/module.h>
 
 #include "module_log.hpp"
@@ -373,9 +374,8 @@ try {
 
     *out = decoder;
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL demux_stream_count(MpDemux* d, std::uint32_t* out_count) noexcept
 {
@@ -521,14 +521,18 @@ bool refill(MpDemux* d) noexcept
 MpResult MP_CALL demux_read_frames(MpDemux* d, void* dst, std::size_t dst_bytes,
                                    std::size_t* out_bytes) noexcept
 try {
-    if (d == nullptr || dst == nullptr || out_bytes == nullptr) {
+    if (d == nullptr || out_bytes == nullptr) {
         return MP_ERR_INVALID;
     }
     *out_bytes = 0;
 
-    const std::size_t frames_wanted = dst_bytes / d->frame_bytes;
+    // Not one whole frame fits -- a NULL `dst` is a buffer of no bytes -- and
+    // the host is told what one takes, rather than handed nothing as though
+    // the stream had ended.
+    const std::size_t frames_wanted = dst == nullptr ? 0 : dst_bytes / d->frame_bytes;
     if (frames_wanted == 0) {
-        return MP_OK;
+        *out_bytes = d->frame_bytes;
+        return MP_TOO_SMALL;
     }
     const std::size_t want = frames_wanted * d->frame_bytes;
 
@@ -552,9 +556,8 @@ try {
     written -= written % d->frame_bytes;
     *out_bytes = written;
     return written == 0 ? MP_END : MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL demux_seek(MpDemux* d, std::uint32_t stream,
                             std::uint64_t frame) noexcept

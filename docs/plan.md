@@ -808,6 +808,62 @@ the same -- a check that stops checking without going red:
   decoder broke theirs -- and the frame it costs is the last one of every file. `codec_mft`
   now doubts the end of a drain four times, a millisecond apart, before believing it.
 
+### ABI v5: a buffer too small is its own answer
+
+**Done.** `MP_ABI_VERSION` is 5, `MP_TOO_SMALL` is a result of its own, and
+`MP_ERR_NO_MEMORY` means that a module could not allocate, and nothing else.
+
+v4 used MP_ERR_NO_MEMORY for two things. It was what a module that ran out of memory said, and
+it was what `read_packet` said when a packet did not fit: nothing consumed, `out->bytes` the
+size to grow to, ask again. The two met at the boundary. Every demuxer ended its entry points
+in one `catch (...)` that answered MP_ERR_NO_MEMORY whatever was thrown, and a throw inside
+`read_packet` leaves `out->bytes` at 0 -- a packet of no bytes that did not fit. The engine
+took that for a broken module; the fuzz harness took it for the broken promise it was, which
+is how the Matroska demuxer's fuzzer met one. Patching the meaning -- "NO_MEMORY with no size
+is the module's own failure" -- was a sentence in the header and a special case in every host,
+and it would have given one code two meanings more carefully rather than one meaning.
+
+So "the caller's buffer cannot hold the answer" is a result: nothing written, nothing
+consumed, and the size needed reported wherever the call has somewhere to report it. **A NULL
+buffer is one of no bytes**, so every call that fills a buffer is asked how much the same way,
+and answers the same way:
+
+- `read_packet`: as before, with MP_TOO_SMALL.
+- `stream_config` answered a NULL `out` with MP_OK and a size, and a short one with
+  MP_ERR_NO_MEMORY. MP_TOO_SMALL for both now, and MP_OK for a stream with no blob, whatever
+  the buffer.
+- `read_frames` answered a buffer too small for one frame with MP_OK and no bytes -- which the
+  engine read as the end of the stream. MP_TOO_SMALL now, with one frame's bytes.
+- A codec's `decode` and `flush`: MP_TOO_SMALL, with what it needed where the codec can say.
+  The packet is spent all the same, since a decoder cannot un-decode, so a host sizes `dst`
+  for the most one packet can make -- which the engine always has, at a megabyte.
+- `read_back`: MP_TOO_SMALL for its NULL query.
+- **`describe`** -- the audio stages', the video stages' and the presenter's -- gained an
+  `out_needed`, because it had nowhere to say anything. Every module formatted its row with
+  `snprintf` into the host's buffer and answered MP_OK, and a row longer than the buffer -- a
+  value is part of the row, and a path is a value with no length -- came back cut short and
+  was taken for whole. A row is written whole or not at all now, with MP_TOO_SMALL and its
+  length when it does not fit. `modules/shared/abi_guard/describe_row.hpp` does that for
+  every C++ module, measuring before writing so that a short buffer is never written into,
+  and the engine reads rows through `mediaperch/row.hpp`, which grows to the length a stage
+  names and asks once more.
+
+**Every module changed, which is what a version is for.** The demuxers, the audio codecs and
+the presenter answer differently; every stage's `describe` has another parameter; the Rust
+modules' `Error::NoMemory`, whose comment said "the caller's buffer is too small", is two
+variants now -- `TooSmall`, and a `NoMemory` that means memory; and `abi/probe_c` and
+`abi/probe_rust`, the evidence that this ABI crosses languages, speak v5 too (the Rust probe
+had been left at v3). A module built against v4 answers null to a v5 host and is not loaded,
+and that is the right outcome: its NO_MEMORY would mean the wrong thing.
+
+**And every entry point catches the same way.** The demuxers, seven codecs, the presenter, both
+video stages and both sinks had a `catch (...)` of their own, most of them answering
+MP_ERR_NO_MEMORY whatever was thrown. They use `modules/shared/abi_guard` now --
+`std::bad_alloc` is MP_ERR_NO_MEMORY and anything else MP_ERR_INTERNAL, which is what the
+Rust modules' `catch_unwind` has always answered for a panic -- and `demux_ogg` and
+`codec_opus`, whose entry points that allocate had no function-try-block at all, so that a
+failed allocation there called `std::terminate`, have one.
+
 ---
 
 ## 5. The audio engine
@@ -2159,6 +2215,16 @@ was missing. `modules/shared/abi_guard` is the catch half as a macro, so the dif
 lines a function and no statement moved, and `mediaperch_add_module` links it into *every*
 module rather than each one asking for it — a vtable that lets an exception out calls
 `std::terminate`, and that is as true of a module nobody has written yet as of these seven.
+
+**Except that the demuxers, seven of the codecs, the presenter, the video stages and the
+sinks had not quite.** Theirs was a `catch (...)` of their own that answered MP_ERR_NO_MEMORY,
+or MP_ERR_INTERNAL, whatever was thrown — and in v4's `read_packet` MP_ERR_NO_MEMORY was not
+an error but a packet that did not fit, with the size to grow to in `out->bytes`, which a
+throw leaves at 0: the Matroska demuxer's fuzzer met one, and the fuzz harness's check of
+module.h's promises stopped on it. That is what ABI v5 is for (§4): a buffer too small has a
+result of its own, MP_ERR_NO_MEMORY means memory, and every one of them catches through the
+guard now — so do `demux_ogg` and `codec_opus`, whose entry points that allocate had no
+function-try-block at all, so that a failed allocation there ended the process.
 
 So `max_taps`, `dsp_eq`'s `taps` and `partition`, `dsp_convolve`'s `partition` and `taps`, and
 `dsp_eq`'s curve `points` are all the caller's numbers now. One of them was two things at
@@ -6543,6 +6609,7 @@ HDR state.
 | M7 | HDR: detection, scRGB present, the four tone-map providers, SDR white level | HDR content looks right on an SDR display *and* on an HDR display, and switching monitors mid-playback is handled. **All six steps of §9.7.2 are built**: the SDR white level, the output the window is on, PQ, HLG, BT.2390 in the shader, and the ABI append that carries what the content was graded on, filled from Matroska, from MP4's `mdcv`/`clli`, and from an HEVC prefix SEI where the container says nothing. Steps 3, 4 and 5 are formulas and are tested against them off-screen on WARP, so they run in CI on a machine with no display. **What is left is the half that is not a formula**: steps 1, 2 and 6 on real HDR hardware, written into [devices.md](devices.md) -- there is no HDR display here, and asserting they work without one is the exact failure §9.2 is the record of |
 | M8 | WinUI 3 shell | **most of it.** The project builds and its own reader decodes §10's wire against a running engine -- `MediaPerch.Shell.exe --check` prints the status and the graph, which is how the two descriptions of one format are held together. The canvas is drawn, the composition surface is composited, and the transport, playlist, module palette and settings screens are there -- every key the engine will take, per node and for the player and the engine, as something to type into, with the module's own refusal shown when it will not take it. Killing it mid-track changes nothing audible. **C#, WinUI 3, Native AOT**, `net10.0-windows10.0.26100.0` with a minimum of 22000, to Fluent 2, dependencies at their newest. Its settings screen is a **node canvas** in the shape of ComfyUI's and Fusion's: the chain as a topology, dragged to reorder, with a settings button per node. §10 says what that asks of the engine -- three verbs and no more -- and why the canvas is Fusion's look over a chain's semantics rather than a free-form DAG. The engine half of §9.7.1 is standing: the composition surface handle, the compositor's clock (not the swap chain's waitable, which was a black window until it was measured), the size message and the display message. The shell's half is done through WinUI's own compositor rather than DirectComposition, and *a shell that dies holding the picture* is a test rather than a claim. The picture survives a track boundary as the audio device does, and both it and `status` follow what is being heard rather than what is being decoded. The window is three pages behind a navigation pane, acrylic into the title bar, the picture filling the first with a Fluent transport and a scrubber under it; a click on a track is `play_at`. The canvas edits the chain -- drag to reorder, a bin to remove, a palette to add -- and the system picker opens files; the chain's grammar had to grow an unambiguous separator first, because it could not round-trip a stage with two settings. The scrubber moves between samples, the keys every player answers are answered, the queue can be dragged (the engine allows what its decoder has not reached), and a mixed-format playlist plays through -- it had stopped at its first boundary. Files can be dropped on the window and the picker is the App SDK's (the WinRT one shows nothing in an unpackaged app); an entry that will not open is walked past, and the refusing module's own reason is what the shell shows -- three video-only WebMs had produced *nothing at 0* and a log line that was wrong. Then the rule behind that was found to be nobody's: the audio engine and the video engine are two libraries that never include each other, each with its own clock, a file with no audio plays its picture on the video engine's clock with no device opened, and the shell counts in whatever the engine's clock counts in. **Done, polish included** |
 | M8.5 | One toolchain, LLVM's, and the ABI header in C23 | **done.** Clang's GNU driver compiles every file, LLD links every image and every Rust module, llvm-ar, llvm-rc and llvm-ml do the rest, and the MSVC STL is the one part of Visual Studio left, as a library. `cmake/LLVMToolchain.cmake` checks each tool at configure time -- LLVM's, of one version, pinned to a full path -- and CI downloads one pinned LLVM and checks its SHA-256, with no developer prompt anywhere. Every enumeration in `module.h` has a fixed underlying type. Clang's first reading of the parts only MSVC had compiled found a dozen things, none of which changed a result; the baseline build is MSVC's to the byte over 22 files and 144 Path B runs, and the AVX2 build's FMA contraction is measured and written down in [formats.md](formats.md) |
+| M8.6 | ABI v5: a buffer too small is its own answer | **done.** MP_ERR_NO_MEMORY meant both a module that could not allocate and a caller's buffer that could not hold the answer, so a throw inside `read_packet` read as a packet of no bytes to grow to -- the Matroska demuxer's fuzzer met one. MP_TOO_SMALL is a result now and a NULL buffer is one of no bytes, in `read_packet`, `stream_config`, `read_frames`, a codec's `decode` and `flush`, and `read_back`; `describe` says how long a row is instead of cutting it short where the host's buffer ended; and every entry point of every module catches through `modules/shared/abi_guard`, `demux_ogg` and `codec_opus` included, which had nothing between an allocation and `std::terminate` |
 | M9 | Linux head | ALSA or PipeWire in an exclusive-equivalent mode, proving the core was actually portable |
 
 M1 and M2 are the ones that de-risk the project. If exclusive-mode negotiation and the

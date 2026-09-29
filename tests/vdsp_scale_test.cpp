@@ -26,6 +26,8 @@
 // Everything renders off screen on WARP and reads back fp32, the way
 // scaler_test.cpp and vdsp_lut_test.cpp do.
 
+#include "mediaperch/row.hpp"
+
 #include <mediaperch/module.h>
 
 #include "module_loader.hpp"
@@ -337,12 +339,14 @@ public:
 
     [[nodiscard]] std::string described(const char* key) const
     {
+        std::string line;
         for (std::uint32_t i = 0;; ++i) {
-            char row[512];
-            if (vtbl_->describe(handle_, i, row, sizeof row) != MP_OK) {
+            const auto ask = [&](char* buffer, std::uint32_t bytes, std::uint32_t* needed) {
+                return vtbl_->describe(handle_, i, buffer, bytes, needed);
+            };
+            if (mp::read_row(ask, line) != MP_OK) {
                 return {};
             }
-            const std::string line{row};
             const std::size_t first = line.find('\t');
             if (first == std::string::npos || line.substr(0, first) != key) {
                 continue;
@@ -360,7 +364,7 @@ public:
         MpPixelLayout layout{};
         layout.size = sizeof(layout);
         if (vtbl_->read_back(handle_, nullptr, 0, &width, &height, &layout) !=
-                MP_ERR_NO_MEMORY ||
+                MP_TOO_SMALL ||
             (layout.flags & MP_PIXEL_FLOAT) == 0u || layout.container_bits != 32u) {
             return {};
         }
@@ -424,12 +428,14 @@ public:
     }
     [[nodiscard]] std::string described(const char* key) const
     {
+        std::string line;
         for (std::uint32_t i = 0;; ++i) {
-            char row[512];
-            if (vtbl_->describe(handle_, i, row, sizeof row) != MP_OK) {
+            const auto ask = [&](char* buffer, std::uint32_t bytes, std::uint32_t* needed) {
+                return vtbl_->describe(handle_, i, buffer, bytes, needed);
+            };
+            if (mp::read_row(ask, line) != MP_OK) {
                 return {};
             }
-            const std::string line{row};
             const std::size_t first = line.find('\t');
             if (first == std::string::npos || line.substr(0, first) != key) {
                 continue;
@@ -1020,13 +1026,15 @@ TEST_CASE("what a person can set on the scaler, and what it says back", "[vdsp][
     std::uint32_t rows = 0;
     std::uint32_t typed = 0;
     std::uint32_t read_only = 0;
+    std::string line;
     for (std::uint32_t i = 0;; ++i) {
-        char row[512];
-        if (stage.vtbl().describe(stage.handle(), i, row, sizeof row) != MP_OK) {
+        const auto ask = [&](char* buffer, std::uint32_t bytes, std::uint32_t* needed) {
+            return stage.vtbl().describe(stage.handle(), i, buffer, bytes, needed);
+        };
+        if (mp::read_row(ask, line) != MP_OK) {
             break;
         }
         ++rows;
-        const std::string line{row};
         if (line.find("(read only)") != std::string::npos) {
             ++read_only;
         } else if (std::count(line.begin(), line.end(), '\t') == 3) {

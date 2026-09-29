@@ -39,6 +39,7 @@
 // that holds the target sample rather than near it -- and two frames before it,
 // because MP3's bit reservoir reaches backwards.
 
+#include <abi_guard.hpp>
 #include <mediaperch/module.h>
 
 #include "module_file.hpp"
@@ -485,9 +486,8 @@ try {
 
     *out = d;
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL demux_stream_count(MpDemux* d, std::uint32_t* out_count) noexcept
 {
@@ -526,11 +526,9 @@ MpResult MP_CALL demux_stream_config(MpDemux* d, std::uint32_t index, std::uint8
         return MP_ERR_INVALID;
     }
     *out_needed = 4;
-    if (out == nullptr) {
-        return MP_OK;
-    }
-    if (out_bytes < 4) {
-        return MP_ERR_NO_MEMORY;
+    // A NULL `out` is a buffer of no bytes, which asks how much.
+    if (out == nullptr || out_bytes < 4) {
+        return MP_TOO_SMALL;
     }
     // **MPEG audio's configuration is its first frame header**, and there is
     // nothing else it could be: the format carries no setup data at all. Four
@@ -613,7 +611,7 @@ try {
         // why `at_end` is not set and the position is not moved.
         out->bytes = static_cast<std::uint32_t>(length);
         d->pending = true;
-        return MP_ERR_NO_MEMORY;
+        return MP_TOO_SMALL;
     }
 
     auto* bytes = static_cast<std::uint8_t*>(dst);
@@ -634,9 +632,8 @@ try {
     out->stream = 0; // the only one this container has
     out->flags = MP_PACKET_TIMED;
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL demux_seek(MpDemux* d, std::uint32_t stream,
                             std::uint64_t frame) noexcept

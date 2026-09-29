@@ -35,6 +35,7 @@
 // tree made to libxaac's integer-only AAC output and to Media Foundation's
 // resampling, and it would be no better for being convenient.
 
+#include <abi_guard.hpp>
 #include <mediaperch/module.h>
 
 #include "module_file.hpp"
@@ -340,9 +341,8 @@ try {
     d->unpacked.resize(static_cast<std::size_t>(k_packet_frames) * channels);
     *out = d;
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL demux_stream_count(MpDemux* d, std::uint32_t* out_count) noexcept
 {
@@ -383,11 +383,12 @@ MpResult MP_CALL demux_stream_config(MpDemux* d, std::uint32_t index, std::uint8
         return MP_ERR_INVALID;
     }
     *out_needed = d->config_bytes;
-    if (out == nullptr || d->config_bytes == 0) {
+    if (d->config_bytes == 0) {
         return MP_OK;
     }
-    if (out_bytes < d->config_bytes) {
-        return MP_ERR_NO_MEMORY;
+    // A NULL `out` is a buffer of no bytes, which asks how much.
+    if (out == nullptr || out_bytes < d->config_bytes) {
+        return MP_TOO_SMALL;
     }
     std::memcpy(out, d->config, d->config_bytes);
     return MP_OK;
@@ -425,7 +426,7 @@ try {
     const std::size_t want = static_cast<std::size_t>(k_packet_frames) * d->frame_bytes;
     if (dst == nullptr || dst_bytes < want) {
         out->bytes = static_cast<std::uint32_t>(want);
-        return MP_ERR_NO_MEMORY;
+        return MP_TOO_SMALL;
     }
 
     const std::uint32_t got =
@@ -472,9 +473,8 @@ try {
     out->flags = MP_PACKET_SYNC | MP_PACKET_TIMED;
     d->position += d->is_dsd ? got / 2u : got;
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL demux_seek(MpDemux* d, std::uint32_t stream,
                             std::uint64_t frame) noexcept

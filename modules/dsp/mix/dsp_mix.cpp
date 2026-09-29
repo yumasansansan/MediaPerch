@@ -20,6 +20,7 @@
 #include "mix.hpp"
 
 #include <abi_guard.hpp>
+#include <describe_row.hpp>
 #include <mediaperch/module.h>
 #include <peak.hpp>
 
@@ -219,81 +220,74 @@ try {
 MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
-                              std::uint32_t out_bytes) noexcept
+                              std::uint32_t out_bytes, std::uint32_t* out_needed) noexcept
 try {
-    if (d == nullptr || out == nullptr || out_bytes < 64) {
+    if (d == nullptr || out_needed == nullptr) {
         return MP_ERR_INVALID;
     }
+    mp::DescribeRow row{out, out_bytes, out_needed};
     switch (index) {
     case 0:
-        std::snprintf(out, out_bytes, "channels\t%u\ttarget channel count; 0 leaves it"
-                                      "\tint min=0 group=Target",
-                      d->channels);
-        return MP_OK;
+        row.format("channels\t%u\ttarget channel count; 0 leaves it"
+                   "\tint min=0 group=Target",
+                   d->channels);
+        return row.result();
     case 1:
-        std::snprintf(out, out_bytes,
-                      "mask\t0x%x\ttarget speaker mask; 0 takes the conventional one"
-                      "\ttext group=Target",
-                      d->mask);
-        return MP_OK;
+        row.format("mask\t0x%x\ttarget speaker mask; 0 takes the conventional one"
+                   "\ttext group=Target",
+                   d->mask);
+        return row.result();
     case 2:
-        std::snprintf(out, out_bytes,
-                      "centre\t%.2f\tdB of the centre channel into each front speaker"
-                      "\tnumber step=0.5 unit=dB group=Recipe",
-                      d->recipe.centre_db);
-        return MP_OK;
+        row.format("centre\t%.2f\tdB of the centre channel into each front speaker"
+                   "\tnumber step=0.5 unit=dB group=Recipe",
+                   d->recipe.centre_db);
+        return row.result();
     case 3:
-        std::snprintf(out, out_bytes,
-                      "surround\t%.2f\tdB of each surround into the front on its side"
-                      "\tnumber step=0.5 unit=dB group=Recipe",
-                      d->recipe.surround_db);
-        return MP_OK;
+        row.format("surround\t%.2f\tdB of each surround into the front on its side"
+                   "\tnumber step=0.5 unit=dB group=Recipe",
+                   d->recipe.surround_db);
+        return row.result();
     case 4:
         if (d->recipe.lfe_db <= -400.0) {
-            std::snprintf(out, out_bytes,
-                          "lfe\toff\tdB of the effects channel into the front pair; "
-                          "dropped by default\tnumber step=0.5 unit=dB group=Recipe");
+            row.format("lfe\toff\tdB of the effects channel into the front pair; "
+                       "dropped by default\tnumber step=0.5 unit=dB group=Recipe");
         } else {
-            std::snprintf(out, out_bytes,
-                          "lfe\t%.2f\tdB of the effects channel into the front pair"
-                          "\tnumber step=0.5 unit=dB group=Recipe",
-                          d->recipe.lfe_db);
+            row.format("lfe\t%.2f\tdB of the effects channel into the front pair"
+                       "\tnumber step=0.5 unit=dB group=Recipe",
+                       d->recipe.lfe_db);
         }
-        return MP_OK;
+        return row.result();
     case 5:
-        std::snprintf(out, out_bytes,
-                      "normalise\t%s\tnone, peak (cannot clip) or energy (keeps loudness)"
-                      "\tenum:none,peak,energy group=Recipe",
-                      mp::mix::normalise_name(d->recipe.normalise));
-        return MP_OK;
+        row.format("normalise\t%s\tnone, peak (cannot clip) or energy (keeps loudness)"
+                   "\tenum:none,peak,energy group=Recipe",
+                   mp::mix::normalise_name(d->recipe.normalise));
+        return row.result();
     case 6:
-        std::snprintf(out, out_bytes,
-                      "synthesise\t%s\tderive a channel nothing feeds, instead of silence"
-                      "\tbool group=Recipe",
-                      d->recipe.synthesise ? "1" : "0");
-        return MP_OK;
+        row.format("synthesise\t%s\tderive a channel nothing feeds, instead of silence"
+                   "\tbool group=Recipe",
+                   d->recipe.synthesise ? "1" : "0");
+        return row.result();
     case 7:
-        std::snprintf(out, out_bytes, "matrix\t%s\texplicit coefficients, or auto"
-                                      "\ttext group=Recipe",
-                      d->explicit_matrix.empty() ? "auto" : d->explicit_matrix.c_str());
-        return MP_OK;
+        row.format("matrix\t%s\texplicit coefficients, or auto"
+                   "\ttext group=Recipe",
+                   d->explicit_matrix.empty() ? "auto" : d->explicit_matrix.c_str());
+        return row.result();
     case 8: {
         // What was actually built. A downmix is a decision and this is the
         // decision, in the same words the setting takes.
         const std::string text = d->matrix.text();
-        std::snprintf(out, out_bytes, "built\t%s\tthe matrix in use (read only)",
-                      text.c_str());
-        return MP_OK;
+        row.format("built\t%s\tthe matrix in use (read only)",
+                   text.c_str());
+        return row.result();
     }
     case 9:
-        std::snprintf(out, out_bytes,
-                      "level\t%.2f\tdB the matrix was scaled by to normalise (read only)",
-                      d->matrix.scale > 0.0 ? 20.0 * std::log10(d->matrix.scale) : -400.0);
-        return MP_OK;
+        row.format("level\t%.2f\tdB the matrix was scaled by to normalise (read only)",
+                   d->matrix.scale > 0.0 ? 20.0 * std::log10(d->matrix.scale) : -400.0);
+        return row.result();
     case 10:
-        std::snprintf(out, out_bytes, "peak\t%.6f\tloudest sample produced (read only)",
-                      d->peak);
-        return MP_OK;
+        row.format("peak\t%.6f\tloudest sample produced (read only)",
+                   d->peak);
+        return row.result();
     default:
         return MP_END;
     }

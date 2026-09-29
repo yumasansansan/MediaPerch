@@ -173,7 +173,7 @@ std::vector<float> shown(const MpVideoVtbl& video, const MpVideoDspVtbl* stage_v
     std::uint32_t h = 0;
     MpPixelLayout layout{};
     layout.size = sizeof(layout);
-    if (video.read_back(handle, nullptr, 0, &w, &h, &layout) != MP_ERR_NO_MEMORY) {
+    if (video.read_back(handle, nullptr, 0, &w, &h, &layout) != MP_TOO_SMALL) {
         return {};
     }
     std::vector<float> out(static_cast<std::size_t>(w) * h * 4u);

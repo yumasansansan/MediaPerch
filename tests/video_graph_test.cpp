@@ -150,7 +150,7 @@ Picture read_picture(mp::Presenter& presenter)
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     MpPixelLayout layout{};
-    REQUIRE(presenter.read_back(nullptr, 0, width, height, layout) == MP_ERR_NO_MEMORY);
+    REQUIRE(presenter.read_back(nullptr, 0, width, height, layout) == MP_TOO_SMALL);
     REQUIRE(width != 0);
 
     std::vector<float> pixels(static_cast<std::size_t>(width) * height * 4u);

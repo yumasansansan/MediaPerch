@@ -43,6 +43,7 @@ add_library(mediaperch_core STATIC
     mediaperch/rational.hpp
     mediaperch/result.cpp
     mediaperch/result.hpp
+    mediaperch/row.hpp
     mediaperch/source.hpp
 )
 add_library(MediaPerch::core ALIAS mediaperch_core)

@@ -28,6 +28,7 @@
 // The output is the file's own samples in the file's own width, because for a
 // lossless codec correct is an identity rather than a tolerance.
 
+#include <abi_guard.hpp>
 #include <mediaperch/module.h>
 
 #include "module_log.hpp"
@@ -116,6 +117,8 @@ struct MpCodecInstance {
     std::size_t out_room = 0;
     std::size_t out_bytes = 0;
     bool overflowed = false;
+    /// What the frame that overflowed would have taken, for MP_TOO_SMALL.
+    std::size_t wanted = 0;
     bool wrote = false;
     bool failed = false;
 
@@ -226,6 +229,7 @@ FLAC__StreamDecoderWriteStatus write_callback(const FLAC__StreamDecoder*,
     const std::size_t needed = static_cast<std::size_t>(frames) * c->frame_bytes;
     if (c->out == nullptr || c->out_bytes + needed > c->out_room) {
         c->overflowed = true;
+        c->wanted = c->out_bytes + needed;
         return FLAC__STREAM_DECODER_WRITE_STATUS_ABORT;
     }
 
@@ -366,9 +370,8 @@ try {
 
     *out = c;
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL codec_get_format(MpCodecInstance* c, MpFormat* out) noexcept
 {
@@ -412,7 +415,8 @@ MpResult MP_CALL codec_decode(MpCodecInstance* c, const void* packet,
     c->input_bytes = 0;
 
     if (c->overflowed) {
-        return MP_ERR_NO_MEMORY;
+        *out_bytes = c->wanted;
+        return MP_TOO_SMALL;
     }
     if (!ok || c->failed) {
         return MP_ERR_FORMAT;

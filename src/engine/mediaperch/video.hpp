@@ -26,6 +26,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace mp {
@@ -103,7 +104,10 @@ public:
     /// the display and the stream and then never seen; a colour pipeline whose
     /// answers nobody can print is one nobody can check, which is how a
     /// tone-mapping fault becomes a matter of opinion.
-    MpResult describe(std::uint32_t index, char* out, std::uint32_t out_bytes) noexcept;
+    ///
+    /// The row whole, however long: mediaperch/row.hpp asks again with the room
+    /// the presenter says it needs.
+    MpResult describe(std::uint32_t index, std::string& out);
     MpResult get_device(MpGraphicsDevice& out) noexcept;
     MpResult read_back(void* dst, std::size_t dst_bytes, std::uint32_t& width,
                        std::uint32_t& height, MpPixelLayout& layout) noexcept;
@@ -148,7 +152,8 @@ public:
 
     MpResult set(const char* key, const char* value) noexcept;
     /// One `key\tcurrent\tdescription` row, MP_END past the last.
-    MpResult describe(std::uint32_t index, char* out, std::uint32_t out_bytes) noexcept;
+    /// The row whole, however long, as `Presenter::describe` reads one.
+    MpResult describe(std::uint32_t index, std::string& out);
 
     /// How a presenter is handed this one. Valid while this is.
     [[nodiscard]] MpVideoStage handed() const noexcept;

@@ -18,11 +18,13 @@
 
 #include <opus_multistream.h>
 
+#include <abi_guard.hpp>
 #include <mediaperch/module.h>
 
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <new>
 #include <vector>
 
@@ -148,9 +150,11 @@ MpResult MP_CALL codec_probe(MpCodec codec, const std::uint8_t* config,
     return MP_OK;
 }
 
+void MP_CALL codec_close(MpCodecInstance* c) noexcept;
+
 MpResult MP_CALL codec_open(MpCodec codec, const std::uint8_t* config,
                             std::uint32_t config_bytes, MpCodecInstance** out) noexcept
-{
+try {
     if (out == nullptr) {
         return MP_ERR_INVALID;
     }
@@ -171,7 +175,10 @@ MpResult MP_CALL codec_open(MpCodec codec, const std::uint8_t* config,
         return MP_ERR_UNSUPPORTED; // more than eight channels, which nothing here maps
     }
 
-    auto* c = new (std::nothrow) MpCodecInstance();
+    // Closed as codec_close closes it on every way out but the last, a throw
+    // included: the buffer below is the one allocation here that can throw.
+    std::unique_ptr<MpCodecInstance, decltype(&codec_close)> c{
+        new (std::nothrow) MpCodecInstance(), &codec_close};
     if (c == nullptr) {
         return MP_ERR_NO_MEMORY;
     }
@@ -179,7 +186,6 @@ MpResult MP_CALL codec_open(MpCodec codec, const std::uint8_t* config,
     c->decoder = opus_multistream_decoder_create(48000, channels, streams, coupled,
                                                  mapping, &error);
     if (c->decoder == nullptr || error != OPUS_OK) {
-        delete c;
         return MP_ERR_FORMAT;
     }
 
@@ -194,9 +200,10 @@ MpResult MP_CALL codec_open(MpCodec codec, const std::uint8_t* config,
     c->format.sample_type = MP_SAMPLE_F32;
     c->format.encoding = MP_ENCODING_PCM;
     c->planar.resize(static_cast<std::size_t>(k_max_frame) * c->channels);
-    *out = c;
+    *out = c.release();
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL codec_get_format(MpCodecInstance* c, MpFormat* out) noexcept
 {
@@ -232,7 +239,8 @@ MpResult MP_CALL codec_decode(MpCodecInstance* c, const void* packet,
     const std::size_t needed =
         static_cast<std::size_t>(frames) * c->channels * sizeof(float);
     if (dst == nullptr || dst_bytes < needed) {
-        return MP_ERR_NO_MEMORY;
+        *out_bytes = needed;
+        return MP_TOO_SMALL;
     }
 
     // libopus writes interleaved already, but in Vorbis channel order. The

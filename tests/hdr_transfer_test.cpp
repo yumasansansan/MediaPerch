@@ -14,6 +14,8 @@
 // `read_back` hands over the floats, and the arithmetic is the same on any
 // machine.
 
+#include "mediaperch/row.hpp"
+
 #include <mediaperch/module.h>
 
 #include "module_loader.hpp"
@@ -350,12 +352,14 @@ public:
 
     [[nodiscard]] std::string described(const char* key) const
     {
+        std::string line;
         for (std::uint32_t i = 0;; ++i) {
-            char row[256];
-            if (vtbl_->describe(handle_, i, row, sizeof row) != MP_OK) {
+            const auto ask = [&](char* buffer, std::uint32_t bytes, std::uint32_t* needed) {
+                return vtbl_->describe(handle_, i, buffer, bytes, needed);
+            };
+            if (mp::read_row(ask, line) != MP_OK) {
                 return {};
             }
-            const std::string line{row};
             const std::size_t first = line.find('\t');
             if (first == std::string::npos || line.substr(0, first) != key) {
                 continue;
@@ -440,7 +444,7 @@ public:
         std::uint32_t h = 0;
         MpPixelLayout layout{};
         layout.size = sizeof(layout);
-        if (vtbl_->read_back(handle_, nullptr, 0, &w, &h, &layout) != MP_ERR_NO_MEMORY) {
+        if (vtbl_->read_back(handle_, nullptr, 0, &w, &h, &layout) != MP_TOO_SMALL) {
             return {};
         }
         const std::size_t count = static_cast<std::size_t>(w) * h * 4u;
@@ -496,7 +500,7 @@ public:
         std::uint32_t h = 0;
         MpPixelLayout layout{};
         layout.size = sizeof(layout);
-        if (vtbl_->read_back(handle_, nullptr, 0, &w, &h, &layout) != MP_ERR_NO_MEMORY ||
+        if (vtbl_->read_back(handle_, nullptr, 0, &w, &h, &layout) != MP_TOO_SMALL ||
             w == 0 || h == 0) {
             return {};
         }

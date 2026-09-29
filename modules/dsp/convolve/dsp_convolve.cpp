@@ -23,6 +23,7 @@
 
 #include <convolve.hpp>
 #include <abi_guard.hpp>
+#include <describe_row.hpp>
 #include <mediaperch/module.h>
 #include <peak.hpp>
 
@@ -276,11 +277,12 @@ try {
 MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
-                              std::uint32_t out_bytes) noexcept
+                              std::uint32_t out_bytes, std::uint32_t* out_needed) noexcept
 try {
-    if (d == nullptr || out == nullptr || out_bytes < 64) {
+    if (d == nullptr || out_needed == nullptr) {
         return MP_ERR_INVALID;
     }
+    mp::DescribeRow row{out, out_bytes, out_needed};
     const char* normalise = d->normalise == Normalise::none
                                 ? "none"
                                 : (d->normalise == Normalise::dc
@@ -289,67 +291,58 @@ try {
                                                                           : "energy"));
     switch (index) {
     case 0:
-        std::snprintf(out, out_bytes, "file\t%s\tthe impulse response to convolve with\tpath",
-                      d->path.empty() ? "none" : d->path.c_str());
-        return MP_OK;
+        row.format("file\t%s\tthe impulse response to convolve with\tpath",
+                   d->path.empty() ? "none" : d->path.c_str());
+        return row.result();
     case 1:
-        std::snprintf(out, out_bytes,
-                      "normalise\t%s\tnone (as measured), dc, peak or energy"
-                      "\tenum:none,dc,peak,energy",
-                      normalise);
-        return MP_OK;
+        row.format("normalise\t%s\tnone (as measured), dc, peak or energy"
+                   "\tenum:none,dc,peak,energy",
+                   normalise);
+        return row.result();
     case 2:
-        std::snprintf(out, out_bytes, "gain_db\t%+.2f\tdB applied on top of that"
-                                      "\tnumber step=0.5 unit=dB",
-                      d->gain_db);
-        return MP_OK;
+        row.format("gain_db\t%+.2f\tdB applied on top of that"
+                   "\tnumber step=0.5 unit=dB",
+                   d->gain_db);
+        return row.result();
     case 3:
-        std::snprintf(out, out_bytes,
-                      "max_taps\t%u\ttruncate past this, with a fade; 0 keeps it all\tint min=0",
-                      d->max_taps);
-        return MP_OK;
+        row.format("max_taps\t%u\ttruncate past this, with a fade; 0 keeps it all\tint min=0",
+                   d->max_taps);
+        return row.result();
     case 4:
-        std::snprintf(out, out_bytes,
-                      "partition\t%u\tconvolution partition; 0 follows the block size\tint min=0",
-                      d->partition);
-        return MP_OK;
+        row.format("partition\t%u\tconvolution partition; 0 follows the block size\tint min=0",
+                   d->partition);
+        return row.result();
     case 5:
-        std::snprintf(out, out_bytes,
-                      "resample\t%s\tconvert the response to the stream's rate\tbool",
-                      d->resample ? "1" : "0");
-        return MP_OK;
+        row.format("resample\t%s\tconvert the response to the stream's rate\tbool",
+                   d->resample ? "1" : "0");
+        return row.result();
     case 6:
-        std::snprintf(out, out_bytes,
-                      "measured_at\t%u\tHz, as the file was recorded (read only)",
-                      d->loaded.sample_rate);
-        return MP_OK;
+        row.format("measured_at\t%u\tHz, as the file was recorded (read only)",
+                   d->loaded.sample_rate);
+        return row.result();
     case 7:
-        std::snprintf(out, out_bytes,
-                      "built\t%zu taps at %u Hz\twhat is actually convolving (read only)",
-                      d->built_taps, d->built_rate);
-        return MP_OK;
+        row.format("built\t%zu taps at %u Hz\twhat is actually convolving (read only)",
+                   d->built_taps, d->built_rate);
+        return row.result();
     case 8:
         // The number that decides whether everything gets louder. Reported
         // whether or not anything was done about it.
-        std::snprintf(out, out_bytes,
-                      "gain_at_dc\t%+.2f\tdB the response has at zero hertz (read only)",
-                      d->gains.dc != 0.0 ? 20.0 * std::log10(std::abs(d->gains.dc))
-                                         : -400.0);
-        return MP_OK;
+        row.format("gain_at_dc\t%+.2f\tdB the response has at zero hertz (read only)",
+                   d->gains.dc != 0.0 ? 20.0 * std::log10(std::abs(d->gains.dc))
+                                      : -400.0);
+        return row.result();
     case 9:
-        std::snprintf(out, out_bytes,
-                      "gain_energy\t%+.2f\tdB it has for uncorrelated signal (read only)",
-                      d->gains.energy > 0.0 ? 20.0 * std::log10(d->gains.energy) : -400.0);
-        return MP_OK;
+        row.format("gain_energy\t%+.2f\tdB it has for uncorrelated signal (read only)",
+                   d->gains.energy > 0.0 ? 20.0 * std::log10(d->gains.energy) : -400.0);
+        return row.result();
     case 10:
-        std::snprintf(out, out_bytes, "peak\t%.6f\tloudest sample produced (read only)",
-                      d->peak);
-        return MP_OK;
+        row.format("peak\t%.6f\tloudest sample produced (read only)",
+                   d->peak);
+        return row.result();
     case 11:
-        std::snprintf(out, out_bytes,
-                      "cost\t%.0f\tmultiplies per output frame (read only)",
-                      d->convolver.multiplies());
-        return MP_OK;
+        row.format("cost\t%.0f\tmultiplies per output frame (read only)",
+                   d->convolver.multiplies());
+        return row.result();
     default:
         return MP_END;
     }

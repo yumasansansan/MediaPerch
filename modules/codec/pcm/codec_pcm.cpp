@@ -120,7 +120,8 @@ MpResult MP_CALL codec_decode(MpCodecInstance* c, const void* packet,
         return MP_ERR_INVALID;
     }
     if (dst == nullptr || dst_bytes < packet_bytes) {
-        return MP_ERR_NO_MEMORY;
+        *out_bytes = packet_bytes;
+        return MP_TOO_SMALL;
     }
     std::memcpy(dst, packet, packet_bytes);
     *out_bytes = packet_bytes;

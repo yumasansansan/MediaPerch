@@ -53,6 +53,7 @@
 // already makes. For now dav1d applies it, because a picture without the grain
 // the stream asked for is a picture that is wrong.
 
+#include <abi_guard.hpp>
 #include <mediaperch/module.h>
 
 #include "decoder_threads.hpp"
@@ -357,9 +358,8 @@ try {
 
     *out = c.release();
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 void MP_CALL codec_close(MpVideoCodec* c) noexcept
 {
@@ -403,9 +403,8 @@ try {
     }
     push(c);
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL codec_next_frame(MpVideoCodec* c, MpVideoFrame* out) noexcept
 try {
@@ -457,9 +456,8 @@ try {
         out->stride[i] = static_cast<std::uint32_t>(picture.stride[1]);
     }
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL codec_flush(MpVideoCodec* c) noexcept
 {
@@ -495,9 +493,8 @@ try {
         push(c);
     }
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 /// `threads`, and nothing else yet.
 ///
@@ -534,9 +531,8 @@ try {
         push(c);
     }
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 constexpr MpVideoCodecVtbl k_vtbl = {
     /* size       */ sizeof(MpVideoCodecVtbl),

@@ -16,6 +16,8 @@
 #include "mediaperch/processor.hpp"
 #include "fake_handles.hpp"
 
+#include <describe_row.hpp>
+
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
@@ -157,13 +159,14 @@ MpResult MP_CALL fake_set(MpDsp* d, const char* key, const char* value)
 }
 
 MpResult MP_CALL fake_describe(MpDsp* d, std::uint32_t index, char* out,
-                               std::uint32_t out_bytes)
+                               std::uint32_t out_bytes, std::uint32_t* out_needed)
 {
+    mp::DescribeRow row{out, out_bytes, out_needed};
     if (index != 0) {
         return MP_END;
     }
-    std::snprintf(out, out_bytes, "gain\t%.3f\thow much of it there is", d->gain);
-    return MP_OK;
+    row.format("gain\t%.3f\thow much of it there is", d->gain);
+    return row.result();
 }
 
 template <MpDsp::Kind K>

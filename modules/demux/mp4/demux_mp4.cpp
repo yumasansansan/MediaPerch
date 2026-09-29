@@ -29,6 +29,7 @@
 // goes across verbatim.
 
 
+#include <abi_guard.hpp>
 #include <mediaperch/module.h>
 
 #include "h264.hpp"
@@ -885,9 +886,8 @@ try {
 
     *out = d.release();
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL demux_stream_count(MpDemux* d, std::uint32_t* out) noexcept
 {
@@ -939,11 +939,12 @@ MpResult MP_CALL demux_stream_config(MpDemux* d, std::uint32_t index, std::uint8
     const auto& config = d->streams[index].config;
     const auto needed = static_cast<std::uint32_t>(config.size());
     *out_needed = needed;
-    if (out == nullptr) {
-        return MP_OK; // asked what it would take, which the ABI allows
+    if (needed == 0) {
+        return MP_OK;
     }
-    if (out_bytes < needed) {
-        return MP_ERR_NO_MEMORY;
+    // A NULL `out` is a buffer of no bytes, which asks how much.
+    if (out == nullptr || out_bytes < needed) {
+        return MP_TOO_SMALL;
     }
     if (needed != 0) {
         std::memcpy(out, config.data(), needed);
@@ -1126,9 +1127,8 @@ try {
 
     std::memcpy(out, &info, std::min<std::size_t>(info.size, sizeof(info)));
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL demux_select_streams(MpDemux* d, const std::uint32_t* indices,
                                       std::uint32_t count) noexcept
@@ -1153,9 +1153,8 @@ try {
     }
     d->selected = std::move(chosen);
     return restart(d, nullptr, 0u) ? MP_OK : MP_ERR_UNSUPPORTED;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL demux_read_packet(MpDemux* d, void* dst, std::size_t dst_bytes,
                                    MpPacket* out) noexcept
@@ -1212,7 +1211,7 @@ try {
         // which is the only way a packet larger than somebody's guess is not
         // silently lost. The sample stays read, so the file is not walked twice.
         out->bytes = bytes;
-        return MP_ERR_NO_MEMORY;
+        return MP_TOO_SMALL;
     }
     if (bytes != 0) {
         std::memcpy(dst, d->sample_data.GetData(), bytes);
@@ -1227,9 +1226,8 @@ try {
     out->stream = d->pending_stream;
     d->have_pending = false;
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL demux_seek(MpDemux* d, std::uint32_t stream,
                             std::uint64_t frame) noexcept
@@ -1284,9 +1282,8 @@ try {
     }
     const auto ms = static_cast<std::uint32_t>(frame * 1000ull / rate);
     return AP4_SUCCEEDED(d->reader->SeekTo(ms)) ? MP_OK : MP_ERR_UNSUPPORTED;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 void MP_CALL demux_close(MpDemux* d) noexcept
 {

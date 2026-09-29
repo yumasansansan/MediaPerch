@@ -39,8 +39,9 @@ const MP_END: MpResult = 1;
 const MP_ERR_INVALID: MpResult = 2;
 const MP_ERR_UNSUPPORTED: MpResult = 3;
 const MP_ERR_FORMAT: MpResult = 4;
+const MP_TOO_SMALL: MpResult = 12;
 
-const MP_ABI_VERSION: u32 = 3;
+const MP_ABI_VERSION: u32 = 5;
 const MP_KIND_DSP: u32 = 3;
 const MP_SAMPLE_F64: u32 = 7;
 
@@ -84,8 +85,13 @@ pub struct MpDspVtbl {
         out_frames: *mut u32,
     ) -> MpResult,
     set: extern "C" fn(d: *mut Dsp, key: *const c_char, value: *const c_char) -> MpResult,
-    describe: extern "C" fn(d: *mut Dsp, index: u32, out: *mut c_char, out_bytes: u32)
-        -> MpResult,
+    describe: extern "C" fn(
+        d: *mut Dsp,
+        index: u32,
+        out: *mut c_char,
+        out_bytes: u32,
+        out_needed: *mut u32,
+    ) -> MpResult,
     reset: extern "C" fn(d: *mut Dsp) -> MpResult,
 }
 
@@ -311,11 +317,18 @@ fn put(text: &str, out: *mut c_char, out_bytes: u32) {
     }
 }
 
-extern "C" fn dsp_describe(d: *mut Dsp, index: u32, out: *mut c_char, out_bytes: u32) -> MpResult {
+extern "C" fn dsp_describe(
+    d: *mut Dsp,
+    index: u32,
+    out: *mut c_char,
+    out_bytes: u32,
+    out_needed: *mut u32,
+) -> MpResult {
     guard(|| {
-        if d.is_null() || out.is_null() || out_bytes < 64 {
+        if d.is_null() || out_needed.is_null() {
             return MP_ERR_INVALID;
         }
+        unsafe { *out_needed = 0 };
         let dsp = unsafe { &*d };
         let line = match index {
             0 => "language\tRust\tthis module was compiled by rustc".to_string(),
@@ -328,6 +341,13 @@ extern "C" fn dsp_describe(d: *mut Dsp, index: u32, out: *mut c_char, out_bytes:
             4 => "panic\t0\tset it to 1 and the next process panics, on purpose".to_string(),
             _ => return MP_END,
         };
+        // Whole or not at all, as the header asks since v5: the row and its
+        // NUL, or MP_TOO_SMALL and how many bytes they take.
+        let needed = line.len() + 1;
+        unsafe { *out_needed = needed as u32 };
+        if out.is_null() || needed > out_bytes as usize {
+            return MP_TOO_SMALL;
+        }
         put(&line, out, out_bytes);
         MP_OK
     })

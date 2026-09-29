@@ -62,6 +62,14 @@ struct World {
     std::uint32_t preroll = 0;
     /// A demuxer that will not say where its packets are.
     bool untimed = false;
+    /// A demuxer whose own allocation fails, which is what MP_ERR_NO_MEMORY
+    /// means and all it means since v5.
+    bool cannot_allocate = false;
+    /// A demuxer that asks for no more than it was offered, which no packet
+    /// that did not fit can be.
+    bool asks_for_what_it_had = false;
+    /// How many times `read_packet` was called.
+    std::uint32_t reads = 0;
     /// What the codec has been told, so the test can see the seek handshake.
     int resets = 0;
     std::uint32_t decoded_packets = 0;
@@ -113,9 +121,10 @@ MpResult MP_CALL demux_stream_config(MpDemux*, std::uint32_t, std::uint8_t* out,
                                      std::uint32_t out_bytes, std::uint32_t* needed)
 {
     *needed = 4;
-    if (out != nullptr && out_bytes >= 4) {
-        std::memcpy(out, "cfg!", 4);
+    if (out == nullptr || out_bytes < 4) {
+        return MP_TOO_SMALL;
     }
+    std::memcpy(out, "cfg!", 4);
     return MP_OK;
 }
 
@@ -140,6 +149,14 @@ MpResult MP_CALL demux_select_streams(MpDemux*, const std::uint32_t* indices,
 MpResult MP_CALL demux_read_packet(MpDemux*, void* dst, std::size_t dst_bytes,
                                    MpPacket* out)
 {
+    ++g.reads;
+    if (g.cannot_allocate) {
+        return MP_ERR_NO_MEMORY;
+    }
+    if (g.asks_for_what_it_had) {
+        out->bytes = static_cast<std::uint32_t>(dst_bytes);
+        return MP_TOO_SMALL;
+    }
     if (g.next_packet >= g.packets) {
         out->bytes = 0;
         return MP_END;
@@ -148,7 +165,7 @@ MpResult MP_CALL demux_read_packet(MpDemux*, void* dst, std::size_t dst_bytes,
         // **Nothing is consumed**, and what it needs is reported. The host is
         // expected to grow and ask again.
         out->bytes = g.packet_bytes;
-        return MP_ERR_NO_MEMORY;
+        return MP_TOO_SMALL;
     }
     // The packet's payload is the index of its first frame, which is all the
     // fake codec needs to produce the right samples.
@@ -186,7 +203,8 @@ MpResult MP_CALL demux_read_frames(MpDemux*, void* dst, std::size_t dst_bytes,
     }
     const auto pcm = frames(g.next_packet * g.frames_per_packet, g.frames_per_packet);
     if (dst_bytes < pcm.size()) {
-        return MP_ERR_NO_MEMORY;
+        *out_bytes = pcm.size();
+        return MP_TOO_SMALL;
     }
     std::memcpy(dst, pcm.data(), pcm.size());
     *out_bytes = pcm.size();
@@ -249,7 +267,8 @@ MpResult MP_CALL codec_decode(MpCodecInstance*, const void* packet, std::size_t 
     std::memcpy(&first, packet, 4);
     const auto pcm = frames(first, g.frames_per_packet);
     if (dst_bytes < pcm.size()) {
-        return MP_ERR_NO_MEMORY;
+        *out_bytes = pcm.size();
+        return MP_TOO_SMALL;
     }
     std::memcpy(dst, pcm.data(), pcm.size());
     *out_bytes = pcm.size();
@@ -370,6 +389,36 @@ TEST_CASE("a packet that does not fit is not lost", "[packet]")
     const auto out = drain(source);
     CHECK(out == frames(0, 128));
     CHECK(g.decoded_packets == 8);
+}
+
+TEST_CASE("a demuxer that cannot allocate is not asked to grow into it", "[packet]")
+{
+    // MP_ERR_NO_MEMORY is the module's own allocation failing, and since v5 it
+    // is nothing else: there is no size to grow to, and asking again would fail
+    // the same way. It stays what it is rather than becoming a broken module.
+    g = World{};
+    g.cannot_allocate = true;
+    mp::Demux demux;
+    REQUIRE(demux.open(demux_vtbl(), "x") == MP_OK);
+    std::vector<std::uint8_t> buffer;
+    MpPacket packet{};
+    CHECK(demux.read_packet(buffer, packet) == MP_ERR_NO_MEMORY);
+    CHECK(g.reads == 1);
+}
+
+TEST_CASE("a demuxer that asks for no more than it had is not believed", "[packet]")
+{
+    // A packet that did not fit needs more than the buffer it did not fit in.
+    // One that asks for the same again is a module that would loop, and the
+    // host says so instead of obliging it.
+    g = World{};
+    g.asks_for_what_it_had = true;
+    mp::Demux demux;
+    REQUIRE(demux.open(demux_vtbl(), "x") == MP_OK);
+    std::vector<std::uint8_t> buffer;
+    MpPacket packet{};
+    CHECK(demux.read_packet(buffer, packet) == MP_ERR_INTERNAL);
+    CHECK(g.reads == 1);
 }
 
 TEST_CASE("the gapless edit is the container's, and it is applied once", "[packet]")

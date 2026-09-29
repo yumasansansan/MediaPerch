@@ -20,6 +20,7 @@ const char* result_name(MpResult r) noexcept
     case MP_ERR_DENIED: return "exclusive mode is disabled for this device";
     case MP_ERR_NO_MEMORY: return "out of memory";
     case MP_TIMEOUT: return "timed out";
+    case MP_TOO_SMALL: return "buffer too small";
     default: return "internal error";
     }
 }

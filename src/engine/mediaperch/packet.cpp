@@ -76,14 +76,18 @@ bool Demux::stream_config(std::uint32_t index, std::vector<std::uint8_t>& out) c
     if (!*this || vtbl_->stream_config == nullptr) {
         return false;
     }
-    // Asked with no buffer first, which the ABI says is legal and is how a
-    // caller learns a size it has no other way to know.
+    // Asked with no buffer first -- a buffer of no bytes, whose MP_TOO_SMALL
+    // carries the size -- which is how a caller learns a size it has no other
+    // way to know.
     std::uint32_t needed = 0;
-    if (vtbl_->stream_config(handle_, index, nullptr, 0, &needed) != MP_OK) {
-        return false;
+    const MpResult asked = vtbl_->stream_config(handle_, index, nullptr, 0, &needed);
+    if (asked == MP_OK) {
+        // A codec whose configuration is the packets themselves; one that says
+        // it needs something and then took it into no buffer broke its word.
+        return needed == 0;
     }
-    if (needed == 0) {
-        return true; // a codec whose configuration is the packets themselves
+    if (asked != MP_TOO_SMALL || needed == 0) {
+        return false;
     }
     out.resize(needed);
     std::uint32_t written = 0;
@@ -151,19 +155,20 @@ MpResult Demux::read_packet(std::vector<std::uint8_t>& buffer, MpPacket& out)
         out = MpPacket{};
         out.size = sizeof(MpPacket);
         const MpResult r = vtbl_->read_packet(handle_, buffer.data(), buffer.size(), &out);
-        if (r != MP_ERR_NO_MEMORY) {
+        if (r != MP_TOO_SMALL) {
             return r;
         }
         // It did not fit and nothing was consumed, so the packet is still
         // there: grow to what it asked for and ask again. Twice at most,
         // because a module that asks for more than it then uses is a module
-        // that would loop.
-        if (out.bytes == 0 || out.bytes <= buffer.size()) {
+        // that would loop -- and one that asks for no more than it had would
+        // loop at once.
+        if (out.bytes <= buffer.size()) {
             return MP_ERR_INTERNAL;
         }
         buffer.resize(out.bytes);
     }
-    return MP_ERR_NO_MEMORY;
+    return MP_ERR_INTERNAL;
 }
 
 MpResult Demux::seek(std::uint32_t stream, std::uint64_t frame)

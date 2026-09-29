@@ -27,16 +27,15 @@ namespace {
 /// one that has not been configured and so has no swap chain yet.
 void* waitable_of(Presenter& presenter)
 {
-    char line[256];
+    std::string line;
     for (std::uint32_t row = 0;; ++row) {
-        line[0] = '\0';
-        if (presenter.describe(row, line, sizeof line) != MP_OK) {
+        if (presenter.describe(row, line) != MP_OK) {
             break;
         }
-        if (std::strncmp(line, "surface\t", 8) != 0) {
+        if (line.rfind("surface\t", 0) != 0) {
             continue;
         }
-        const char* at = std::strstr(line + 8, "waitable 0x");
+        const char* at = std::strstr(line.c_str() + 8, "waitable 0x");
         if (at == nullptr) {
             return nullptr;
         }

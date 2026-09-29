@@ -37,6 +37,7 @@
 
 #include <mediaperch/module.h>
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -84,16 +85,16 @@ struct MpDsp {
     int complaints;
 };
 
-static const MpHost *g_host = NULL;
+static const MpHost *g_host = nullptr;
 
 static MpResult MP_CALL probe_open(MpDsp **out)
 {
     MpDsp *d;
-    if (out == NULL) {
+    if (out == nullptr) {
         return MP_ERR_INVALID;
     }
     d = (MpDsp *)calloc(1, sizeof(MpDsp));
-    if (d == NULL) {
+    if (d == nullptr) {
         return MP_ERR_NO_MEMORY;
     }
     *out = d;
@@ -108,7 +109,7 @@ static void MP_CALL probe_close(MpDsp *d)
 static MpResult MP_CALL probe_configure(MpDsp *d, const MpFormat *in, uint32_t max_frames,
                                         MpFormat *out, uint32_t *out_max)
 {
-    if (d == NULL || in == NULL || out == NULL || out_max == NULL) {
+    if (d == nullptr || in == nullptr || out == nullptr || out_max == nullptr) {
         return MP_ERR_INVALID;
     }
     /* The bus is deinterleaved f64. A host that offered anything else would be
@@ -134,14 +135,14 @@ static MpResult MP_CALL probe_process(MpDsp *d, const double *const *in, uint32_
 {
     uint32_t c;
     uint32_t n;
-    if (d == NULL || out_frames == NULL) {
+    if (d == nullptr || out_frames == nullptr) {
         return MP_ERR_INVALID;
     }
     *out_frames = 0;
     if (in_frames == 0) {
         return MP_OK;
     }
-    if (in == NULL || out == NULL) {
+    if (in == nullptr || out == nullptr) {
         d->complaints++;
         return MP_ERR_INVALID;
     }
@@ -152,7 +153,7 @@ static MpResult MP_CALL probe_process(MpDsp *d, const double *const *in, uint32_
         return MP_ERR_INVALID;
     }
     for (c = 0; c < d->format.channels; ++c) {
-        if (in[c] == NULL || out[c] == NULL) {
+        if (in[c] == nullptr || out[c] == nullptr) {
             d->complaints++;
             return MP_ERR_INVALID;
         }
@@ -172,7 +173,7 @@ static MpResult MP_CALL probe_flush(MpDsp *d, double *const *out, uint32_t out_c
     (void)d;
     (void)out;
     (void)out_capacity;
-    if (out_frames == NULL) {
+    if (out_frames == nullptr) {
         return MP_ERR_INVALID;
     }
     *out_frames = 0;
@@ -181,7 +182,7 @@ static MpResult MP_CALL probe_flush(MpDsp *d, double *const *out, uint32_t out_c
 
 static MpResult MP_CALL probe_set(MpDsp *d, const char *key, const char *value)
 {
-    if (d == NULL || key == NULL || value == NULL) {
+    if (d == nullptr || key == nullptr || value == nullptr) {
         return MP_ERR_INVALID;
     }
     /* One setting, so that `set` is exercised rather than merely present. */
@@ -193,32 +194,55 @@ static MpResult MP_CALL probe_set(MpDsp *d, const char *key, const char *value)
     return MP_ERR_UNSUPPORTED;
 }
 
-static MpResult MP_CALL probe_describe(MpDsp *d, uint32_t index, char *out,
-                                       uint32_t out_bytes)
+/* One row, whole or not at all, as MpDspVtbl::describe asks since v5: measured
+ * first, and written only when it fits with its NUL. What describe_row.hpp is
+ * to the C++ modules, in the probe's own language. */
+static MpResult row(char *out, uint32_t out_bytes, uint32_t *out_needed, const char *format, ...)
 {
-    if (d == NULL || out == NULL || out_bytes < 64) {
+    va_list args;
+    va_start(args, format);
+    va_list measuring;
+    va_copy(measuring, args);
+    const int length = vsnprintf(nullptr, 0, format, measuring);
+    va_end(measuring);
+    if (length < 0) {
+        va_end(args);
+        return MP_ERR_INTERNAL;
+    }
+    *out_needed = (uint32_t)length + 1u;
+    if (out == nullptr || *out_needed > out_bytes) {
+        va_end(args);
+        return MP_TOO_SMALL;
+    }
+    vsnprintf(out, out_bytes, format, args);
+    va_end(args);
+    return MP_OK;
+}
+
+static MpResult MP_CALL probe_describe(MpDsp *d, uint32_t index, char *out,
+                                       uint32_t out_bytes, uint32_t *out_needed)
+{
+    if (d == nullptr || out_needed == nullptr) {
         return MP_ERR_INVALID;
     }
+    *out_needed = 0;
     switch (index) {
     case 0:
-        snprintf(out, out_bytes, "language\tC\tthis module was compiled by a C compiler");
-        return MP_OK;
+        return row(out, out_bytes, out_needed,
+                   "language\tC\tthis module was compiled by a C compiler");
     case 1:
-        snprintf(out, out_bytes, "blocks\t%u\tprocess calls seen (read only)", d->blocks);
-        return MP_OK;
+        return row(out, out_bytes, out_needed, "blocks\t%u\tprocess calls seen (read only)",
+                   d->blocks);
     case 2:
-        snprintf(out, out_bytes, "frames\t%llu\tframes seen (read only)",
-                 (unsigned long long)d->frames);
-        return MP_OK;
+        return row(out, out_bytes, out_needed, "frames\t%llu\tframes seen (read only)",
+                   (unsigned long long)d->frames);
     case 3:
         /* The answer the probe exists to give. */
-        snprintf(out, out_bytes, "complaints\t%d\ttimes the host broke the header's word",
-                 d->complaints);
-        return MP_OK;
+        return row(out, out_bytes, out_needed,
+                   "complaints\t%d\ttimes the host broke the header's word", d->complaints);
     case 4:
-        snprintf(out, out_bytes, "host\t%s\twhether a host vtable arrived at init",
-                 g_host != NULL ? "yes" : "no");
-        return MP_OK;
+        return row(out, out_bytes, out_needed, "host\t%s\twhether a host vtable arrived at init",
+                   g_host != nullptr ? "yes" : "no");
     default:
         return MP_END;
     }
@@ -226,7 +250,7 @@ static MpResult MP_CALL probe_describe(MpDsp *d, uint32_t index, char *out,
 
 static MpResult MP_CALL probe_reset(MpDsp *d)
 {
-    if (d == NULL) {
+    if (d == nullptr) {
         return MP_ERR_INVALID;
     }
     return MP_OK;
@@ -235,7 +259,7 @@ static MpResult MP_CALL probe_reset(MpDsp *d)
 /* Samples pass through untouched, so nothing is older than it was. */
 static MpResult MP_CALL probe_get_latency(MpDsp *d, uint32_t *out_frames)
 {
-    if (d == NULL || out_frames == NULL) {
+    if (d == nullptr || out_frames == nullptr) {
         return MP_ERR_INVALID;
     }
     *out_frames = 0;
@@ -256,7 +280,7 @@ static MpResult MP_CALL probe_init(const MpHost *host)
 
 static void MP_CALL probe_shutdown(void)
 {
-    g_host = NULL;
+    g_host = nullptr;
 }
 
 static const MpModuleDesc g_desc = {
@@ -276,7 +300,7 @@ static const MpModuleDesc g_desc = {
     /* codecs, codec_count, reserved: a DSP stage declares no codecs, and saying
      * so positionally is the point -- a descriptor written field by field in
      * another language is the thing this probe exists to check. */
-    NULL,
+    nullptr,
     0,
     0,
 };
@@ -284,7 +308,7 @@ static const MpModuleDesc g_desc = {
 MP_EXPORT const MpModuleDesc *MP_CALL mp_module_entry(uint32_t host_abi_version)
 {
     if (host_abi_version != MP_ABI_VERSION) {
-        return NULL;
+        return nullptr;
     }
     return &g_desc;
 }

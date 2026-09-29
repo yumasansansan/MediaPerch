@@ -8,6 +8,7 @@
 #include "wave_format.hpp"
 #include "win_headers.hpp"
 
+#include <abi_guard.hpp>
 #include <mediaperch/module.h>
 
 #include <cstring>
@@ -204,9 +205,8 @@ try {
     }
 
     return MP_OK;
-} catch (...) {
-    return MP_ERR_INTERNAL;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 // --------------------------------------------------------------------------
 // Open and close
@@ -245,9 +245,8 @@ try {
 
     *out = sink;
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 void MP_CALL sink_close(MpSink* sink) noexcept
 {
@@ -382,9 +381,8 @@ try {
 
     *accepted = *want;
     return MP_OK;
-} catch (...) {
-    return MP_ERR_INTERNAL;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL sink_get_period(MpSink* sink, std::uint32_t* frames) noexcept
 {

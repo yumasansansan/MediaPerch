@@ -34,6 +34,7 @@
 // positions rather than about parsing: the file's SEEKTABLE where it has one,
 // plus a point recorded every so often on the way past.
 
+#include <abi_guard.hpp>
 #include <mediaperch/module.h>
 
 #include "module_file.hpp"
@@ -387,9 +388,8 @@ try {
 
     *out = d;
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL demux_stream_count(MpDemux* d, std::uint32_t* out_count) noexcept
 {
@@ -427,11 +427,12 @@ MpResult MP_CALL demux_stream_config(MpDemux* d, std::uint32_t index, std::uint8
     }
     const auto needed = static_cast<std::uint32_t>(d->config.size());
     *out_needed = needed;
-    if (out == nullptr) {
+    if (needed == 0) {
         return MP_OK;
     }
-    if (out_bytes < needed) {
-        return MP_ERR_NO_MEMORY;
+    // A NULL `out` is a buffer of no bytes, which asks how much.
+    if (out == nullptr || out_bytes < needed) {
+        return MP_TOO_SMALL;
     }
     std::memcpy(out, d->config.data(), needed);
     return MP_OK;
@@ -492,7 +493,7 @@ try {
         // assumed: libFLAC is flushed and repositioned, and the next call reads
         // the same frame again.
         out->bytes = static_cast<std::uint32_t>(length);
-        return restart_at(d, start) ? MP_ERR_NO_MEMORY : MP_ERR_IO;
+        return restart_at(d, start) ? MP_TOO_SMALL : MP_ERR_IO;
     }
 
     // The frame's own bytes, on the handle libFLAC does not know about.
@@ -512,9 +513,8 @@ try {
     out->flags = MP_PACKET_SYNC | MP_PACKET_TIMED;
     d->position += blocksize;
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL demux_seek(MpDemux* d, std::uint32_t stream,
                             std::uint64_t frame) noexcept
@@ -539,9 +539,8 @@ try {
     d->position = best.sample;
     d->since_point = 0;
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 void MP_CALL demux_close(MpDemux* d) noexcept
 {

@@ -18,6 +18,7 @@
 
 #include <ogg/ogg.h>
 
+#include <abi_guard.hpp>
 #include <mediaperch/module.h>
 
 #include "module_file.hpp"
@@ -27,6 +28,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <new>
 #include <string>
 #include <vector>
@@ -212,21 +214,26 @@ MpResult MP_CALL demux_probe(const char* path, const std::uint8_t* head,
     return MP_OK;
 }
 
+void MP_CALL demux_close(MpDemux* d) noexcept;
+
 MpResult MP_CALL demux_open(const char* path, MpDemux** out) noexcept
-{
+try {
     if (path == nullptr || out == nullptr) {
         return MP_ERR_INVALID;
     }
     *out = nullptr;
 
-    auto* d = new (std::nothrow) MpDemux();
+    // Closed as demux_close closes it on every way out but the last, a throw
+    // included: the boundary at the end catches it, and a demuxer half opened
+    // is not left behind.
+    std::unique_ptr<MpDemux, decltype(&demux_close)> d{new (std::nothrow) MpDemux(),
+                                                        &demux_close};
     if (d == nullptr) {
         return MP_ERR_NO_MEMORY;
     }
     d->path = path;
     d->fp = mp::file::open_read(path);
     if (d->fp == nullptr) {
-        delete d;
         return MP_ERR_IO;
     }
     ogg_sync_init(&d->sync);
@@ -327,9 +334,6 @@ MpResult MP_CALL demux_open(const char* path, MpDemux** out) noexcept
 
     if (!found) {
         log_fmt(MP_LOG_DEBUG, "%s: no audio stream this demuxer can name", path);
-        ogg_sync_clear(&d->sync);
-        std::fclose(d->fp);
-        delete d;
         return MP_ERR_UNSUPPORTED;
     }
 
@@ -353,7 +357,7 @@ MpResult MP_CALL demux_open(const char* path, MpDemux** out) noexcept
             ++have;
             continue;
         }
-        if (!next_page(d)) {
+        if (!next_page(d.get())) {
             break;
         }
     }
@@ -371,9 +375,10 @@ MpResult MP_CALL demux_open(const char* path, MpDemux** out) noexcept
 
     // Back to where the audio starts. The header pages have been consumed and
     // the packet reader carries on from here.
-    *out = d;
+    *out = d.release();
     return MP_OK;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL demux_stream_count(MpDemux* d, std::uint32_t* out) noexcept
 {
@@ -421,11 +426,12 @@ MpResult MP_CALL demux_stream_config(MpDemux* d, std::uint32_t index, std::uint8
     }
     const auto needed = static_cast<std::uint32_t>(d->config.size());
     *out_needed = needed;
-    if (out == nullptr) {
+    if (needed == 0) {
         return MP_OK;
     }
-    if (out_bytes < needed) {
-        return MP_ERR_NO_MEMORY;
+    // A NULL `out` is a buffer of no bytes, which asks how much.
+    if (out == nullptr || out_bytes < needed) {
+        return MP_TOO_SMALL;
     }
     if (needed != 0) {
         std::memcpy(out, d->config.data(), needed);
@@ -451,7 +457,7 @@ MpResult MP_CALL demux_select_streams(MpDemux* d, const std::uint32_t* indices,
 
 MpResult MP_CALL demux_read_packet(MpDemux* d, void* dst, std::size_t dst_bytes,
                                    MpPacket* out) noexcept
-{
+try {
     if (d == nullptr || out == nullptr) {
         return MP_ERR_INVALID;
     }
@@ -461,7 +467,7 @@ MpResult MP_CALL demux_read_packet(MpDemux* d, void* dst, std::size_t dst_bytes,
         // anybody but this module, which is what makes that promise keepable.
         if (dst == nullptr || dst_bytes < d->pending.size()) {
             out->bytes = static_cast<std::uint32_t>(d->pending.size());
-            return MP_ERR_NO_MEMORY;
+            return MP_TOO_SMALL;
         }
         std::memcpy(dst, d->pending.data(), d->pending.size());
         out->bytes = static_cast<std::uint32_t>(d->pending.size());
@@ -487,7 +493,7 @@ MpResult MP_CALL demux_read_packet(MpDemux* d, void* dst, std::size_t dst_bytes,
                 d->pending_frame = d->page_start;
                 d->first_in_page = false;
                 out->bytes = static_cast<std::uint32_t>(packet.bytes);
-                return MP_ERR_NO_MEMORY;
+                return MP_TOO_SMALL;
             }
             std::memcpy(dst, packet.packet, static_cast<std::size_t>(packet.bytes));
             out->bytes = static_cast<std::uint32_t>(packet.bytes);
@@ -513,6 +519,7 @@ MpResult MP_CALL demux_read_packet(MpDemux* d, void* dst, std::size_t dst_bytes,
     d->ended = true;
     return MP_END;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL demux_seek(MpDemux* d, std::uint32_t stream,
                             std::uint64_t frame) noexcept

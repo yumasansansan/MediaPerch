@@ -22,6 +22,7 @@
 #include "vst3_host.hpp"
 
 #include <abi_guard.hpp>
+#include <describe_row.hpp>
 #include <mediaperch/module.h>
 
 #include <cstdio>
@@ -309,74 +310,69 @@ try {
 MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
-                              std::uint32_t out_bytes) noexcept
+                              std::uint32_t out_bytes, std::uint32_t* out_needed) noexcept
 try {
-    if (d == nullptr || out == nullptr || out_bytes < 64) {
+    if (d == nullptr || out_needed == nullptr) {
         return MP_ERR_INVALID;
     }
+    mp::DescribeRow row{out, out_bytes, out_needed};
     switch (index) {
     case 0:
-        std::snprintf(out, out_bytes, "file\t%s\tthe .vst3 to load, a DLL or a bundle\tpath",
-                      d->path.empty() ? "none" : d->path.c_str());
-        return MP_OK;
+        row.format("file\t%s\tthe .vst3 to load, a DLL or a bundle\tpath",
+                   d->path.empty() ? "none" : d->path.c_str());
+        return row.result();
     case 1:
-        std::snprintf(out, out_bytes,
-                      "class\t%s\twhich audio effect in it: an index, or part of a name\ttext",
-                      d->which.empty() ? "(first)" : d->which.c_str());
-        return MP_OK;
+        row.format("class\t%s\twhich audio effect in it: an index, or part of a name\ttext",
+                   d->which.empty() ? "(first)" : d->which.c_str());
+        return row.result();
     case 2:
-        std::snprintf(out, out_bytes, "state\t%s\ta file of plugin state, as setState takes it"
-                                      "\tpath",
-                      d->state_path.empty() ? "none" : d->state_path.c_str());
-        return MP_OK;
+        row.format("state\t%s\ta file of plugin state, as setState takes it"
+                   "\tpath",
+                   d->state_path.empty() ? "none" : d->state_path.c_str());
+        return row.result();
     case 3:
-        std::snprintf(out, out_bytes,
-                      "param\t(append)\tone knob, as name=value or id=value, normalised 0 to 1"
-                      "\ttext");
-        return MP_OK;
+        row.format("param\t(append)\tone knob, as name=value or id=value, normalised 0 to 1"
+                   "\ttext");
+        return row.result();
     case 4:
-        std::snprintf(out, out_bytes, "plugin\t%s\twhat loaded (read only)",
-                      d->host.loaded() ? d->host.name().c_str() : "nothing");
-        return MP_OK;
+        row.format("plugin\t%s\twhat loaded (read only)",
+                   d->host.loaded() ? d->host.name().c_str() : "nothing");
+        return row.result();
     case 5:
-        std::snprintf(out, out_bytes, "vendor\t%s %s\twho wrote it (read only)",
-                      d->host.vendor().c_str(), d->host.version().c_str());
-        return MP_OK;
+        row.format("vendor\t%s %s\twho wrote it (read only)",
+                   d->host.vendor().c_str(), d->host.version().c_str());
+        return row.result();
     case 6:
-        std::snprintf(out, out_bytes, "category\t%s\twhat it says it is (read only)",
-                      d->host.subcategories().c_str());
-        return MP_OK;
+        row.format("category\t%s\twhat it says it is (read only)",
+                   d->host.subcategories().c_str());
+        return row.result();
     case 7:
         // The line worth reading. A plugin that takes doubles is handed this
         // tree's bus untouched; one that does not gets f32, and the samples are
         // narrowed and widened again around it.
-        std::snprintf(out, out_bytes,
-                      "precision\t%s\twhat the plugin is fed (read only)",
-                      !d->host.loaded()  ? "-"
-                      : d->host.native_f64() ? "f64, the bus itself"
-                                             : "f32, converted both ways");
-        return MP_OK;
+        row.format("precision\t%s\twhat the plugin is fed (read only)",
+                   !d->host.loaded()  ? "-"
+                   : d->host.native_f64() ? "f64, the bus itself"
+                                          : "f32, converted both ways");
+        return row.result();
     case 8:
-        std::snprintf(out, out_bytes,
-                      "latency\t%u\tframes it delays by, which nothing compensates yet "
-                      "(read only)",
-                      d->host.latency_frames());
-        return MP_OK;
+        row.format("latency\t%u\tframes it delays by, which nothing compensates yet "
+                   "(read only)",
+                   d->host.latency_frames());
+        return row.result();
     case 9:
         if (d->host.tail_frames() == mp::vst3::Host::k_infinite_tail) {
-            std::snprintf(out, out_bytes,
-                          "tail\tinfinite\tit never stops; flush takes one second (read only)");
+            row.format("tail\tinfinite\tit never stops; flush takes one second (read only)");
         } else {
-            std::snprintf(out, out_bytes,
-                          "tail\t%u\tframes it keeps producing after the input stops "
-                          "(read only)",
-                          d->host.tail_frames());
+            row.format("tail\t%u\tframes it keeps producing after the input stops "
+                       "(read only)",
+                       d->host.tail_frames());
         }
-        return MP_OK;
+        return row.result();
     case 10:
-        std::snprintf(out, out_bytes, "trouble\t%s\twhat went wrong (read only)",
-                      d->trouble.empty() ? "nothing" : d->trouble.c_str());
-        return MP_OK;
+        row.format("trouble\t%s\twhat went wrong (read only)",
+                   d->trouble.empty() ? "nothing" : d->trouble.c_str());
+        return row.result();
     default:
         break;
     }
@@ -392,9 +388,9 @@ try {
     if (!d->host.parameter(at, title, value, shown)) {
         return MP_END;
     }
-    std::snprintf(out, out_bytes, "  %s\t%.4f\t%s (read only)", title.c_str(), value,
-                  shown.c_str());
-    return MP_OK;
+    row.format("  %s\t%.4f\t%s (read only)", title.c_str(), value,
+               shown.c_str());
+    return row.result();
 }
 MEDIAPERCH_ABI_GUARD_CATCH
 

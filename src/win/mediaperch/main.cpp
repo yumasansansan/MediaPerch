@@ -1520,12 +1520,11 @@ bool add_video_stage(const mp::win::ModuleRegistry& registry, const std::string&
 /// stage's: key, current, and the module's own words.
 void print_stage_rows(mp::VideoStage& stage, const char* indent)
 {
+    std::string text;
     for (std::uint32_t row = 0;; ++row) {
-        char line[512];
-        if (stage.describe(row, line, sizeof line) != MP_OK) {
+        if (stage.describe(row, text) != MP_OK) {
             break;
         }
-        const std::string text{line};
         const std::size_t first = text.find('\t');
         const std::size_t second = first == std::string::npos ? first : text.find('\t', first + 1);
         if (first == std::string::npos || second == std::string::npos) {
@@ -2037,10 +2036,10 @@ int render(const mp::win::ModuleRegistry& registry, const Options& options)
             }
             if (presenter.configure(picture) != MP_OK) {
                 std::fprintf(stderr, "the presenter would not take the picture\n");
-                char row[512];
-                for (std::uint32_t i = 0; presenter.describe(i, row, sizeof row) == MP_OK; ++i) {
-                    if (std::strncmp(row, "trouble\t", 8) == 0) {
-                        std::fprintf(stderr, "  %s\n", row + 8);
+                std::string row;
+                for (std::uint32_t i = 0; presenter.describe(i, row) == MP_OK; ++i) {
+                    if (row.rfind("trouble\t", 0) == 0) {
+                        std::fprintf(stderr, "  %s\n", row.c_str() + 8);
                     }
                 }
                 return 1;
@@ -2076,10 +2075,10 @@ int render(const mp::win::ModuleRegistry& registry, const Options& options)
         }
         const MpResult shown = presenter.present(frame);
         if (shown != MP_OK) {
-            char row[512];
-            for (std::uint32_t i = 0; presenter.describe(i, row, sizeof row) == MP_OK; ++i) {
-                if (std::strncmp(row, "trouble\t", 8) == 0) {
-                    std::fprintf(stderr, "the presenter refused the frame: %s\n", row + 8);
+            std::string row;
+            for (std::uint32_t i = 0; presenter.describe(i, row) == MP_OK; ++i) {
+                if (row.rfind("trouble\t", 0) == 0) {
+                    std::fprintf(stderr, "the presenter refused the frame: %s\n", row.c_str() + 8);
                 }
             }
             return 1;
@@ -2167,7 +2166,7 @@ int render(const mp::win::ModuleRegistry& registry, const Options& options)
     std::uint32_t height = 0;
     MpPixelLayout layout{};
     layout.size = sizeof(layout);
-    if (presenter.read_back(nullptr, 0, width, height, layout) != MP_ERR_NO_MEMORY ||
+    if (presenter.read_back(nullptr, 0, width, height, layout) != MP_TOO_SMALL ||
         (layout.flags & MP_PIXEL_FLOAT) == 0 || layout.container_bits != 32u) {
         std::fprintf(stderr, "the presenter would not hand back its frame as fp32\n");
         return 1;
@@ -2182,12 +2181,11 @@ int render(const mp::win::ModuleRegistry& registry, const Options& options)
                 static_cast<unsigned long long>(options.frame_index));
     // **The presenter's own rows**, because they are the numbers the picture
     // was made with, and a picture without them is a matter of opinion.
+    std::string line;
     for (std::uint32_t i = 0;; ++i) {
-        char row[512];
-        if (presenter.describe(i, row, sizeof row) != MP_OK) {
+        if (presenter.describe(i, line) != MP_OK) {
             break;
         }
-        const std::string line{row};
         const std::size_t first = line.find('\t');
         if (first == std::string::npos) {
             continue;
@@ -2379,11 +2377,12 @@ int show(const MpSinkVtbl& sink_vtbl, const mp::win::ModuleRegistry& registry,
     // answers are worked out from the display and the stream and were then
     // never shown; a colour path whose numbers nobody can print is one nobody
     // can check, which is how a tone-mapping fault becomes a matter of opinion.
+    std::string text;
     for (std::uint32_t row = 0;; ++row) {
-        char line[192];
-        if (presenter.describe(row, line, sizeof line) != MP_OK) {
+        if (presenter.describe(row, text) != MP_OK) {
             break;
         }
+        const char* line = text.c_str();
         const char* first = std::strchr(line, '\t');
         if (first == nullptr) {
             continue;

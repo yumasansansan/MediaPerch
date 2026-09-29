@@ -22,6 +22,7 @@
 
 #include <dr_wav.h>
 
+#include <abi_guard.hpp>
 #include <mediaperch/module.h>
 
 #include "dr_wav_file.hpp"
@@ -239,9 +240,8 @@ try {
 
     *out = d;
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL demux_stream_count(MpDemux* d, std::uint32_t* out_count) noexcept
 {
@@ -313,7 +313,7 @@ MpResult MP_CALL demux_read_packet(MpDemux* d, void* dst, std::size_t dst_bytes,
     if (dst == nullptr || dst_bytes < want) {
         // Nothing is consumed by a read that could not deliver.
         out->bytes = static_cast<std::uint32_t>(want);
-        return MP_ERR_NO_MEMORY;
+        return MP_TOO_SMALL;
     }
 
     const drwav_uint64 got = drwav_read_pcm_frames(&d->wav, k_packet_frames, dst);

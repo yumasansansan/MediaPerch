@@ -15,6 +15,7 @@
 #include "loudness.hpp"
 
 #include <abi_guard.hpp>
+#include <describe_row.hpp>
 #include <mediaperch/module.h>
 
 #include <cmath>
@@ -195,11 +196,12 @@ try {
 MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
-                              std::uint32_t out_bytes) noexcept
+                              std::uint32_t out_bytes, std::uint32_t* out_needed) noexcept
 try {
-    if (d == nullptr || out == nullptr || out_bytes < 64) {
+    if (d == nullptr || out_needed == nullptr) {
         return MP_ERR_INVALID;
     }
+    mp::DescribeRow row{out, out_bytes, out_needed};
     // The integrated loudness goes over every block the meter has closed, so
     // it is asked for by the two rows that show it and by no other: asked at
     // the top, a sweep of the rows went over them all nine times.
@@ -208,71 +210,63 @@ try {
     switch (index) {
     case 0:
         if (d->has_gain) {
-            std::snprintf(out, out_bytes, "gain_db\t%+.2f\tdB to apply, from a scan or a tag"
-                                          "\tnumber step=0.5 unit=dB",
-                          d->gain_db);
+            row.format("gain_db\t%+.2f\tdB to apply, from a scan or a tag"
+                       "\tnumber step=0.5 unit=dB",
+                       d->gain_db);
         } else {
-            std::snprintf(out, out_bytes,
-                          "gain_db\tnone\tdB to apply, from a scan or a tag; nothing "
-                          "is applied without one\tnumber step=0.5 unit=dB");
+            row.format("gain_db\tnone\tdB to apply, from a scan or a tag; nothing "
+                       "is applied without one\tnumber step=0.5 unit=dB");
         }
-        return MP_OK;
+        return row.result();
     case 1:
-        std::snprintf(out, out_bytes, "target\t%.1f\tLUFS the gain aims at (-18 is "
-                                      "ReplayGain 2.0's own)\tnumber step=0.5 unit=LUFS",
-                      d->target_lufs);
-        return MP_OK;
+        row.format("target\t%.1f\tLUFS the gain aims at (-18 is "
+                   "ReplayGain 2.0's own)\tnumber step=0.5 unit=LUFS",
+                   d->target_lufs);
+        return row.result();
     case 2:
-        std::snprintf(out, out_bytes, "preamp\t%+.2f\tdB added to whatever gain is applied"
-                                      "\tnumber step=0.5 unit=dB",
-                      d->preamp_db);
-        return MP_OK;
+        row.format("preamp\t%+.2f\tdB added to whatever gain is applied"
+                   "\tnumber step=0.5 unit=dB",
+                   d->preamp_db);
+        return row.result();
     case 3:
-        std::snprintf(out, out_bytes,
-                      "peak\t%.6f\tthe track's known peak, so the gain can be limited"
-                      "\tnumber step=0.01",
-                      d->known_peak);
-        return MP_OK;
+        row.format("peak\t%.6f\tthe track's known peak, so the gain can be limited"
+                   "\tnumber step=0.01",
+                   d->known_peak);
+        return row.result();
     case 4:
-        std::snprintf(out, out_bytes,
-                      "prevent_clipping\t%s\tnever apply more than the known peak allows\tbool",
-                      d->prevent_clipping ? "1" : "0");
-        return MP_OK;
+        row.format("prevent_clipping\t%s\tnever apply more than the known peak allows\tbool",
+                   d->prevent_clipping ? "1" : "0");
+        return row.result();
     case 5:
-        std::snprintf(out, out_bytes, "applied\t%+.2f\tdB actually applied (read only)",
-                      d->applied > 0.0 ? 20.0 * std::log10(d->applied) : -400.0);
-        return MP_OK;
+        row.format("applied\t%+.2f\tdB actually applied (read only)",
+                   d->applied > 0.0 ? 20.0 * std::log10(d->applied) : -400.0);
+        return row.result();
     case 6: {
         // What the meter heard, so far. On a whole track this is the scan.
         const double measured = d->meter.integrated_lufs();
         if (heard(measured)) {
-            std::snprintf(out, out_bytes,
-                          "loudness\t%.2f\tLUFS integrated so far (read only)", measured);
+            row.format("loudness\t%.2f\tLUFS integrated so far (read only)", measured);
         } else {
-            std::snprintf(out, out_bytes,
-                          "loudness\tsilence\tnothing above the absolute gate yet "
-                          "(read only)");
+            row.format("loudness\tsilence\tnothing above the absolute gate yet "
+                       "(read only)");
         }
-        return MP_OK;
+        return row.result();
     }
     case 7:
-        std::snprintf(out, out_bytes,
-                      "measured_peak\t%.2f\tdBFS, sample peak not true peak (read only)",
-                      d->meter.sample_peak_db());
-        return MP_OK;
+        row.format("measured_peak\t%.2f\tdBFS, sample peak not true peak (read only)",
+                   d->meter.sample_peak_db());
+        return row.result();
     case 8: {
         // replay_gain_db()'s own difference, from the one measurement.
         const double measured = d->meter.integrated_lufs();
         if (heard(measured)) {
-            std::snprintf(out, out_bytes,
-                          "suggested\t%+.2f\tdB this would need to reach the target "
-                          "(read only)",
-                          d->target_lufs - measured);
+            row.format("suggested\t%+.2f\tdB this would need to reach the target "
+                       "(read only)",
+                       d->target_lufs - measured);
         } else {
-            std::snprintf(out, out_bytes,
-                          "suggested\t--\tnot enough audio to say yet (read only)");
+            row.format("suggested\t--\tnot enough audio to say yet (read only)");
         }
-        return MP_OK;
+        return row.result();
     }
     default:
         return MP_END;

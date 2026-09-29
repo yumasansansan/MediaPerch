@@ -39,6 +39,11 @@ function(mediaperch_test_platform target)
             "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/test_platform_posix.cpp")
         target_link_libraries(${target} PRIVATE ${CMAKE_DL_LIBS})
     endif()
+    # The fakes' `describe` keeps ABI v5's promise the way every module keeps
+    # it, through describe_row.hpp, so that a fake cannot be kinder than a
+    # module.
+    target_include_directories(${target} PRIVATE
+        "${CMAKE_SOURCE_DIR}/modules/shared/abi_guard")
 endfunction()
 
 add_executable(mediaperch_tests

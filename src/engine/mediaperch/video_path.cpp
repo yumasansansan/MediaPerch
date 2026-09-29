@@ -166,13 +166,12 @@ std::vector<std::string> VideoPath::stage_describe(std::size_t index,
     std::string why;
     (void)on_loop(
         [&] {
-            char line[512];
+            std::string line;
             for (std::uint32_t row = 0;; ++row) {
-                line[0] = '\0';
-                if (stages_[index]->describe(row, line, sizeof line) != MP_OK) {
+                if (stages_[index]->describe(row, line) != MP_OK) {
                     break;
                 }
-                out.emplace_back(line);
+                out.push_back(line);
             }
             return true;
         },
@@ -232,13 +231,12 @@ std::vector<std::string> VideoPath::presenter_describe()
     std::string why;
     (void)on_loop(
         [&] {
-            char line[256];
+            std::string line;
             for (std::uint32_t row = 0;; ++row) {
-                line[0] = '\0';
-                if (presenter_->describe(row, line, sizeof line) != MP_OK) {
+                if (presenter_->describe(row, line) != MP_OK) {
                     break;
                 }
-                out.emplace_back(line);
+                out.push_back(line);
             }
             return true;
         },

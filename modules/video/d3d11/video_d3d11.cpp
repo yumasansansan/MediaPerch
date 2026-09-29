@@ -83,6 +83,8 @@
 #include "siting.hpp"
 #include "yuv_matrix.hpp"
 
+#include <abi_guard.hpp>
+#include <describe_row.hpp>
 #include <mediaperch/module.h>
 
 #include <algorithm>
@@ -2410,9 +2412,8 @@ try {
     v->window = static_cast<HWND>(window);
     *out = v.release();
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 void MP_CALL video_close(MpVideo* v) noexcept
 {
@@ -2487,9 +2488,8 @@ try {
     v->drawn = false;
     v->trouble.clear();
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL video_present(MpVideo* v, const MpVideoFrame* frame) noexcept
 try {
@@ -2869,9 +2869,8 @@ try {
     v->drawn = true;
     v->last_pts = frame->pts;
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL video_get_device(MpVideo* v, MpGraphicsDevice* out) noexcept
 {
@@ -2912,7 +2911,7 @@ try {
     const std::size_t needed =
         static_cast<std::size_t>(v->width) * v->height * pixel_bytes;
     if (dst == nullptr || dst_bytes < needed) {
-        return MP_ERR_NO_MEMORY; // the caller asks again with room, as read_packet does
+        return MP_TOO_SMALL; // the caller asks again with room, as read_packet does
     }
     if (!v->configured || !v->staging || !v->drawn) {
         return MP_ERR_INVALID;
@@ -2941,9 +2940,8 @@ try {
     }
     v->context->Unmap(v->staging.get(), 0);
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL video_set(MpVideo* v, const char* key, const char* value) noexcept
 try {
@@ -3189,9 +3187,8 @@ try {
         return MP_OK;
     }
     return MP_ERR_UNSUPPORTED;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL video_stages(MpVideo* v, const MpVideoStage* stages,
                               std::uint32_t count) noexcept
@@ -3226,33 +3223,30 @@ try {
     // display.
     return configure_chain(v) ? MP_OK : MP_ERR_UNSUPPORTED;
 }
-catch (...) {
-    return MP_ERR_NO_MEMORY;
-}
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL video_describe(MpVideo* v, std::uint32_t index, char* out,
-                                std::uint32_t out_bytes) noexcept
+                                std::uint32_t out_bytes, std::uint32_t* out_needed) noexcept
 try {
-    if (v == nullptr || out == nullptr || out_bytes < 64) {
+    if (v == nullptr || out_needed == nullptr) {
         return MP_ERR_INVALID;
     }
+    mp::DescribeRow row{out, out_bytes, out_needed};
     switch (index) {
     case 0:
-        std::snprintf(out, out_bytes,
-                      "tonemap\t%s\thow HDR reaches an SDR display: none, driver, d2d, shader"
-                      "\tenum:none,driver,d2d,shader group=Colour",
-                      mp::video::name_of(v->preferred));
-        return MP_OK;
+        row.format("tonemap\t%s\thow HDR reaches an SDR display: none, driver, d2d, shader"
+                   "\tenum:none,driver,d2d,shader group=Colour",
+                   mp::video::name_of(v->preferred));
+        return row.result();
     case 1:
-        std::snprintf(out, out_bytes, "device\t%s\thardware or warp; warp is deterministic"
-                                      "\tenum:hardware,warp group=Device",
-                      v->warp ? "warp" : "hardware");
-        return MP_OK;
+        row.format("device\t%s\thardware or warp; warp is deterministic"
+                   "\tenum:hardware,warp group=Device",
+                   v->warp ? "warp" : "hardware");
+        return row.result();
     case 2:
-        std::snprintf(out, out_bytes,
-                      "composited\t%d\twhether anything is drawn over the video\tbool group=Device",
-                      v->composited ? 1 : 0);
-        return MP_OK;
+        row.format("composited\t%d\twhether anything is drawn over the video\tbool group=Device",
+                   v->composited ? 1 : 0);
+        return row.result();
     case 3:
         // **The handle is a number on purpose.** It has to cross a process
         // boundary, and a shell duplicates it by value out of an IPC message;
@@ -3262,217 +3256,190 @@ try {
             // A handle is a number Windows gives the type void*, 32 bits wide
             // so that it can cross into 32-bit code; HandleToULong is the
             // SDK's word for that number.
-            std::snprintf(out, out_bytes,
-                          "surface\tcomposition 0x%lx, waitable 0x%lx"
-                          "\twhere it draws and what paces it (read only)",
-                          HandleToULong(v->composition), HandleToULong(waitable));
+            row.format("surface\tcomposition 0x%lx, waitable 0x%lx"
+                       "\twhere it draws and what paces it (read only)",
+                       HandleToULong(v->composition), HandleToULong(waitable));
         } else {
-            std::snprintf(out, out_bytes, "surface\t%s\twhere it draws (read only)",
-                          v->window != nullptr ? "a window" : "off-screen");
+            row.format("surface\t%s\twhere it draws (read only)",
+                       v->window != nullptr ? "a window" : "off-screen");
         }
-        return MP_OK;
+        return row.result();
     case 4:
         // **Three numbers rather than one word.** §9.6's boost is a function of
         // the first, §9.9.1's HLG OOTF of the second, and until both were
         // printed the only way to tell a display that was asked from one that
         // was assumed was to read the source.
-        std::snprintf(out, out_bytes,
-                      "display\t%s, white %.0f nits, peak %.0f nits"
-                      "\twhat it turned out to be (read only)",
-                      v->display.hdr ? "HDR" : "SDR",
-                      v->display.sdr_white_nits, v->display.peak_nits);
-        return MP_OK;
+        row.format("display\t%s, white %.0f nits, peak %.0f nits"
+                   "\twhat it turned out to be (read only)",
+                   v->display.hdr ? "HDR" : "SDR",
+                   v->display.sdr_white_nits, v->display.peak_nits);
+        return row.result();
     case 5:
-        std::snprintf(out, out_bytes,
-                      "encoding\t%s\twhat the buffer holds (read only)",
-                      mp::video::name_of(v->plan.encoding));
-        return MP_OK;
+        row.format("encoding\t%s\twhat the buffer holds (read only)",
+                   mp::video::name_of(v->plan.encoding));
+        return row.result();
     case 6:
-        std::snprintf(out, out_bytes, "applied\t%s\tthe tone mapper in the path (read only)",
-                      v->plan.tone_mapping ? mp::video::name_of(v->plan.tone_map) : "none");
-        return MP_OK;
+        row.format("applied\t%s\tthe tone mapper in the path (read only)",
+                   v->plan.tone_mapping ? mp::video::name_of(v->plan.tone_map) : "none");
+        return row.result();
     case 7:
-        std::snprintf(out, out_bytes,
-                      "sdr_scale\t%.4f\twhat SDR content is multiplied by (read only)",
-                      v->plan.sdr_scale);
-        return MP_OK;
+        row.format("sdr_scale\t%.4f\twhat SDR content is multiplied by (read only)",
+                   v->plan.sdr_scale);
+        return row.result();
     case 8:
-        std::snprintf(out, out_bytes, "frames\t%llu\tpresented so far (read only)",
-                      static_cast<unsigned long long>(v->frames));
-        return MP_OK;
+        row.format("frames\t%llu\tpresented so far (read only)",
+                   static_cast<unsigned long long>(v->frames));
+        return row.result();
     case 9:
-        std::snprintf(out, out_bytes,
-                      "precision\t%s\twhat it renders into; fp16 is what a display gets "
-                      "and all DXGI will present\tenum:fp16,fp32 group=Device",
-                      off_screen(v) && v->wide_target ? "fp32" : "fp16");
-        return MP_OK;
+        row.format("precision\t%s\twhat it renders into; fp16 is what a display gets "
+                   "and all DXGI will present\tenum:fp16,fp32 group=Device",
+                   off_screen(v) && v->wide_target ? "fp32" : "fp16");
+        return row.result();
     case 10:
-        std::snprintf(out, out_bytes,
-                      "convert\t%s\twhat the source transfer needs (read only)",
-                      mp::video::name_of(v->plan.convert));
-        return MP_OK;
+        row.format("convert\t%s\twhat the source transfer needs (read only)",
+                   mp::video::name_of(v->plan.convert));
+        return row.result();
     case 11:
-        std::snprintf(out, out_bytes, "trouble\t%s\twhat went wrong (read only)",
-                      v->trouble.empty() ? "nothing" : v->trouble.c_str());
-        return MP_OK;
+        row.format("trouble\t%s\twhat went wrong (read only)",
+                   v->trouble.empty() ? "nothing" : v->trouble.c_str());
+        return row.result();
     case 12:
         // **What was asked for, not what it came to.** This row round-trips
         // through `set`, so `native` has to read back as `native` rather than
         // as the size it happens to resolve to; `picture` below is where the
         // number comes from.
         if (v->asked_width != 0) {
-            std::snprintf(out, out_bytes,
-                          "size\t%ux%u\twhat it renders at; a shell sets this when its "
-                          "window changes\tsize group=Picture",
-                          v->asked_width, v->asked_height);
+            row.format("size\t%ux%u\twhat it renders at; a shell sets this when its "
+                       "window changes\tsize group=Picture",
+                       v->asked_width, v->asked_height);
         } else {
-            std::snprintf(out, out_bytes,
-                          "size\tnative\twhat it renders at; a shell sets this when its "
-                          "window changes\tsize group=Picture");
+            row.format("size\tnative\twhat it renders at; a shell sets this when its "
+                       "window changes\tsize group=Picture");
         }
-        return MP_OK;
+        return row.result();
     case 13:
         // **The number a shell cannot work out for itself.** It has the
         // window; it does not have the container's aspect correction, and a
         // shell that guessed at it would stretch every anamorphic file.
-        std::snprintf(out, out_bytes,
-                      "picture\t%ux%u\tthe video's own size, which is what a shell fits "
-                      "(read only)",
-                      v->picture_width, v->picture_height);
-        return MP_OK;
+        row.format("picture\t%ux%u\tthe video's own size, which is what a shell fits "
+                   "(read only)",
+                   v->picture_width, v->picture_height);
+        return row.result();
     case 15:
         // **§9.8.3's chain, and whether it is actually in the path.** A stage
         // that was handed over and an intermediate that was made are two
         // things, and a run that says one without the other is a run drawing
         // one pass while somebody believes it is grading.
         if (v->chain.empty()) {
-            std::snprintf(out, out_bytes,
-                          "chain\tnone\twhat runs in linear light: nothing, so the picture "
-                          "is one pass unless the target is another size (read only)");
+            row.format("chain\tnone\twhat runs in linear light: nothing, so the picture "
+                       "is one pass unless the target is another size (read only)");
         } else if (v->linear_picture) {
-            std::snprintf(out, out_bytes,
-                          "chain\t%zu stage%s, with an intermediate at %ux%u\twhat runs in "
-                          "linear light, and the picture it is given (read only)",
-                          v->chain.size(), v->chain.size() == 1 ? "" : "s",
-                          v->linear_width, v->linear_height);
+            row.format("chain\t%zu stage%s, with an intermediate at %ux%u\twhat runs in "
+                       "linear light, and the picture it is given (read only)",
+                       v->chain.size(), v->chain.size() == 1 ? "" : "s",
+                       v->linear_width, v->linear_height);
         } else {
-            std::snprintf(out, out_bytes,
-                          "chain\t%zu stage%s, no frame yet\twhat runs in linear light "
-                          "(read only)",
-                          v->chain.size(), v->chain.size() == 1 ? "" : "s");
+            row.format("chain\t%zu stage%s, no frame yet\twhat runs in linear light "
+                       "(read only)",
+                       v->chain.size(), v->chain.size() == 1 ? "" : "s");
         }
-        return MP_OK;
+        return row.result();
     case 14:
         // **Who said what the display is**, which is the difference between a
         // decision and a guess. A windowless engine that fell back to the first
         // output would report the same three numbers and be wrong about which
         // monitor they belong to, and nothing else in the report would say so.
-        std::snprintf(out, out_bytes,
-                      "display_from\t%s\twho said what the display is (read only)",
-                      v->display_told ? "the shell" : "this process");
-        return MP_OK;
+        row.format("display_from\t%s\twho said what the display is (read only)",
+                   v->display_told ? "the shell" : "this process");
+        return row.result();
     case 16:
         // **The two numbers the roll-off is made of**, so a person can see
         // that 203 is what an SDR display's white means to HDR content and
         // 1000 is what the file was graded to -- or what it was taken to be.
         if (v->plan.tone_mapping && v->plan.tone_map == mp::video::ToneMap::shader) {
-            std::snprintf(out, out_bytes,
-                          "target\t%.0f nits from %.0f\twhere the roll-off aims (BT.2408's "
-                          "reference white on an SDR display) and the source peak it "
-                          "starts from (read only)",
-                          v->plan.tone_target_nits, v->plan.tone_source_nits);
+            row.format("target\t%.0f nits from %.0f\twhere the roll-off aims (BT.2408's "
+                       "reference white on an SDR display) and the source peak it "
+                       "starts from (read only)",
+                       v->plan.tone_target_nits, v->plan.tone_source_nits);
         } else {
-            std::snprintf(out, out_bytes,
-                          "target\tnone\twhere the roll-off aims; nothing is rolled off "
-                          "(read only)");
+            row.format("target\tnone\twhere the roll-off aims; nothing is rolled off "
+                       "(read only)");
         }
-        return MP_OK;
+        return row.result();
     case 17:
-        std::snprintf(out, out_bytes,
-                      "chroma\t%s\tthe kernel chroma is reconstructed with at the luma's "
-                      "positions\tenum:%s group=Chroma",
-                      mp::kernels::name_of(v->chroma_kernel), mp::kernels::k_kernel_list);
-        return MP_OK;
+        row.format("chroma\t%s\tthe kernel chroma is reconstructed with at the luma's "
+                   "positions\tenum:%s group=Chroma",
+                   mp::kernels::name_of(v->chroma_kernel), mp::kernels::k_kernel_list);
+        return row.result();
     case 18:
-        std::snprintf(out, out_bytes,
-                      "chroma_lobes\t%u\tLanczos lobes for the chroma reconstruction\tint "
-                      "min=1 step=1 group=Chroma when=chroma=lanczos",
-                      v->chroma_lobes);
-        return MP_OK;
+        row.format("chroma_lobes\t%u\tLanczos lobes for the chroma reconstruction\tint "
+                   "min=1 step=1 group=Chroma when=chroma=lanczos",
+                   v->chroma_lobes);
+        return row.result();
     case 19:
-        std::snprintf(out, out_bytes,
-                      "chroma_b\t%.4f\tthe cubic's B, when chroma=bicubic\tnumber step=0.05 "
-                      "group=Chroma when=chroma=bicubic",
-                      v->chroma_b);
-        return MP_OK;
+        row.format("chroma_b\t%.4f\tthe cubic's B, when chroma=bicubic\tnumber step=0.05 "
+                   "group=Chroma when=chroma=bicubic",
+                   v->chroma_b);
+        return row.result();
     case 20:
-        std::snprintf(out, out_bytes,
-                      "chroma_c\t%.4f\tthe cubic's C, when chroma=bicubic\tnumber step=0.05 "
-                      "group=Chroma when=chroma=bicubic",
-                      v->chroma_c);
-        return MP_OK;
+        row.format("chroma_c\t%.4f\tthe cubic's C, when chroma=bicubic\tnumber step=0.05 "
+                   "group=Chroma when=chroma=bicubic",
+                   v->chroma_c);
+        return row.result();
     case 21:
         // **Which siting, and whose.** A person's, the stream's, or the
         // assumption -- and the row says which, because a quarter-sample
         // shift is invisible in a colour and plain in a test pattern.
         if (v->siting_asked < mp::video::k_siting_types) {
-            std::snprintf(out, out_bytes,
-                          "siting\t%s\twhere a chroma sample sits against the luma: auto, "
-                          "left, centre, topleft, top, bottomleft, bottom"
-                          "\tenum:auto,left,centre,topleft,top,bottomleft,bottom group=Chroma",
-                          mp::video::siting_name(v->siting_asked));
+            row.format("siting\t%s\twhere a chroma sample sits against the luma: auto, "
+                       "left, centre, topleft, top, bottomleft, bottom"
+                       "\tenum:auto,left,centre,topleft,top,bottomleft,bottom group=Chroma",
+                       mp::video::siting_name(v->siting_asked));
         } else {
-            std::snprintf(out, out_bytes,
-                          "siting\tauto (%s, %s)\twhere a chroma sample sits against the "
-                          "luma: auto, left, centre, topleft, top, bottomleft, bottom"
-                          "\tenum:auto,left,centre,topleft,top,bottomleft,bottom group=Chroma",
-                          mp::video::siting_name(v->siting),
-                          v->stream_siting != 0 ? "the stream's" : "assumed");
+            row.format("siting\tauto (%s, %s)\twhere a chroma sample sits against the "
+                       "luma: auto, left, centre, topleft, top, bottomleft, bottom"
+                       "\tenum:auto,left,centre,topleft,top,bottomleft,bottom group=Chroma",
+                       mp::video::siting_name(v->siting),
+                       v->stream_siting != 0 ? "the stream's" : "assumed");
         }
-        return MP_OK;
+        return row.result();
     case 22:
-        std::snprintf(out, out_bytes,
-                      "gamut\t%s\twhat a colour past the display's gamut gets: clip, "
-                      "desaturate\tenum:clip,desaturate group=Colour",
-                      mp::video::name_of(v->gamut));
-        return MP_OK;
+        row.format("gamut\t%s\twhat a colour past the display's gamut gets: clip, "
+                   "desaturate\tenum:clip,desaturate group=Colour",
+                   mp::video::name_of(v->gamut));
+        return row.result();
     case 23:
         // **Source to target, the factor, and who scales**: a stage in the
         // chain that answered the target's size, or the finish pass's own
         // bilinear fetch, which is what a chain with no scaler leaves.
         if (v->source_width == 0) {
-            std::snprintf(out, out_bytes,
-                          "scale\tno frame yet\tsource to target, the factor, and who "
-                          "scales (read only)");
+            row.format("scale\tno frame yet\tsource to target, the factor, and who "
+                       "scales (read only)");
         } else if (!resampling(v)) {
-            std::snprintf(out, out_bytes,
-                          "scale\t%ux%u 1:1\tsource to target: one to one is every sample "
-                          "read where it is (read only)",
-                          v->source_width, v->source_height);
+            row.format("scale\t%ux%u 1:1\tsource to target: one to one is every sample "
+                       "read where it is (read only)",
+                       v->source_width, v->source_height);
         } else if (v->chain_out_width == v->width && v->chain_out_height == v->height) {
-            std::snprintf(out, out_bytes,
-                          "scale\t%ux%u -> %ux%u, x%.3f by the chain\tsource to target and "
-                          "the factor; a stage in the chain produces the target's size "
-                          "(read only)",
-                          v->source_width, v->source_height, v->width, v->height,
-                          static_cast<double>(v->width) / static_cast<double>(v->source_width));
+            row.format("scale\t%ux%u -> %ux%u, x%.3f by the chain\tsource to target and "
+                       "the factor; a stage in the chain produces the target's size "
+                       "(read only)",
+                       v->source_width, v->source_height, v->width, v->height,
+                       static_cast<double>(v->width) / static_cast<double>(v->source_width));
         } else {
-            std::snprintf(out, out_bytes,
-                          "scale\t%ux%u -> %ux%u, x%.3f by the presenter's bilinear "
-                          "fetch\tsource to target and the factor; no stage in the chain "
-                          "scales, so the finish pass samples the picture with two taps -- "
-                          "put `scale` in video_dsp for a kernel (read only)",
-                          v->source_width, v->source_height, v->width, v->height,
-                          static_cast<double>(v->width) / static_cast<double>(v->source_width));
+            row.format("scale\t%ux%u -> %ux%u, x%.3f by the presenter's bilinear "
+                       "fetch\tsource to target and the factor; no stage in the chain "
+                       "scales, so the finish pass samples the picture with two taps -- "
+                       "put `scale` in video_dsp for a kernel (read only)",
+                       v->source_width, v->source_height, v->width, v->height,
+                       static_cast<double>(v->width) / static_cast<double>(v->source_width));
         }
-        return MP_OK;
+        return row.result();
     default:
         break;
     }
     return MP_END;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 const MpVideoVtbl g_vtbl = {
     /* size      */ sizeof(MpVideoVtbl),

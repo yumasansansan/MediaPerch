@@ -18,6 +18,7 @@
 
 #include <convolve.hpp>
 #include <abi_guard.hpp>
+#include <describe_row.hpp>
 #include <mediaperch/module.h>
 #include <peak.hpp>
 #include <transform.hpp>
@@ -411,95 +412,87 @@ try {
 MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
-                              std::uint32_t out_bytes) noexcept
+                              std::uint32_t out_bytes, std::uint32_t* out_needed) noexcept
 try {
-    if (d == nullptr || out == nullptr || out_bytes < 64) {
+    if (d == nullptr || out_needed == nullptr) {
         return MP_ERR_INVALID;
     }
+    mp::DescribeRow row{out, out_bytes, out_needed};
     switch (index) {
     case 0: {
         const std::string text = mp::biquad::bands_text(d->bands);
-        std::snprintf(out, out_bytes, "bands\t%s\tkind:hz:dB:Q, semicolons between; %s"
-                                      "\ttext group=Bands",
-                      text.c_str(), mp::biquad::kind_names().c_str());
-        return MP_OK;
+        row.format("bands\t%s\tkind:hz:dB:Q, semicolons between; %s"
+                   "\ttext group=Bands",
+                   text.c_str(), mp::biquad::kind_names().c_str());
+        return row.result();
     }
     case 1:
-        std::snprintf(out, out_bytes,
-                      "band\t(append)\tone more band, in the same words as above"
-                      "\ttext group=Bands");
-        return MP_OK;
+        row.format("band\t(append)\tone more band, in the same words as above"
+                   "\ttext group=Bands");
+        return row.result();
     case 2:
-        std::snprintf(out, out_bytes, "curve\t%g:%g:%u\twhere the reported curve is "
-                                      "sampled: low:high:points\ttext group=Report",
-                      d->curve_low_hz, d->curve_high_hz, d->curve_points);
-        return MP_OK;
+        row.format("curve\t%g:%g:%u\twhere the reported curve is "
+                   "sampled: low:high:points\ttext group=Report",
+                   d->curve_low_hz, d->curve_high_hz, d->curve_points);
+        return row.result();
     case 3:
-        std::snprintf(out, out_bytes,
-                      "sections\t%zu\tsecond-order sections in use (read only)",
-                      d->cascade.sections());
-        return MP_OK;
+        row.format("sections\t%zu\tsecond-order sections in use (read only)",
+                   d->cascade.sections());
+        return row.result();
     case 4:
         // The one number somebody needs before putting an equaliser in front of
         // a quantiser: how much louder the loudest frequency got.
-        std::snprintf(out, out_bytes,
-                      "headroom\t%+.2f\tdB the loudest frequency gains (read only)",
-                      d->cascade.sections() == 0 && d->profile.curve.empty()
-                          ? 0.0
-                          : target_peak_db(*d));
-        return MP_OK;
+        row.format("headroom\t%+.2f\tdB the loudest frequency gains (read only)",
+                   d->cascade.sections() == 0 && d->profile.curve.empty()
+                       ? 0.0
+                       : target_peak_db(*d));
+        return row.result();
     case 5:
-        std::snprintf(out, out_bytes, "peak\t%.6f\tloudest sample produced (read only)",
-                      d->peak);
-        return MP_OK;
+        row.format("peak\t%.6f\tloudest sample produced (read only)",
+                   d->peak);
+        return row.result();
     case 7:
-        std::snprintf(out, out_bytes,
-                      "mode\t%s\tiir (no latency), linear (no phase shift) or minimum "
-                      "(no pre-ringing)\tenum:iir,linear,minimum group=Realisation",
-                      d->mode == Mode::iir ? "iir"
-                                           : (d->mode == Mode::linear ? "linear"
-                                                                      : "minimum"));
-        return MP_OK;
+        row.format("mode\t%s\tiir (no latency), linear (no phase shift) or minimum "
+                   "(no pre-ringing)\tenum:iir,linear,minimum group=Realisation",
+                   d->mode == Mode::iir ? "iir"
+                                        : (d->mode == Mode::linear ? "linear"
+                                                                   : "minimum"));
+        return row.result();
     case 8:
-        std::snprintf(out, out_bytes, "taps\t%u\tFIR length (mode=linear or minimum)"
-                                      "\tint min=1 group=Realisation when=mode=linear,minimum",
-                      d->taps);
-        return MP_OK;
+        row.format("taps\t%u\tFIR length (mode=linear or minimum)"
+                   "\tint min=1 group=Realisation when=mode=linear,minimum",
+                   d->taps);
+        return row.result();
     case 9:
-        std::snprintf(out, out_bytes,
-                      "partition\t%u\tconvolution partition; 0 follows the block size"
-                      "\tint min=0 group=Realisation when=mode=linear,minimum",
-                      d->partition);
-        return MP_OK;
+        row.format("partition\t%u\tconvolution partition; 0 follows the block size"
+                   "\tint min=0 group=Realisation when=mode=linear,minimum",
+                   d->partition);
+        return row.result();
     case 10:
-        std::snprintf(out, out_bytes, "preamp\t%+.2f\tdB applied with the curve"
-                                      "\tnumber step=0.5 unit=dB group=Bands",
-                      d->preamp_db);
-        return MP_OK;
+        row.format("preamp\t%+.2f\tdB applied with the curve"
+                   "\tnumber step=0.5 unit=dB group=Bands",
+                   d->preamp_db);
+        return row.result();
     case 11:
-        std::snprintf(out, out_bytes,
-                      "preset\t%s\tan AutoEq or Equalizer APO file\tpath group=Bands",
-                      d->profile.kind.empty() ? "none" : d->profile.kind.c_str());
-        return MP_OK;
+        row.format("preset\t%s\tan AutoEq or Equalizer APO file\tpath group=Bands",
+                   d->profile.kind.empty() ? "none" : d->profile.kind.c_str());
+        return row.result();
     case 12:
         if (d->mode == Mode::iir) {
-            std::snprintf(out, out_bytes,
-                          "latency\t0\tframes; a cascade delays nothing (read only)");
+            row.format("latency\t0\tframes; a cascade delays nothing (read only)");
         } else {
             // Half the filter for linear phase, and the block granularity on
             // top. Said rather than implied, because a player that shifts its
             // own audio should say by how much.
-            std::snprintf(out, out_bytes,
-                          "latency\t%u\tframes of delay this mode adds (read only)",
-                          d->mode == Mode::linear ? d->taps / 2 : 0u);
+            row.format("latency\t%u\tframes of delay this mode adds (read only)",
+                       d->mode == Mode::linear ? d->taps / 2 : 0u);
         }
-        return MP_OK;
+        return row.result();
     case 13:
-        std::snprintf(out, out_bytes,
-                      "cost\t%.0f\tmultiplies per output frame (read only)",
-                      d->mode == Mode::iir ? 5.0 * static_cast<double>(d->cascade.sections())
-                                           : d->convolver.multiplies());
-        return MP_OK;
+        row.format("cost\t%.0f\tmultiplies per output frame (read only)",
+                   d->mode == Mode::iir ? 5.0 * static_cast<double>(d->cascade.sections())
+                                        : d->convolver.multiplies());
+        return row.result();
     case 6: {
         // The curve itself, computed from the coefficients rather than
         // measured. The same function a display would draw with.
@@ -516,9 +509,9 @@ try {
                           target_db(*d, hz));
             text += point;
         }
-        std::snprintf(out, out_bytes, "response\t%s\tdB at those frequencies (read only)",
-                      text.c_str());
-        return MP_OK;
+        row.format("response\t%s\tdB at those frequencies (read only)",
+                   text.c_str());
+        return row.result();
     }
     default:
         return MP_END;

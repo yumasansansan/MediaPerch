@@ -23,6 +23,7 @@
 // states it in `MpStreamInfo` and `PacketSource` applies it, which is what §4
 // means by the edit being the container's.
 
+#include <abi_guard.hpp>
 #include <mediaperch/module.h>
 
 #include "module_log.hpp"
@@ -218,7 +219,8 @@ MpResult deliver(MpCodecInstance* c, std::size_t produced, void* dst,
         return MP_OK;
     }
     if (dst == nullptr || dst_bytes < produced) {
-        return MP_ERR_NO_MEMORY;
+        *out_bytes = produced;
+        return MP_TOO_SMALL;
     }
     std::memcpy(dst, c->pcm.data(), produced);
     *out_bytes = produced;
@@ -285,9 +287,8 @@ try {
     c->format_known = true;
     *out = c;
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL codec_get_format(MpCodecInstance* c, MpFormat* out) noexcept
 {
@@ -321,9 +322,8 @@ try {
         return r;
     }
     return deliver(c, produced, dst, dst_bytes, out_bytes);
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL codec_flush(MpCodecInstance* c, void* dst, std::size_t dst_bytes,
                              std::size_t* out_bytes) noexcept
@@ -343,9 +343,8 @@ try {
         return r;
     }
     return deliver(c, produced, dst, dst_bytes, out_bytes);
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL codec_reset(MpCodecInstance* c) noexcept
 {

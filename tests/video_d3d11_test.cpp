@@ -17,6 +17,7 @@
 #include <mediaperch/module.h>
 
 #include "fake_video.hpp"
+#include "mediaperch/row.hpp"
 #include "module_loader.hpp"
 
 #include <catch2/catch_approx.hpp>
@@ -167,7 +168,7 @@ public:
         // The same grow-and-ask-again shape read_packet has: nothing is lost
         // by asking with no room first.
         const MpResult sized = vtbl_->read_back(handle_, nullptr, 0, &w, &h, &layout);
-        if (sized != MP_ERR_NO_MEMORY || w == 0 || h == 0) {
+        if (sized != MP_TOO_SMALL || w == 0 || h == 0) {
             return {};
         }
         const std::size_t pixels = static_cast<std::size_t>(w) * h * 4u;
@@ -203,12 +204,15 @@ public:
     /// One `key\tvalue\tdescription` line, by key.
     [[nodiscard]] std::string described(const char* key)
     {
-        char line[512];
+        std::string row;
         for (std::uint32_t i = 0; i < 64; ++i) {
-            line[0] = '\0';
-            if (vtbl_->describe(handle_, i, line, sizeof(line)) != MP_OK) {
+            const auto ask = [&](char* buffer, std::uint32_t bytes, std::uint32_t* needed) {
+                return vtbl_->describe(handle_, i, buffer, bytes, needed);
+            };
+            if (mp::read_row(ask, row) != MP_OK) {
                 break;
             }
+            const char* line = row.c_str();
             const char* tab = std::strchr(line, '\t');
             if (tab == nullptr) {
                 continue;

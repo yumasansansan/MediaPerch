@@ -37,6 +37,7 @@
 
 #include "h264.hpp"
 
+#include <abi_guard.hpp>
 #include <mediaperch/module.h>
 
 #include <algorithm>
@@ -762,9 +763,8 @@ try {
 
     *out = c.release();
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 void MP_CALL codec_close(MpVideoCodec* c) noexcept
 {
@@ -864,9 +864,8 @@ try {
         return MP_ERR_BUSY;
     }
     return SUCCEEDED(hr) ? MP_OK : MP_ERR_FORMAT;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL codec_next_frame(MpVideoCodec* c, MpVideoFrame* out) noexcept
 try {
@@ -1048,9 +1047,8 @@ try {
                     sample * 2 * (c->crop_x / 2u);
     out->stride[1] = out->stride[0];
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL codec_flush(MpVideoCodec* c) noexcept
 {

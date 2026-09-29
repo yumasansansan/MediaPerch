@@ -35,6 +35,7 @@
 // far as MediaPerch was concerned. Now each one is described and `select` picks
 // between them.
 
+#include <abi_guard.hpp>
 #include <mediaperch/module.h>
 
 #include "module_log.hpp"
@@ -590,9 +591,8 @@ try {
     // twice for every file with more than one track.
     *out = d;
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL demux_stream_count(MpDemux* d, std::uint32_t* out_count) noexcept
 {
@@ -676,7 +676,7 @@ MpResult MP_CALL demux_read_packet(MpDemux* d, void* dst, std::size_t dst_bytes,
 MpResult MP_CALL demux_read_frames(MpDemux* d, void* dst, std::size_t dst_bytes,
                                    std::size_t* out_bytes) noexcept
 try {
-    if (d == nullptr || dst == nullptr || out_bytes == nullptr) {
+    if (d == nullptr || out_bytes == nullptr) {
         return MP_ERR_INVALID;
     }
     *out_bytes = 0;
@@ -687,10 +687,14 @@ try {
         return MP_END;
     }
 
+    // Not one whole frame fits -- a NULL `dst` is a buffer of no bytes -- and
+    // the host is told what one takes, rather than handed nothing as though
+    // the stream had ended.
     const std::uint32_t frame_bytes = d->current().frame_bytes;
-    const std::size_t want = (dst_bytes / frame_bytes) * frame_bytes;
+    const std::size_t want = dst == nullptr ? 0 : (dst_bytes / frame_bytes) * frame_bytes;
     if (want == 0) {
-        return MP_OK;
+        *out_bytes = frame_bytes;
+        return MP_TOO_SMALL;
     }
 
     std::size_t got = d->child.read(dst, want);
@@ -703,9 +707,8 @@ try {
     d->position += got / frame_bytes;
     *out_bytes = got;
     return MP_OK;
-} catch (...) {
-    return MP_ERR_IO;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL demux_seek(MpDemux* d, std::uint32_t stream,
                             std::uint64_t frame) noexcept

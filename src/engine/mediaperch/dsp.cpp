@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "mediaperch/dsp.hpp"
+#include "mediaperch/row.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -133,13 +134,17 @@ std::vector<std::string> DspStage::describe() const
     if (handle_ == nullptr || vtbl_->describe == nullptr) {
         return out;
     }
-    char line[512];
+    std::string line;
     for (std::uint32_t i = 0; i < 64; ++i) {
-        line[0] = '\0';
-        if (vtbl_->describe(handle_, i, line, sizeof(line)) != MP_OK) {
+        const MpResult r = read_row(
+            [&](char* row, std::uint32_t bytes, std::uint32_t* needed) {
+                return vtbl_->describe(handle_, i, row, bytes, needed);
+            },
+            line);
+        if (r != MP_OK) {
             break;
         }
-        out.emplace_back(line);
+        out.push_back(line);
     }
     return out;
 }

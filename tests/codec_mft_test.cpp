@@ -713,7 +713,7 @@ TEST_CASE("a decoded frame reaches the presenter and comes back as pixels",
     MpPixelLayout layout{};
     layout.size = sizeof(layout);
     REQUIRE(video->read_back(presenter, nullptr, 0, &width, &height, &layout) ==
-            MP_ERR_NO_MEMORY);
+            MP_TOO_SMALL);
     CHECK(width == 128u);
     CHECK(height == 96u);
     CHECK(layout.chroma == MP_CHROMA_RGB);
@@ -929,7 +929,8 @@ TEST_CASE("a hardware decoder decodes into a texture the presenter samples in pl
 
     if (!granted) {
         char why[512] = "";
-        video->describe(presenter, 0, why, sizeof(why));
+        std::uint32_t needed = 0;
+        video->describe(presenter, 0, why, sizeof(why), &needed);
         video->close(presenter);
         SKIP("this machine's decoder would not grant D3D11_BIND_SHADER_RESOURCE, so "
              "the presenter refused the texture by name, which is the other half of "
@@ -946,7 +947,7 @@ TEST_CASE("a hardware decoder decodes into a texture the presenter samples in pl
     MpPixelLayout layout{};
     layout.size = sizeof(layout);
     REQUIRE(video->read_back(presenter, nullptr, 0, &width, &height, &layout) ==
-            MP_ERR_NO_MEMORY);
+            MP_TOO_SMALL);
     CHECK(width == 128u);
     CHECK(height == 96u);
     CHECK(layout.chroma == MP_CHROMA_RGB);

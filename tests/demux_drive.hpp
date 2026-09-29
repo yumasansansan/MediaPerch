@@ -186,14 +186,21 @@ private:
             if (v_.stream_info(d_, i, nullptr) == MP_OK) {
                 return fail("stream_info refuses a null out");
             }
-            // The two-call dance module.h describes: ask with no buffer, then
-            // with one of the size it named.
+            // The two-call dance module.h describes: ask with no buffer -- one
+            // of no bytes, which a blob that has any does not fit -- then with
+            // one of the size it named.
             std::uint32_t needed = 0;
-            if (v_.stream_config(d_, i, nullptr, 0, &needed) == MP_OK && needed != 0 &&
-                needed <= limits_.largest_config) {
+            const MpResult asked = v_.stream_config(d_, i, nullptr, 0, &needed);
+            if (asked == MP_OK && needed != 0) {
+                return fail("stream_config answers no buffer with MP_TOO_SMALL "
+                            "when it needs bytes");
+            }
+            if (asked == MP_TOO_SMALL && needed != 0 && needed <= limits_.largest_config) {
                 std::vector<std::uint8_t> config(needed);
                 std::uint32_t again = 0;
-                v_.stream_config(d_, i, config.data(), needed, &again);
+                if (v_.stream_config(d_, i, config.data(), needed, &again) != MP_OK) {
+                    return fail("stream_config fills a buffer of the size it named");
+                }
             }
             if (v_.stream_config(d_, i, nullptr, 0, nullptr) == MP_OK) {
                 return fail("stream_config refuses a null out_needed");
@@ -218,7 +225,7 @@ private:
             MpPacket packet{};
             packet.size = sizeof(MpPacket);
             MpResult r = v_.read_packet(d_, buffer_.data(), buffer_.size(), &packet);
-            if (r == MP_ERR_NO_MEMORY) {
+            if (r == MP_TOO_SMALL) {
                 if (packet.bytes <= buffer_.size()) {
                     return fail("a packet that does not fit names more bytes than were offered");
                 }

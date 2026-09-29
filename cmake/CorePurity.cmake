@@ -129,7 +129,7 @@ endforeach()
 # be linked without the other. A rule that is a comment is not a rule, so the
 # three lists live here as well, and a file in src/engine that is in none of
 # them is a failure: whoever adds a file says which engine it belongs to.
-set(core_names clock format log packet rational result source)
+set(core_names clock format log packet rational result row source)
 set(audio_names buffering compare convert dither dsp shaper_tables negotiation
     passthrough processed processor repack ring sine sink wiring)
 set(video_names avsync display framerate refresh video video_host video_path)

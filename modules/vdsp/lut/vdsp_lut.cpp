@@ -26,6 +26,8 @@
 #include "cube.hpp"
 #include "module_log.hpp"
 
+#include <abi_guard.hpp>
+#include <describe_row.hpp>
 #include <mediaperch/module.h>
 
 #include <algorithm>
@@ -290,9 +292,8 @@ try {
 
     *out = d.release();
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 void MP_CALL lut_close(MpVideoDsp* d) noexcept
 {
@@ -344,9 +345,8 @@ try {
     answer.size = out->size;
     std::memcpy(out, &answer, std::min<std::size_t>(out->size, sizeof(answer)));
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL lut_process(MpVideoDsp* d, const MpVideoFrame* in,
                              MpVideoFrame* out) noexcept
@@ -439,9 +439,8 @@ try {
     }
     std::memcpy(out, &answer, std::min<std::size_t>(out->size, sizeof(answer)));
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL lut_reset(MpVideoDsp* d) noexcept
 {
@@ -522,47 +521,43 @@ try {
         return MP_OK;
     }
     return MP_ERR_UNSUPPORTED;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL lut_describe(MpVideoDsp* d, std::uint32_t index, char* out,
-                              std::uint32_t out_bytes) noexcept
+                              std::uint32_t out_bytes, std::uint32_t* out_needed) noexcept
 {
-    if (d == nullptr || out == nullptr || out_bytes < 64) {
+    if (d == nullptr || out_needed == nullptr) {
         return MP_ERR_INVALID;
     }
+    mp::DescribeRow row{out, out_bytes, out_needed};
     switch (index) {
     case 0:
-        std::snprintf(out, out_bytes,
-                      "file\t%s\ta .cube lookup table; empty is the identity\tpath",
-                      d->file.empty() ? "" : d->file.c_str());
-        return MP_OK;
+        row.format("file\t%s\ta .cube lookup table; empty is the identity\tpath",
+                   d->file.empty() ? "" : d->file.c_str());
+        return row.result();
     case 1:
-        std::snprintf(out, out_bytes,
-                      "strength\t%.4f\t0 is the picture, 1 is the table, and either "
-                      "side of that extrapolates\tnumber step=0.05",
-                      d->strength);
-        return MP_OK;
+        row.format("strength\t%.4f\t0 is the picture, 1 is the table, and either "
+                   "side of that extrapolates\tnumber step=0.05",
+                   d->strength);
+        return row.result();
     case 2:
-        std::snprintf(out, out_bytes, "title\t%s\twhat the table calls itself (read only)",
-                      d->lut.title.empty() ? "(none)" : d->lut.title.c_str());
-        return MP_OK;
+        row.format("title\t%s\twhat the table calls itself (read only)",
+                   d->lut.title.empty() ? "(none)" : d->lut.title.c_str());
+        return row.result();
     case 3:
-        std::snprintf(out, out_bytes,
-                      "size\t%u\tentries per axis, and %s (read only)", d->lut.size,
-                      d->identity ? "it is the identity" : "it changes the picture");
-        return MP_OK;
+        row.format("size\t%u\tentries per axis, and %s (read only)", d->lut.size,
+                   d->identity ? "it is the identity" : "it changes the picture");
+        return row.result();
     case 4:
-        std::snprintf(out, out_bytes,
-                      "domain\t%.4f..%.4f\tthe range the table covers; outside it is "
-                      "clamped (read only)",
-                      d->lut.domain_min[0], d->lut.domain_max[0]);
-        return MP_OK;
+        row.format("domain\t%.4f..%.4f\tthe range the table covers; outside it is "
+                   "clamped (read only)",
+                   d->lut.domain_min[0], d->lut.domain_max[0]);
+        return row.result();
     case 5:
-        std::snprintf(out, out_bytes, "trouble\t%s\twhat went wrong (read only)",
-                      d->trouble.empty() ? "nothing" : d->trouble.c_str());
-        return MP_OK;
+        row.format("trouble\t%s\twhat went wrong (read only)",
+                   d->trouble.empty() ? "nothing" : d->trouble.c_str());
+        return row.result();
     default:
         break;
     }

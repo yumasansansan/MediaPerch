@@ -16,6 +16,7 @@
 // peak the tag also carries so the gain can be limited rather than clipped.
 
 #include <abi_guard.hpp>
+#include <describe_row.hpp>
 #include <mediaperch/module.h>
 #include <peak.hpp>
 
@@ -167,25 +168,26 @@ try {
 MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
-                              std::uint32_t out_bytes) noexcept
+                              std::uint32_t out_bytes, std::uint32_t* out_needed) noexcept
 try {
-    if (d == nullptr || out == nullptr || out_bytes < 64) {
+    if (d == nullptr || out_needed == nullptr) {
         return MP_ERR_INVALID;
     }
+    mp::DescribeRow row{out, out_bytes, out_needed};
     switch (index) {
     case 0:
-        std::snprintf(out, out_bytes, "gain_db\t%.4f\tgain in decibels, -144 to 24"
-                                      "\tnumber step=0.5 unit=dB",
-                      d->gain_db);
-        return MP_OK;
+        row.format("gain_db\t%.4f\tgain in decibels, -144 to 24"
+                   "\tnumber step=0.5 unit=dB",
+                   d->gain_db);
+        return row.result();
     case 1:
-        std::snprintf(out, out_bytes, "gain\t%.6f\tlinear gain, 0 to 16\tnumber step=0.05",
-                      d->gain);
-        return MP_OK;
+        row.format("gain\t%.6f\tlinear gain, 0 to 16\tnumber step=0.05",
+                   d->gain);
+        return row.result();
     case 2:
-        std::snprintf(out, out_bytes, "peak\t%.6f\tloudest sample seen (read only)",
-                      d->peak);
-        return MP_OK;
+        row.format("peak\t%.6f\tloudest sample seen (read only)",
+                   d->peak);
+        return row.result();
     default:
         return MP_END;
     }

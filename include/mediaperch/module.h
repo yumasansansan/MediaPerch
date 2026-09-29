@@ -93,9 +93,14 @@ extern "C" {
  *      MpPixelFormat was six DXGI names and could not say 4:2:2, 4:4:4 or
  *      twelve bits at all -- and naming the combinations would have taken
  *      seventy-five enumerators. See MpPixelLayout below.
+ *   5  a buffer too small for an answer is MP_TOO_SMALL, and MP_ERR_NO_MEMORY
+ *      is an allocation that failed and nothing else. v4 said both with
+ *      MP_ERR_NO_MEMORY, so a module that could not allocate inside
+ *      `read_packet` said "grow to a packet of no bytes", and `describe`,
+ *      which had no way to say either, cut a long row short in silence.
  *
  * docs/plan.md §4 has the argument for each. */
-#define MP_ABI_VERSION 4u
+#define MP_ABI_VERSION 5u
 
 /* ------------------------------------------------------------------ */
 /* Results                                                             */
@@ -111,9 +116,14 @@ typedef enum MpResult : uint32_t {
     MP_ERR_DEVICE_LOST = 6u,  /* rebuild the graph */
     MP_ERR_BUSY = 7u,         /* another process holds the device exclusively */
     MP_ERR_DENIED = 8u,       /* exclusive mode disabled for this device */
-    MP_ERR_NO_MEMORY = 9u,
+    MP_ERR_NO_MEMORY = 9u,    /* the module could not allocate, and only that */
     MP_ERR_INTERNAL = 10u,
-    MP_TIMEOUT = 11u          /* a wait expired. Also not an error by itself. */
+    MP_TIMEOUT = 11u,         /* a wait expired. Also not an error by itself. */
+    /* **v5.** The caller's buffer cannot hold the answer: nothing was written
+     * and nothing consumed, and the size it needs was reported wherever the
+     * call has somewhere to report it. A NULL buffer is one of no bytes, so the
+     * same call with NULL asks how much. Not an error by itself either. */
+    MP_TOO_SMALL = 12u
 } MpResult;
 
 /* ------------------------------------------------------------------ */
@@ -419,8 +429,8 @@ typedef struct MpStreamInfo {
 typedef struct MpPacket {
     uint32_t size;
     uint32_t flags;
-    /* Bytes actually written into the caller's buffer -- or, when the buffer
-     * was too small, the bytes the packet needs. See `read_packet`. */
+    /* Bytes actually written into the caller's buffer -- or, with MP_TOO_SMALL,
+     * the bytes the packet needs. See `read_packet`. */
     uint32_t bytes;
     /* Which stream this packet belongs to. **v3**, in the slot v2 called
      * `reserved`: with several streams selected, a packet that could not say
@@ -672,8 +682,10 @@ typedef struct MpDemuxVtbl {
     /* MP_ANY. `out->size` is set by the caller. */
     MpResult(MP_CALL *stream_info)(MpDemux *d, uint32_t index, MpStreamInfo *out);
     /* MP_ANY. The codec's configuration blob, verbatim: ALACSpecificConfig,
-     * AudioSpecificConfig, a FLAC STREAMINFO. Fills at most `out_bytes` and
-     * always reports what it needs, so a caller may ask with `out` NULL first. */
+     * AudioSpecificConfig, a FLAC STREAMINFO. Always reports what it needs in
+     * `out_needed`; MP_TOO_SMALL, and nothing written, when `out_bytes` is less
+     * -- so a caller may ask with `out` NULL first. A stream with no blob needs
+     * nothing, and that is MP_OK whatever the buffer. */
     MpResult(MP_CALL *stream_config)(MpDemux *d, uint32_t index, uint8_t *out,
                                      uint32_t out_bytes, uint32_t *out_needed);
 
@@ -705,8 +717,10 @@ typedef struct MpDemuxVtbl {
      * the only arrangement that reads a file once.
      *
      * When the packet does not fit, nothing is consumed, `out->bytes` is what it
-     * needs and the result is MP_ERR_NO_MEMORY -- so a host grows its buffer and
-     * asks again rather than losing a packet it cannot hold. */
+     * needs and the result is MP_TOO_SMALL -- so a host grows its buffer and
+     * asks again rather than losing a packet it cannot hold. **v5**: v4 said
+     * this with MP_ERR_NO_MEMORY, which a module that could not allocate said
+     * too, and then it read as a packet of no bytes that did not fit. */
     MpResult(MP_CALL *read_packet)(MpDemux *d, void *dst, size_t dst_bytes, MpPacket *out);
 
     /* MP_IO. To the packet containing `frame` of stream `stream`, or the nearest
@@ -728,7 +742,8 @@ typedef struct MpDemuxVtbl {
     MpResult(MP_CALL *seek)(MpDemux *d, uint32_t stream, uint64_t frame);
 
     /* MP_IO. Only for a stream flagged MP_STREAM_SELF_DECODES: PCM in the format
-     * `stream_info` reported. Null on a
+     * `stream_info` reported, as many whole frames as fit. MP_TOO_SMALL, with
+     * `out_bytes` one frame's bytes, when not one does. Null on a
      * demuxer that splits properly, which is most of them. */
     MpResult(MP_CALL *read_frames)(MpDemux *d, void *dst, size_t dst_bytes,
                                    size_t *out_bytes);
@@ -770,11 +785,17 @@ typedef struct MpCodecVtbl {
     /* MP_IO. One packet in, PCM out, in the format `get_format` reports.
      * **Never converts**: conversion is the graph's job, here as in v1. A packet
      * that decodes to nothing -- a priming frame -- returns MP_OK with
-     * *out_bytes == 0. */
+     * *out_bytes == 0.
+     *
+     * A packet whose PCM does not fit is MP_TOO_SMALL, with *out_bytes what it
+     * needed where the codec can say (0 where it cannot). **The packet is spent
+     * all the same** -- a decoder cannot un-decode -- so a host does not send it
+     * again, and sizes `dst` for the most one packet of this stream can make. */
     MpResult(MP_CALL *decode)(MpCodecInstance *c, const void *packet, size_t packet_bytes,
                               void *dst, size_t dst_bytes, size_t *out_bytes);
 
-    /* MP_IO. What is still inside after the last packet. */
+    /* MP_IO. What is still inside after the last packet. MP_TOO_SMALL as
+     * `decode` says it, what did not fit likewise spent. */
     MpResult(MP_CALL *flush)(MpCodecInstance *c, void *dst, size_t dst_bytes, size_t *out_bytes);
 
     /* MP_IO. Forget everything: the audio after a seek is not adjacent to the
@@ -1244,10 +1265,10 @@ typedef struct MpVideoDspVtbl {
      * convention for a stage that knows why it refused. */
     MpResult(MP_CALL *set)(MpVideoDsp *d, const char *key, const char *value);
     /* MP_ANY. One `key\tcurrent\tdescription[\tspec]` per index, MP_END past
-     * the last -- the fourth field and the "(read only)" convention exactly as
-     * MpDspVtbl::describe spells them. */
+     * the last -- the fourth field, the "(read only)" convention and the sizes
+     * exactly as MpDspVtbl::describe spells them. */
     MpResult(MP_CALL *describe)(MpVideoDsp *d, uint32_t index, char *out,
-                                uint32_t out_bytes);
+                                uint32_t out_bytes, uint32_t *out_needed);
 } MpVideoDspVtbl;
 
 /* One stage, as a presenter is handed it: somebody else's vtable and somebody
@@ -1288,10 +1309,10 @@ typedef struct MpVideoVtbl {
      * convention for a stage that knows why it refused. */
     MpResult(MP_CALL *set)(MpVideo *v, const char *key, const char *value);
     /* MP_ANY. One `key\tcurrent\tdescription[\tspec]` per index, MP_END past
-     * the last -- the fourth field and the "(read only)" convention exactly as
-     * MpDspVtbl::describe spells them. */
+     * the last -- the fourth field, the "(read only)" convention and the sizes
+     * exactly as MpDspVtbl::describe spells them. */
     MpResult(MP_CALL *describe)(MpVideo *v, uint32_t index, char *out,
-                                uint32_t out_bytes);
+                                uint32_t out_bytes, uint32_t *out_needed);
 
     /* MP_ANY. The device this presenter made, for whatever decodes into it.
      * `out->size` is set by the caller. MP_ERR_UNSUPPORTED before `configure`,
@@ -1303,8 +1324,8 @@ typedef struct MpVideoVtbl {
      * in**, tightly packed. `out_layout` says which -- MP_LAYOUT_RGBA16F for
      * the scRGB path, MP_LAYOUT_RGB10A2 for HDR10 -- and the caller sets
      * `out_layout->size` before the call. Call with `dst` NULL to be told the
-     * geometry and the layout; the result is MP_ERR_NO_MEMORY and nothing is
-     * written, the same shape `read_packet` uses.
+     * geometry and the layout; the result is MP_TOO_SMALL and nothing is
+     * written, as it is for any `dst_bytes` short of the picture.
      *
      * **This is the measuring apparatus, in the ABI on purpose.** A screenshot
      * is a feature people want; a rendered frame a test can hash is the only
@@ -1539,8 +1560,16 @@ typedef struct MpDspVtbl {
      * "off") is still a row of that kind; a shell shows the word and takes a
      * number. A row with no fourth field is text, which every row was before
      * there were kinds.
+     *
+     * **The row and its terminating NUL are written whole or not at all**
+     * (v5). `out_needed` always says how many bytes they take, and a row that
+     * does not fit in `out_bytes` is MP_TOO_SMALL with nothing written -- so a
+     * host asks again with that many, and NULL asks how many. v4 had nowhere to
+     * say it, and a row longer than the host's buffer -- a path is a value, and
+     * a path has no length -- came back cut short as though it were whole.
      */
-    MpResult(MP_CALL *describe)(MpDsp *d, uint32_t index, char *out, uint32_t out_bytes);
+    MpResult(MP_CALL *describe)(MpDsp *d, uint32_t index, char *out, uint32_t out_bytes,
+                                uint32_t *out_needed);
 
     /*
      * Forget everything about where the stream was, keeping the settings.

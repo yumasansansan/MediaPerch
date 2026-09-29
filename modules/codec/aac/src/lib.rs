@@ -165,7 +165,7 @@ impl Codec for AacCodec {
 
         let needed = aac::FRAME_LEN * channels * std::mem::size_of::<f32>();
         if dst.len() < needed {
-            return Err(Error::NoMemory);
+            return Err(Error::TooSmall);
         }
 
         // Planar float into interleaved, in WAVE slot order. FFmpeg's encoder

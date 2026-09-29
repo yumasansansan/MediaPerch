@@ -210,6 +210,7 @@ struct Scratch {
     std::uint8_t bytes[256] = {};
     double samples[64] = {};
     char text[64] = {};
+    std::uint32_t needed = 0;
 };
 
 void ask_demuxer(Nonsense& n, const MpDemuxVtbl& v)
@@ -324,7 +325,8 @@ void ask_dsp(Nonsense& n, const MpDspVtbl& v)
         n.refused(v.set(nullptr, "gain", "0"), "set, on no stage");
     }
     if (v.describe != nullptr) {
-        n.refused(v.describe(nullptr, 0, s.text, sizeof(s.text)), "describe, of no stage");
+        n.refused(v.describe(nullptr, 0, s.text, sizeof(s.text), &s.needed),
+                  "describe, of no stage");
     }
     n.refused(v.reset(nullptr), "reset, of no stage");
     if (v.get_latency != nullptr) {
@@ -345,8 +347,10 @@ void ask_dsp(Nonsense& n, const MpDspVtbl& v)
         n.refused(v.set(d, nullptr, nullptr), "set, of no key");
     }
     if (v.describe != nullptr) {
-        n.refused(v.describe(d, 0, nullptr, sizeof(s.text)),
+        n.refused(v.describe(d, 0, nullptr, sizeof(s.text), &s.needed),
                   "describe, into no buffer said to hold 64 bytes");
+        n.refused(v.describe(d, 0, s.text, sizeof(s.text), nullptr),
+                  "describe, with nowhere to say how long the row is");
     }
     if (v.get_latency != nullptr) {
         n.refused(v.get_latency(d, nullptr), "get_latency, with nowhere to put it");
@@ -379,7 +383,8 @@ void ask_video_dsp(Nonsense& n, const MpVideoDspVtbl& v)
         n.refused(v.set(nullptr, "size", "640x360"), "set, on no stage");
     }
     if (v.describe != nullptr) {
-        n.refused(v.describe(nullptr, 0, s.text, sizeof(s.text)), "describe, of no stage");
+        n.refused(v.describe(nullptr, 0, s.text, sizeof(s.text), &s.needed),
+                  "describe, of no stage");
     }
     v.close(nullptr);
 }
@@ -400,7 +405,8 @@ void ask_presenter(Nonsense& n, const MpVideoVtbl& v)
         n.refused(v.set(nullptr, "size", "640x360"), "set, on no presenter");
     }
     if (v.describe != nullptr) {
-        n.refused(v.describe(nullptr, 0, s.text, sizeof(s.text)), "describe, of no presenter");
+        n.refused(v.describe(nullptr, 0, s.text, sizeof(s.text), &s.needed),
+                  "describe, of no presenter");
     }
     if (v.get_device != nullptr) {
         MpGraphicsDevice device{};

@@ -14,6 +14,7 @@
 
 #include "fake_handles.hpp"
 
+#include <describe_row.hpp>
 #include <mediaperch/module.h>
 
 #include <cstdint>
@@ -112,16 +113,16 @@ inline MpResult MP_CALL dsp_set(MpDsp* d, const char* key, const char* value) no
 }
 
 inline MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
-                                     std::uint32_t out_bytes) noexcept
+                                     std::uint32_t out_bytes, std::uint32_t* out_needed) noexcept
 {
-    if (d == nullptr || out == nullptr || out_bytes < 32) {
+    if (d == nullptr || out_needed == nullptr) {
         return MP_ERR_INVALID;
     }
+    mp::DescribeRow row{out, out_bytes, out_needed};
     if (index == 0) {
-        std::snprintf(out, out_bytes,
-                      "amount\t%g\twhat every sample is multiplied by\tnumber min=0 step=0.5",
-                      d->amount);
-        return MP_OK;
+        row.format("amount\t%g\twhat every sample is multiplied by\tnumber min=0 step=0.5",
+                   d->amount);
+        return row.result();
     }
     // **A measurement, spelled the way every module in this tree spells one.**
     // A stage answers with things it will not take back -- a peak, a cost, a
@@ -129,9 +130,8 @@ inline MpResult MP_CALL dsp_describe(MpDsp* d, std::uint32_t index, char* out,
     // Something has to read that, and it is the engine rather than each shell;
     // this row is what makes that checkable without a real module.
     if (index == 1) {
-        std::snprintf(out, out_bytes, "peak\t%.6f\tloudest sample seen (read only)",
-                      d->amount);
-        return MP_OK;
+        row.format("peak\t%.6f\tloudest sample seen (read only)", d->amount);
+        return row.result();
     }
     return MP_END;
 }

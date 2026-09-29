@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "mediaperch/video.hpp"
+#include "mediaperch/row.hpp"
 
 #include <cstddef>
 
@@ -162,13 +163,17 @@ MpResult VideoStage::set(const char* key, const char* value) noexcept
     return vtbl_->set(handle_, key, value);
 }
 
-MpResult VideoStage::describe(std::uint32_t index, char* out,
-                              std::uint32_t out_bytes) noexcept
+MpResult VideoStage::describe(std::uint32_t index, std::string& out)
 {
+    out.clear();
     if (!*this || vtbl_->describe == nullptr) {
         return MP_END;
     }
-    return vtbl_->describe(handle_, index, out, out_bytes);
+    return read_row(
+        [&](char* row, std::uint32_t bytes, std::uint32_t* needed) {
+            return vtbl_->describe(handle_, index, row, bytes, needed);
+        },
+        out);
 }
 
 MpVideoStage VideoStage::handed() const noexcept
@@ -210,13 +215,17 @@ MpResult Presenter::set(const char* key, const char* value) noexcept
     return *this ? vtbl_->set(handle_, key, value) : MP_ERR_INVALID;
 }
 
-MpResult Presenter::describe(std::uint32_t index, char* out,
-                             std::uint32_t out_bytes) noexcept
+MpResult Presenter::describe(std::uint32_t index, std::string& out)
 {
+    out.clear();
     if (!*this || vtbl_->describe == nullptr) {
         return MP_ERR_UNSUPPORTED;
     }
-    return vtbl_->describe(handle_, index, out, out_bytes);
+    return read_row(
+        [&](char* row, std::uint32_t bytes, std::uint32_t* needed) {
+            return vtbl_->describe(handle_, index, row, bytes, needed);
+        },
+        out);
 }
 
 MpResult Presenter::get_device(MpGraphicsDevice& out) noexcept

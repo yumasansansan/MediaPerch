@@ -54,6 +54,9 @@ pub mod result {
     pub const ERR_IO: MpResult = 5;
     pub const ERR_NO_MEMORY: MpResult = 9;
     pub const ERR_INTERNAL: MpResult = 10;
+    /// v5: the caller's buffer cannot hold the answer, and the size it needs
+    /// was reported. v4 said this with ERR_NO_MEMORY.
+    pub const TOO_SMALL: MpResult = 12;
 }
 
 /// The ABI these modules are built against, which has to be **this tree's
@@ -73,7 +76,10 @@ pub mod result {
 /// A version bump is global whatever half of the ABI it was about. The check
 /// that catches this now is `module_abi_test.cpp`, which loads every module
 /// this tree builds and requires it to answer at MP_ABI_VERSION.
-pub const ABI_VERSION: u32 = 4;
+///
+/// v5 was about this file as much as any: a buffer too small is TOO_SMALL now,
+/// where `Error::NoMemory` used to say it.
+pub const ABI_VERSION: u32 = 5;
 
 pub mod kind {
     pub const DSP: u32 = 3;
@@ -340,9 +346,14 @@ pub enum Error {
     /// The data is not what it claims to be.
     Format,
     Io,
-    /// The caller's buffer is too small.
+    /// The module could not allocate. A Rust module that runs out of memory
+    /// aborts rather than returning, so this is for a `try_reserve` that said
+    /// no, and for nothing else.
     NoMemory,
     Internal,
+    /// The caller's buffer cannot hold the answer (v5). v4 had no word for it
+    /// but `NoMemory`, which meant both.
+    TooSmall,
 }
 
 impl Error {
@@ -354,6 +365,7 @@ impl Error {
             Error::Io => result::ERR_IO,
             Error::NoMemory => result::ERR_NO_MEMORY,
             Error::Internal => result::ERR_INTERNAL,
+            Error::TooSmall => result::TOO_SMALL,
         }
     }
 }
@@ -378,7 +390,8 @@ pub trait Codec: Sized + 'static {
     fn format(&self) -> Result<Format, Error>;
 
     /// One packet in, PCM out into `dst`. Returns the bytes written, or
-    /// `Error::NoMemory` when `dst` is too small for what the packet holds.
+    /// `Error::TooSmall` when `dst` is too small for what the packet holds --
+    /// the packet spent all the same, as the header says.
     fn decode(&mut self, packet: &[u8], dst: &mut [u8]) -> Result<usize, Error>;
 
     /// What is still inside after the last packet, if anything.
@@ -389,7 +402,7 @@ pub trait Codec: Sized + 'static {
 
 /// What `Demux::read_packet` hands back, which the trampoline turns into the
 /// header's three-way contract: a packet, MP_END with no bytes, or
-/// MP_ERR_NO_MEMORY with the size the packet needs and nothing consumed.
+/// MP_TOO_SMALL with the size the packet needs and nothing consumed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Next {
     /// `bytes` were written into `dst`; `frame` is the packet's position in
@@ -761,11 +774,12 @@ extern "C" fn demux_stream_config<D: Demux>(
             Err(e) => return e.code(),
         };
         unsafe { *out_needed = config.len() as u32 };
-        if out.is_null() {
-            return result::OK; // asking how much, which the header allows
+        if config.is_empty() {
+            return result::OK;
         }
-        if (out_bytes as usize) < config.len() {
-            return result::ERR_NO_MEMORY;
+        // A NULL `out` is a buffer of no bytes, which asks how much.
+        if out.is_null() || (out_bytes as usize) < config.len() {
+            return result::TOO_SMALL;
         }
         let dst = unsafe { bytes_mut(out, out_bytes as usize) };
         dst[..config.len()].copy_from_slice(config);
@@ -838,7 +852,7 @@ extern "C" fn demux_read_packet<D: Demux>(
             Ok(Next::End) => result::END,
             Ok(Next::TooSmall(needed)) => {
                 unsafe { (*out).bytes = needed as u32 };
-                result::ERR_NO_MEMORY
+                result::TOO_SMALL
             }
             Err(e) => e.code(),
         }

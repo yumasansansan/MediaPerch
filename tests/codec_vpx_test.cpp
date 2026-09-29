@@ -17,6 +17,7 @@
 // still have.
 
 #include "mediaperch/packet.hpp"
+#include "mediaperch/row.hpp"
 
 #include <mediaperch/module.h>
 
@@ -119,12 +120,14 @@ TEST_CASE("the VP9 decoder names the colour family and leaves the curve to the c
     REQUIRE(video->set(presenter, "device", "warp") == MP_OK);
     REQUIRE(video->configure(presenter, &container) == MP_OK);
     const auto described = [&](const char* key) {
+        std::string line;
         for (std::uint32_t i = 0;; ++i) {
-            char row[256];
-            if (video->describe(presenter, i, row, sizeof row) != MP_OK) {
+            const auto ask = [&](char* buffer, std::uint32_t bytes, std::uint32_t* needed) {
+                return video->describe(presenter, i, buffer, bytes, needed);
+            };
+            if (mp::read_row(ask, line) != MP_OK) {
                 return std::string{};
             }
-            const std::string line{row};
             const std::size_t first = line.find('\t');
             if (first == std::string::npos || line.substr(0, first) != key) {
                 continue;
@@ -257,7 +260,7 @@ TEST_CASE("VP8 and VP9 decode out of a WebM and reach the presenter",
         MpPixelLayout layout{};
         layout.size = sizeof(layout);
         REQUIRE(video->read_back(presenter, nullptr, 0, &width, &height, &layout) ==
-                MP_ERR_NO_MEMORY);
+                MP_TOO_SMALL);
         CHECK(width == 128u);
         CHECK(height == 96u);
 

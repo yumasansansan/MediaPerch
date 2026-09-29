@@ -19,6 +19,7 @@
 // all. ABI v4 can describe those; see this module's CMakeLists for where the
 // option is set.
 
+#include <abi_guard.hpp>
 #include <mediaperch/module.h>
 
 #include "decoder_threads.hpp"
@@ -266,9 +267,8 @@ try {
 
     *out = c.release();
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 void MP_CALL codec_close(MpVideoCodec* c) noexcept
 {
@@ -314,9 +314,8 @@ try {
         return MP_ERR_FORMAT;
     }
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL codec_next_frame(MpVideoCodec* c, MpVideoFrame* out) noexcept
 try {
@@ -349,9 +348,8 @@ try {
         out->stride[i] = static_cast<std::uint32_t>(img->stride[i]);
     }
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 MpResult MP_CALL codec_flush(MpVideoCodec* c) noexcept
 {
@@ -393,9 +391,8 @@ try {
     }
     c->started = true;
     return MP_OK;
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 /// `threads`, and nothing else yet.
 ///
@@ -413,9 +410,8 @@ try {
         return took;
     }
     return codec_reset(c);
-} catch (...) {
-    return MP_ERR_NO_MEMORY;
 }
+MEDIAPERCH_ABI_GUARD_CATCH
 
 constexpr MpVideoCodecVtbl k_vtbl = {
     /* size       */ sizeof(MpVideoCodecVtbl),

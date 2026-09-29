@@ -213,7 +213,7 @@ TEST_CASE("AV2 decodes out of a WebM and reaches the presenter", "[video][avm][d
     MpPixelLayout layout{};
     layout.size = sizeof(layout);
     REQUIRE(video->read_back(presenter, nullptr, 0, &width, &height, &layout) ==
-            MP_ERR_NO_MEMORY);
+            MP_TOO_SMALL);
     CHECK(width == 128u);
     CHECK(height == 96u);
 

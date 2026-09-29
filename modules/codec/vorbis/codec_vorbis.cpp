@@ -253,10 +253,11 @@ MpResult drain(MpCodecInstance* c, void* dst, std::size_t dst_bytes,
     const std::size_t needed =
         static_cast<std::size_t>(frames) * c->channels * sizeof(float);
     if (dst == nullptr || dst_bytes < needed) {
-        // Nothing is consumed: `vorbis_synthesis_read` is what consumes, and it
-        // has not been called. The host grows and asks again.
+        // The packet is spent -- it was synthesised -- but its PCM is not:
+        // `vorbis_synthesis_read` is what takes that, and it has not been
+        // called, so the next call drains it ahead of whatever comes next.
         *out_bytes = needed;
-        return MP_ERR_NO_MEMORY;
+        return MP_TOO_SMALL;
     }
 
     // Planar into interleaved, in WAVE slot order.
