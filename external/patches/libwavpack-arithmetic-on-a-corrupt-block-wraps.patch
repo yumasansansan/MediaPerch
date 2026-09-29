@@ -1,0 +1,509 @@
+libwavpack: arithmetic on the samples of a corrupt block wraps rather than overflows
+
+A block decodes to whatever its bits say, and a corrupt one hands the decorrelation samples, weights and corrections of any size, whose sums, differences and products then overflow int32_t, which C leaves undefined. The code was written for the wrap that two's complement arithmetic gives -- the CRC and the mute limit catch what comes out -- and upstream's fuzzing build turns the check for it off (fuzzing/build.sh), but a compiler may assume the overflow never happens. MediaPerch's WavPack fuzzers, built for Linux with UndefinedBehaviorSanitizer, found it in one night at two places, the term-18 prediction of decorr_mono_pass and the joint stereo of unpack_samples, and a build of the decoder without the assembly, run over the fuzzers' corpora and upstream's regression files, reached 40 operations on 22 lines: every term of decorr_mono_pass and all but term -1 of decorr_stereo_pass, apply_weight, the joint stereo, and the negation of a float's magnitude in both loops of unpack_floats.c. wavpack_local.h now has wrap_add, wrap_sub, wrap_mul and wrap_neg, which compute in uint32_t and hand back the int32_t with the same bits; apply_weight_i, apply_weight_f and update_weight are written with them, and so are the sums of unpack_samples -- lossless, hybrid lossy and hybrid lossless with its cross decorrelation and its noise shaping --, of decorr_mono_pass and decorr_stereo_pass, and the two negations. fixup_samples makes the additions it made in int32_t in uint32_t, where it already made the shifts after them, and the mute limit is compared with llabs(), since labs() of the one sample -2^31 overflows where long has 32 bits, as on Windows. For a block that decodes correctly nothing overflows and every value is what it was, and for a corrupt one every value is what the processors made of it before: over 9,463 files -- 288 made by the wavpack program from twelve WAV files in twenty-four modes, 144 of them with a correction file, then the fuzzers' corpora and findings and upstream's regression files, which between them reach every line this changes -- the patched decoder gives the same samples as the original compiled with -fwrapv, and under UndefinedBehaviorSanitizer reports nothing where the original reported those 40, in the same time. The variants PERFCOND leaves out are unchanged. Against 5.9.0-56-gb0e6c05.
+
+diff --git a/src/unpack.c b/src/unpack.c
+index f0b55d0..557eb7a 100644
+--- a/src/unpack.c
++++ b/src/unpack.c
+@@ -143,7 +143,7 @@ int32_t unpack_samples (WavpackStream *wps, int32_t *buffer, uint32_t sample_cou
+         if (!(flags & HYBRID_FLAG))
+ #endif
+         for (bptr = buffer; bptr < eptr; ++bptr) {
+-            if (labs (bptr [0]) > mute_limit) {
++            if (llabs (bptr [0]) > mute_limit) {
+                 i = (uint32_t)(bptr - buffer);
+                 break;
+             }
+@@ -203,7 +203,8 @@ int32_t unpack_samples (WavpackStream *wps, int32_t *buffer, uint32_t sample_cou
+ 
+         if (flags & JOINT_STEREO)
+             for (bptr = buffer; bptr < eptr; bptr += 2) {
+-                bptr [0] += (bptr [1] -= (bptr [0] >> 1));
++                bptr [1] = wrap_sub (bptr [1], bptr [0] >> 1);
++                bptr [0] = wrap_add (bptr [0], bptr [1]);
+                 crc += (crc << 3) + ((uint32_t) bptr [0] << 1) + bptr [0] + bptr [1];
+             }
+         else
+@@ -214,7 +215,7 @@ int32_t unpack_samples (WavpackStream *wps, int32_t *buffer, uint32_t sample_cou
+         if (!(flags & HYBRID_FLAG))
+ #endif
+         for (bptr = buffer; bptr < eptr; bptr += 16)
+-            if (labs (bptr [0]) > mute_limit || labs (bptr [1]) > mute_limit) {
++            if (llabs (bptr [0]) > mute_limit || llabs (bptr [1]) > mute_limit) {
+                 i = (uint32_t)(bptr - buffer) / 2;
+                 break;
+             }
+@@ -234,9 +235,9 @@ int32_t unpack_samples (WavpackStream *wps, int32_t *buffer, uint32_t sample_cou
+ 
+                 if (dpp->term > MAX_TERM) {
+                     if (dpp->term & 1)
+-                        sam = 2 * dpp->samples_A [0] - dpp->samples_A [1];
++                        sam = wrap_sub (wrap_mul (2, dpp->samples_A [0]), dpp->samples_A [1]);
+                     else
+-                        sam = (3 * dpp->samples_A [0] - dpp->samples_A [1]) >> 1;
++                        sam = wrap_sub (wrap_mul (3, dpp->samples_A [0]), dpp->samples_A [1]) >> 1;
+ 
+                     dpp->samples_A [1] = dpp->samples_A [0];
+                     k = 0;
+@@ -246,7 +247,7 @@ int32_t unpack_samples (WavpackStream *wps, int32_t *buffer, uint32_t sample_cou
+                     k = (m + dpp->term) & (MAX_TERM - 1);
+                 }
+ 
+-                temp = apply_weight (dpp->weight_A, sam) + read_word;
++                temp = wrap_add (apply_weight (dpp->weight_A, sam), read_word);
+                 update_weight (dpp->weight_A, dpp->delta, sam, read_word);
+                 dpp->samples_A [k] = read_word = temp;
+             }
+@@ -254,26 +255,26 @@ int32_t unpack_samples (WavpackStream *wps, int32_t *buffer, uint32_t sample_cou
+             m = (m + 1) & (MAX_TERM - 1);
+ 
+             if (flags & HYBRID_SHAPE) {
+-                int shaping_weight = (wps->dc.shaping_acc [0] += wps->dc.shaping_delta [0]) >> 16;
++                int shaping_weight = (wps->dc.shaping_acc [0] = wrap_add (wps->dc.shaping_acc [0], wps->dc.shaping_delta [0])) >> 16;
+                 int32_t temp = -apply_weight (shaping_weight, wps->dc.error [0]);
+ 
+                 if ((flags & NEW_SHAPING) && shaping_weight < 0 && temp) {
+                     if (temp == wps->dc.error [0])
+                         temp = (temp < 0) ? temp + 1 : temp - 1;
+ 
+-                    wps->dc.error [0] = temp - correction [0];
++                    wps->dc.error [0] = wrap_sub (temp, correction [0]);
+                 }
+                 else
+-                    wps->dc.error [0] = -correction [0];
++                    wps->dc.error [0] = wrap_neg (correction [0]);
+ 
+-                read_word += correction [0] - temp;
++                read_word = wrap_add (read_word, wrap_sub (correction [0], temp));
+             }
+             else
+-                read_word += correction [0];
++                read_word = wrap_add (read_word, correction [0]);
+ 
+             crc += (crc << 1) + read_word;
+ 
+-            if (labs (read_word) > mute_limit)
++            if (llabs (read_word) > mute_limit)
+                 break;
+ 
+             *bptr++ = read_word;
+@@ -291,8 +292,8 @@ int32_t unpack_samples (WavpackStream *wps, int32_t *buffer, uint32_t sample_cou
+                     break;
+ 
+             if (flags & CROSS_DECORR) {
+-                left_c = left + correction [0];
+-                right_c = right + correction [1];
++                left_c = wrap_add (left, correction [0]);
++                right_c = wrap_add (right, correction [1]);
+ 
+                 for (tcount = wps->num_terms, dpp = wps->decorr_passes; tcount--; dpp++) {
+                     int32_t sam_A, sam_B;
+@@ -300,12 +301,12 @@ int32_t unpack_samples (WavpackStream *wps, int32_t *buffer, uint32_t sample_cou
+                     if (dpp->term > 0) {
+                         if (dpp->term > MAX_TERM) {
+                             if (dpp->term & 1) {
+-                                sam_A = 2 * dpp->samples_A [0] - dpp->samples_A [1];
+-                                sam_B = 2 * dpp->samples_B [0] - dpp->samples_B [1];
++                                sam_A = wrap_sub (wrap_mul (2, dpp->samples_A [0]), dpp->samples_A [1]);
++                                sam_B = wrap_sub (wrap_mul (2, dpp->samples_B [0]), dpp->samples_B [1]);
+                             }
+                             else {
+-                                sam_A = (3 * dpp->samples_A [0] - dpp->samples_A [1]) >> 1;
+-                                sam_B = (3 * dpp->samples_B [0] - dpp->samples_B [1]) >> 1;
++                                sam_A = wrap_sub (wrap_mul (3, dpp->samples_A [0]), dpp->samples_A [1]) >> 1;
++                                sam_B = wrap_sub (wrap_mul (3, dpp->samples_B [0]), dpp->samples_B [1]) >> 1;
+                             }
+                         }
+                         else {
+@@ -313,25 +314,27 @@ int32_t unpack_samples (WavpackStream *wps, int32_t *buffer, uint32_t sample_cou
+                             sam_B = dpp->samples_B [m];
+                         }
+ 
+-                        left_c += apply_weight (dpp->weight_A, sam_A);
+-                        right_c += apply_weight (dpp->weight_B, sam_B);
++                        left_c = wrap_add (left_c, apply_weight (dpp->weight_A, sam_A));
++                        right_c = wrap_add (right_c, apply_weight (dpp->weight_B, sam_B));
+                     }
+                     else if (dpp->term == -1) {
+-                        left_c += apply_weight (dpp->weight_A, dpp->samples_A [0]);
+-                        right_c += apply_weight (dpp->weight_B, left_c);
++                        left_c = wrap_add (left_c, apply_weight (dpp->weight_A, dpp->samples_A [0]));
++                        right_c = wrap_add (right_c, apply_weight (dpp->weight_B, left_c));
+                     }
+                     else {
+-                        right_c += apply_weight (dpp->weight_B, dpp->samples_B [0]);
++                        right_c = wrap_add (right_c, apply_weight (dpp->weight_B, dpp->samples_B [0]));
+ 
+                         if (dpp->term == -3)
+-                            left_c += apply_weight (dpp->weight_A, dpp->samples_A [0]);
++                            left_c = wrap_add (left_c, apply_weight (dpp->weight_A, dpp->samples_A [0]));
+                         else
+-                            left_c += apply_weight (dpp->weight_A, right_c);
++                            left_c = wrap_add (left_c, apply_weight (dpp->weight_A, right_c));
+                     }
+                 }
+ 
+-                if (flags & JOINT_STEREO)
+-                    left_c += (right_c -= (left_c >> 1));
++                if (flags & JOINT_STEREO) {
++                    right_c = wrap_sub (right_c, left_c >> 1);
++                    left_c = wrap_add (left_c, right_c);
++                }
+             }
+ 
+             for (tcount = wps->num_terms, dpp = wps->decorr_passes; tcount--; dpp++) {
+@@ -342,12 +345,12 @@ int32_t unpack_samples (WavpackStream *wps, int32_t *buffer, uint32_t sample_cou
+ 
+                     if (dpp->term > MAX_TERM) {
+                         if (dpp->term & 1) {
+-                            sam_A = 2 * dpp->samples_A [0] - dpp->samples_A [1];
+-                            sam_B = 2 * dpp->samples_B [0] - dpp->samples_B [1];
++                            sam_A = wrap_sub (wrap_mul (2, dpp->samples_A [0]), dpp->samples_A [1]);
++                            sam_B = wrap_sub (wrap_mul (2, dpp->samples_B [0]), dpp->samples_B [1]);
+                         }
+                         else {
+-                            sam_A = (3 * dpp->samples_A [0] - dpp->samples_A [1]) >> 1;
+-                            sam_B = (3 * dpp->samples_B [0] - dpp->samples_B [1]) >> 1;
++                            sam_A = wrap_sub (wrap_mul (3, dpp->samples_A [0]), dpp->samples_A [1]) >> 1;
++                            sam_B = wrap_sub (wrap_mul (3, dpp->samples_B [0]), dpp->samples_B [1]) >> 1;
+                         }
+ 
+                         dpp->samples_A [1] = dpp->samples_A [0];
+@@ -360,8 +363,8 @@ int32_t unpack_samples (WavpackStream *wps, int32_t *buffer, uint32_t sample_cou
+                         k = (m + dpp->term) & (MAX_TERM - 1);
+                     }
+ 
+-                    left2 = apply_weight (dpp->weight_A, sam_A) + left;
+-                    right2 = apply_weight (dpp->weight_B, sam_B) + right;
++                    left2 = wrap_add (apply_weight (dpp->weight_A, sam_A), left);
++                    right2 = wrap_add (apply_weight (dpp->weight_B, sam_B), right);
+ 
+                     update_weight (dpp->weight_A, dpp->delta, sam_A, left);
+                     update_weight (dpp->weight_B, dpp->delta, sam_B, right);
+@@ -370,15 +373,15 @@ int32_t unpack_samples (WavpackStream *wps, int32_t *buffer, uint32_t sample_cou
+                     dpp->samples_B [k] = right = right2;
+                 }
+                 else if (dpp->term == -1) {
+-                    left2 = left + apply_weight (dpp->weight_A, dpp->samples_A [0]);
++                    left2 = wrap_add (left, apply_weight (dpp->weight_A, dpp->samples_A [0]));
+                     update_weight_clip (dpp->weight_A, dpp->delta, dpp->samples_A [0], left);
+                     left = left2;
+-                    right2 = right + apply_weight (dpp->weight_B, left2);
++                    right2 = wrap_add (right, apply_weight (dpp->weight_B, left2));
+                     update_weight_clip (dpp->weight_B, dpp->delta, left2, right);
+                     dpp->samples_A [0] = right = right2;
+                 }
+                 else {
+-                    right2 = right + apply_weight (dpp->weight_B, dpp->samples_B [0]);
++                    right2 = wrap_add (right, apply_weight (dpp->weight_B, dpp->samples_B [0]));
+                     update_weight_clip (dpp->weight_B, dpp->delta, dpp->samples_B [0], right);
+                     right = right2;
+ 
+@@ -387,7 +390,7 @@ int32_t unpack_samples (WavpackStream *wps, int32_t *buffer, uint32_t sample_cou
+                         dpp->samples_A [0] = right;
+                     }
+ 
+-                    left2 = left + apply_weight (dpp->weight_A, right2);
++                    left2 = wrap_add (left, apply_weight (dpp->weight_A, right2));
+                     update_weight_clip (dpp->weight_A, dpp->delta, right2, left);
+                     dpp->samples_B [0] = left = left2;
+                 }
+@@ -396,55 +399,59 @@ int32_t unpack_samples (WavpackStream *wps, int32_t *buffer, uint32_t sample_cou
+             m = (m + 1) & (MAX_TERM - 1);
+ 
+             if (!(flags & CROSS_DECORR)) {
+-                left_c = left + correction [0];
+-                right_c = right + correction [1];
++                left_c = wrap_add (left, correction [0]);
++                right_c = wrap_add (right, correction [1]);
+ 
+-                if (flags & JOINT_STEREO)
+-                    left_c += (right_c -= (left_c >> 1));
++                if (flags & JOINT_STEREO) {
++                    right_c = wrap_sub (right_c, left_c >> 1);
++                    left_c = wrap_add (left_c, right_c);
++                }
+             }
+ 
+-            if (flags & JOINT_STEREO)
+-                left += (right -= (left >> 1));
++            if (flags & JOINT_STEREO) {
++                right = wrap_sub (right, left >> 1);
++                left = wrap_add (left, right);
++            }
+ 
+             if (flags & HYBRID_SHAPE) {
+                 int shaping_weight;
+                 int32_t temp;
+ 
+-                correction [0] = left_c - left;
+-                shaping_weight = (wps->dc.shaping_acc [0] += wps->dc.shaping_delta [0]) >> 16;
++                correction [0] = wrap_sub (left_c, left);
++                shaping_weight = (wps->dc.shaping_acc [0] = wrap_add (wps->dc.shaping_acc [0], wps->dc.shaping_delta [0])) >> 16;
+                 temp = -apply_weight (shaping_weight, wps->dc.error [0]);
+ 
+                 if ((flags & NEW_SHAPING) && shaping_weight < 0 && temp) {
+                     if (temp == wps->dc.error [0])
+                         temp = (temp < 0) ? temp + 1 : temp - 1;
+ 
+-                    wps->dc.error [0] = temp - correction [0];
++                    wps->dc.error [0] = wrap_sub (temp, correction [0]);
+                 }
+                 else
+-                    wps->dc.error [0] = -correction [0];
++                    wps->dc.error [0] = wrap_neg (correction [0]);
+ 
+-                left = left_c - temp;
+-                correction [1] = right_c - right;
+-                shaping_weight = (wps->dc.shaping_acc [1] += wps->dc.shaping_delta [1]) >> 16;
++                left = wrap_sub (left_c, temp);
++                correction [1] = wrap_sub (right_c, right);
++                shaping_weight = (wps->dc.shaping_acc [1] = wrap_add (wps->dc.shaping_acc [1], wps->dc.shaping_delta [1])) >> 16;
+                 temp = -apply_weight (shaping_weight, wps->dc.error [1]);
+ 
+                 if ((flags & NEW_SHAPING) && shaping_weight < 0 && temp) {
+                     if (temp == wps->dc.error [1])
+                         temp = (temp < 0) ? temp + 1 : temp - 1;
+ 
+-                    wps->dc.error [1] = temp - correction [1];
++                    wps->dc.error [1] = wrap_sub (temp, correction [1]);
+                 }
+                 else
+-                    wps->dc.error [1] = -correction [1];
++                    wps->dc.error [1] = wrap_neg (correction [1]);
+ 
+-                right = right_c - temp;
++                right = wrap_sub (right_c, temp);
+             }
+             else {
+                 left = left_c;
+                 right = right_c;
+             }
+ 
+-            if (labs (left) > mute_limit || labs (right) > mute_limit)
++            if (llabs (left) > mute_limit || llabs (right) > mute_limit)
+                 break;
+ 
+             crc += (crc << 3) + ((uint32_t) left << 1) + left + right;
+@@ -530,9 +537,9 @@ static void decorr_mono_pass (struct decorr_pass *dpp, int32_t *buffer, int32_t
+ 
+         case 17:
+             for (bptr = buffer; bptr < eptr; bptr++) {
+-                sam_A = 2 * dpp->samples_A [0] - dpp->samples_A [1];
++                sam_A = wrap_sub (wrap_mul (2, dpp->samples_A [0]), dpp->samples_A [1]);
+                 dpp->samples_A [1] = dpp->samples_A [0];
+-                dpp->samples_A [0] = apply_weight (weight_A, sam_A) + bptr [0];
++                dpp->samples_A [0] = wrap_add (apply_weight (weight_A, sam_A), bptr [0]);
+                 update_weight (weight_A, delta, sam_A, bptr [0]);
+                 bptr [0] = dpp->samples_A [0];
+             }
+@@ -541,9 +548,9 @@ static void decorr_mono_pass (struct decorr_pass *dpp, int32_t *buffer, int32_t
+ 
+         case 18:
+             for (bptr = buffer; bptr < eptr; bptr++) {
+-                sam_A = (3 * dpp->samples_A [0] - dpp->samples_A [1]) >> 1;
++                sam_A = wrap_sub (wrap_mul (3, dpp->samples_A [0]), dpp->samples_A [1]) >> 1;
+                 dpp->samples_A [1] = dpp->samples_A [0];
+-                dpp->samples_A [0] = apply_weight (weight_A, sam_A) + bptr [0];
++                dpp->samples_A [0] = wrap_add (apply_weight (weight_A, sam_A), bptr [0]);
+                 update_weight (weight_A, delta, sam_A, bptr [0]);
+                 bptr [0] = dpp->samples_A [0];
+             }
+@@ -553,7 +560,7 @@ static void decorr_mono_pass (struct decorr_pass *dpp, int32_t *buffer, int32_t
+         default:
+             for (m = 0, k = dpp->term & (MAX_TERM - 1), bptr = buffer; bptr < eptr; bptr++) {
+                 sam_A = dpp->samples_A [m];
+-                dpp->samples_A [k] = apply_weight (weight_A, sam_A) + bptr [0];
++                dpp->samples_A [k] = wrap_add (apply_weight (weight_A, sam_A), bptr [0]);
+                 update_weight (weight_A, delta, sam_A, bptr [0]);
+                 bptr [0] = dpp->samples_A [k];
+                 m = (m + 1) & (MAX_TERM - 1);
+@@ -592,14 +599,14 @@ static void decorr_stereo_pass (struct decorr_pass *dpp, int32_t *buffer, int32_
+             for (bptr = buffer; bptr < eptr; bptr += 2) {
+                 int32_t sam, tmp;
+ 
+-                sam = 2 * dpp->samples_A [0] - dpp->samples_A [1];
++                sam = wrap_sub (wrap_mul (2, dpp->samples_A [0]), dpp->samples_A [1]);
+                 dpp->samples_A [1] = dpp->samples_A [0];
+-                bptr [0] = dpp->samples_A [0] = apply_weight (dpp->weight_A, sam) + (tmp = bptr [0]);
++                bptr [0] = dpp->samples_A [0] = wrap_add (apply_weight (dpp->weight_A, sam), (tmp = bptr [0]));
+                 update_weight (dpp->weight_A, dpp->delta, sam, tmp);
+ 
+-                sam = 2 * dpp->samples_B [0] - dpp->samples_B [1];
++                sam = wrap_sub (wrap_mul (2, dpp->samples_B [0]), dpp->samples_B [1]);
+                 dpp->samples_B [1] = dpp->samples_B [0];
+-                bptr [1] = dpp->samples_B [0] = apply_weight (dpp->weight_B, sam) + (tmp = bptr [1]);
++                bptr [1] = dpp->samples_B [0] = wrap_add (apply_weight (dpp->weight_B, sam), (tmp = bptr [1]));
+                 update_weight (dpp->weight_B, dpp->delta, sam, tmp);
+             }
+ 
+@@ -609,14 +616,14 @@ static void decorr_stereo_pass (struct decorr_pass *dpp, int32_t *buffer, int32_
+             for (bptr = buffer; bptr < eptr; bptr += 2) {
+                 int32_t sam, tmp;
+ 
+-                sam = dpp->samples_A [0] + ((dpp->samples_A [0] - dpp->samples_A [1]) >> 1);
++                sam = wrap_add (dpp->samples_A [0], wrap_sub (dpp->samples_A [0], dpp->samples_A [1]) >> 1);
+                 dpp->samples_A [1] = dpp->samples_A [0];
+-                bptr [0] = dpp->samples_A [0] = apply_weight (dpp->weight_A, sam) + (tmp = bptr [0]);
++                bptr [0] = dpp->samples_A [0] = wrap_add (apply_weight (dpp->weight_A, sam), (tmp = bptr [0]));
+                 update_weight (dpp->weight_A, dpp->delta, sam, tmp);
+ 
+-                sam = dpp->samples_B [0] + ((dpp->samples_B [0] - dpp->samples_B [1]) >> 1);
++                sam = wrap_add (dpp->samples_B [0], wrap_sub (dpp->samples_B [0], dpp->samples_B [1]) >> 1);
+                 dpp->samples_B [1] = dpp->samples_B [0];
+-                bptr [1] = dpp->samples_B [0] = apply_weight (dpp->weight_B, sam) + (tmp = bptr [1]);
++                bptr [1] = dpp->samples_B [0] = wrap_add (apply_weight (dpp->weight_B, sam), (tmp = bptr [1]));
+                 update_weight (dpp->weight_B, dpp->delta, sam, tmp);
+             }
+ 
+@@ -627,12 +634,12 @@ static void decorr_stereo_pass (struct decorr_pass *dpp, int32_t *buffer, int32_
+                 int32_t sam;
+ 
+                 sam = dpp->samples_A [m];
+-                dpp->samples_A [k] = apply_weight (dpp->weight_A, sam) + bptr [0];
++                dpp->samples_A [k] = wrap_add (apply_weight (dpp->weight_A, sam), bptr [0]);
+                 update_weight (dpp->weight_A, dpp->delta, sam, bptr [0]);
+                 bptr [0] = dpp->samples_A [k];
+ 
+                 sam = dpp->samples_B [m];
+-                dpp->samples_B [k] = apply_weight (dpp->weight_B, sam) + bptr [1];
++                dpp->samples_B [k] = wrap_add (apply_weight (dpp->weight_B, sam), bptr [1]);
+                 update_weight (dpp->weight_B, dpp->delta, sam, bptr [1]);
+                 bptr [1] = dpp->samples_B [k];
+ 
+@@ -646,10 +653,10 @@ static void decorr_stereo_pass (struct decorr_pass *dpp, int32_t *buffer, int32_
+             for (bptr = buffer; bptr < eptr; bptr += 2) {
+                 int32_t sam;
+ 
+-                sam = bptr [0] + apply_weight (dpp->weight_A, dpp->samples_A [0]);
++                sam = wrap_add (bptr [0], apply_weight (dpp->weight_A, dpp->samples_A [0]));
+                 update_weight_clip (dpp->weight_A, dpp->delta, dpp->samples_A [0], bptr [0]);
+                 bptr [0] = sam;
+-                dpp->samples_A [0] = bptr [1] + apply_weight (dpp->weight_B, sam);
++                dpp->samples_A [0] = wrap_add (bptr [1], apply_weight (dpp->weight_B, sam));
+                 update_weight_clip (dpp->weight_B, dpp->delta, sam, bptr [1]);
+                 bptr [1] = dpp->samples_A [0];
+             }
+@@ -660,10 +667,10 @@ static void decorr_stereo_pass (struct decorr_pass *dpp, int32_t *buffer, int32_
+             for (bptr = buffer; bptr < eptr; bptr += 2) {
+                 int32_t sam;
+ 
+-                sam = bptr [1] + apply_weight (dpp->weight_B, dpp->samples_B [0]);
++                sam = wrap_add (bptr [1], apply_weight (dpp->weight_B, dpp->samples_B [0]));
+                 update_weight_clip (dpp->weight_B, dpp->delta, dpp->samples_B [0], bptr [1]);
+                 bptr [1] = sam;
+-                dpp->samples_B [0] = bptr [0] + apply_weight (dpp->weight_A, sam);
++                dpp->samples_B [0] = wrap_add (bptr [0], apply_weight (dpp->weight_A, sam));
+                 update_weight_clip (dpp->weight_A, dpp->delta, sam, bptr [0]);
+                 bptr [0] = dpp->samples_B [0];
+             }
+@@ -674,9 +681,9 @@ static void decorr_stereo_pass (struct decorr_pass *dpp, int32_t *buffer, int32_
+             for (bptr = buffer; bptr < eptr; bptr += 2) {
+                 int32_t sam_A, sam_B;
+ 
+-                sam_A = bptr [0] + apply_weight (dpp->weight_A, dpp->samples_A [0]);
++                sam_A = wrap_add (bptr [0], apply_weight (dpp->weight_A, dpp->samples_A [0]));
+                 update_weight_clip (dpp->weight_A, dpp->delta, dpp->samples_A [0], bptr [0]);
+-                sam_B = bptr [1] + apply_weight (dpp->weight_B, dpp->samples_B [0]);
++                sam_B = wrap_add (bptr [1], apply_weight (dpp->weight_B, dpp->samples_B [0]));
+                 update_weight_clip (dpp->weight_B, dpp->delta, dpp->samples_B [0], bptr [1]);
+                 bptr [0] = dpp->samples_B [0] = sam_A;
+                 bptr [1] = dpp->samples_A [0] = sam_B;
+@@ -740,9 +747,9 @@ static void fixup_samples (WavpackStream *wps, int32_t *buffer, uint32_t sample_
+                 if (zeros)
+                     *(uint32_t*)dptr <<= zeros;
+                 else if (ones)
+-                    *dptr = ((uint32_t)(*dptr + 1) << ones) - 1;
++                    *dptr = (((uint32_t) *dptr + 1) << ones) - 1;
+                 else if (dups)
+-                    *dptr = ((uint32_t)(*dptr + (*dptr & 1)) << dups) - (*dptr & 1);
++                    *dptr = (((uint32_t) *dptr + (*dptr & 1)) << dups) - (*dptr & 1);
+ 
+                 crc = crc * 9 + (*dptr & 0xffff) * 3 + ((*dptr >> 16) & 0xffff);
+                 dptr++;
+@@ -768,9 +775,9 @@ static void fixup_samples (WavpackStream *wps, int32_t *buffer, uint32_t sample_
+                 if (zeros)
+                     *(uint32_t*)dptr <<= zeros;
+                 else if (ones)
+-                    *dptr = ((uint32_t)(*dptr + 1) << ones) - 1;
++                    *dptr = (((uint32_t) *dptr + 1) << ones) - 1;
+                 else if (dups)
+-                    *dptr = ((uint32_t)(*dptr + (*dptr & 1)) << dups) - (*dptr & 1);
++                    *dptr = (((uint32_t) *dptr + (*dptr & 1)) << dups) - (*dptr & 1);
+ 
+                 dptr++;
+             }
+diff --git a/src/unpack_floats.c b/src/unpack_floats.c
+index 8d6fcb7..a4aba21 100644
+--- a/src/unpack_floats.c
++++ b/src/unpack_floats.c
+@@ -56,7 +56,7 @@ void float_values (WavpackStream *wps, int32_t *values, int32_t num_values)
+             *(uint32_t*)values <<= (wps->float_shift & 0x1f);
+ 
+             if (*values < 0) {
+-                *values = -*values;
++                *values = wrap_neg (*values);
+                 set_sign (outval, 1);
+             }
+ 
+@@ -118,7 +118,7 @@ static void float_values_nowvx (WavpackStream *wps, int32_t *values, int32_t num
+             *(uint32_t*)values <<= (wps->float_shift & 0x1f);
+ 
+             if (*values < 0) {
+-                *values = -*values;
++                *values = wrap_neg (*values);
+                 set_sign (outval, 1);
+             }
+ 
+diff --git a/src/wavpack_local.h b/src/wavpack_local.h
+index 6ea2297..1f68c45 100644
+--- a/src/wavpack_local.h
++++ b/src/wavpack_local.h
+@@ -433,6 +433,19 @@ struct WavpackContext {
+ 
+ // #define SKIP_DECORRELATION   // experimental switch to disable all decorrelation on encode
+ 
++// A decoder takes whatever a block holds, and a corrupt block makes the sums,
++// differences and products of its samples as large as it likes. In int32_t
++// they would overflow, which C leaves undefined; these make them in uint32_t,
++// which wraps, and hand back the int32_t with the same bits -- what two's
++// complement arithmetic gives, which is what the code was written for. For a
++// block that decodes correctly nothing overflows, and each is exactly the
++// operator it stands for.
++
++static __inline int32_t wrap_add (int32_t a, int32_t b) { return (int32_t) ((uint32_t) a + (uint32_t) b); }
++static __inline int32_t wrap_sub (int32_t a, int32_t b) { return (int32_t) ((uint32_t) a - (uint32_t) b); }
++static __inline int32_t wrap_mul (int32_t a, int32_t b) { return (int32_t) ((uint32_t) a * (uint32_t) b); }
++static __inline int32_t wrap_neg (int32_t a) { return (int32_t) (0U - (uint32_t) a); }
++
+ // These macros implement the weight application and update operations
+ // that are at the heart of the decorrelation loops. Note that there are
+ // sometimes two and even three versions of each macro. These should be
+@@ -440,14 +453,14 @@ struct WavpackContext {
+ // or worse on a given architecture.
+ 
+ #if 1   // PERFCOND - apply decorrelation weight when no 32-bit overflow possible
+-#define apply_weight_i(weight, sample) ((weight * sample + 512) >> 10)
++#define apply_weight_i(weight, sample) (wrap_add (wrap_mul (weight, sample), 512) >> 10)
+ #else
+ #define apply_weight_i(weight, sample) ((((weight * sample) >> 8) + 2) >> 2)
+ #endif
+ 
+ #if 1   // PERFCOND - apply decorrelation weight when 32-bit overflow is possible
+-#define apply_weight_f(weight, sample) (((((sample & 0xffff) * weight) >> 9) + \
+-    (((sample & ~0xffff) >> 9) * weight) + 1) >> 1)
++#define apply_weight_f(weight, sample) (wrap_add (wrap_add (wrap_mul ((sample) & 0xffff, weight) >> 9, \
++    wrap_mul (((sample) & ~0xffff) >> 9, weight)), 1) >> 1)
+ #elif 1
+ #define apply_weight_f(weight, sample) ((int32_t)((weight * (int64_t) sample + 512) >> 10))
+ #else
+@@ -463,7 +476,7 @@ struct WavpackContext {
+ 
+ #if 1   // PERFCOND
+ #define update_weight(weight, delta, source, result) \
+-    if (source && result) { int32_t s = (int32_t) (source ^ result) >> 31; weight = (delta ^ s) + (weight - s); }
++    if (source && result) { int32_t s = (int32_t) (source ^ result) >> 31; weight = wrap_add (delta ^ s, wrap_sub (weight, s)); }
+ #elif 1
+ #define update_weight(weight, delta, source, result) \
+     if (source && result) weight += (((source ^ result) >> 30) | 1) * delta;

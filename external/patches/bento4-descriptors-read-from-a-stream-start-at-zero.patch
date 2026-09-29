@@ -1,0 +1,45 @@
+Bento4: the ES, object and initial object descriptors read from a stream start their fields at zero
+
+The constructors of AP4_EsDescriptor and AP4_ObjectDescriptor that read a stream initialise none of the descriptor's fields, and AP4_InitialObjectDescriptor's does not initialise its inline profile level flag, before they return as soon as the payload is too short for the next field: a descriptor cut short kept the heap's ES_ID, flags, stream priority, dependency and OCR ES_ID, or its object descriptor ID and URL flag, or that flag, where the other constructors start every one of them. They start at zero, false for the flags, as the other constructors start them. Against v1.6.0-641-119-gb8c50a0.
+
+diff --git a/Source/C++/Core/Ap4EsDescriptor.cpp b/Source/C++/Core/Ap4EsDescriptor.cpp
+index 50beed1..228d47e 100644
+--- a/Source/C++/Core/Ap4EsDescriptor.cpp
++++ b/Source/C++/Core/Ap4EsDescriptor.cpp
+@@ -61,7 +61,12 @@ AP4_EsDescriptor::AP4_EsDescriptor(AP4_UI16 es_id) :
+ AP4_EsDescriptor::AP4_EsDescriptor(AP4_ByteStream& stream, 
+                                    AP4_Size        header_size,
+                                    AP4_Size        payload_size) :
+-    AP4_Descriptor(AP4_DESCRIPTOR_TAG_ES, header_size, payload_size)
++    AP4_Descriptor(AP4_DESCRIPTOR_TAG_ES, header_size, payload_size),
++    m_EsId(0),
++    m_OcrEsId(0),
++    m_Flags(0),
++    m_StreamPriority(0),
++    m_DependsOn(0)
+ {
+     // read descriptor fields
+     if (payload_size < 3) return;
+diff --git a/Source/C++/Core/Ap4ObjectDescriptor.cpp b/Source/C++/Core/Ap4ObjectDescriptor.cpp
+index 989fbe4..dc23c39 100644
+--- a/Source/C++/Core/Ap4ObjectDescriptor.cpp
++++ b/Source/C++/Core/Ap4ObjectDescriptor.cpp
+@@ -69,7 +69,9 @@ AP4_ObjectDescriptor::AP4_ObjectDescriptor(AP4_ByteStream& stream,
+                                            AP4_UI08        tag,
+                                            AP4_Size        header_size,
+                                            AP4_Size        payload_size) :
+-    AP4_Descriptor(tag, header_size, payload_size)
++    AP4_Descriptor(tag, header_size, payload_size),
++    m_ObjectDescriptorId(0),
++    m_UrlFlag(false)
+ {
+     // read descriptor fields
+     unsigned short bits;
+@@ -219,6 +221,7 @@ AP4_InitialObjectDescriptor::AP4_InitialObjectDescriptor(AP4_ByteStream& stream,
+                                                          AP4_Size        header_size,
+                                                          AP4_Size        payload_size) :
+     AP4_ObjectDescriptor(tag, header_size, payload_size),
++    m_IncludeInlineProfileLevelFlag(false),
+     m_OdProfileLevelIndication(0),
+     m_SceneProfileLevelIndication(0),
+     m_AudioProfileLevelIndication(0),

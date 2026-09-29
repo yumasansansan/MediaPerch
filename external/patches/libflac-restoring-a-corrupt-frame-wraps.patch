@@ -1,0 +1,413 @@
+libFLAC: restoring a corrupt frame wraps rather than overflows, and nothing is exempt from the check for it
+
+The decoder chooses the 32-bit FLAC__fixed_restore_signal and FLAC__lpc_restore_signal when a subframe's bits per sample and coefficients say that the prediction fits in 32 bits, and the 33-bit versions by the same reasoning in 64; nothing holds the residual of a corrupt frame to that premise, so its samples leave the range, and the products and sums of the restore loops overflow, as do the sums and differences of undo_channel_coding. d52921bc exempted all five functions from UndefinedBehaviorSanitizer's signed-integer-overflow check in a fuzzing build unless FUZZING_BUILD_MODE_FLAC_SANITIZE_SIGNED_INTEGER_OVERFLOW is defined, on the ground that the values are audio only; but the overflow is undefined behaviour in every build whatever the values are for, and the exemption hid it from every fuzzer that builds libFLAC as OSS-Fuzz does -- MediaPerch's among them, which build it in that mode for its decoding of frames whose CRC fails and its failing allocations. With the exemption lifted, the corpora of MediaPerch's FLAC fuzzers reach 195 overflowing operations on 103 lines, in all five functions. They are made in unsigned arithmetic of the same width now, which wraps, and the result is the signed number with the same bits -- what two's complement arithmetic gives, and for a frame that decodes correctly exactly what it was: FLAC__fixed_restore_signal and undo_channel_coding cast their operands, as FLAC__fixed_restore_signal_wide casts its own, FLAC__lpc_restore_signal reads its coefficients through an unsigned view of them, so that none of its 109 unrolled products changes, and the 33-bit versions read theirs from an unsigned copy widened to 64 bits; every shift of a sum is made on the signed number, as before. The five exemptions go, so that the check applies in a fuzzing build as in any other. Over 11,900 files -- 218 written by libFLAC's own encoder at 8, 16, 24 and 32 bits, in one, two and six channels, at levels 0, 1, 2, 5 and 8 and with predictors of order 32, of music-like, full-scale and smooth signals, two of them with a 33-bit side channel that only fixed predictors of order 2 and 3 predict; the FLAC fuzzers' corpora and findings; and the codec fuzzer's inputs made into files, which between them reach every line of the five functions but the defaults no order reaches -- the patched library gives the same samples as the original compiled with -fwrapv, in the fuzzing mode and out of it, and under UndefinedBehaviorSanitizer reports nothing where the original reported those 195. It decodes in the time it took: two minutes of 24-bit 96 kHz stereo at level 8 in 183 to 189 ms before and after, and of 16-bit 44.1 kHz at level 5 in 94 to 96, on an i7-1360P at -O3. Against 1.5.0.
+
+diff --git a/src/libFLAC/fixed.c b/src/libFLAC/fixed.c
+index d7e7760..92468dd 100644
+--- a/src/libFLAC/fixed.c
++++ b/src/libFLAC/fixed.c
+@@ -560,14 +560,12 @@ void FLAC__fixed_compute_residual_wide_33bit(const FLAC__int64 data[], uint32_t
+ 	}
+ }
+ 
+-#if defined(FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION) && !defined(FUZZING_BUILD_MODE_FLAC_SANITIZE_SIGNED_INTEGER_OVERFLOW)
+-/* The attribute below is to silence the undefined sanitizer of oss-fuzz.
+- * Because fuzzing feeds bogus predictors and residual samples to the
+- * decoder, having overflows in this section is unavoidable. Also,
+- * because the calculated values are audio path only, there is no
+- * potential for security problems */
+-__attribute__((no_sanitize("signed-integer-overflow")))
+-#endif
++/* A corrupt subframe hands this samples outside the bits per sample the
++ * choice of the 32-bit version assumed, and the sums below then overflow 32
++ * bits. They are made in unsigned arithmetic of the same width, which wraps
++ * where signed arithmetic would be undefined, and the result is the signed
++ * number with the same bits: what two's complement arithmetic gives, and for a
++ * subframe that decodes correctly exactly what it was. */
+ void FLAC__fixed_restore_signal(const FLAC__int32 residual[], uint32_t data_len, uint32_t order, FLAC__int32 data[])
+ {
+ 	int i, idata_len = (int)data_len;
+@@ -579,19 +577,19 @@ void FLAC__fixed_restore_signal(const FLAC__int32 residual[], uint32_t data_len,
+ 			break;
+ 		case 1:
+ 			for(i = 0; i < idata_len; i++)
+-				data[i] = residual[i] + data[i-1];
++				data[i] = (FLAC__int32)((FLAC__uint32)residual[i] + (FLAC__uint32)data[i-1]);
+ 			break;
+ 		case 2:
+ 			for(i = 0; i < idata_len; i++)
+-				data[i] = residual[i] + 2*data[i-1] - data[i-2];
++				data[i] = (FLAC__int32)((FLAC__uint32)residual[i] + 2*(FLAC__uint32)data[i-1] - (FLAC__uint32)data[i-2]);
+ 			break;
+ 		case 3:
+ 			for(i = 0; i < idata_len; i++)
+-				data[i] = residual[i] + 3*data[i-1] - 3*data[i-2] + data[i-3];
++				data[i] = (FLAC__int32)((FLAC__uint32)residual[i] + 3*(FLAC__uint32)data[i-1] - 3*(FLAC__uint32)data[i-2] + (FLAC__uint32)data[i-3]);
+ 			break;
+ 		case 4:
+ 			for(i = 0; i < idata_len; i++)
+-				data[i] = residual[i] + 4*data[i-1] - 6*data[i-2] + 4*data[i-3] - data[i-4];
++				data[i] = (FLAC__int32)((FLAC__uint32)residual[i] + 4*(FLAC__uint32)data[i-1] - 6*(FLAC__uint32)data[i-2] + 4*(FLAC__uint32)data[i-3] - (FLAC__uint32)data[i-4]);
+ 			break;
+ 		default:
+ 			FLAC__ASSERT(0);
+@@ -628,14 +626,9 @@ void FLAC__fixed_restore_signal_wide(const FLAC__int32 residual[], uint32_t data
+ 	}
+ }
+ 
+-#if defined(FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION) && !defined(FUZZING_BUILD_MODE_FLAC_SANITIZE_SIGNED_INTEGER_OVERFLOW)
+-/* The attribute below is to silence the undefined sanitizer of oss-fuzz.
+- * Because fuzzing feeds bogus predictors and residual samples to the
+- * decoder, having overflows in this section is unavoidable. Also,
+- * because the calculated values are audio path only, there is no
+- * potential for security problems */
+-__attribute__((no_sanitize("signed-integer-overflow")))
+-#endif
++/* As in FLAC__fixed_restore_signal, the sums are made in unsigned arithmetic,
++ * here of 64 bits, which a corrupt subframe of 33 bits per sample overflows as
++ * well. */
+ void FLAC__fixed_restore_signal_wide_33bit(const FLAC__int32 residual[], uint32_t data_len, uint32_t order, FLAC__int64 data[])
+ {
+ 	int i, idata_len = (int)data_len;
+@@ -647,19 +640,19 @@ void FLAC__fixed_restore_signal_wide_33bit(const FLAC__int32 residual[], uint32_
+ 			break;
+ 		case 1:
+ 			for(i = 0; i < idata_len; i++)
+-				data[i] = (FLAC__int64)residual[i] + data[i-1];
++				data[i] = (FLAC__int64)((FLAC__uint64)residual[i] + (FLAC__uint64)data[i-1]);
+ 			break;
+ 		case 2:
+ 			for(i = 0; i < idata_len; i++)
+-				data[i] = (FLAC__int64)residual[i] + 2*data[i-1] - data[i-2];
++				data[i] = (FLAC__int64)((FLAC__uint64)residual[i] + 2*(FLAC__uint64)data[i-1] - (FLAC__uint64)data[i-2]);
+ 			break;
+ 		case 3:
+ 			for(i = 0; i < idata_len; i++)
+-				data[i] = (FLAC__int64)residual[i] + 3*data[i-1] - 3*data[i-2] + data[i-3];
++				data[i] = (FLAC__int64)((FLAC__uint64)residual[i] + 3*(FLAC__uint64)data[i-1] - 3*(FLAC__uint64)data[i-2] + (FLAC__uint64)data[i-3]);
+ 			break;
+ 		case 4:
+ 			for(i = 0; i < idata_len; i++)
+-				data[i] = (FLAC__int64)residual[i] + 4*data[i-1] - 6*data[i-2] + 4*data[i-3] - data[i-4];
++				data[i] = (FLAC__int64)((FLAC__uint64)residual[i] + 4*(FLAC__uint64)data[i-1] - 6*(FLAC__uint64)data[i-2] + 4*(FLAC__uint64)data[i-3] - (FLAC__uint64)data[i-4]);
+ 			break;
+ 		default:
+ 			FLAC__ASSERT(0);
+diff --git a/src/libFLAC/lpc.c b/src/libFLAC/lpc.c
+index 6825286..b6115db 100644
+--- a/src/libFLAC/lpc.c
++++ b/src/libFLAC/lpc.c
+@@ -967,26 +967,25 @@ uint32_t FLAC__lpc_max_residual_bps(uint32_t subframe_bps, const FLAC__int32 * f
+ 	return FLAC__bitmath_silog2(max_residual_value);
+ }
+ 
+-#if defined(FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION) && !defined(FUZZING_BUILD_MODE_FLAC_SANITIZE_SIGNED_INTEGER_OVERFLOW)
+-/* The attribute below is to silence the undefined sanitizer of oss-fuzz.
+- * Because fuzzing feeds bogus predictors and residual samples to the
+- * decoder, having overflows in this section is unavoidable. Also,
+- * because the calculated values are audio path only, there is no
+- * potential for security problems */
+-__attribute__((no_sanitize("signed-integer-overflow")))
+-#endif
+-void FLAC__lpc_restore_signal(const FLAC__int32 * flac_restrict residual, uint32_t data_len, const FLAC__int32 * flac_restrict qlp_coeff, uint32_t order, int lp_quantization, FLAC__int32 * flac_restrict data)
++/* A corrupt subframe hands this samples outside the bits per sample the
++ * choice of the 32-bit version assumed, and the products and sums below then
++ * overflow 32 bits. They are made in unsigned arithmetic of the same width,
++ * which wraps where signed arithmetic would be undefined, and the result is
++ * the signed number with the same bits: what two's complement arithmetic
++ * gives, and for a subframe that decodes correctly exactly what it was. */
++void FLAC__lpc_restore_signal(const FLAC__int32 * flac_restrict residual, uint32_t data_len, const FLAC__int32 * flac_restrict signed_qlp_coeff, uint32_t order, int lp_quantization, FLAC__int32 * flac_restrict data)
+ #if defined(FLAC__OVERFLOW_DETECT) || !defined(FLAC__LPC_UNROLLED_FILTER_LOOPS)
+ {
++	const FLAC__uint32 * flac_restrict qlp_coeff = (const FLAC__uint32 *)signed_qlp_coeff;
+ 	FLAC__int64 sumo;
+ 	uint32_t i, j;
+-	FLAC__int32 sum;
++	FLAC__uint32 sum;
+ 	const FLAC__int32 *r = residual, *history;
+ 
+ #ifdef FLAC__OVERFLOW_DETECT_VERBOSE
+ 	flac_fprintf(stderr,"FLAC__lpc_restore_signal: data_len=%d, order=%u, lpq=%d",data_len,order,lp_quantization);
+ 	for(i=0;i<order;i++)
+-		flac_fprintf(stderr,", q[%u]=%d",i,qlp_coeff[i]);
++		flac_fprintf(stderr,", q[%u]=%d",i,signed_qlp_coeff[i]);
+ 	flac_fprintf(stderr,"\n");
+ #endif
+ 	FLAC__ASSERT(order > 0);
+@@ -997,13 +996,13 @@ void FLAC__lpc_restore_signal(const FLAC__int32 * flac_restrict residual, uint32
+ 		history = data;
+ 		for(j = 0; j < order; j++) {
+ 			sum += qlp_coeff[j] * (*(--history));
+-			sumo += (FLAC__int64)qlp_coeff[j] * (FLAC__int64)(*history);
++			sumo += (FLAC__int64)signed_qlp_coeff[j] * (FLAC__int64)(*history);
+ #ifdef FLAC__OVERFLOW_DETECT
+ 			if(sumo > 2147483647ll || sumo < -2147483648ll)
+-				flac_fprintf(stderr,"FLAC__lpc_restore_signal: OVERFLOW, i=%u, j=%u, c=%d, d=%d, sumo=%" PRId64 "\n",i,j,qlp_coeff[j],*history,sumo);
++				flac_fprintf(stderr,"FLAC__lpc_restore_signal: OVERFLOW, i=%u, j=%u, c=%d, d=%d, sumo=%" PRId64 "\n",i,j,signed_qlp_coeff[j],*history,sumo);
+ #endif
+ 		}
+-		*(data++) = *(r++) + (sum >> lp_quantization);
++		*(data++) = (FLAC__int32)((FLAC__uint32)*(r++) + ((FLAC__int32)sum >> lp_quantization));
+ 	}
+ 
+ 	/* Here's a slower but clearer version:
+@@ -1017,8 +1016,9 @@ void FLAC__lpc_restore_signal(const FLAC__int32 * flac_restrict residual, uint32
+ }
+ #else /* fully unrolled version for normal use */
+ {
++	const FLAC__uint32 * flac_restrict qlp_coeff = (const FLAC__uint32 *)signed_qlp_coeff;
+ 	int i;
+-	FLAC__int32 sum;
++	FLAC__uint32 sum;
+ 
+ 	FLAC__ASSERT(order > 0);
+ 	FLAC__ASSERT(order <= 32);
+@@ -1046,7 +1046,7 @@ void FLAC__lpc_restore_signal(const FLAC__int32 * flac_restrict residual, uint32
+ 						sum += qlp_coeff[2] * data[i-3];
+ 						sum += qlp_coeff[1] * data[i-2];
+ 						sum += qlp_coeff[0] * data[i-1];
+-						data[i] = residual[i] + (sum >> lp_quantization);
++						data[i] = (FLAC__int32)((FLAC__uint32)residual[i] + ((FLAC__int32)sum >> lp_quantization));
+ 					}
+ 				}
+ 				else { /* order == 11 */
+@@ -1063,7 +1063,7 @@ void FLAC__lpc_restore_signal(const FLAC__int32 * flac_restrict residual, uint32
+ 						sum += qlp_coeff[2] * data[i-3];
+ 						sum += qlp_coeff[1] * data[i-2];
+ 						sum += qlp_coeff[0] * data[i-1];
+-						data[i] = residual[i] + (sum >> lp_quantization);
++						data[i] = (FLAC__int32)((FLAC__uint32)residual[i] + ((FLAC__int32)sum >> lp_quantization));
+ 					}
+ 				}
+ 			}
+@@ -1081,7 +1081,7 @@ void FLAC__lpc_restore_signal(const FLAC__int32 * flac_restrict residual, uint32
+ 						sum += qlp_coeff[2] * data[i-3];
+ 						sum += qlp_coeff[1] * data[i-2];
+ 						sum += qlp_coeff[0] * data[i-1];
+-						data[i] = residual[i] + (sum >> lp_quantization);
++						data[i] = (FLAC__int32)((FLAC__uint32)residual[i] + ((FLAC__int32)sum >> lp_quantization));
+ 					}
+ 				}
+ 				else { /* order == 9 */
+@@ -1096,7 +1096,7 @@ void FLAC__lpc_restore_signal(const FLAC__int32 * flac_restrict residual, uint32
+ 						sum += qlp_coeff[2] * data[i-3];
+ 						sum += qlp_coeff[1] * data[i-2];
+ 						sum += qlp_coeff[0] * data[i-1];
+-						data[i] = residual[i] + (sum >> lp_quantization);
++						data[i] = (FLAC__int32)((FLAC__uint32)residual[i] + ((FLAC__int32)sum >> lp_quantization));
+ 					}
+ 				}
+ 			}
+@@ -1114,7 +1114,7 @@ void FLAC__lpc_restore_signal(const FLAC__int32 * flac_restrict residual, uint32
+ 						sum += qlp_coeff[2] * data[i-3];
+ 						sum += qlp_coeff[1] * data[i-2];
+ 						sum += qlp_coeff[0] * data[i-1];
+-						data[i] = residual[i] + (sum >> lp_quantization);
++						data[i] = (FLAC__int32)((FLAC__uint32)residual[i] + ((FLAC__int32)sum >> lp_quantization));
+ 					}
+ 				}
+ 				else { /* order == 7 */
+@@ -1127,7 +1127,7 @@ void FLAC__lpc_restore_signal(const FLAC__int32 * flac_restrict residual, uint32
+ 						sum += qlp_coeff[2] * data[i-3];
+ 						sum += qlp_coeff[1] * data[i-2];
+ 						sum += qlp_coeff[0] * data[i-1];
+-						data[i] = residual[i] + (sum >> lp_quantization);
++						data[i] = (FLAC__int32)((FLAC__uint32)residual[i] + ((FLAC__int32)sum >> lp_quantization));
+ 					}
+ 				}
+ 			}
+@@ -1141,7 +1141,7 @@ void FLAC__lpc_restore_signal(const FLAC__int32 * flac_restrict residual, uint32
+ 						sum += qlp_coeff[2] * data[i-3];
+ 						sum += qlp_coeff[1] * data[i-2];
+ 						sum += qlp_coeff[0] * data[i-1];
+-						data[i] = residual[i] + (sum >> lp_quantization);
++						data[i] = (FLAC__int32)((FLAC__uint32)residual[i] + ((FLAC__int32)sum >> lp_quantization));
+ 					}
+ 				}
+ 				else { /* order == 5 */
+@@ -1152,7 +1152,7 @@ void FLAC__lpc_restore_signal(const FLAC__int32 * flac_restrict residual, uint32
+ 						sum += qlp_coeff[2] * data[i-3];
+ 						sum += qlp_coeff[1] * data[i-2];
+ 						sum += qlp_coeff[0] * data[i-1];
+-						data[i] = residual[i] + (sum >> lp_quantization);
++						data[i] = (FLAC__int32)((FLAC__uint32)residual[i] + ((FLAC__int32)sum >> lp_quantization));
+ 					}
+ 				}
+ 			}
+@@ -1166,7 +1166,7 @@ void FLAC__lpc_restore_signal(const FLAC__int32 * flac_restrict residual, uint32
+ 						sum += qlp_coeff[2] * data[i-3];
+ 						sum += qlp_coeff[1] * data[i-2];
+ 						sum += qlp_coeff[0] * data[i-1];
+-						data[i] = residual[i] + (sum >> lp_quantization);
++						data[i] = (FLAC__int32)((FLAC__uint32)residual[i] + ((FLAC__int32)sum >> lp_quantization));
+ 					}
+ 				}
+ 				else { /* order == 3 */
+@@ -1175,7 +1175,7 @@ void FLAC__lpc_restore_signal(const FLAC__int32 * flac_restrict residual, uint32
+ 						sum += qlp_coeff[2] * data[i-3];
+ 						sum += qlp_coeff[1] * data[i-2];
+ 						sum += qlp_coeff[0] * data[i-1];
+-						data[i] = residual[i] + (sum >> lp_quantization);
++						data[i] = (FLAC__int32)((FLAC__uint32)residual[i] + ((FLAC__int32)sum >> lp_quantization));
+ 					}
+ 				}
+ 			}
+@@ -1185,12 +1185,12 @@ void FLAC__lpc_restore_signal(const FLAC__int32 * flac_restrict residual, uint32
+ 						sum = 0;
+ 						sum += qlp_coeff[1] * data[i-2];
+ 						sum += qlp_coeff[0] * data[i-1];
+-						data[i] = residual[i] + (sum >> lp_quantization);
++						data[i] = (FLAC__int32)((FLAC__uint32)residual[i] + ((FLAC__int32)sum >> lp_quantization));
+ 					}
+ 				}
+ 				else { /* order == 1 */
+ 					for(i = 0; i < (int)data_len; i++)
+-						data[i] = residual[i] + ((qlp_coeff[0] * data[i-1]) >> lp_quantization);
++						data[i] = (FLAC__int32)((FLAC__uint32)residual[i] + ((FLAC__int32)(qlp_coeff[0] * data[i-1]) >> lp_quantization));
+ 				}
+ 			}
+ 		}
+@@ -1232,7 +1232,7 @@ void FLAC__lpc_restore_signal(const FLAC__int32 * flac_restrict residual, uint32
+ 				         sum += qlp_coeff[ 1] * data[i- 2];
+ 				         sum += qlp_coeff[ 0] * data[i- 1];
+ 			}
+-			data[i] = residual[i] + (sum >> lp_quantization);
++			data[i] = (FLAC__int32)((FLAC__uint32)residual[i] + ((FLAC__int32)sum >> lp_quantization));
+ 		}
+ 	}
+ }
+@@ -1490,19 +1490,14 @@ void FLAC__lpc_restore_signal_wide(const FLAC__int32 * flac_restrict residual, u
+ }
+ #endif
+ 
+-#if defined(FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION) && !defined(FUZZING_BUILD_MODE_FLAC_SANITIZE_SIGNED_INTEGER_OVERFLOW)
+-/* The attribute below is to silence the undefined sanitizer of oss-fuzz.
+- * Because fuzzing feeds bogus predictors and residual samples to the
+- * decoder, having overflows in this section is unavoidable. Also,
+- * because the calculated values are audio path only, there is no
+- * potential for security problems */
+-__attribute__((no_sanitize("signed-integer-overflow")))
+-#endif
+-void FLAC__lpc_restore_signal_wide_33bit(const FLAC__int32 * flac_restrict residual, uint32_t data_len, const FLAC__int32 * flac_restrict qlp_coeff, uint32_t order, int lp_quantization, FLAC__int64 * flac_restrict data)
++/* As in FLAC__lpc_restore_signal, the products and sums are made in unsigned
++ * arithmetic, here of 64 bits, which a corrupt subframe of 33 bits per sample
++ * overflows as well. */
++void FLAC__lpc_restore_signal_wide_33bit(const FLAC__int32 * flac_restrict residual, uint32_t data_len, const FLAC__int32 * flac_restrict signed_qlp_coeff, uint32_t order, int lp_quantization, FLAC__int64 * flac_restrict data)
+ #if defined(FLAC__OVERFLOW_DETECT) || !defined(FLAC__LPC_UNROLLED_FILTER_LOOPS)
+ {
+ 	uint32_t i, j;
+-	FLAC__int64 sum;
++	FLAC__uint64 sum;
+ 	const FLAC__int32 *r = residual;
+ 	const FLAC__int64 *history;
+ 
+@@ -1512,24 +1507,28 @@ void FLAC__lpc_restore_signal_wide_33bit(const FLAC__int32 * flac_restrict resid
+ 		sum = 0;
+ 		history = data;
+ 		for(j = 0; j < order; j++)
+-			sum += (FLAC__int64)qlp_coeff[j] * (FLAC__int64)(*(--history));
++			sum += (FLAC__uint64)signed_qlp_coeff[j] * (FLAC__uint64)(*(--history));
+ #ifdef FLAC__OVERFLOW_DETECT
+-		if(FLAC__bitmath_silog2((FLAC__int64)(*r) + (sum >> lp_quantization)) > 33) {
+-			flac_fprintf(stderr,"FLAC__lpc_restore_signal_33bit: OVERFLOW, i=%u, residual=%d, sum=%" PRId64 ", data=%" PRId64 "\n", i, *r, (sum >> lp_quantization), ((FLAC__int64)(*r) + (sum >> lp_quantization)));
++		if(FLAC__bitmath_silog2((FLAC__int64)(*r) + ((FLAC__int64)sum >> lp_quantization)) > 33) {
++			flac_fprintf(stderr,"FLAC__lpc_restore_signal_33bit: OVERFLOW, i=%u, residual=%d, sum=%" PRId64 ", data=%" PRId64 "\n", i, *r, ((FLAC__int64)sum >> lp_quantization), ((FLAC__int64)(*r) + ((FLAC__int64)sum >> lp_quantization)));
+ 			break;
+ 		}
+ #endif
+-		*(data++) = (FLAC__int64)(*(r++)) + (sum >> lp_quantization);
++		*(data++) = (FLAC__int64)((FLAC__uint64)*(r++) + (FLAC__uint64)((FLAC__int64)sum >> lp_quantization));
+ 	}
+ }
+ #else /* unrolled version for normal use */
+ {
++	FLAC__uint64 qlp_coeff[32];
+ 	int i;
+-	FLAC__int64 sum;
++	FLAC__uint64 sum;
+ 
+ 	FLAC__ASSERT(order > 0);
+ 	FLAC__ASSERT(order <= 32);
+ 
++	for(i = 0; i < (int)order; i++)
++		qlp_coeff[i] = (FLAC__uint64)signed_qlp_coeff[i];
++
+ 	for(i = 0; i < (int)data_len; i++) {
+ 		sum = 0;
+ 		switch(order) {
+@@ -1566,7 +1565,7 @@ void FLAC__lpc_restore_signal_wide_33bit(const FLAC__int32 * flac_restrict resid
+ 			case  2: sum += qlp_coeff[ 1] * data[i- 2]; /* Falls through. */
+ 			case  1: sum += qlp_coeff[ 0] * data[i- 1];
+ 		}
+-		data[i] = residual[i] + (sum >> lp_quantization);
++		data[i] = (FLAC__int64)((FLAC__uint64)residual[i] + (FLAC__uint64)((FLAC__int64)sum >> lp_quantization));
+ 	}
+ }
+ #endif
+diff --git a/src/libFLAC/stream_decoder.c b/src/libFLAC/stream_decoder.c
+index 8c7bc17..bc62022 100644
+--- a/src/libFLAC/stream_decoder.c
++++ b/src/libFLAC/stream_decoder.c
+@@ -3474,14 +3474,11 @@ FLAC__bool read_callback_(FLAC__byte buffer[], size_t *bytes, void *client_data)
+ 	 */
+ }
+ 
+-#if defined(FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION) && !defined(FUZZING_BUILD_MODE_FLAC_SANITIZE_SIGNED_INTEGER_OVERFLOW)
+-/* The attribute below is to silence the undefined sanitizer of oss-fuzz.
+- * Because fuzzing feeds bogus predictors and residual samples to the
+- * decoder, having overflows in this section is unavoidable. Also,
+- * because the calculated values are audio path only, there is no
+- * potential for security problems */
+-__attribute__((no_sanitize("signed-integer-overflow")))
+-#endif
++/* A corrupt frame decodes to samples of any size, and the sums and differences
++ * below then overflow. They are made in unsigned arithmetic, which wraps where
++ * signed arithmetic would be undefined, and the result is the signed number
++ * with the same bits: what two's complement arithmetic gives, and for a frame
++ * that decodes correctly exactly what it was. */
+ void undo_channel_coding(FLAC__StreamDecoder *decoder) {
+ 	uint32_t i;
+ 	switch(decoder->private_->frame.header.channel_assignment) {
+@@ -3493,18 +3490,18 @@ void undo_channel_coding(FLAC__StreamDecoder *decoder) {
+ 		FLAC__ASSERT(decoder->private_->side_subframe_in_use != /* logical XOR */ (decoder->private_->frame.header.bits_per_sample < 32));
+ 		for(i = 0; i < decoder->private_->frame.header.blocksize; i++)
+ 			if(decoder->private_->side_subframe_in_use)
+-				decoder->private_->output[1][i] = decoder->private_->output[0][i] - decoder->private_->side_subframe[i];
++				decoder->private_->output[1][i] = (FLAC__int32)((FLAC__uint64)decoder->private_->output[0][i] - (FLAC__uint64)decoder->private_->side_subframe[i]);
+ 			else
+-				decoder->private_->output[1][i] = decoder->private_->output[0][i] - decoder->private_->output[1][i];
++				decoder->private_->output[1][i] = (FLAC__int32)((FLAC__uint32)decoder->private_->output[0][i] - (FLAC__uint32)decoder->private_->output[1][i]);
+ 		break;
+ 	case FLAC__CHANNEL_ASSIGNMENT_RIGHT_SIDE:
+ 		FLAC__ASSERT(decoder->private_->frame.header.channels == 2);
+ 		FLAC__ASSERT(decoder->private_->side_subframe_in_use != /* logical XOR */ (decoder->private_->frame.header.bits_per_sample < 32));
+ 		for(i = 0; i < decoder->private_->frame.header.blocksize; i++)
+ 			if(decoder->private_->side_subframe_in_use)
+-				decoder->private_->output[0][i] = decoder->private_->output[1][i] + decoder->private_->side_subframe[i];
++				decoder->private_->output[0][i] = (FLAC__int32)((FLAC__uint64)decoder->private_->output[1][i] + (FLAC__uint64)decoder->private_->side_subframe[i]);
+ 			else
+-				decoder->private_->output[0][i] += decoder->private_->output[1][i];
++				decoder->private_->output[0][i] = (FLAC__int32)((FLAC__uint32)decoder->private_->output[0][i] + (FLAC__uint32)decoder->private_->output[1][i]);
+ 		break;
+ 	case FLAC__CHANNEL_ASSIGNMENT_MID_SIDE:
+ 		FLAC__ASSERT(decoder->private_->frame.header.channels == 2);
+@@ -3516,15 +3513,15 @@ void undo_channel_coding(FLAC__StreamDecoder *decoder) {
+ 				side = decoder->private_->output[1][i];
+ 				mid = ((uint32_t) mid) << 1;
+ 				mid |= (side & 1); /* i.e. if 'side' is odd... */
+-				decoder->private_->output[0][i] = (mid + side) >> 1;
+-				decoder->private_->output[1][i] = (mid - side) >> 1;
++				decoder->private_->output[0][i] = (FLAC__int32)((FLAC__uint32)mid + (FLAC__uint32)side) >> 1;
++				decoder->private_->output[1][i] = (FLAC__int32)((FLAC__uint32)mid - (FLAC__uint32)side) >> 1;
+ 			}
+ 			else { /* bps == 32 */
+ 				FLAC__int64 mid;
+ 				mid = ((uint64_t)decoder->private_->output[0][i]) << 1;
+ 				mid |= (decoder->private_->side_subframe[i] & 1); /* i.e. if 'side' is odd... */
+-				decoder->private_->output[0][i] = (mid + decoder->private_->side_subframe[i]) >> 1;
+-				decoder->private_->output[1][i] = (mid - decoder->private_->side_subframe[i]) >> 1;
++				decoder->private_->output[0][i] = (FLAC__int32)((FLAC__int64)((FLAC__uint64)mid + (FLAC__uint64)decoder->private_->side_subframe[i]) >> 1);
++				decoder->private_->output[1][i] = (FLAC__int32)((FLAC__int64)((FLAC__uint64)mid - (FLAC__uint64)decoder->private_->side_subframe[i]) >> 1);
+ 			}
+ 		}
+ 		break;

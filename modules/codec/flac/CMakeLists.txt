@@ -35,6 +35,25 @@ set(WITH_OGG OFF CACHE BOOL "" FORCE)
 add_subdirectory("${CMAKE_SOURCE_DIR}/external/flac"
                  "${CMAKE_BINARY_DIR}/external/flac" EXCLUDE_FROM_ALL SYSTEM)
 
+# **FLAC__OVERFLOW_DETECT is libFLAC's aid for debugging libFLAC, not a switch
+# this tree turns on.** libFLAC's CMakeLists defines it for every Debug and
+# RelWithDebInfo build, and with it the linear prediction is restored by a loop
+# of its own rather than the unrolled one a Release build runs, a loop that
+# prints a line to stderr for every partial sum past 32 bits -- which a decoder
+# handed nonsense reaches at nearly every sample. The sanitizer and fuzz builds
+# are RelWithDebInfo, so their fuzzers ran a libFLAC the player does not ship,
+# and one of them printed so much in the ten minutes a night gives it that
+# ctest, which holds a test's output until the test ends, ran out of memory and
+# took the job's other fuzzers down with it. The definition comes off the
+# directory libFLAC put it on, so that every build compiles libFLAC's decoder as
+# Release does; the fuzz tree, which adds libFLAC itself where this module is
+# not built, takes it off the same way.
+get_property(mediaperch_flac_definitions
+    DIRECTORY "${CMAKE_SOURCE_DIR}/external/flac/src/libFLAC" PROPERTY COMPILE_DEFINITIONS)
+list(REMOVE_ITEM mediaperch_flac_definitions FLAC__OVERFLOW_DETECT)
+set_property(DIRECTORY "${CMAKE_SOURCE_DIR}/external/flac/src/libFLAC"
+    PROPERTY COMPILE_DEFINITIONS "${mediaperch_flac_definitions}")
+
 mediaperch_add_module(mp_codec_flac
     KIND codec
     SOURCES codec_flac.cpp

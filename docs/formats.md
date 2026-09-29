@@ -192,7 +192,7 @@ Both files are kept, as `fuzz/corpus/mp4/found_sgpd_unbounded_entries.m4a` and
 `found_dref_unbounded_entries.mp4`. `mediaperch-probe claims` on either of them
 did not come back. They now return in about 220 ms.
 
-**Two defences, because one was not enough.**
+**Two defences at first, and one now.**
 
 The blunt one is a *budget on the stream*: `FileStream` counts reads and seeks,
 each entry point arms a limit, and past it every operation reports end-of-stream
@@ -201,22 +201,17 @@ the same. It bounds any parse loop that touches the file, including ones nobody
 has found yet. A million operations for an `open` is far above any real file:
 parsing is proportional to a file's *boxes*, not its samples.
 
-The sharp one is *not parsing three boxes at all*. The budget does not catch
+The sharp one was *not parsing three boxes at all*. The budget does not catch
 `dref`, because its spin never reads a byte -- `bytes_available < 8` returns
-before any I/O -- and that is exactly why both are here. `sgpd`, `sbgp` and
-`dref` are declined in the atom factory: sample groups describe roll distances
-for editors and packagers, and `dref` says which file the media lives in, which
-this tree answers by only reading self-contained ones. Nothing in Bento4 reads a
-parsed `dref` either -- the only other mention of the class is `Ap4TrakAtom.cpp`
-constructing one when *writing* a track.
-
-**The durable fix is upstream and it is small.** In `Ap4SgpdAtom.cpp`, subtract
-each entry from `bytes_available` as it is read, and stop after the first entry
-when the version is 0, since a version-0 entry consumes the rest of the box by
-definition. In `Ap4DrefAtom.cpp`, leave the outer loop when the inner one adds
-nothing. Until that lands, the two defences above stand, and the fuzzer keeps
-running without the budget so that the next one of these is reported rather than
-quietly absorbed.
+before any I/O -- so `sgpd`, `sbgp` and `dref` were declined in the atom
+factory. That is gone, because the durable fix was small and is in the tree:
+both parsers are patched in Bento4
+(external/patches/bento4-sample-group-descriptions-read-out-of-their-box.patch
+and external/patches/bento4-the-entries-of-a-dref-are-read-once.patch), `sbgp`
+has checked its count against its box since upstream added it, and the factory
+never saw what `AP4_LinearReader` parses between fragments with a factory of its
+own. The budget stays, for the next loop of the kind, and the fuzzer keeps
+running without it so that such a loop is reported rather than quietly absorbed.
 
 ### Where the reference implementation is used, and where it is not
 
@@ -1377,11 +1372,15 @@ unrelated lossless codecs, three unrelated containers, one set of bytes.
 libwavpack is BSD-3-Clause, in OSS-Fuzz, and pinned at upstream's master after
 5.9.0 (5.9.0-56-gb0e6c05). It gets a fuzz target here anyway, for the reason
 libFLAC and libmpg123 do: the corpus needs somewhere to live and the machinery
-is the part that rots. And it found two faults once it ran under the sanitizers
+is the part that rots. And it found three faults once it ran under the sanitizers
 on Linux: the length of a hybrid profile of no bytes checked by adding to a null
-pointer, which upstream had fixed after 5.9.0 and is why the pin moved, and a
-mute limit that overflowed, which
-external/patches/libwavpack-the-mute-limit-in-64-bits.patch fixes. `OPEN_WVC` is
+pointer, which upstream had fixed after 5.9.0 and is why the pin moved; a mute
+limit that overflowed, which
+external/patches/libwavpack-the-mute-limit-in-64-bits.patch fixes; and, in the
+first nightly campaign, the decorrelation's own arithmetic overflowing on the
+samples of a corrupt block -- upstream's fuzzing build turns that check off --
+which external/patches/libwavpack-arithmetic-on-a-corrupt-block-wraps.patch makes
+wrap, as two's complement arithmetic does, without changing a sample. `OPEN_WVC` is
 deliberately not set -- a `.wvc` sits beside the `.wv` and turns a hybrid file
 lossless, and finding it would mean this module opening a path the host never
 gave it, which is the host's business.

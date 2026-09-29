@@ -487,7 +487,11 @@ endif()
 # builds it. FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION is its own switch for a
 # fuzzer, as OSS-Fuzz uses it: a frame whose CRC does not match is decoded
 # rather than dropped, so a mutation reaches the decoder instead of stopping at
-# a checksum it has one chance in 65536 of getting right.
+# a checksum it has one chance in 65536 of getting right. Upstream's mode also
+# exempted the restore loops and the stereo decorrelation from the sanitizer's
+# signed-overflow check; external/patches/libflac-restoring-a-corrupt-frame-wraps.patch
+# makes their arithmetic wrap and takes the exemptions out, so that the mode
+# loosens nothing.
 if(NOT TARGET FLAC AND EXISTS "${CMAKE_SOURCE_DIR}/external/flac/CMakeLists.txt")
     set(BUILD_CXXLIBS OFF CACHE BOOL "" FORCE)
     set(BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
@@ -500,6 +504,14 @@ if(NOT TARGET FLAC AND EXISTS "${CMAKE_SOURCE_DIR}/external/flac/CMakeLists.txt"
     set(WITH_OGG OFF CACHE BOOL "" FORCE)
     add_subdirectory("${CMAKE_SOURCE_DIR}/external/flac"
                      "${CMAKE_BINARY_DIR}/external/flac" EXCLUDE_FROM_ALL SYSTEM)
+    # Without libFLAC's FLAC__OVERFLOW_DETECT, for the reason
+    # modules/codec/flac/CMakeLists.txt gives: the decoder fuzzed is the one
+    # that ships, and a fuzzer does not print a line for every sample.
+    get_property(mediaperch_flac_definitions
+        DIRECTORY "${CMAKE_SOURCE_DIR}/external/flac/src/libFLAC" PROPERTY COMPILE_DEFINITIONS)
+    list(REMOVE_ITEM mediaperch_flac_definitions FLAC__OVERFLOW_DETECT)
+    set_property(DIRECTORY "${CMAKE_SOURCE_DIR}/external/flac/src/libFLAC"
+        PROPERTY COMPILE_DEFINITIONS "${mediaperch_flac_definitions}")
 endif()
 if(TARGET FLAC)
     mediaperch_instrument(FLAC)

@@ -1,0 +1,24 @@
+Bento4: a read the stream ends in leaves zeros where it read nothing, not what the buffer held
+
+AP4_ByteStream::Read returns an error when the stream ends before the bytes asked for, and leaves them as they were, while ReadUI08 to ReadUI64 and ReadDouble, built on it, store zero where they fail. Forty-eight of its callers read with it and go on without asking -- languages, URLs, names, a descriptor's data, reserved fields -- so that a box or a descriptor the stream ends in went on with whatever the heap or the stack held. MediaPerch's MP4 demuxer and MP4 parser fuzzers, built for Linux with MemorySanitizer, found three of them in a day, each decoded or measured before anything had written it: the language of an mdhd whose stated size leaves no room for its 64-bit times (a 28-byte file), the URL of an ES descriptor (238 bytes) and the URL of an initial object descriptor (675 bytes). Read leaves what it could not read zero now, as its sibling readers leave their value, so that every such caller is handed zeros -- no language, no URL, no data -- and those that check the result still see the failure. Against v1.6.0-641-119-gb8c50a0.
+
+diff --git a/Source/C++/Core/Ap4ByteStream.cpp b/Source/C++/Core/Ap4ByteStream.cpp
+index c7f45b0..e48946d 100644
+--- a/Source/C++/Core/Ap4ByteStream.cpp
++++ b/Source/C++/Core/Ap4ByteStream.cpp
+@@ -52,8 +52,13 @@ AP4_ByteStream::Read(void* buffer, AP4_Size bytes_to_read)
+     AP4_Size bytes_read;
+     while (bytes_to_read) {
+         AP4_Result result = ReadPartial(buffer, bytes_to_read, bytes_read);
+-        if (AP4_FAILED(result)) return result;
+-        if (bytes_read == 0) return AP4_ERROR_INTERNAL;
++        if (AP4_FAILED(result) || bytes_read == 0) {
++            // what was not read is left zero, as ReadUI08 to ReadUI64 leave
++            // their value, so that a caller that goes on is not handed what
++            // the buffer held before
++            AP4_SetMemory(buffer, 0, bytes_to_read);
++            return AP4_FAILED(result) ? result : AP4_ERROR_INTERNAL;
++        }
+         AP4_ASSERT(bytes_read <= bytes_to_read);
+         bytes_to_read -= bytes_read;
+         buffer = (void*)(((AP4_Byte*)buffer)+bytes_read);
