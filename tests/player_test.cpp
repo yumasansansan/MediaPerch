@@ -1361,6 +1361,50 @@ TEST_CASE("an engine joins two tracks and can be told to skip one", "[player]")
     player.shutdown();
 }
 
+TEST_CASE("a status gives the length of the track being heard, not the one being read",
+          "[player]")
+{
+    // **A gapless queue reads ahead by the ring's depth**, so at every boundary
+    // there is a ring's worth of time in which the decoder is on the next track
+    // and the listener is still on this one. A status's index and offset are
+    // the listener's; its length was the decoder's, read off the item the
+    // decoder was reading -- on the shell's thread, while the decode thread
+    // read from it, and while it had only just opened it: ThreadSanitizer
+    // reported the item read as it was being built, and the queue's marks read
+    // while the decode thread pushed onto them. A ring deeper than the first
+    // track puts the decoder on the second for nearly all of the first, and a
+    // status is asked all the way through.
+    Host host;
+    host.add("a", pattern(64 * 4 * 1000, 4));
+    host.add("b", pattern(64 * 4 * 500, 5));
+    const std::uint64_t lengths[] = {64 * 1000, 64 * 500};
+    mp::Player player{host};
+    std::string why;
+    REQUIRE(player.set("ring_periods", "1024", why));
+    player.start();
+    player.play({"a", "b"});
+    REQUIRE(wait_for_state(player, mp::ipc::State::playing));
+
+    std::uint64_t asked = 0;
+    std::uint64_t wrong = 0;
+    REQUIRE(wait_for([&] {
+        const mp::ipc::Status status = player.status();
+        if (status.state != mp::ipc::State::playing) {
+            return true;
+        }
+        ++asked;
+        if (status.index > 1 || status.length != lengths[status.index]) {
+            ++wrong;
+        }
+        return status.index == 1 && status.item_position > 0;
+    }));
+    INFO(wrong << " of " << asked << " statuses named another track's length");
+    CHECK(asked > 0);
+    CHECK(wrong == 0);
+    REQUIRE(wait_for_state(player, mp::ipc::State::stopped));
+    player.shutdown();
+}
+
 TEST_CASE("next starts the following track now, from where the listener is", "[player]")
 {
     // The button, end to end: the ring is thrown away and refilled from the

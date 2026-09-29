@@ -261,7 +261,7 @@ MpResult VideoGraph::fetch()
         const MpResult got = decoder_->next_frame(frame);
         if (got == MP_OK) {
             frame_ = frame;
-            ++stats_.decoded;
+            decoded_.fetch_add(1, std::memory_order_relaxed);
             return MP_OK;
         }
         if (got == MP_ERR_BUSY) {
@@ -419,7 +419,7 @@ VideoGraph::Step VideoGraph::pump(double audible_seconds)
                 // at the target needs them, and let go because nobody asked
                 // for them. Counted apart from dropping, which is lateness.
                 if (stream_seconds(frame_.pts, info_.timescale) < preroll_until) {
-                    ++stats_.preroll;
+                    preroll_.fetch_add(1, std::memory_order_relaxed);
                     have_frame_ = false;
                     continue;
                 }
@@ -437,7 +437,7 @@ VideoGraph::Step VideoGraph::pump(double audible_seconds)
 
         have_frame_ = false;
         if (decision.fate == FrameFate::drop) {
-            ++stats_.dropped;
+            dropped_.fetch_add(1, std::memory_order_relaxed);
             // **Straight on to the next one**, on this same call. A decoder
             // that fell behind has several past frames to let go, and letting
             // one go per display refresh would never catch the clock.
@@ -449,21 +449,34 @@ VideoGraph::Step VideoGraph::pump(double audible_seconds)
             error_ = shown;
             return Step::failed;
         }
-        if (stats_.shown == 0) {
-            stats_.first_late_seconds = decision.error_seconds;
+        if (shown_.load(std::memory_order_relaxed) == 0) {
+            first_late_seconds_.store(decision.error_seconds, std::memory_order_relaxed);
         } else {
             // From the second frame on, so that a startup offset is not
             // reported as a pacing error -- see Stats.
-            if (decision.error_seconds < stats_.worst_late_seconds) {
-                stats_.worst_late_seconds = decision.error_seconds;
+            if (decision.error_seconds < worst_late_seconds_.load(std::memory_order_relaxed)) {
+                worst_late_seconds_.store(decision.error_seconds, std::memory_order_relaxed);
             }
-            if (decision.error_seconds > stats_.worst_early_seconds) {
-                stats_.worst_early_seconds = decision.error_seconds;
+            if (decision.error_seconds > worst_early_seconds_.load(std::memory_order_relaxed)) {
+                worst_early_seconds_.store(decision.error_seconds, std::memory_order_relaxed);
             }
         }
-        ++stats_.shown;
+        shown_.fetch_add(1, std::memory_order_relaxed);
         return Step::shown;
     }
+}
+
+VideoGraph::Stats VideoGraph::stats() const noexcept
+{
+    Stats out;
+    out.shown = shown_.load(std::memory_order_relaxed);
+    out.dropped = dropped_.load(std::memory_order_relaxed);
+    out.decoded = decoded_.load(std::memory_order_relaxed);
+    out.preroll = preroll_.load(std::memory_order_relaxed);
+    out.first_late_seconds = first_late_seconds_.load(std::memory_order_relaxed);
+    out.worst_late_seconds = worst_late_seconds_.load(std::memory_order_relaxed);
+    out.worst_early_seconds = worst_early_seconds_.load(std::memory_order_relaxed);
+    return out;
 }
 
 } // namespace mp

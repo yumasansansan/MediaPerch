@@ -268,7 +268,8 @@ public:
         /// is half a refresh either side rather than a whole one on one side.
         double worst_early_seconds = 0.0;
     };
-    [[nodiscard]] Stats stats() const noexcept { return stats_; }
+    /// From any thread, while the loop pumps.
+    [[nodiscard]] Stats stats() const noexcept;
     [[nodiscard]] MpResult error() const noexcept { return error_; }
     [[nodiscard]] bool finished() const noexcept { return finished_; }
 
@@ -308,7 +309,15 @@ private:
 
     std::vector<std::uint8_t> buffer_;
     MpPacket packet_{};
-    Stats stats_{};
+    /// `Stats`, a field at a time, as another thread reads them: kept as
+    /// `DisplayLoop`'s are, and for the same reason.
+    std::atomic<std::uint64_t> shown_{0};
+    std::atomic<std::uint64_t> dropped_{0};
+    std::atomic<std::uint64_t> decoded_{0};
+    std::atomic<std::uint64_t> preroll_{0};
+    std::atomic<double> first_late_seconds_{0.0};
+    std::atomic<double> worst_late_seconds_{0.0};
+    std::atomic<double> worst_early_seconds_{0.0};
 };
 
 } // namespace mp

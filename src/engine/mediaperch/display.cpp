@@ -75,7 +75,7 @@ void DisplayLoop::refresh_spec()
     spec_ = spec;
     clock_.configure(spec_);
     if (configured_) {
-        ++stats_.reanchored;
+        reanchored_.fetch_add(1, std::memory_order_relaxed);
     }
     configured_ = true;
 }
@@ -137,12 +137,12 @@ void DisplayLoop::learn_refresh(std::uint64_t ticks)
     last_tick_ = ticks;
     have_last_tick_ = true;
 
-    stats_.refresh_seconds = interval_now();
-    stats_.refresh_span = span_refreshes_;
+    const double refresh = interval_now();
+    refresh_seconds_.store(refresh, std::memory_order_relaxed);
+    refresh_span_.store(span_refreshes_, std::memory_order_relaxed);
 
     // Until two turns have happened, whatever the display said about itself.
-    const double interval = stats_.refresh_seconds != 0.0 ? stats_.refresh_seconds
-                                                          : frames_->nominal_interval();
+    const double interval = refresh != 0.0 ? refresh : frames_->nominal_interval();
     graph_->set_lead_seconds(interval);
 }
 
@@ -167,7 +167,7 @@ bool DisplayLoop::turn(DisplayStep& out)
     // a row read -- on the thread that owns the presenter, between one frame
     // and the next.
     drain_posts();
-    ++stats_.turns;
+    turns_.fetch_add(1, std::memory_order_relaxed);
     // Once, and used for both: the tick a frame is drawn at is the tick the
     // audio position is extrapolated to, and reading the counter twice would
     // put the difference between two reads in between them.
@@ -196,7 +196,7 @@ bool DisplayLoop::turn(DisplayStep& out)
         // Nothing is playing, or the sink has no clock. Either way there is
         // nothing to decide against, and §8 says a picture is not drawn against
         // a guess. The one already up stays up.
-        ++stats_.without_clock;
+        without_clock_.fetch_add(1, std::memory_order_relaxed);
         out.step = VideoGraph::Step::repeated;
         return !graph_->finished();
     }
@@ -217,7 +217,18 @@ std::uint64_t DisplayLoop::run()
     while (once(step)) {
     }
     stopped_turning();
-    return stats_.turns;
+    return turns_.load(std::memory_order_relaxed);
+}
+
+DisplayLoop::Stats DisplayLoop::stats() const noexcept
+{
+    Stats out;
+    out.turns = turns_.load(std::memory_order_relaxed);
+    out.without_clock = without_clock_.load(std::memory_order_relaxed);
+    out.reanchored = reanchored_.load(std::memory_order_relaxed);
+    out.refresh_seconds = refresh_seconds_.load(std::memory_order_relaxed);
+    out.refresh_span = refresh_span_.load(std::memory_order_relaxed);
+    return out;
 }
 
 bool DisplayLoop::wait_turn_until(std::chrono::steady_clock::time_point deadline)

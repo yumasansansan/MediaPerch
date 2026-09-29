@@ -113,11 +113,12 @@ public:
             return false;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds{1});
-        now_ += 166'667;
+        now_.fetch_add(166'667, std::memory_order_acq_rel);
         return !cancelled_.load(std::memory_order_acquire);
     }
     [[nodiscard]] double nominal_interval() const override { return 1.0 / 60.0; }
-    [[nodiscard]] std::uint64_t now() const override { return now_; }
+    /// Read from any thread, as `EndlessClock`'s is and for the same reason.
+    [[nodiscard]] std::uint64_t now() const override { return now_.load(std::memory_order_acquire); }
     [[nodiscard]] std::uint64_t rate() const override { return 10'000'000; }
     void cancel() noexcept override
     {
@@ -125,7 +126,7 @@ public:
     }
 
 private:
-    std::uint64_t now_ = 0;
+    std::atomic<std::uint64_t> now_{0};
     std::atomic<bool> cancelled_{false};
 };
 

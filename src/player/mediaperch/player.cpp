@@ -620,16 +620,19 @@ void Player::previous()
         }
         return;
     }
-    if (queue_ == nullptr) {
+    // No graph after the wait: the run is ending, or its graph never started,
+    // and there is nothing to seek. What the target would have been is not
+    // worked out either -- that took the decoder's position, which is the
+    // decode thread's, from this one.
+    if (queue_ == nullptr || (graph_a_ == nullptr && graph_b_ == nullptr)) {
         return;
     }
     // What a "previous" button means everywhere: the start of this track,
     // unless you have only just got here, in which case the one before. *This
     // track* is the one being heard, asked at the device's position; the
     // decoder's is up to a ring's depth ahead.
-    const std::uint64_t here = graph_a_ != nullptr   ? graph_a_->position_frames()
-                               : graph_b_ != nullptr ? graph_b_->position_frames()
-                                                     : queue_->item_start();
+    const std::uint64_t here =
+        graph_a_ != nullptr ? graph_a_->position_frames() : graph_b_->position_frames();
     const std::uint64_t start = queue_->start_at(here);
     const std::uint64_t grace = queue_->format().sample_rate * 3ull;
     const std::uint64_t target = (here > start + grace || !queue_->has_previous_at(here))
@@ -637,7 +640,7 @@ void Player::previous()
                                      : queue_->previous_start_at(here);
     if (graph_a_ != nullptr) {
         (void)graph_a_->seek(target);
-    } else if (graph_b_ != nullptr) {
+    } else {
         (void)graph_b_->seek(target);
     }
 }
@@ -689,7 +692,10 @@ ipc::Status Player::status() const
         s.item_position = s.position;
     }
     if (queue_ != nullptr) {
-        s.length = queue_->length_frames();
+        // All three at the device's position, the length too: the decoder's
+        // item -- which the length was -- is up to a ring's depth ahead of the
+        // one being heard, and is not this thread's to ask.
+        s.length = queue_->length_at(s.position);
         s.index = static_cast<std::uint32_t>(queue_->index_at(s.position));
         s.item_position = s.position - queue_->start_at(s.position);
         // From the playlist rather than from what the run started with: a queue

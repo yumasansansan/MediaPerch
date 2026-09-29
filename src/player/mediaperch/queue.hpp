@@ -29,6 +29,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <vector>
 
 namespace mp {
@@ -66,6 +67,10 @@ public:
     bool seek(std::uint64_t frame) override;
     /// The current item's length, not the playlist's: a queue's total is a
     /// question about a playlist and this is a question about a track.
+    ///
+    /// **The decode thread's, as `read` is**: it asks the item the decoder is
+    /// on, which nothing but the decode thread may ask anything while it reads
+    /// from it. Another thread asks `length_at`.
     [[nodiscard]] std::uint64_t length_frames() const noexcept override;
 
     /// Opens the first item and takes its format. Until this succeeds the queue
@@ -73,7 +78,9 @@ public:
     [[nodiscard]] bool open(std::string& why);
 
     /// Which item is playing, and how far into it, in that item's own frames.
-    [[nodiscard]] std::size_t index() const noexcept { return index_; }
+    /// `index` may be asked from any thread; `item_position` is the decode
+    /// thread's.
+    [[nodiscard]] std::size_t index() const noexcept;
     [[nodiscard]] std::uint64_t item_position() const noexcept;
 
     /// How far into the *queue*: frames handed out since it was built, counted
@@ -115,11 +122,18 @@ public:
     /// `run` is a frame this queue has already handed out, which is what makes
     /// this answerable at all: boundaries are recorded on the way past, because
     /// the length of a track nobody has played is a guess.
+    ///
+    /// These, and `length_at`, may be asked from any thread: see `marks_lock_`.
     [[nodiscard]] std::size_t index_at(std::uint64_t run) const noexcept;
     [[nodiscard]] std::uint64_t start_at(std::uint64_t run) const noexcept;
     /// `has_previous` and `previous_start`, for a frame somebody else counted.
     [[nodiscard]] bool has_previous_at(std::uint64_t run) const noexcept;
     [[nodiscard]] std::uint64_t previous_start_at(std::uint64_t run) const noexcept;
+    /// The length of the item queue frame `run` belongs to, as the item said
+    /// when the queue crossed into it: the length beside `index_at`, where
+    /// `length_frames` is the length of the item the decoder is on, up to a
+    /// ring's depth ahead of the one being heard. Zero where nobody knows.
+    [[nodiscard]] std::uint64_t length_at(std::uint64_t run) const noexcept;
 
     /// **The next track from where the listener is, and the ring goes with
     /// it.** Set before a seek to the device's own position: that seek then
@@ -139,7 +153,7 @@ public:
     /// the moment it is decoded and never underruns on the way.
     ///
     /// Consumed by that one seek, on the decode thread, which is the only
-    /// thread that may touch the marks; atomic because it is asked for on
+    /// thread that may change the marks; atomic because it is asked for on
     /// whichever thread a shell is on.
     void request_next() noexcept { next_wanted_.store(true, std::memory_order_release); }
     /// For a request whose seek never happened -- a source that cannot seek.
@@ -148,6 +162,8 @@ public:
     /// The queue frame at which the current item began, and the one before it.
     /// What a "previous track" button needs, and it is a question only the
     /// queue can answer: a graph counts frames and has never seen a boundary.
+    /// The decode thread's, since they are asked at its position; another
+    /// thread asks the `_at` forms at a position it has.
     [[nodiscard]] std::uint64_t item_start() const noexcept;
     [[nodiscard]] bool has_previous() const noexcept;
     [[nodiscard]] std::uint64_t previous_start() const noexcept;
@@ -174,11 +190,28 @@ private:
         std::uint64_t run_base;
         std::size_t index;
         std::uint64_t item_base;
+        /// What the item said its length was when the queue crossed into it,
+        /// asked on the decode thread -- the only thread that asks an item
+        /// anything -- for `length_at` to answer on any other. Every source
+        /// here says its length once, when it opens.
+        std::uint64_t length;
     };
 
     /// The mark covering queue frame `run`. Never empty once `open` succeeded.
     [[nodiscard]] std::size_t mark_for(std::uint64_t run) const noexcept;
 
+    /// **The marks and the decoder's index, as another thread reads them.**
+    /// The decode thread writes both as it crosses a boundary or seeks, while
+    /// a status, a "previous" or a move on a shell's thread -- or the engine
+    /// thread following the picture -- asks which track a frame is in; and a
+    /// mark pushed onto the vector a reader is indexing can move the vector
+    /// out from under it. So the decode thread writes them under this, and a
+    /// reader on another thread takes it. The decode thread's own reads, which
+    /// nothing else writes, go without it, and `open` writes them before the
+    /// queue is anyone else's. Everything else here is the decode thread's
+    /// alone but the format, which `open` fixes, and the two requests, which
+    /// are atomic.
+    mutable std::mutex marks_lock_;
     std::vector<Mark> marks_;
 
     IPlaylist* playlist_;

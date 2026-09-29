@@ -46,7 +46,7 @@ bool Queue::open(std::string& why)
         return false;
     }
     position_ = 0;
-    marks_.assign(1, Mark{0, index_, 0});
+    marks_.assign(1, Mark{0, index_, 0, current_->length_frames()});
     stopped_ = QueueStop::end;
     done_ = false;
     return true;
@@ -79,14 +79,18 @@ bool Queue::jump(std::size_t index, std::uint64_t at)
     if (!item->seek(0)) {
         return false;
     }
-    // Everything the decoder had recorded past this frame was read on a pass
-    // this has just undone.
-    while (!marks_.empty() && marks_.back().run_base >= at) {
-        marks_.pop_back();
+    const std::uint64_t length = item->length_frames();
+    {
+        const std::lock_guard lock{marks_lock_};
+        // Everything the decoder had recorded past this frame was read on a
+        // pass this has just undone.
+        while (!marks_.empty() && marks_.back().run_base >= at) {
+            marks_.pop_back();
+        }
+        marks_.push_back(Mark{at, index, 0, length});
+        index_ = index;
     }
-    marks_.push_back(Mark{at, index, 0});
     ++completed_;
-    index_ = index;
     current_ = item;
     position_ = at;
     done_ = false;
@@ -114,14 +118,16 @@ bool Queue::advance()
         stopped_ = QueueStop::format_change;
         return false;
     }
-    index_ = index;
     current_ = next;
+    const std::uint64_t length = next->length_frames();
+    const std::lock_guard lock{marks_lock_};
+    index_ = index;
     // The boundary, now that it is behind us. Anything recorded at or after
     // this point was recorded on a pass that a seek has since undone.
     while (!marks_.empty() && marks_.back().run_base >= position_) {
         marks_.pop_back();
     }
-    marks_.push_back(Mark{position_, index_, 0});
+    marks_.push_back(Mark{position_, index_, 0, length});
     return true;
 }
 
@@ -207,28 +213,44 @@ std::size_t Queue::mark_for(std::uint64_t run) const noexcept
     return m == 0 ? 0 : m - 1;
 }
 
+std::size_t Queue::index() const noexcept
+{
+    const std::lock_guard lock{marks_lock_};
+    return index_;
+}
+
 std::size_t Queue::index_at(std::uint64_t run) const noexcept
 {
+    const std::lock_guard lock{marks_lock_};
     return marks_.empty() ? index_ : marks_[mark_for(run)].index;
 }
 
 std::uint64_t Queue::start_at(std::uint64_t run) const noexcept
 {
+    const std::lock_guard lock{marks_lock_};
     return marks_.empty() ? 0 : marks_[mark_for(run)].run_base;
 }
 
 bool Queue::has_previous_at(std::uint64_t run) const noexcept
 {
+    const std::lock_guard lock{marks_lock_};
     return !marks_.empty() && mark_for(run) > 0;
 }
 
 std::uint64_t Queue::previous_start_at(std::uint64_t run) const noexcept
 {
+    const std::lock_guard lock{marks_lock_};
     if (marks_.empty()) {
         return 0;
     }
     const std::size_t m = mark_for(run);
     return m > 0 ? marks_[m - 1].run_base : 0;
+}
+
+std::uint64_t Queue::length_at(std::uint64_t run) const noexcept
+{
+    const std::lock_guard lock{marks_lock_};
+    return marks_.empty() ? 0 : marks_[mark_for(run)].length;
 }
 
 std::uint64_t Queue::item_start() const noexcept
@@ -275,7 +297,10 @@ bool Queue::seek(std::uint64_t frame)
     if (item == nullptr || !item->seek(mark.item_base + (frame - mark.run_base))) {
         return false;
     }
-    index_ = mark.index;
+    {
+        const std::lock_guard lock{marks_lock_};
+        index_ = mark.index;
+    }
     current_ = item;
     position_ = frame;
     done_ = false;

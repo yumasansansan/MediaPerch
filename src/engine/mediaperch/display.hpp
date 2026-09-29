@@ -220,7 +220,8 @@ public:
         /// measurement and are a double for the same reason.
         std::uint64_t refresh_span = 0;
     };
-    [[nodiscard]] Stats stats() const noexcept { return stats_; }
+    /// From any thread, while the loop turns.
+    [[nodiscard]] Stats stats() const noexcept;
     [[nodiscard]] const AvClock& clock() const noexcept { return clock_; }
 
 private:
@@ -264,7 +265,16 @@ private:
     /// number of refreshes long.
     double span_seconds_ = 0.0;
     std::uint64_t span_refreshes_ = 0;
-    Stats stats_{};
+    /// **`Stats`, a field at a time, as another thread reads them.** Written by
+    /// the thread that turns the loop and asked for by a status or a node's
+    /// rows on a shell's thread while it turns, where a copy of a plain struct
+    /// was a data race ThreadSanitizer reported. Relaxed, as the audio graphs'
+    /// counts are: each is a number on its own, and nothing is ordered by it.
+    std::atomic<std::uint64_t> turns_{0};
+    std::atomic<std::uint64_t> without_clock_{0};
+    std::atomic<std::uint64_t> reanchored_{0};
+    std::atomic<double> refresh_seconds_{0.0};
+    std::atomic<std::uint64_t> refresh_span_{0};
 };
 
 

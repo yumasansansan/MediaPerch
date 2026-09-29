@@ -134,7 +134,10 @@ public:
 
     [[nodiscard]] const std::vector<Format>& offered() const noexcept { return offered_; }
     [[nodiscard]] const Format& accepted() const noexcept { return accepted_; }
-    [[nodiscard]] bool started() const noexcept { return started_; }
+    [[nodiscard]] bool started() const noexcept
+    {
+        return started_.load(std::memory_order_acquire);
+    }
 
     /// Everything that was committed, in order. The bit-exactness check.
     [[nodiscard]] std::vector<std::uint8_t> captured() const
@@ -197,14 +200,14 @@ private:
 
     static MpResult MP_CALL start_thunk(MpSink* s)
     {
-        self(s).started_ = true;
+        self(s).started_.store(true, std::memory_order_release);
         self(s).paced_.store(false, std::memory_order_relaxed);
         return MP_OK;
     }
 
     static MpResult MP_CALL stop_thunk(MpSink* s)
     {
-        self(s).started_ = false;
+        self(s).started_.store(false, std::memory_order_release);
         self(s).paced_.store(false, std::memory_order_relaxed);
         return MP_OK;
     }
@@ -271,7 +274,10 @@ private:
     std::vector<Format> offered_;
     Format accepted_{};
     std::uint32_t frame_bytes_ = 0;
-    bool started_ = false;
+    /// Set by whichever thread starts or stops the device -- the engine's --
+    /// and asked by a test on its own: a plain flag here was a data race
+    /// ThreadSanitizer reported.
+    std::atomic<bool> started_{false};
     std::uint32_t waits_ = 0;
     /// When the next period is due (see `FakeSinkRules::pace_us`), whether
     /// that has been set since the device last started, and what sleeps to it.
