@@ -18,7 +18,7 @@
 # the process happened to be started, which is where libFuzzer writes them
 # unless told.
 #
-# Three variables of the environment turn the thirty seconds a push gets into
+# Four variables of the environment turn the thirty seconds a push gets into
 # the campaign the nightly workflow runs (.github/workflows/fuzz.yml):
 #
 #   MEDIAPERCH_FUZZ_SECONDS   how long, instead of the ARGS' -max_total_time
@@ -27,6 +27,22 @@
 #   MEDIAPERCH_FUZZ_CORPORA   a directory whose <NAME> subdirectory is the corpus,
 #                             kept from one run to the next, instead of SCRATCH
 #   MEDIAPERCH_FUZZ_FINDINGS  where the findings go, instead of FINDINGS
+#   MEDIAPERCH_FUZZ_EARLIER   the findings of an earlier run, replayed first
+#
+# **An input that failed before is given again before anything else**, and one
+# that still fails fails the run, kept among its findings, without fuzzing:
+# fuzzing looks for inputs at random, and a run need not come upon the one the
+# last found, so it is replayed until it is fixed rather than until fuzzing
+# happens to miss it. A crash, a leak, a time-out or an out-of-memory are what
+# failed; a slow unit failed at nothing and is not replayed.
+#
+# **A corpus kept from one run to the next is merged down after each run**, to
+# the fewest inputs that reach what all of it reached. libFuzzer replays the
+# whole corpus it is given before it looks at the time, and a corpus that only
+# grows makes each run start later than the last. The merge is made beside the
+# corpus and takes its place only once it has finished, so that a run stopped
+# in the middle loses nothing. ADLplug-Next's ci/fuzz.sh does both, in its
+# words.
 
 if(NOT DEFINED FUZZER OR NOT DEFINED SEEDS OR NOT DEFINED SCRATCH OR NOT DEFINED NAME
    OR NOT DEFINED FINDINGS)
@@ -50,6 +66,29 @@ if(EXISTS "${SEEDS}")
 endif()
 
 string(REPLACE "|" ";" fuzzer_args "${ARGS}")
+# What every run of the fuzzer here keeps from ARGS: the time an input may
+# take, without which libFuzzer gives each input twenty minutes and one that
+# ran out of time would pass a replay.
+set(input_args ${fuzzer_args})
+list(FILTER input_args EXCLUDE REGEX "^-(runs|max_total_time|print_final_stats)=")
+
+if(DEFINED ENV{MEDIAPERCH_FUZZ_EARLIER} AND NOT "$ENV{MEDIAPERCH_FUZZ_EARLIER}" STREQUAL "")
+    file(TO_CMAKE_PATH "$ENV{MEDIAPERCH_FUZZ_EARLIER}" earlier)
+    file(GLOB failed "${earlier}/${NAME}-crash-*" "${earlier}/${NAME}-leak-*"
+                     "${earlier}/${NAME}-timeout-*" "${earlier}/${NAME}-oom-*")
+    if(failed)
+        list(LENGTH failed count)
+        message(STATUS "${NAME}: ${count} inputs that failed in an earlier run")
+        execute_process(COMMAND "${FUZZER}" ${input_args} ${failed} RESULT_VARIABLE status)
+        if(NOT status EQUAL 0)
+            file(COPY ${failed} DESTINATION "${FINDINGS}")
+            message(FATAL_ERROR
+                "${NAME} still fails on an input that failed in an earlier run (${status}); "
+                "it is kept in ${FINDINGS}")
+        endif()
+    endif()
+endif()
+
 if(DEFINED ENV{MEDIAPERCH_FUZZ_SECONDS} AND NOT "$ENV{MEDIAPERCH_FUZZ_SECONDS}" STREQUAL "")
     list(FILTER fuzzer_args EXCLUDE REGEX "^-(runs|max_total_time)=")
     list(APPEND fuzzer_args "-max_total_time=$ENV{MEDIAPERCH_FUZZ_SECONDS}")
@@ -61,4 +100,26 @@ execute_process(
     RESULT_VARIABLE status)
 if(NOT status EQUAL 0)
     message(FATAL_ERROR "${FUZZER} exited with ${status}")
+endif()
+
+if("${corpus}" STREQUAL "${SCRATCH}")
+    return()
+endif()
+file(GLOB kept "${corpus}/*")
+list(LENGTH kept before)
+set(merged "${corpus}.merging")
+file(REMOVE_RECURSE "${merged}")
+file(MAKE_DIRECTORY "${merged}")
+execute_process(COMMAND "${FUZZER}" -merge=1 ${input_args} "${merged}" "${corpus}"
+                RESULT_VARIABLE status)
+if(status EQUAL 0)
+    file(REMOVE_RECURSE "${corpus}")
+    file(RENAME "${merged}" "${corpus}")
+    file(GLOB now "${corpus}/*")
+    list(LENGTH now after)
+    message(STATUS "${NAME}: ${before} inputs merged down to ${after}")
+else()
+    file(REMOVE_RECURSE "${merged}")
+    message(STATUS "${NAME}: the merge did not finish (${status}), and the corpus of "
+        "${before} inputs carries over as it is")
 endif()

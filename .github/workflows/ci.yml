@@ -336,6 +336,128 @@ jobs:
           path: build/windows-fuzz/fuzz-findings/
           if-no-files-found: ignore
 
+  # **Ubuntu, under the sanitizers: the tests, and then the fuzzers.** The
+  # Windows jobs have AddressSanitizer and a trap for undefined behaviour, and
+  # nothing more: no LeakSanitizer, which it took a Linux build of the Matroska
+  # fuzzer to find libebml's and libmatroska's leaks with; no vptr check,
+  # which Clang has none of for the MSVC ABI; and no ThreadSanitizer, which it
+  # has none of for Windows, and which is the one thing that sees the engine's
+  # threads get each other wrong. So each of two builds here makes everything
+  # the linux job makes and runs its tests -- one with the address, undefined
+  # and vptr sanitizers, LeakSanitizer with them, and one with the thread and
+  # undefined ones, since thread cannot share a build with address -- and then
+  # builds the fuzz targets again under the same sanitizers, without the
+  # modules, and gives each thirty seconds on its seeds and regression inputs,
+  # as the Windows fuzz job does. A canary for each sanitizer passes only when
+  # the sanitizer reports what it does on purpose (tests/sanitizers/), so that
+  # the silence of the rest means something. ADLplug-Next's sanitize jobs, in
+  # this tree's shape.
+  #
+  # **For the runner's own processor**, as the fuzz job is built: what these
+  # builds make is tested and fuzzed here and never shipped.
+  sanitize:
+    name: Linux, ${{ matrix.sanitizers }}, tests and fuzzing
+    runs-on: ubuntu-26.04
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sanitizers: address, undefined and vptr
+            tests: linux-asan
+            fuzz: linux-fuzz
+          - sanitizers: thread and undefined
+            tests: linux-tsan
+            fuzz: linux-fuzz-tsan
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - name: LLVM, pinned, and the tools of the external decoders
+        run: bash ci/setup.sh
+
+      - name: Configure the tests
+        run: cmake --preset ${{ matrix.tests }} -DMEDIAPERCH_ARCH=native
+
+      - name: Report the toolchain, the instruction set and the sanitizers
+        run: |
+          cat build/${{ matrix.tests }}/llvm-toolchain.txt
+          cmake -N -L build/${{ matrix.tests }} | grep -E 'MEDIAPERCH_(ARCH|SANITIZERS)'
+
+      - name: Build the tests
+        run: cmake --build --preset ${{ matrix.tests }}
+
+      - name: Test
+        run: ctest --preset ${{ matrix.tests }} --output-on-failure --no-tests=error
+
+      - name: Configure the fuzz targets
+        run: cmake --preset ${{ matrix.fuzz }} -DMEDIAPERCH_ARCH=native
+
+      - name: Build the fuzz targets
+        run: cmake --build --preset ${{ matrix.fuzz }}
+
+      - name: Fuzz
+        run: ctest --preset ${{ matrix.fuzz }} --output-on-failure
+
+      - name: Keep the inputs that failed
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-findings-${{ matrix.fuzz }}
+          path: build/${{ matrix.fuzz }}/fuzz-findings/
+          if-no-files-found: ignore
+
+  # **The memory sanitizer reads what none of the others can: a value that was
+  # never written.** It sees only the code it has instrumented, which makes the
+  # C++ library part of what has to be, and no system ships one that is:
+  # ci/msan-libraries.sh builds libc++ with the sanitizer, and a libFuzzer
+  # against it, from the sources of the very compiler ci/setup.sh installed.
+  # What can run under it is what this tree builds whole, which is the fuzz
+  # targets and not the modules: a module is loaded by a host, and a host the
+  # sanitizer knew nothing of would be reported for every value it handed over.
+  # The canary here reads a value never written, and passes only when that is
+  # reported.
+  msan:
+    name: Linux, memory and undefined, fuzzing
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - name: LLVM, pinned
+        run: bash ci/setup.sh
+
+      - name: libc++ and libFuzzer, built with the sanitizer
+        run: |
+          bash ci/msan-libraries.sh "$HOME/libcxx-msan"
+          echo "MEDIAPERCH_MSAN_LIBRARIES=$HOME/libcxx-msan" >> "$GITHUB_ENV"
+
+      # For the runner's own processor, as the sanitize jobs are built.
+      - name: Configure the fuzz targets
+        run: cmake --preset linux-fuzz-msan -DMEDIAPERCH_ARCH=native
+
+      - name: Report the toolchain, the instruction set and the sanitizers
+        run: |
+          cat build/linux-fuzz-msan/llvm-toolchain.txt
+          cmake -N -L build/linux-fuzz-msan | grep -E 'MEDIAPERCH_(ARCH|SANITIZERS)'
+
+      - name: Build the fuzz targets
+        run: cmake --build --preset linux-fuzz-msan
+
+      - name: Fuzz
+        run: ctest --preset linux-fuzz-msan --output-on-failure
+
+      - name: Keep the inputs that failed
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-findings-linux-fuzz-msan
+          path: build/linux-fuzz-msan/fuzz-findings/
+          if-no-files-found: ignore
+
   # Every other check in this tree compares one decoder with another, which can
   # only say whether they agree. This one holds each decoder against the
   # uncompressed audio that went into the encoder: length, alignment, which

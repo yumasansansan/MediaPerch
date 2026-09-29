@@ -73,6 +73,14 @@ ExternalProject_Add(hm_external
         # instruction set every external project is given, since this takes
         # the place of the CMAKE_CXX_FLAGS that list sets.
         "-DCMAKE_CXX_FLAGS=${MEDIAPERCH_ARCH_CFLAGS} -w"
+        # **And no sanitizer**, which that list gives a sanitizer build's
+        # libraries: HM is a program run beside the tree, as the reference its
+        # decoder is held to, and nothing of it is built into what ships. A
+        # sanitizer's runtime linked into it would judge somebody else's program
+        # at its exit -- its leaks among them -- and fail the test that asks it
+        # for the answer.
+        "-DCMAKE_C_FLAGS=${MEDIAPERCH_ARCH_CFLAGS}"
+        "-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld"
     # Only the decoder. HM builds an encoder, two analysers and three utilities
     # besides, and none of them is what the reference is being asked for.
     BUILD_COMMAND "${CMAKE_COMMAND}" --build "${hm_prefix}/build" --target TAppDecoder

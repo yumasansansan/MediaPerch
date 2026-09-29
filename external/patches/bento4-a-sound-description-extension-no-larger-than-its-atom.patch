@@ -1,0 +1,20 @@
+Bento4: a sound description's extension is no larger than its atom
+
+A QuickTime sound description of version 2 states the size of its structure, and AP4_AudioSampleEntry::ReadFields took whatever that size has beyond the 72 bytes of the structure itself for an extension, allocated it and read it, without asking whether the atom holds that many bytes. MediaPerch's Bento4 fuzzer, built for Linux with AddressSanitizer and with ThreadSanitizer, found files of 1883 and 1147 bytes that asked for 4,109,824,968 and 4,294,902,045. The extension is now no longer than what the atom holds after the fields before it, which is also where AP4_SampleEntry::Read, counting it among the fields, starts the atom's children. Against v1.6.0-641-119-gb8c50a0.
+
+diff --git a/Source/C++/Core/Ap4SampleEntry.cpp b/Source/C++/Core/Ap4SampleEntry.cpp
+index 8fbbd3a..718b302 100644
+--- a/Source/C++/Core/Ap4SampleEntry.cpp
++++ b/Source/C++/Core/Ap4SampleEntry.cpp
+@@ -501,6 +501,11 @@ AP4_AudioSampleEntry::ReadFields(AP4_ByteStream& stream)
+         stream.ReadUI32(m_QtV2LPCMFramesPerAudioPacket);
+         if (m_QtV2StructSize > 72) {
+             unsigned int ext_size = m_QtV2StructSize-72;
++            // no more than the atom holds after the fields read so far
++            AP4_UI64 payload = GetSize()-GetHeaderSize();
++            AP4_UI64 fields  = AP4_SampleEntry::GetFieldsSize()+20+36;
++            AP4_UI64 room    = payload > fields ? payload-fields : 0;
++            if (ext_size > room) ext_size = (unsigned int)room;
+             m_QtV2Extension.SetDataSize(ext_size);
+             stream.Read(m_QtV2Extension.UseData(), ext_size);
+         }

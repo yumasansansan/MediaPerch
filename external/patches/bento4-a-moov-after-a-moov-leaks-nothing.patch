@@ -1,0 +1,18 @@
+Bento4: a file with a second movie box keeps one movie, and loses none
+
+AP4_File::ParseStream makes an AP4_Movie for every moov atom at the top of a file and stores it in m_Movie over whatever was there: a file with two moov atoms, which the specification does not allow and a fuzzer makes at once, left the first movie -- its track list and its tracks -- with nothing pointing to it. MediaPerch's MP4 fuzzer, built for Linux with LeakSanitizer, found a 3588-byte file with two moov atoms at its top level. The movie of an earlier moov atom is deleted before the next one's takes its place, so a caller gets the movie it got before, the last one's; the atoms themselves are children of the file and stay. Against v1.6.0-641-119-gb8c50a0.
+
+diff --git a/Source/C++/Core/Ap4File.cpp b/Source/C++/Core/Ap4File.cpp
+index cb20c3e..cbcdcbb 100644
+--- a/Source/C++/Core/Ap4File.cpp
++++ b/Source/C++/Core/Ap4File.cpp
+@@ -105,6 +105,9 @@ AP4_File::ParseStream(AP4_ByteStream&  stream,
+         AddChild(atom);
+         switch (atom->GetType()) {
+             case AP4_ATOM_TYPE_MOOV:
++                // a second moov atom replaces the movie of the first, which
++                // nothing else holds (the atom itself is a child of the file)
++                delete m_Movie;
+                 m_Movie = new AP4_Movie(AP4_DYNAMIC_CAST(AP4_MoovAtom, atom), stream, false);
+                 if (moov_only) keep_parsing = false;
+                 break;

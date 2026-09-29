@@ -12,7 +12,7 @@
 # Driven by modules/codec/dav1d/CMakeLists.txt; see the comment there for why
 # this tree has a Meson dependency at all.
 
-foreach(required meson src build prefix cc ar cflags)
+foreach(required meson src build prefix cc ar cflags ldflags)
     if(NOT DEFINED ${required})
         message(FATAL_ERROR "meson_setup.cmake needs -D${required}=")
     endif()
@@ -29,10 +29,16 @@ set(ENV{CC_LD} "lld")
 set(ENV{AR} "${ar}")
 
 # **The instruction set, the one every external project is given**
-# (cmake/CompilerOptions.cmake), as Meson's c_args. Given on every setup, a
-# reconfigure included, so that a build directory whose MEDIAPERCH_ARCH
-# changed compiles with the new one rather than the flags it began with.
+# (cmake/CompilerOptions.cmake), as Meson's c_args, and in a sanitizer build the
+# sanitizers, in c_args and in c_link_args -- the second for the programs Meson
+# links to check the compiler, which would not link with the first alone. Given
+# on every setup, a reconfigure included, so that a build directory whose
+# MEDIAPERCH_ARCH or MEDIAPERCH_SANITIZERS changed compiles with the new ones
+# rather than the flags it began with.
+string(STRIP "${cflags}" cflags)
+string(STRIP "${ldflags}" ldflags)
 set(c_args "-Dc_args=${cflags}")
+set(c_link_args "-Dc_link_args=${ldflags}")
 
 set(extra)
 if(EXISTS "${build}/meson-private/coredata.dat")
@@ -66,6 +72,7 @@ execute_process(
         -Denable_asm=true
         -Db_staticpic=true
         "${c_args}"
+        "${c_link_args}"
         ${extra}
     RESULT_VARIABLE result)
 

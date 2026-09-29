@@ -185,7 +185,7 @@ endif()
 # (-Zstack-protector).
 if(MEDIAPERCH_CARGO AND WIN32)
     string(APPEND MEDIAPERCH_RUSTFLAGS " -Clink-arg=/lldignoreenv")
-    if(NOT (MEDIAPERCH_SANITIZE OR MEDIAPERCH_BUILD_FUZZERS))
+    if(NOT (MEDIAPERCH_SANITIZERS OR MEDIAPERCH_BUILD_FUZZERS))
         string(APPEND MEDIAPERCH_RUSTFLAGS " -Ccontrol-flow-guard")
     endif()
 endif()

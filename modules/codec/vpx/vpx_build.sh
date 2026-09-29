@@ -28,7 +28,13 @@
 # is taken without asking the CPU.** With run-time detection off, libvpx's
 # rtcd.pl calls every function's version for the highest set enabled, so a build
 # for AVX2 turns AVX-512 off, which it does not guarantee, and a build for
-# AVX-512 keeps it (MEDIAPERCH_ISA_LEVEL, the last argument).
+# AVX-512 keeps it (MEDIAPERCH_ISA_LEVEL, the next argument).
+#
+# **And a sanitizer build's sanitizers** (MEDIAPERCH_SANITIZER_FLAGS, the last
+# argument, empty in any other build), in the same extra flags and in LDFLAGS,
+# which configure links its own checks with: a library the thread sanitizer
+# cannot see into is one whose threads it reports racing, since it does not see
+# the atomics they order themselves with.
 #
 # **On Windows this runs under MSYS2, and that is not a preference.** libvpx's
 # scripts use MSYS2's sed and cut, and its rules put long lists on one command
@@ -42,7 +48,7 @@
 # own bash, so the limit is CreateProcess's 32767 and the lists fit.
 #
 # Arguments: <src> <build> <checks> <cc> <cxx> <ar> <strip> <nasm> <arch flags>
-#            <isa level>
+#            <isa level> [<sanitizer flags>]
 set -e
 
 # **MSYS2's own tools first, before anything else runs**, on Windows: this
@@ -63,6 +69,9 @@ build=$(unix_path "$2")
 checks=$3
 arch=$9
 isa=${10}
+sanitizers=${11:-}
+extra="$arch${sanitizers:+ $sanitizers}"
+extra="${extra# }"
 
 # **The toolchain the parent build was checked against**, found by putting its
 # directory first on PATH and naming each tool bare. Not by path: libvpx's
@@ -80,7 +89,7 @@ export STRIP=$(basename "$7" .exe)
 export NM=llvm-nm
 export LD="$CC"
 export CROSS=
-export LDFLAGS=-fuse-ld=lld
+export LDFLAGS="-fuse-ld=lld${sanitizers:+ $sanitizers}"
 
 mkdir -p "$build"
 cd "$build"
@@ -96,11 +105,11 @@ cd "$build"
 # webm-io and libyuv are on by default and are both jobs this tree does itself:
 # containers are demuxers here and colour conversion is a shader.
 if [ "$windows" = 1 ]; then
-    options=(--target=x86_64-win64-gcc "--extra-cflags=-fms-runtime-lib=dll${arch:+ $arch}")
+    options=(--target=x86_64-win64-gcc "--extra-cflags=-fms-runtime-lib=dll${extra:+ $extra}")
 else
     options=(--target=x86_64-linux-gcc --enable-pic)
-    if [ -n "$arch" ]; then
-        options+=("--extra-cflags=$arch")
+    if [ -n "$extra" ]; then
+        options+=("--extra-cflags=$extra")
     fi
 fi
 options+=(

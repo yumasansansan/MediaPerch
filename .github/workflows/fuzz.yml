@@ -2,14 +2,27 @@
 #
 # Every fuzz target, for minutes rather than seconds, every night.
 #
-# CI's `fuzz` job gives each target thirty seconds on every push: a smoke test
-# that the campaign still builds, with the regression corpus in it. That is not
-# a campaign, and the faults a campaign finds were not found by it -- the
+# CI gives each target thirty seconds on every push: a smoke test that the
+# campaign still builds, with the regression corpus in it. That is not a
+# campaign, and the faults a campaign finds were not found by it -- the
 # demuxer fuzzers' first three minutes each found a read after free in the
 # WavPack demuxer and a Bento4 loop that outlasted its twenty-second limit.
 # This runs the same tests (fuzz/RunFuzzer.cmake) for as long as it is asked,
-# on the corpus the last night grew, and keeps the corpus it grows and every
-# input that failed.
+# in four builds of the fuzz targets, each with sanitizers no other build can
+# have with them: Windows' with the address sanitizer, and Ubuntu's with the
+# address, undefined and vptr sanitizers and LeakSanitizer, with the thread
+# and undefined ones, and with the memory and undefined ones -- the three
+# presets CI's sanitizer jobs fuzz with for a moment on every push.
+#
+# A run carries on from the corpus the last one grew and kept, and each target
+# first replays the inputs that failed in it, so that a failure lasts until it
+# is fixed rather than until fuzzing happens to miss it; a corpus is merged
+# down after the run, so that the next does not spend its minutes replaying
+# everything the last one kept (RunFuzzer.cmake). The targets of each build are
+# fuzzed by three jobs side by side -- the demuxers through the module ABI, the
+# codecs through it, and the parsers under them with the settings file -- since
+# one job fuzzing every target in turn would outgrow the time a job may take.
+# ADLplug-Next's fuzz.yml is the same campaign, in its words.
 name: Fuzz
 run-name: Fuzz, ${{ github.event.inputs.minutes || '10' }} minutes each
 
@@ -33,25 +46,44 @@ concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   fuzz:
-    name: ${{ matrix.part }}, ${{ github.event.inputs.minutes || '10' }} minutes each
-    runs-on: windows-2025-vs2026
-    # The build, and ten targets at most at the longest time each, with room.
+    name: ${{ matrix.preset }}, ${{ matrix.part }}, ${{ github.event.inputs.minutes || '10' }} minutes each
+    runs-on: ${{ matrix.os }}
+    # The build, and ten targets at most at the longest time each, with room;
+    # an hour more for the memory sanitizer's build, which is slower by a good
+    # deal and builds its C++ library first. The tables are worked out here
+    # because an expression of GitHub's has no arithmetic.
     timeout-minutes: >-
-      ${{ fromJSON('{"1": 60, "5": 110, "10": 160, "15": 210, "20": 260}')[github.event.inputs.minutes || '10'] }}
+      ${{ fromJSON(matrix.preset == 'linux-fuzz-msan'
+            && '{"1": 120, "5": 170, "10": 220, "15": 270, "20": 320}'
+            || '{"1": 60, "5": 110, "10": 160, "15": 210, "20": 260}')[github.event.inputs.minutes || '10'] }}
     strategy:
       fail-fast: false
       matrix:
+        preset: [windows-fuzz, linux-fuzz, linux-fuzz-tsan, linux-fuzz-msan]
+        part: [demuxers, codecs, parsers]
         include:
-          # The demuxer modules through the ABI, seven of them.
+          - preset: windows-fuzz
+            os: windows-2025-vs2026
+          - preset: linux-fuzz
+            os: ubuntu-26.04
+          - preset: linux-fuzz-tsan
+            os: ubuntu-26.04
+          - preset: linux-fuzz-msan
+            os: ubuntu-26.04
+          # The demuxer modules through the ABI.
           - part: demuxers
             select: -R ^fuzz_demux_
-          # The audio codec modules through the ABI, five of them.
+          # The audio codec modules through the ABI.
           - part: codecs
             select: -R ^fuzz_codec_
-          # The parsers under them and the settings file, six in C++ and four
-          # in Rust.
+          # The parsers under them and the settings file, in C++ and -- in the
+          # builds that have them, Windows' and the address one -- in Rust.
           - part: parsers
             select: -E "^fuzz_(demux|codec)_"
     steps:
@@ -60,31 +92,35 @@ jobs:
           submodules: true
 
       - name: LLVM, pinned
-        shell: bash
         run: bash ci/setup.sh
 
-      # For the runner's own processor, as CI's fuzz job is: nothing built here
-      # leaves this job but what it finds.
-      - name: Configure
-        run: cmake --preset windows-fuzz -DMEDIAPERCH_ARCH=native
-
-      - name: Report the toolchain
+      - name: libc++ and libFuzzer, built with the memory sanitizer
+        if: ${{ matrix.preset == 'linux-fuzz-msan' }}
         run: |
-          Get-Content build/windows-fuzz/llvm-toolchain.txt
-          cmake -N -L build/windows-fuzz | Select-String -Pattern 'MEDIAPERCH_ARCH'
+          bash ci/msan-libraries.sh "$HOME/libcxx-msan"
+          echo "MEDIAPERCH_MSAN_LIBRARIES=$HOME/libcxx-msan" >> "$GITHUB_ENV"
+
+      # For the runner's own processor, as CI's fuzz jobs are: nothing built
+      # here leaves this job but what it finds.
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }} -DMEDIAPERCH_ARCH=native
+
+      - name: Report the toolchain, the instruction set and the sanitizers
+        run: |
+          cat build/${{ matrix.preset }}/llvm-toolchain.txt
+          cmake -N -L build/${{ matrix.preset }} | grep -E 'MEDIAPERCH_(ARCH|SANITIZERS)' || true
 
       - name: Build
-        run: cmake --build --preset windows-fuzz
+        run: cmake --build --preset ${{ matrix.preset }}
 
-      # The corpus the last campaign grew, where there was one: a night that
-      # starts from the seed inputs spends its first minutes finding again what
-      # the one before had already found.
-      - name: Carry over the corpus
-        shell: bash
+      # The corpus the last campaign grew and the inputs that failed in it,
+      # where there was one: a night that starts from the seed inputs spends its
+      # first minutes finding again what the one before had already found.
+      - name: Carry over the corpus and the inputs that failed
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p fuzz-run/corpora
+          mkdir -p fuzz-run/corpora fuzz-run/earlier
           last=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow fuzz.yml --branch main \
             --status completed --limit 20 --json conclusion,databaseId \
             --jq '[.[] | select(.conclusion == "success" or .conclusion == "failure")][0].databaseId // empty')
@@ -94,27 +130,37 @@ jobs:
           fi
           echo "Carrying over from run $last."
           gh run download "$last" --repo "$GITHUB_REPOSITORY" --dir fuzz-run/corpora \
-            --name "fuzz-corpora-${{ matrix.part }}" \
+            --name "fuzz-corpora-${{ matrix.preset }}-${{ matrix.part }}" \
             || echo "Run $last kept no corpus: the corpus starts from the seed inputs."
+          gh run download "$last" --repo "$GITHUB_REPOSITORY" --dir fuzz-run/earlier \
+            --name "fuzz-findings-${{ matrix.preset }}-${{ matrix.part }}" \
+            || echo "Run $last kept no inputs that failed."
 
       # Each target for the minutes asked, in turn; ctest's own limit is the
-      # run's length and ten minutes more, so that only a fuzzer that will not
-      # stop is stopped by it. A hang inside one input is a finding of the
-      # fuzzer's own, at twenty-five seconds (fuzz/CMakeLists.txt).
+      # run's length and ten minutes more -- half an hour more under the memory
+      # sanitizer -- so that only a fuzzer that will not stop is stopped by it.
+      # A hang inside one input is a finding of the fuzzer's own, at twenty-five
+      # seconds (fuzz/CMakeLists.txt).
       - name: Fuzz each target
         env:
           MEDIAPERCH_FUZZ_CORPORA: ${{ github.workspace }}/fuzz-run/corpora
           MEDIAPERCH_FUZZ_FINDINGS: ${{ github.workspace }}/fuzz-run/findings
+          MEDIAPERCH_FUZZ_EARLIER: ${{ github.workspace }}/fuzz-run/earlier
+          MINUTES: ${{ github.event.inputs.minutes || '10' }}
         run: |
-          $seconds = [int]('${{ github.event.inputs.minutes || '10' }}') * 60
-          $env:MEDIAPERCH_FUZZ_SECONDS = "$seconds"
-          ctest --preset windows-fuzz ${{ matrix.select }} --timeout ($seconds + 600) --output-on-failure
+          seconds=$((MINUTES * 60))
+          guard=$((seconds + 600))
+          if [ '${{ matrix.preset }}' = linux-fuzz-msan ]; then
+            guard=$((seconds + 1800))
+          fi
+          export MEDIAPERCH_FUZZ_SECONDS=$seconds
+          ctest --preset ${{ matrix.preset }} ${{ matrix.select }} --timeout "$guard" --output-on-failure
 
       - name: Keep the corpus
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: fuzz-corpora-${{ matrix.part }}
+          name: fuzz-corpora-${{ matrix.preset }}-${{ matrix.part }}
           path: fuzz-run/corpora/
           if-no-files-found: ignore
           retention-days: 30
@@ -123,7 +169,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: fuzz-findings-${{ matrix.part }}
+          name: fuzz-findings-${{ matrix.preset }}-${{ matrix.part }}
           path: fuzz-run/findings/
           if-no-files-found: ignore
           retention-days: 90

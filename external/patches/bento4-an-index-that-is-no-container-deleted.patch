@@ -1,0 +1,18 @@
+Bento4: an atom where a fragment index should be, and is not one, is deleted
+
+AP4_LinearReader::SeekTo looks for the movie fragment random access box where the mfro box at the end of a file says it is, makes an atom of whatever it finds there, and keeps it as the index when it is a container atom. When it was not, the cast gave back null, and the atom that had been made was left with nothing pointing to it -- once for every seek. MediaPerch's MP4 demuxer fuzzer, built for Linux with LeakSanitizer, found a 1427-byte fragmented file whose mfro points at an atom of another kind, and three seeks lost three atoms. The atom is deleted when it is no container. Against v1.6.0-641-119-gb8c50a0.
+
+diff --git a/Source/C++/Core/Ap4LinearReader.cpp b/Source/C++/Core/Ap4LinearReader.cpp
+index b69d831..e9f4cd3 100644
+--- a/Source/C++/Core/Ap4LinearReader.cpp
++++ b/Source/C++/Core/Ap4LinearReader.cpp
+@@ -186,6 +186,9 @@ AP4_LinearReader::SeekTo(AP4_UI32 time_ms, AP4_UI32* actual_time_ms)
+                             AP4_DefaultAtomFactory atom_factory;
+                             atom_factory.CreateAtomFromStream(*m_FragmentStream, available, mfra);
+                             m_Mfra = AP4_DYNAMIC_CAST(AP4_ContainerAtom, mfra);
++                            // an atom there that is no container is no index,
++                            // and nothing else holds it
++                            if (m_Mfra == NULL) delete mfra;
+                         }
+                     }
+                 }

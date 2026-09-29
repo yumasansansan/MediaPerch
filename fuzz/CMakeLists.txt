@@ -9,6 +9,23 @@
 #   cmake --build --preset windows-fuzz
 #   build/windows-fuzz/bin/wav_fuzzer corpus/wav -runs=100000
 
+# **Which sanitizers.** A build that names its own (MEDIAPERCH_SANITIZERS: the
+# Linux fuzz presets, one for each of address, thread and memory) has given them
+# to everything it compiles already (cmake/CompilerOptions.cmake), and the fuzz
+# targets add libFuzzer to that. A build that names none -- the Windows preset
+# -- has the address sanitizer here, on the fuzz targets and on the libraries
+# they instrument, and a trap for undefined behaviour on the modules' own code
+# (mediaperch_add_module_fuzzer), as it always had. Either way the fuzz tests
+# run with the sanitizers' environment, and a build that has no tests/ gets the
+# canaries here.
+if(MEDIAPERCH_SANITIZER_LIST)
+    set(mediaperch_fuzz_sanitizers "")
+    cmake_language(DEFER CALL mediaperch_sanitizer_test_environment)
+    mediaperch_add_sanitizer_canaries()
+else()
+    set(mediaperch_fuzz_sanitizers ",address")
+endif()
+
 # libFuzzer's own runtime, clang_rt.fuzzer-x86_64.lib, is built against the
 # static CRT. Objects here default to the dynamic one, and the two disagree
 # through a /failifmismatch record that MSVC's STL headers emit -- so the
@@ -70,6 +87,10 @@ set(mediaperch_fuzz_args "-runs=20000|-max_total_time=30|-timeout=25|-print_fina
 # Where the tests put what they find, for CI to keep: one directory, every
 # file named after its fuzzer.
 set(mediaperch_fuzz_findings "${CMAKE_BINARY_DIR}/fuzz-findings")
+# The C++ libraries' checks of their own preconditions (mediaperch_add_fuzzer).
+set(mediaperch_fuzz_stl_checks
+    _MSVC_STL_HARDENING=1 _GLIBCXX_ASSERTIONS
+    _LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_FAST)
 
 function(mediaperch_add_fuzzer name source corpus)
     # Extra translation units after the corpus name: the AAC parser is ours,
@@ -96,13 +117,27 @@ function(mediaperch_add_fuzzer name source corpus)
     # past a vector's end, front() of nothing, a span taken past its data. ASan
     # sees a read outside an allocation; these see a read outside the object,
     # inside an allocation that is bigger -- a vector's spare capacity, say --
-    # which ASan cannot. A broken one traps, and libFuzzer keeps the input.
-    target_compile_definitions(${name} PRIVATE _MSVC_STL_HARDENING=1)
+    # which ASan cannot. A broken one traps, and libFuzzer keeps the input. Each
+    # C++ library has its own word for it, and ignores the other two: the MSVC
+    # STL's, libstdc++'s on Linux, and the libc++ of a memory-sanitizer build.
+    target_compile_definitions(${name} PRIVATE ${mediaperch_fuzz_stl_checks})
 
     # Not mediaperch_flags: this is somebody else's parser compiled into our
     # binary, and holding it to our warning set would drown the signal.
-    target_compile_options(${name} PRIVATE -fsanitize=fuzzer,address -w)
-    target_link_options(${name} PRIVATE -fsanitize=fuzzer,address)
+    #
+    # **In a memory-sanitizer build libFuzzer itself comes from somewhere
+    # else**: the one that comes with the compiler is compiled against
+    # libstdc++, and such a build links an instrumented libc++ instead, which
+    # leaves every std::string and std::ifstream of libFuzzer's own code
+    # undefined. ci/msan-libraries.sh builds one against the same library, and
+    # the instrumentation is asked for on its own.
+    target_compile_options(${name} PRIVATE -fsanitize=fuzzer${mediaperch_fuzz_sanitizers} -w)
+    if("memory" IN_LIST MEDIAPERCH_SANITIZER_LIST)
+        target_link_options(${name} PRIVATE -fsanitize=fuzzer-no-link)
+        target_link_libraries(${name} PRIVATE "${MEDIAPERCH_MSAN_LIBRARIES}/lib/libFuzzer.a")
+    else()
+        target_link_options(${name} PRIVATE -fsanitize=fuzzer${mediaperch_fuzz_sanitizers})
+    endif()
 
     set_target_properties(${name} PROPERTIES FOLDER "fuzz")
 
@@ -156,11 +191,13 @@ endfunction()
 # are off for the reason mediaperch_add_fuzzer gives.
 function(mediaperch_instrument target)
     target_compile_options(${target} PRIVATE
-        "$<$<COMPILE_LANGUAGE:C,CXX>:-fsanitize=fuzzer-no-link,address>"
+        "$<$<COMPILE_LANGUAGE:C,CXX>:-fsanitize=fuzzer-no-link${mediaperch_fuzz_sanitizers}>"
         "$<$<COMPILE_LANGUAGE:C,CXX>:-w>")
     target_compile_definitions(${target} PRIVATE
-        _DISABLE_VECTOR_ANNOTATION _DISABLE_STRING_ANNOTATION
-        "$<$<COMPILE_LANGUAGE:CXX>:_MSVC_STL_HARDENING=1>")
+        _DISABLE_VECTOR_ANNOTATION _DISABLE_STRING_ANNOTATION)
+    foreach(check IN LISTS mediaperch_fuzz_stl_checks)
+        target_compile_definitions(${target} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${check}>")
+    endforeach()
     set_target_properties(${target} PROPERTIES FOLDER "external")
 endfunction()
 
@@ -172,7 +209,15 @@ mediaperch_add_fuzzer(flac_fuzzer flac_fuzzer.cpp flac)
 # that module builds it (cmake/Mpg123.cmake, optimised decoders and all), with
 # the sanitizer on: a library linked in uninstrumented is a library the fuzzer
 # runs through and reports nothing about.
-include(Mpg123)
+#
+# **Not under the memory sanitizer.** libmpg123's decoders are its x86-64
+# assembly, which this tree ships and cmake/Mpg123.cmake will not build
+# without, and the samples the assembly writes are memory the sanitizer never
+# saw written: every read of one would be reported. The address and thread
+# builds fuzz it, and Windows'.
+if(NOT "memory" IN_LIST MEDIAPERCH_SANITIZER_LIST)
+    include(Mpg123)
+endif()
 if(TARGET libmpg123)
     foreach(_ext IN ITEMS libmpg123 libsyn123 compat compat_str)
         if(TARGET ${_ext})
@@ -266,8 +311,16 @@ function(mediaperch_add_rust_fuzzer name manifest corpus)
                      -P "${CMAKE_CURRENT_LIST_DIR}/RunFuzzer.cmake")
 endfunction()
 
-if(MEDIAPERCH_CARGO)
-    execute_process(COMMAND rustc -vV OUTPUT_VARIABLE rustc_info)
+# **Not in the thread and memory builds**, which would build the same four
+# Rust programs again: they carry no sanitizer, and the address build and the
+# Windows one fuzz them.
+if(MEDIAPERCH_CARGO AND ("thread" IN_LIST MEDIAPERCH_SANITIZER_LIST
+                         OR "memory" IN_LIST MEDIAPERCH_SANITIZER_LIST))
+    message(STATUS "Fuzzing: the Rust fuzzers are the address build's")
+elseif(MEDIAPERCH_CARGO)
+    # The rustc beside cargo that cmake/Rust.cmake found, as everywhere else: the
+    # one on PATH may be none, and then cargo was given an empty --target.
+    execute_process(COMMAND "${MEDIAPERCH_RUSTC}" -vV OUTPUT_VARIABLE rustc_info)
     string(REGEX MATCH "host: ([^
 ]+)" _ "${rustc_info}")
     set(rust_host "${CMAKE_MATCH_1}")
@@ -288,9 +341,10 @@ else()
 endif()
 
 # WavPack, which demux_wavpack is built on. It is on OSS-Fuzz upstream, which
-# is why this is expected to find nothing -- and is not a reason to leave it
-# out, for the reasons wavpack_fuzzer.cpp gives. Built as demux_wavpack builds
-# it (cmake/WavPack.cmake), assembly and all: what is fuzzed is what ships.
+# is why this was expected to find nothing -- it found two, which
+# wavpack_fuzzer.cpp names -- and is not a reason to leave it out, for the
+# reasons wavpack_fuzzer.cpp gives. Built as demux_wavpack builds it
+# (cmake/WavPack.cmake), assembly and all: what is fuzzed is what ships.
 include(WavPack)
 if(TARGET wavpack)
     mediaperch_instrument(wavpack)
@@ -398,9 +452,12 @@ function(mediaperch_add_module_fuzzer name harness corpus module_source)
     # overflow of a signed number, a shift past the width, a misaligned load, a
     # pointer taken past its object. Trapping rather than reporting, so it needs
     # no runtime of its own beside ASan's, and only on the sources compiled into
-    # this target -- the module's and the shared ones; the libraries under it
-    # are other people's, whose undefined behaviour has its own fuzzers.
-    target_compile_options(${name} PRIVATE -fsanitize=undefined -fsanitize-trap=undefined)
+    # this target -- the module's and the shared ones. A build whose sanitizers
+    # include `undefined` has it on everything already, the libraries under the
+    # module too, with a runtime that says which check it was.
+    if(NOT "undefined" IN_LIST MEDIAPERCH_SANITIZER_LIST)
+        target_compile_options(${name} PRIVATE -fsanitize=undefined -fsanitize-trap=undefined)
+    endif()
     target_link_libraries(${name} PRIVATE ${M_LINK} ${CMAKE_DL_LIBS})
 endfunction()
 

@@ -1,0 +1,34 @@
+Bento4: a data buffer copies no bytes when it has none to copy
+
+AP4_DataBuffer's copy constructor and SetData hand AP4_CopyMemory -- memcpy -- a source and a size whatever they are, and an empty buffer's pointer is NULL: the default constructor leaves it so, and an unknown atom that holds no payload in memory carries one. memcpy's source and destination are declared never to be null, even for no bytes, so copying an empty buffer is undefined behaviour however little it copies. MediaPerch's MP4 fuzzers, built for Linux with UndefinedBehaviorSanitizer, stopped on it at the first seed, a real file, where AP4_SampleDescription clones the atoms of an audio sample entry (AP4_ContainerAtom::Clone, AP4_UnknownAtom's copy constructor). The two copy only when there is something to copy, as AppendData, which returns before a copy of nothing, already did. Against v1.6.0-641-119-gb8c50a0.
+
+diff --git a/Source/C++/Core/Ap4DataBuffer.cpp b/Source/C++/Core/Ap4DataBuffer.cpp
+index 89247d0..528f25f 100644
+--- a/Source/C++/Core/Ap4DataBuffer.cpp
++++ b/Source/C++/Core/Ap4DataBuffer.cpp
+@@ -80,7 +80,11 @@ AP4_DataBuffer::AP4_DataBuffer(const AP4_DataBuffer& other) :
+     m_DataSize(other.m_DataSize)
+ {
+     m_Buffer = new AP4_Byte[m_BufferSize];
+-    AP4_CopyMemory(m_Buffer, other.m_Buffer, m_BufferSize);
++    // an empty buffer's pointer is NULL, and memcpy's source may not be
++    // even for no bytes
++    if (m_BufferSize) {
++        AP4_CopyMemory(m_Buffer, other.m_Buffer, m_BufferSize);
++    }
+ }
+ 
+ /*----------------------------------------------------------------------
+@@ -172,7 +176,11 @@ AP4_DataBuffer::SetData(const AP4_Byte* data, AP4_Size size)
+             return AP4_FAILURE;
+         }
+     }
+-    AP4_CopyMemory(m_Buffer, data, size);
++    // nothing to copy from, perhaps from NULL, and into a buffer that may not
++    // be there either
++    if (size) {
++        AP4_CopyMemory(m_Buffer, data, size);
++    }
+     m_DataSize = size;
+ 
+     return AP4_SUCCESS;

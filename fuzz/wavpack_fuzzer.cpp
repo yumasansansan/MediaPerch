@@ -9,6 +9,14 @@
 // that rots. libFLAC and libmpg123 are fuzzed upstream too and have targets
 // here for the same reason.
 //
+// **It found two faults in its first runs under the sanitizers on Linux.** A
+// hybrid profile of no bytes had its length checked by adding to the null
+// pointer that stands for its data, which upstream had fixed after 5.9.0 and
+// is why external/wavpack moved to upstream's master; and the limit beyond
+// which a block is silenced overflowed for a header stating a magnitude of 31,
+// which external/patches/libwavpack-the-mute-limit-in-64-bits.patch fixes. The
+// two inputs are in fuzz/corpus/wavpack.
+//
 // The whole buffer is a file, read through the same `WavpackStreamReader64`
 // callbacks `demux_wavpack` installs, so what is exercised is the path this
 // tree actually takes: the header, the block walk, the decorrelation, and
@@ -19,6 +27,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 

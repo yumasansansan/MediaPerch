@@ -218,6 +218,8 @@ decode-quality check inside it goes from 174 to 39.
 | `windows-core-only` | what CI builds to keep `src/engine` and `src/player` portable, and the engine free of the player |
 | `windows-asan` | the parsers under ASan and UBSan |
 | `windows-fuzz` | the libFuzzer targets. CI configures it with `-DMEDIAPERCH_ARCH=native`: the fuzzers are built and run on one runner and never shipped |
+| `linux-asan`, `linux-tsan` | everything `linux` builds, and its tests, under the address, undefined and vptr sanitizers with LeakSanitizer, or under the thread and undefined ones |
+| `linux-fuzz`, `linux-fuzz-tsan`, `linux-fuzz-msan` | the libFuzzer targets under the same two sets of sanitizers, and under the memory and undefined ones; the last needs the libraries `ci/msan-libraries.sh` builds, named by `MEDIAPERCH_MSAN_LIBRARIES` in the environment. CI builds all three for the runner's own processor, as it builds `windows-fuzz` |
 
 There is no toolchain column because there is one toolchain. `llvm-tools`, a
 hidden preset every other one inherits, names each tool once.
@@ -331,7 +333,7 @@ Three options remain, and none of them changes the arithmetic:
 |---|---|---|
 | `MEDIAPERCH_DIAGNOSTICS` | OFF | keep the measuring commands in an optimised build |
 | `MEDIAPERCH_LINK_MAP` | OFF | a `.map` beside every binary, for `tools/mapsize.py` |
-| `MEDIAPERCH_SANITIZE` | OFF | ASan and UBSan, and no LTO with them. The release C runtime in every configuration, because Clang's ASan on Windows does not support the debug one; the ASan runtime DLL of the Clang in use copied beside the programs; and no Control Flow Guard, EH continuation table or CET compatibility, which stop ASan committing its own shadow memory (below) |
+| `MEDIAPERCH_SANITIZERS` | empty | the sanitizers to build everything with, comma-separated -- `address`, `undefined`, `vptr`, `thread`, `memory`, the names ADLplug-Next gives its own -- and no LTO with them. Undefined behaviour stops the program; `vptr` is left out for the MSVC ABI and beside `thread`; `thread` is Linux's, and cannot share a build with `address` or `memory`; `memory` is Linux's, for the fuzz targets, and needs `MEDIAPERCH_MSAN_LIBRARIES`. On Windows under `address`, the release C runtime in every configuration, because Clang's ASan there does not support the debug one; the ASan runtime DLL of the Clang in use copied beside the programs; and no Control Flow Guard, EH continuation table or CET compatibility, which stop ASan committing its own shadow memory (below). `cmake/CompilerOptions.cmake` says what each finds |
 
 `cmake/CompilerOptions.cmake` is **one block for one toolchain**: Clang's GNU
 driver, which produces COFF on Windows and ELF on Linux from the same words. The

@@ -101,12 +101,12 @@
       "name": "windows-asan",
       "inherits": "windows-base",
       "displayName": "Windows, sanitized",
-      "description": "The parsers under ASan and UBSan, without the Windows head.",
+      "description": "The parsers under ASan and UBSan, without the Windows head. Clang has no vptr check for the MSVC ABI and no thread sanitizer for Windows.",
       "generator": "Ninja",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "MEDIAPERCH_BUILD_PLATFORM": "OFF",
-        "MEDIAPERCH_SANITIZE": "ON"
+        "MEDIAPERCH_SANITIZERS": "address,undefined"
       }
     },
     {
@@ -145,6 +145,64 @@
       "description": "The same build for exactly the processor it is built on, with 512-bit vectors where it has AVX-512. For that machine alone: another may lack an instruction it uses, and stop there.",
       "cacheVariables": {
         "MEDIAPERCH_ARCH": "native"
+      }
+    },
+    {
+      "name": "linux-sanitized",
+      "hidden": true,
+      "inherits": "linux-base",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+    {
+      "name": "linux-asan",
+      "inherits": "linux-sanitized",
+      "displayName": "Linux, address, undefined and vptr sanitizers",
+      "description": "Everything the linux preset builds, and its tests, under AddressSanitizer with LeakSanitizer, UBSan and the vptr check. RelWithDebInfo: a sanitizer is not for a link-time optimised build.",
+      "cacheVariables": {
+        "MEDIAPERCH_SANITIZERS": "address,undefined,vptr"
+      }
+    },
+    {
+      "name": "linux-tsan",
+      "inherits": "linux-sanitized",
+      "displayName": "Linux, thread and undefined sanitizers",
+      "description": "Everything the linux preset builds, and its tests, under ThreadSanitizer and UBSan: races between the engine's threads and locks taken in orders that could stop them, which nothing else finds.",
+      "cacheVariables": {
+        "MEDIAPERCH_SANITIZERS": "thread,undefined"
+      }
+    },
+    {
+      "name": "linux-fuzz",
+      "inherits": "linux-sanitized",
+      "displayName": "Linux, fuzzers under the address, undefined and vptr sanitizers",
+      "description": "libFuzzer over every parser that reads somebody else's file, with LeakSanitizer, which Windows has none of.",
+      "cacheVariables": {
+        "MEDIAPERCH_BUILD_FUZZERS": "ON",
+        "MEDIAPERCH_BUILD_TESTS": "OFF",
+        "MEDIAPERCH_BUILD_PLATFORM": "OFF",
+        "MEDIAPERCH_SANITIZERS": "address,undefined,vptr"
+      }
+    },
+    {
+      "name": "linux-fuzz-tsan",
+      "inherits": "linux-fuzz",
+      "displayName": "Linux, fuzzers under the thread and undefined sanitizers",
+      "description": "The same fuzzers under ThreadSanitizer, for the libraries that start threads of their own and the code that shares with them.",
+      "cacheVariables": {
+        "MEDIAPERCH_SANITIZERS": "thread,undefined"
+      }
+    },
+    {
+      "name": "linux-fuzz-msan",
+      "inherits": "linux-fuzz",
+      "displayName": "Linux, fuzzers under the memory and undefined sanitizers",
+      "description": "The same fuzzers under MemorySanitizer, against libc++ and a libFuzzer built with it: MEDIAPERCH_MSAN_LIBRARIES in the environment names their prefix, which ci/msan-libraries.sh writes.",
+      "cacheVariables": {
+        "MEDIAPERCH_SANITIZERS": "memory,undefined",
+        "MEDIAPERCH_MSAN_LIBRARIES": "$env{MEDIAPERCH_MSAN_LIBRARIES}"
       }
     }
   ],
@@ -211,6 +269,26 @@
       "name": "linux-release",
       "configurePreset": "linux",
       "configuration": "Release"
+    },
+    {
+      "name": "linux-asan",
+      "configurePreset": "linux-asan"
+    },
+    {
+      "name": "linux-tsan",
+      "configurePreset": "linux-tsan"
+    },
+    {
+      "name": "linux-fuzz",
+      "configurePreset": "linux-fuzz"
+    },
+    {
+      "name": "linux-fuzz-tsan",
+      "configurePreset": "linux-fuzz-tsan"
+    },
+    {
+      "name": "linux-fuzz-msan",
+      "configurePreset": "linux-fuzz-msan"
     }
   ],
   "testPresets": [
@@ -282,6 +360,31 @@
       "inherits": "checked",
       "configurePreset": "linux",
       "configuration": "Release"
+    },
+    {
+      "name": "linux-asan",
+      "inherits": "checked",
+      "configurePreset": "linux-asan"
+    },
+    {
+      "name": "linux-tsan",
+      "inherits": "checked",
+      "configurePreset": "linux-tsan"
+    },
+    {
+      "name": "linux-fuzz",
+      "inherits": "checked",
+      "configurePreset": "linux-fuzz"
+    },
+    {
+      "name": "linux-fuzz-tsan",
+      "inherits": "checked",
+      "configurePreset": "linux-fuzz-tsan"
+    },
+    {
+      "name": "linux-fuzz-msan",
+      "inherits": "checked",
+      "configurePreset": "linux-fuzz-msan"
     }
   ]
 }

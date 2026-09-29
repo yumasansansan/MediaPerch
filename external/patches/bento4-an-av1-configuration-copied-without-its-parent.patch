@@ -1,0 +1,50 @@
+Bento4: a copy of an AV1 configuration box is one a sample description can hold
+
+AP4_Av1SampleDescription copies the av1C atom it is given, or finds among its details, and adds the copy to its own details, which then own it and delete it with them. Every other configuration atom a description copies this way -- avcC, hvcC, dac3, dec3, dmlp -- has a copy constructor of its own that makes an atom with no parent. av1C had none, so the one the compiler writes copied the original's parent too; AP4_AtomParent::AddChild refused a child that already had a parent, and the copy, which the description went on pointing to, was deleted by nobody -- once for every AV1 track opened. MediaPerch's tests, built for Linux with LeakSanitizer, found it in every test that opens an AV1 file in MP4. av1C has the copy constructor the others have. Against v1.6.0-641-119-gb8c50a0.
+
+diff --git a/Source/C++/Core/Ap4Av1cAtom.cpp b/Source/C++/Core/Ap4Av1cAtom.cpp
+index ca73079..e56462c 100644
+--- a/Source/C++/Core/Ap4Av1cAtom.cpp
++++ b/Source/C++/Core/Ap4Av1cAtom.cpp
+@@ -131,6 +131,29 @@ AP4_Av1cAtom::AP4_Av1cAtom() :
+     m_Size32 += 4;
+ }
+ 
++/*----------------------------------------------------------------------
++|   AP4_Av1cAtom::AP4_Av1cAtom
+++---------------------------------------------------------------------*/
++AP4_Av1cAtom::AP4_Av1cAtom(const AP4_Av1cAtom& other) :
++    AP4_Atom(AP4_ATOM_TYPE_AV1C, other.m_Size32),
++    m_Version(other.m_Version),
++    m_SeqProfile(other.m_SeqProfile),
++    m_SeqLevelIdx0(other.m_SeqLevelIdx0),
++    m_SeqTier0(other.m_SeqTier0),
++    m_HighBitDepth(other.m_HighBitDepth),
++    m_TwelveBit(other.m_TwelveBit),
++    m_Monochrome(other.m_Monochrome),
++    m_ChromaSubsamplingX(other.m_ChromaSubsamplingX),
++    m_ChromaSubsamplingY(other.m_ChromaSubsamplingY),
++    m_ChromaSamplePosition(other.m_ChromaSamplePosition),
++    m_InitialPresentationDelayPresent(other.m_InitialPresentationDelayPresent),
++    m_InitialPresentationDelayMinusOne(other.m_InitialPresentationDelayMinusOne),
++    m_ConfigObus(other.m_ConfigObus)
++{
++    // a copy has no parent of its own yet, as AP4_AvccAtom's has none:
++    // one that kept the original's could not be added to another
++}
++
+ /*----------------------------------------------------------------------
+ |   AP4_Av1cAtom::AP4_Av1cAtom
+ +---------------------------------------------------------------------*/
+diff --git a/Source/C++/Core/Ap4Av1cAtom.h b/Source/C++/Core/Ap4Av1cAtom.h
+index 7fb9768..309fd43 100644
+--- a/Source/C++/Core/Ap4Av1cAtom.h
++++ b/Source/C++/Core/Ap4Av1cAtom.h
+@@ -70,6 +70,7 @@ public:
+                  const AP4_UI08* config_obus,
+                  AP4_Size        config_obus_size);
+     AP4_Av1cAtom();
++    AP4_Av1cAtom(const AP4_Av1cAtom& other); // copy constructor
+     
+     // methods
+     virtual AP4_Result InspectFields(AP4_AtomInspector& inspector);

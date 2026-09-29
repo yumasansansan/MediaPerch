@@ -60,6 +60,7 @@
 #include <limits>
 #include <memory>
 #include <new>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -470,6 +471,9 @@ struct MpDemux {
     std::unique_ptr<libebml::IOCallback> io;
     std::unique_ptr<EbmlStream> stream;
     std::unique_ptr<EbmlElement> segment;
+    /// How many bytes the file held when last measured, which is what an element
+    /// read whole has to fit in -- see `fits`. 0 until the first one asks.
+    std::uint64_t file_size = 0;
 
     std::uint64_t timestamp_scale = k_default_scale;
     double duration_scaled = 0.0;
@@ -593,7 +597,53 @@ struct Above {
     int levels = 0;
 };
 
-/// Reads `el` whole: a master and everything in it, or a block and its data.
+/// How many bytes the file behind `io` holds now. The reader is left where it
+/// was.
+std::uint64_t measure(libebml::IOCallback& io)
+{
+    const std::uint64_t at = io.getFilePointer();
+    io.setFilePointer(0, libebml::seek_end);
+    const std::uint64_t size = io.getFilePointer();
+    io.setFilePointer(static_cast<std::int64_t>(at), libebml::seek_beginning);
+    return size;
+}
+
+/// Whether the file holds all of `el`, which is what reading it whole takes.
+///
+/// **libebml takes an element's size at its word.** A binary element is given a
+/// buffer as large as its header says before a byte of it is read, and a master
+/// reads children up to the end it states. What bounds either is the largest
+/// size the caller lets `FindNextElement` accept, and the one caller that knows
+/// where the file ends is this one -- which looks for a level-1 element, and for
+/// a cluster's child, with no bound at all, because a file cut off in the middle
+/// of a cluster still holds whole blocks worth reading. So the bound is here,
+/// where an element is about to be read: one that states more than the file
+/// holds is where the file ends, by its own account, and nothing in it is read.
+/// The memory sanitizer's fuzzer found why, in a 1296-byte file whose Info
+/// stated seventeen terabytes and a child of it 1.9 GB: libebml allocated the
+/// 1.9 GB, which the sanitizer ran out of memory marking undefined, and which
+/// an ordinary build asks the system for and fills with the few bytes the file
+/// has left. Under a master that fits, every child is bounded by what is left
+/// of its parent: only a segment or a cluster may leave its size unknown, and
+/// neither is read whole.
+///
+/// **A miss measures the file again before it counts**, since a file may grow
+/// while it is read: a recording is still being written as it is played.
+bool fits(MpDemux* d, const EbmlElement& el)
+{
+    if (!el.IsFiniteSize()) {
+        return false;
+    }
+    if (el.GetEndPosition() <= d->file_size) {
+        return true;
+    }
+    d->file_size = measure(*d->io);
+    return el.GetEndPosition() <= d->file_size;
+}
+
+/// Reads `el` whole: a master and everything in it, a block and its data, or a
+/// number. Nothing, when the file does not hold all of it (`fits`): the file
+/// ends inside it, and the reader is left at its data.
 ///
 /// **libebml ends a master that states more than it holds on whatever follows
 /// it**, as it ends a cluster: the element it met is handed back through
@@ -608,8 +658,11 @@ struct Above {
 /// as scratch while it descends, and handing it the walk's own counter left an
 /// Info read as an empty master -- silently, so the file simply had no
 /// duration and no timestamp scale. Every `Read` here gets its own.
-Above read_whole(MpDemux* d, EbmlElement& el)
+[[nodiscard]] std::optional<Above> read_whole(MpDemux* d, EbmlElement& el)
 {
+    if (!fits(d, el)) {
+        return std::nullopt;
+    }
     int level = 0;
     EbmlElement* found = nullptr;
     el.Read(*d->stream, EBML_CONTEXT(&el), level, found, true);
@@ -858,8 +911,19 @@ bool read_head(MpDemux* d)
     while (el) {
         const EbmlId id = EbmlId(*el);
         Above above;
+        // Reads `el` whole, and says whether it could: the file ending inside
+        // an element ends the walk.
+        const auto read = [&] {
+            std::optional<Above> whole = read_whole(d, *el);
+            if (whole) {
+                above = std::move(*whole);
+            }
+            return whole.has_value();
+        };
         if (id == EBML_ID(KaxInfo)) {
-            above = read_whole(d, *el);
+            if (!read()) {
+                break;
+            }
             auto& info = static_cast<EbmlMaster&>(*el);
             if (auto* scale = FindChild<KaxTimestampScale>(info)) {
                 const auto value = static_cast<std::uint64_t>(*scale);
@@ -871,7 +935,9 @@ bool read_head(MpDemux* d)
                 d->duration_scaled = float_of(d, *duration);
             }
         } else if (id == EBML_ID(KaxTracks)) {
-            above = read_whole(d, *el);
+            if (!read()) {
+                break;
+            }
             auto& tracks = static_cast<EbmlMaster&>(*el);
             // `EbmlMaster::operator[]` indexes with an `unsigned`, and
             // `ListSize` answers in `size_t`. The loop counts in what the
@@ -885,7 +951,9 @@ bool read_head(MpDemux* d)
             // **Matroska's own seek index**, and the reason seeking here is a
             // lookup rather than a walk. It is almost always at the end of the
             // file, which is why this walk does not stop at the first cluster.
-            above = read_whole(d, *el);
+            if (!read()) {
+                break;
+            }
             auto& cues = static_cast<EbmlMaster&>(*el);
             for (unsigned i = 0; i < cues.ListSize(); ++i) {
                 if (EbmlId(*cues[i]) != EBML_ID(KaxCuePoint)) {
@@ -1018,9 +1086,13 @@ bool next_block(MpDemux* d)
 
         const EbmlId id = EbmlId(*child);
         if (id == EBML_ID(KaxClusterTimestamp)) {
-            int level = 0;
-            EbmlElement* dummy = nullptr;
-            child->Read(*d->stream, EBML_CONTEXT(child.get()), level, dummy, true);
+            // A timestamp the file ends inside is the end, as a block is. Read
+            // short, it made libebml throw, which demux_read reported as a
+            // packet that did not fit, of no bytes.
+            if (!read_whole(d, *child)) {
+                d->cluster.reset();
+                return false;
+            }
             d->cluster_ts = static_cast<std::uint64_t>(
                 *static_cast<KaxClusterTimestamp*>(child.get()));
             // **libmatroska needs telling.** A block stores a signed 16-bit
@@ -1039,7 +1111,14 @@ bool next_block(MpDemux* d)
         // short final frame needs. Reading only the first kind loses exactly one
         // packet per file, which is how this was found.
         if (id == EBML_ID(KaxSimpleBlock) || id == EBML_ID(KaxBlockGroup)) {
-            Above above = read_whole(d, *child);
+            // A block the file ends inside is where its packets end: the file
+            // was cut off in the middle of writing it.
+            std::optional<Above> whole = read_whole(d, *child);
+            if (!whole) {
+                d->cluster.reset();
+                return false;
+            }
+            Above above = std::move(*whole);
             if (above.levels == 1) {
                 d->pending_child = std::move(above.element);
             } else if (above.element) {
@@ -1338,7 +1417,12 @@ try {
     }
     Above after_head;
     {
-        after_head = read_whole(d.get(), *head);
+        // A header the file ends inside is all the file there is.
+        std::optional<Above> whole = read_whole(d.get(), *head);
+        if (!whole) {
+            return MP_ERR_UNSUPPORTED;
+        }
+        after_head = std::move(*whole);
         auto& master = static_cast<EbmlMaster&>(*head);
         if (auto* type = FindChild<EDocType>(master)) {
             const std::string doc(*type);

@@ -97,7 +97,17 @@ if(WIN32)
             "13% slower, so it stops here instead.")
     endif()
 endif()
-set(WAVPACK_ENABLE_ASM ON CACHE BOOL "" FORCE)
+# **The C decoder under the memory sanitizer, and only there.** What the
+# assembly writes is memory the sanitizer never saw written, so every sample it
+# decoded would be reported as a value never written; libwavpack's own switch
+# gives the C that the assembly stands in for, which the sanitizer can follow.
+# That build fuzzes and ships nothing, and the address and thread builds fuzz
+# the assembly.
+if("memory" IN_LIST MEDIAPERCH_SANITIZER_LIST)
+    set(WAVPACK_ENABLE_ASM OFF CACHE BOOL "" FORCE)
+else()
+    set(WAVPACK_ENABLE_ASM ON CACHE BOOL "" FORCE)
+endif()
 set(WAVPACK_ENABLE_LEGACY OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
@@ -112,7 +122,8 @@ add_subdirectory("${CMAKE_SOURCE_DIR}/external/wavpack"
 # stays on -- so it is read from that directory.
 get_directory_property(mediaperch_wavpack_asm
     DIRECTORY "${CMAKE_SOURCE_DIR}/external/wavpack" DEFINITION WAVPACK_ENABLE_ASM)
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|x86_64|amd64)$" AND NOT mediaperch_wavpack_asm)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|x86_64|amd64)$" AND NOT mediaperch_wavpack_asm
+   AND NOT "memory" IN_LIST MEDIAPERCH_SANITIZER_LIST)
     message(FATAL_ERROR
         "libwavpack was configured without its assembly, which this tree builds on "
         "every system, so the configure stops here rather than build the slower "

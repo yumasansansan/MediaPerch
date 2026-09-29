@@ -1,9 +1,9 @@
 libwavpack: the assembly is on wherever the C compiler can assemble it
 
-Outside MSVC, libwavpack's assembly is the .S files, and CMake compiles a .S file as ASM -- with the C compiler, which preprocesses it first -- a language this list file already enables. HAVE_ASM asked instead for an ASM-ATT assembler, a separate program such as GNU as that CMake gives the .s and .asm extensions, none of which libwavpack has on those systems. So the build required a tool it never ran: with Clang and LLD and no binutils beside them, the assembly was off, and with binutils present it was on for a reason that had nothing to do with how the files are assembled. HAVE_ASM now asks for the ASM compiler, and ASM-ATT is no longer looked for. Against 5.9.0.
+Outside MSVC, libwavpack's assembly is the .S files, and CMake compiles a .S file as ASM -- with the C compiler, which preprocesses it first -- a language this list file already enables. HAVE_ASM asked instead for an ASM-ATT assembler, a separate program such as GNU as that CMake gives the .s and .asm extensions, none of which libwavpack has on those systems. So the build required a tool it never ran: with Clang and LLD and no binutils beside them, the assembly was off, and with binutils present it was on for a reason that had nothing to do with how the files are assembled. HAVE_ASM now asks for the ASM compiler, and ASM-ATT is no longer looked for. Against 5.9.0-56-gb0e6c05.
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 0b5d26d..269bf52 100644
+index 0e1115f..a170d1c 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -44,11 +44,6 @@ if(MSVC)

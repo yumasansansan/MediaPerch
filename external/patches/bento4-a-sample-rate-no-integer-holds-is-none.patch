@@ -1,0 +1,17 @@
+Bento4: a sample rate no 32-bit integer holds is none
+
+A QuickTime sound description of version 2 states its sample rate as a 64-bit float, and AP4_AudioSampleEntry::GetSampleRate converted it to AP4_UI32 with a cast, which is undefined behaviour for a value the type cannot hold -- NaN, a number at or below -1, 2^32 and above -- and every sample description made of such an entry asks it. MediaPerch's Bento4 fuzzer, built for Linux with UndefinedBehaviorSanitizer, found a 1143-byte file stating 1.13553e+243, which its MP4 demuxer fuzzer reaches as well. A rate outside [0, 2^32) is returned as 0, which no reader takes for a rate, and one inside it is truncated as before. Against v1.6.0-641-119-gb8c50a0.
+
+diff --git a/Source/C++/Core/Ap4SampleEntry.cpp b/Source/C++/Core/Ap4SampleEntry.cpp
+index 4f71ad2..8fbbd3a 100644
+--- a/Source/C++/Core/Ap4SampleEntry.cpp
++++ b/Source/C++/Core/Ap4SampleEntry.cpp
+@@ -443,6 +443,8 @@ AP4_UI32
+ AP4_AudioSampleEntry::GetSampleRate()
+ {
+     if (m_QtVersion == 2) {
++        // a rate no 32-bit integer holds -- NaN, negative, 2^32 or more -- is none
++        if (!(m_QtV2SampleRate64 >= 0.0 && m_QtV2SampleRate64 < 4294967296.0)) return 0;
+         return (AP4_UI32)(m_QtV2SampleRate64);
+     } else {
+         return m_SampleRate>>16;

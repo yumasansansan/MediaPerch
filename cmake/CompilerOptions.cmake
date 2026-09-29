@@ -217,10 +217,13 @@ endif()
 # (`ml64.exe` said `A1004: out of memory`). None of these was ever meant for
 # anything but C and C++, and the guard states what was always true.
 add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-fstack-protector-strong>")
-option(MEDIAPERCH_SANITIZE "Build with the address and undefined-behaviour sanitizers" OFF)
+set(MEDIAPERCH_SANITIZERS "" CACHE STRING
+    "Sanitizers to build with, comma-separated: address, undefined, vptr, thread, memory")
+set(MEDIAPERCH_MSAN_LIBRARIES "" CACHE PATH
+    "Prefix of the libraries a memory-sanitizer build needs and no system ships: libc++ built with that sanitizer, and a libFuzzer built against it (ci/msan-libraries.sh writes them)")
 if(MEDIAPERCH_ELF)
     add_link_options(LINKER:-z,relro LINKER:-z,now LINKER:-z,noexecstack)
-elseif(MEDIAPERCH_SANITIZE OR MEDIAPERCH_BUILD_FUZZERS)
+elseif(MEDIAPERCH_SANITIZERS OR MEDIAPERCH_BUILD_FUZZERS)
     # **Not under the sanitizers.** AddressSanitizer on Windows reserves its
     # shadow memory and commits it a page at a time from an exception handler,
     # resuming the instruction that touched it -- and with Control Flow Guard,
@@ -383,23 +386,243 @@ endif()
 # ---------------------------------------------------------------------------
 # Sanitizers
 # ---------------------------------------------------------------------------
-# (MEDIAPERCH_SANITIZE is declared with the hardening above, which it changes.)
+# (MEDIAPERCH_SANITIZERS is declared with the hardening above, which it changes.)
+#
+# **Named, as ADLplug-Next names its own, and given to everything this build
+# compiles**: this tree's code and every library it builds from a submodule. The
+# decoders and the containers are most of what the modules ship, so a fault of
+# memory or an undefined operation in one of them is the module's. The
+# libraries that build systems of their own build -- dav1d with Meson, libvpx
+# with make, libaom, avm and libde265 with CMake of their own -- are told them
+# as they are told the instruction set (MEDIAPERCH_SANITIZER_FLAGS, and what an
+# external project is told, below): under the thread sanitizer a library that
+# was not compiled with it is a false report waiting to be made, since the
+# sanitizer cannot see the atomics it orders its own threads with -- dav1d's
+# workers were reported racing on the probability tables they hand each other
+# until dav1d was built with it too. HM, a program the tests run beside the tree as a
+# reference, and the Rust, with bounds checks of its own, are not.
+# MEDIAPERCH_SANITIZERS is a list, comma-separated, of:
+#
+#   * address -- a read or a write outside an object, or of one already freed.
+#     On Linux it brings LeakSanitizer, which looks when a program ends for
+#     memory nothing points to any more, and a leak fails a test like any other
+#     finding (ASAN_OPTIONS=detect_leaks=1 below). Windows has none: the fuzz
+#     job that ran there only could not see the leaks a Linux build of the same
+#     fuzzer found in libebml and libmatroska.
+#   * undefined -- an overflow of a signed number, a shift past the width, a
+#     misaligned load, a call through a pointer of the wrong type. It stops the
+#     program (-fno-sanitize-recover=all) rather than being reported and passed
+#     over, as a fault of memory does.
+#   * vptr -- an object used as a class it is not, where a downcast or a call of
+#     a member function takes it for one, which `undefined` leaves out. Clang
+#     has no such check for the MSVC ABI, so a Windows build leaves it out and
+#     says so; a thread build leaves it out too (below).
+#   * thread -- two threads that reach the same memory with nothing to order
+#     one against the other, and locks taken in an order that could meet
+#     another thread's and stop both. The engine is threads -- a render thread
+#     the device waits on, a decode thread, a display loop, and a shell's thread
+#     asking all of them what is playing -- and nothing else sees their
+#     mistakes: it found a queue read while the decode thread grew it,
+#     statistics copied while the loop wrote them, and a seek made on the
+#     caller's thread while `start` filled the same ring. It cannot be built
+#     with address or memory, and Clang has none for Windows.
+#   * memory -- a read of a value that was never written. Linux, the fuzz
+#     targets alone, and a C++ library built with it: see below.
+#
+# Not for Release, whose link-time optimisation moves the frames a report
+# names: the sanitizer presets configure RelWithDebInfo, the configurations of
+# a multi-config generator are the caller's to choose, and the frame pointer
+# stays in all of them.
+#
+# **What a test is run with**, given to the tests by the directories that
+# register them (tests/, fuzz/) once all their tests exist:
+# UBSAN_OPTIONS=print_stacktrace=1, so that a report of undefined behaviour
+# names its callers; detect_leaks=1 on Linux under address, where LeakSanitizer
+# is at home; and under thread, halt_on_error=1 -- ThreadSanitizer reports a
+# race and carries on by default, telling only the exit status at the end, by
+# which time libFuzzer has fuzzed past the input that found it -- with
+# second_deadlock_stack=1, so that a report of locks taken in two orders names
+# the place of the other order too. None of them says anything when it finds
+# nothing, which cannot be told from a check that never ran: the canaries in
+# tests/sanitizers/ leak, race and read what was never written on purpose, and
+# pass only when that is reported (mediaperch_add_sanitizer_canaries).
+set(MEDIAPERCH_SANITIZER_LIST "")
+set(MEDIAPERCH_SANITIZER_TEST_ENVIRONMENT "")
+set(MEDIAPERCH_SANITIZER_FLAGS "")
+if(MEDIAPERCH_SANITIZERS)
+    get_property(mediaperch_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+    if(NOT mediaperch_multi_config AND CMAKE_BUILD_TYPE STREQUAL "Release")
+        message(FATAL_ERROR
+            "MEDIAPERCH_SANITIZERS is not for Release builds, which are link-time "
+            "optimised. Configure RelWithDebInfo, as the sanitizer presets do.")
+    endif()
+    string(REPLACE "," ";" MEDIAPERCH_SANITIZER_LIST "${MEDIAPERCH_SANITIZERS}")
+    foreach(mediaperch_sanitizer IN LISTS MEDIAPERCH_SANITIZER_LIST)
+        if(NOT mediaperch_sanitizer MATCHES "^(address|undefined|vptr|thread|memory)$")
+            message(FATAL_ERROR
+                "MEDIAPERCH_SANITIZERS names '${mediaperch_sanitizer}', which is not one of "
+                "address, undefined, vptr, thread, memory.")
+        endif()
+    endforeach()
+    foreach(mediaperch_pair IN ITEMS "address;thread" "address;memory" "thread;memory")
+        list(GET mediaperch_pair 0 mediaperch_one)
+        list(GET mediaperch_pair 1 mediaperch_other)
+        if(mediaperch_one IN_LIST MEDIAPERCH_SANITIZER_LIST
+           AND mediaperch_other IN_LIST MEDIAPERCH_SANITIZER_LIST)
+            message(FATAL_ERROR
+                "MEDIAPERCH_SANITIZERS names both ${mediaperch_one} and ${mediaperch_other}, "
+                "which cannot be built together: each keeps a shadow of all of memory in "
+                "its own way.")
+        endif()
+    endforeach()
+    if("thread" IN_LIST MEDIAPERCH_SANITIZER_LIST AND WIN32)
+        message(FATAL_ERROR
+            "MEDIAPERCH_SANITIZERS names thread, which Clang has no thread sanitizer for on "
+            "Windows: it refuses -fsanitize=thread there. The thread presets are Linux's.")
+    endif()
+    # **LLVM's own runtime races with itself when the vptr check runs on more
+    # than one thread**: the check asks IsAccessibleMemoryRange() whether a
+    # vtable pointer can be read, that makes a pipe, and the write of its two
+    # descriptors is what ThreadSanitizer then reports, with no frame of the
+    # program in it (google/sanitizers issue 1106, known since 2019; ADLplug-Next
+    # reproduced it in thirty lines with Clang 23.1.2). A thread build leaves
+    # vptr out; the address build keeps it, and what it finds has nothing to do
+    # with threads.
+    if("thread" IN_LIST MEDIAPERCH_SANITIZER_LIST AND "vptr" IN_LIST MEDIAPERCH_SANITIZER_LIST)
+        list(REMOVE_ITEM MEDIAPERCH_SANITIZER_LIST "vptr")
+        message(STATUS "Sanitizers: vptr is left out, since its check and the thread "
+            "sanitizer's runtime race with one another inside LLVM")
+    endif()
+    if("vptr" IN_LIST MEDIAPERCH_SANITIZER_LIST AND WIN32)
+        list(REMOVE_ITEM MEDIAPERCH_SANITIZER_LIST "vptr")
+        message(STATUS "Sanitizers: vptr is left out, since Clang has no vptr check for the "
+            "MSVC ABI")
+        if(NOT MEDIAPERCH_SANITIZER_LIST)
+            message(FATAL_ERROR
+                "MEDIAPERCH_SANITIZERS names no sanitizer that this build can have besides vptr.")
+        endif()
+    endif()
 
-if(MEDIAPERCH_SANITIZE)
+    # **memory reads what the others cannot: a value that was never written.**
+    # It sees only the code it has instrumented, and memory written by code it
+    # has not seen is memory it believes was never written, so every read of it
+    # is reported. That makes the C++ library part of what has to be
+    # instrumented, and no system ships one that is -- libstdc++ cannot be built
+    # with the sanitizer at all. MEDIAPERCH_MSAN_LIBRARIES names a prefix holding
+    # libc++ built with it, which ci/msan-libraries.sh writes, and the build
+    # compiles and links against that in place of the system's libstdc++. The
+    # same prefix holds a libFuzzer built against it, which the fuzz targets link
+    # in place of the compiler's own (fuzz/CMakeLists.txt says why). What can run
+    # under it is what this tree builds whole, which is the fuzz targets: a
+    # module is loaded by a host, and a host the sanitizer knew nothing of would
+    # be reported for every value it handed over.
+    #
+    # The two libraries are linked statically, the one place this tree links a
+    # C++ library that way, and not for size: with a shared instrumented libc++
+    # the sanitizer's own report walks the stack into itself until the stack
+    # runs out, and a real finding comes out as "stack-overflow ... nested bug in
+    # the same thread, aborting" with nothing named (ADLplug-Next measured it).
+    # Nothing of such a build is shipped, so what the system's library gains
+    # later reaches nothing that leaves here.
+    #
+    # Origins are tracked to the fullest, so that a report says where the value
+    # it read was made and through which stores it travelled, not only where it
+    # arrived.
+    if("memory" IN_LIST MEDIAPERCH_SANITIZER_LIST)
+        if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            message(FATAL_ERROR
+                "MEDIAPERCH_SANITIZERS names memory, which Clang has a memory sanitizer for "
+                "on Linux alone.")
+        endif()
+        if(NOT MEDIAPERCH_MSAN_LIBRARIES)
+            message(FATAL_ERROR
+                "MEDIAPERCH_SANITIZERS names memory, which needs a C++ library built with "
+                "it: reads of what the system's library wrote would be reported as reads of "
+                "what was never written. Give MEDIAPERCH_MSAN_LIBRARIES the prefix of one, "
+                "which ci/msan-libraries.sh writes.")
+        endif()
+        foreach(mediaperch_part IN ITEMS lib/libc++.a lib/libc++abi.a lib/libFuzzer.a
+                                         include/c++/v1/version llvm.txt)
+            if(NOT EXISTS "${MEDIAPERCH_MSAN_LIBRARIES}/${mediaperch_part}")
+                message(FATAL_ERROR
+                    "MEDIAPERCH_MSAN_LIBRARIES is '${MEDIAPERCH_MSAN_LIBRARIES}', which holds "
+                    "no ${mediaperch_part}. ci/msan-libraries.sh writes a prefix that holds "
+                    "all of them.")
+            endif()
+        endforeach()
+        # And they have to be this compiler's: llvm.txt says which compiler built
+        # them and from which sources, both asked of that compiler.
+        file(STRINGS "${MEDIAPERCH_MSAN_LIBRARIES}/llvm.txt" mediaperch_msan_built_by
+             LIMIT_COUNT 1)
+        string(REGEX MATCH "^[^ ]+" mediaperch_msan_version "${mediaperch_msan_built_by}")
+        string(REGEX REPLACE "^[^ ]+ " "" mediaperch_msan_sources "${mediaperch_msan_built_by}")
+        if(NOT mediaperch_msan_version VERSION_EQUAL CMAKE_CXX_COMPILER_VERSION)
+            message(FATAL_ERROR
+                "MEDIAPERCH_MSAN_LIBRARIES holds libraries built by Clang "
+                "${mediaperch_msan_version}, and this build's compiler is "
+                "${CMAKE_CXX_COMPILER_VERSION} (${CMAKE_CXX_COMPILER}). Run "
+                "ci/msan-libraries.sh with the compiler this build uses first on PATH.")
+        endif()
+        message(STATUS "Sanitizers: the C++ library is libc++ ${mediaperch_msan_version} "
+            "built with the sanitizer, from ${mediaperch_msan_sources}")
+        file(APPEND "${MEDIAPERCH_LLVM_TOOLCHAIN_FILE}"
+            "C++ library (sanitized)\t${mediaperch_msan_version}\tlibc++ ${MEDIAPERCH_MSAN_LIBRARIES}/lib/libc++.a (${mediaperch_msan_sources})\n"
+            "libFuzzer (sanitized)\t${mediaperch_msan_version}\t${MEDIAPERCH_MSAN_LIBRARIES}/lib/libFuzzer.a\n")
+        add_compile_options(
+            "$<$<COMPILE_LANGUAGE:C,CXX>:-fsanitize-memory-track-origins=2>"
+            "$<$<COMPILE_LANGUAGE:CXX>:-nostdinc++>"
+            "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-isystem ${MEDIAPERCH_MSAN_LIBRARIES}/include/c++/v1>")
+        add_link_options(-nostdlib++)
+        # At the very end of every link line, where a static library has to be,
+        # and read until nothing more is needed, since the two refer to each
+        # other.
+        string(APPEND CMAKE_CXX_STANDARD_LIBRARIES
+            " -Wl,--start-group ${MEDIAPERCH_MSAN_LIBRARIES}/lib/libc++.a"
+            " ${MEDIAPERCH_MSAN_LIBRARIES}/lib/libc++abi.a -Wl,--end-group")
+        # **And no _FORTIFY_SOURCE in the libraries that ask for it by options
+        # of their own**, libopus and libFLAC. With it an optimised compile turns
+        # a memcpy whose size it cannot see into a call of glibc's
+        # __memcpy_chk, which the sanitizer does not intercept as it does
+        # memcpy: the copy is made where it cannot see, and every value copied is
+        # taken for one never written. libopus's SILK decoder was reported
+        # reading the LPC coefficients it had just copied, at -O2 and not at -O0,
+        # where the fortified copy is not made; with the option off it is not
+        # reported at all. Such a build fuzzes and ships nothing, and every other
+        # build keeps what the two libraries ask for.
+        set(OPUS_FORTIFY_SOURCE OFF CACHE BOOL "" FORCE)
+        set(WITH_FORTIFY_SOURCE OFF CACHE BOOL "" FORCE)
+    endif()
+
+    list(JOIN MEDIAPERCH_SANITIZER_LIST "," mediaperch_sanitizer_option)
+    message(STATUS "Sanitizers: ${mediaperch_sanitizer_option}")
     add_compile_options(
-        "$<$<COMPILE_LANGUAGE:C,CXX>:-fsanitize=address,undefined>"
+        "$<$<COMPILE_LANGUAGE:C,CXX>:-fsanitize=${mediaperch_sanitizer_option}>"
+        "$<$<COMPILE_LANGUAGE:C,CXX>:-fno-sanitize-recover=all>"
         "$<$<COMPILE_LANGUAGE:C,CXX>:-fno-omit-frame-pointer>")
-    add_link_options(-fsanitize=address,undefined)
+    add_link_options("-fsanitize=${mediaperch_sanitizer_option}")
+    # The same, as one string, for the builds this one starts by hand (above),
+    # which give it to their compiles and to the links of their own checks.
+    set(MEDIAPERCH_SANITIZER_FLAGS
+        "-fsanitize=${mediaperch_sanitizer_option} -fno-sanitize-recover=all -fno-omit-frame-pointer")
 
+    set(MEDIAPERCH_SANITIZER_TEST_ENVIRONMENT "UBSAN_OPTIONS=print_stacktrace=1")
+    if("address" IN_LIST MEDIAPERCH_SANITIZER_LIST AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        list(APPEND MEDIAPERCH_SANITIZER_TEST_ENVIRONMENT "ASAN_OPTIONS=detect_leaks=1")
+    endif()
+    if("thread" IN_LIST MEDIAPERCH_SANITIZER_LIST)
+        list(APPEND MEDIAPERCH_SANITIZER_TEST_ENVIRONMENT
+            "TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1")
+    endif()
+endif()
+
+if("address" IN_LIST MEDIAPERCH_SANITIZER_LIST AND WIN32)
     # **The release C runtime, in every configuration.** Clang's AddressSanitizer
     # on Windows does not support the debug CRT: with it, a program's first
     # free went to a heap the sanitizer had not allocated from, and every test
     # stopped at start with "attempting free on address which was not
     # malloc()-ed". The Debug configuration keeps its -O0 and its debug
     # information; only the runtime library is the release one.
-    if(WIN32)
-        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
-    endif()
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
 
     # **The runtime is a DLL, and it goes beside the programs.** On Windows
     # AddressSanitizer links its runtime dynamically, and a program that cannot
@@ -409,33 +632,85 @@ if(MEDIAPERCH_SANITIZE)
     # This is the one of the Clang in use, from its resource directory, as the
     # fuzzers take it (fuzz/CMakeLists.txt), copied into every configuration's
     # output directory now so that a test run finds it with nothing on PATH.
-    if(WIN32)
-        execute_process(COMMAND "${CMAKE_CXX_COMPILER}" --print-resource-dir
-            OUTPUT_VARIABLE mediaperch_clang_resources OUTPUT_STRIP_TRAILING_WHITESPACE)
-        file(TO_CMAKE_PATH "${mediaperch_clang_resources}" mediaperch_clang_resources)
-        set(mediaperch_asan_runtime
-            "${mediaperch_clang_resources}/lib/windows/clang_rt.asan_dynamic-x86_64.dll")
-        if(NOT EXISTS "${mediaperch_asan_runtime}")
-            message(FATAL_ERROR
-                "MEDIAPERCH_SANITIZE needs ${mediaperch_asan_runtime}, the runtime of "
-                "the Clang in use, and it is not there.")
-        endif()
-        get_property(mediaperch_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
-        if(mediaperch_multi_config)
-            set(mediaperch_output_dirs "")
-            foreach(mediaperch_config IN LISTS CMAKE_CONFIGURATION_TYPES)
-                list(APPEND mediaperch_output_dirs
-                     "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/${mediaperch_config}")
-            endforeach()
-        else()
-            set(mediaperch_output_dirs "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
-        endif()
-        foreach(mediaperch_output_dir IN LISTS mediaperch_output_dirs)
-            file(COPY "${mediaperch_asan_runtime}" DESTINATION "${mediaperch_output_dir}")
-        endforeach()
-        message(STATUS "ASan runtime ${mediaperch_asan_runtime}, beside the programs")
+    execute_process(COMMAND "${CMAKE_CXX_COMPILER}" --print-resource-dir
+        OUTPUT_VARIABLE mediaperch_clang_resources OUTPUT_STRIP_TRAILING_WHITESPACE)
+    file(TO_CMAKE_PATH "${mediaperch_clang_resources}" mediaperch_clang_resources)
+    set(mediaperch_asan_runtime
+        "${mediaperch_clang_resources}/lib/windows/clang_rt.asan_dynamic-x86_64.dll")
+    if(NOT EXISTS "${mediaperch_asan_runtime}")
+        message(FATAL_ERROR
+            "An address-sanitizer build needs ${mediaperch_asan_runtime}, the runtime of "
+            "the Clang in use, and it is not there.")
     endif()
+    get_property(mediaperch_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+    if(mediaperch_multi_config)
+        set(mediaperch_output_dirs "")
+        foreach(mediaperch_config IN LISTS CMAKE_CONFIGURATION_TYPES)
+            list(APPEND mediaperch_output_dirs
+                 "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/${mediaperch_config}")
+        endforeach()
+    else()
+        set(mediaperch_output_dirs "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+    endif()
+    foreach(mediaperch_output_dir IN LISTS mediaperch_output_dirs)
+        file(COPY "${mediaperch_asan_runtime}" DESTINATION "${mediaperch_output_dir}")
+    endforeach()
+    message(STATUS "ASan runtime ${mediaperch_asan_runtime}, beside the programs")
 endif()
+
+# Gives the tests of the directory it is called in the sanitizers' environment
+# (above); a directory defers the call until all of its tests exist. A test
+# discovered when CTest runs -- Catch2's -- is given it where it is discovered.
+function(mediaperch_sanitizer_test_environment)
+    get_property(tests DIRECTORY PROPERTY TESTS)
+    if(tests AND MEDIAPERCH_SANITIZER_TEST_ENVIRONMENT)
+        set_property(TEST ${tests} APPEND PROPERTY ENVIRONMENT
+            ${MEDIAPERCH_SANITIZER_TEST_ENVIRONMENT})
+    endif()
+endfunction()
+
+# **The canaries**: a program for each sanitizer that says nothing when it finds
+# nothing, doing on purpose what that sanitizer is for, and a test of it that
+# passes only when the sanitizer says so -- so that the silence of every other
+# test and fuzz run means something. Leaks on Linux under address, where leak
+# detection is asked for; races under thread; a value never written under
+# memory. Registered by whichever of tests/ and fuzz/ a build has, once.
+function(mediaperch_add_sanitizer_canaries)
+    get_property(added GLOBAL PROPERTY MEDIAPERCH_SANITIZER_CANARIES)
+    if(added OR NOT MEDIAPERCH_SANITIZER_LIST)
+        return()
+    endif()
+    set_property(GLOBAL PROPERTY MEDIAPERCH_SANITIZER_CANARIES ON)
+    set(canaries "${CMAKE_SOURCE_DIR}/tests/sanitizers")
+    set(tests "")
+    if("address" IN_LIST MEDIAPERCH_SANITIZER_LIST AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_executable(mediaperch_leak_canary "${canaries}/leak_canary.c")
+        add_test(NAME sanitizer.leak_detection COMMAND mediaperch_leak_canary)
+        set_tests_properties(sanitizer.leak_detection PROPERTIES
+            PASS_REGULAR_EXPRESSION "ERROR: LeakSanitizer: detected memory leaks")
+        list(APPEND tests mediaperch_leak_canary)
+    endif()
+    if("thread" IN_LIST MEDIAPERCH_SANITIZER_LIST)
+        find_package(Threads REQUIRED)
+        add_executable(mediaperch_race_canary "${canaries}/race_canary.c")
+        target_link_libraries(mediaperch_race_canary PRIVATE Threads::Threads)
+        add_test(NAME sanitizer.race_detection COMMAND mediaperch_race_canary)
+        set_tests_properties(sanitizer.race_detection PROPERTIES
+            PASS_REGULAR_EXPRESSION "WARNING: ThreadSanitizer: data race")
+        list(APPEND tests mediaperch_race_canary)
+    endif()
+    if("memory" IN_LIST MEDIAPERCH_SANITIZER_LIST)
+        add_executable(mediaperch_memory_canary "${canaries}/memory_canary.c")
+        add_test(NAME sanitizer.memory_detection COMMAND mediaperch_memory_canary)
+        set_tests_properties(sanitizer.memory_detection PROPERTIES
+            PASS_REGULAR_EXPRESSION "WARNING: MemorySanitizer: use-of-uninitialized-value")
+        list(APPEND tests mediaperch_memory_canary)
+    endif()
+    foreach(canary IN LISTS tests)
+        target_link_libraries(${canary} PRIVATE mediaperch_flags)
+        set_target_properties(${canary} PROPERTIES FOLDER "tests")
+    endforeach()
+endfunction()
 
 # ---------------------------------------------------------------------------
 # Link-time optimisation
@@ -452,7 +727,7 @@ endif()
 # Two builds do without it, for the same reason: they exist to observe the
 # program rather than to be fast, and cross-module inlining moves the frames a
 # sanitizer report and a fuzzer crash both point at.
-if(NOT MEDIAPERCH_SANITIZE AND NOT MEDIAPERCH_BUILD_FUZZERS)
+if(NOT MEDIAPERCH_SANITIZERS AND NOT MEDIAPERCH_BUILD_FUZZERS)
     include(CheckIPOSupported)
     check_ipo_supported(RESULT MEDIAPERCH_IPO_OK OUTPUT MEDIAPERCH_IPO_WHY LANGUAGES C CXX)
     if(NOT MEDIAPERCH_IPO_OK)
@@ -525,15 +800,23 @@ endif()
 # **And position-independent**, as everything this tree builds itself is (the
 # root list file): each of these libraries is linked into a module, which on
 # Linux is a shared library.
+#
+# **And a sanitizer build's sanitizers** (MEDIAPERCH_SANITIZER_FLAGS), beside
+# the instruction set in the compile flags and in the link flags, which their
+# configures check the compiler with. HM, which is a program run beside the
+# tree rather than a library built into it, takes them out again (tests/hm).
+string(STRIP "${MEDIAPERCH_ARCH_CFLAGS} ${MEDIAPERCH_SANITIZER_FLAGS}"
+       mediaperch_external_cflags)
+string(STRIP "-fuse-ld=lld ${MEDIAPERCH_SANITIZER_FLAGS}" mediaperch_external_ldflags)
 set(MEDIAPERCH_EXTERNAL_CMAKE_ARGS
     "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}"
     "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
-    "-DCMAKE_C_FLAGS=${MEDIAPERCH_ARCH_CFLAGS}"
-    "-DCMAKE_CXX_FLAGS=${MEDIAPERCH_ARCH_CFLAGS}"
+    "-DCMAKE_C_FLAGS=${mediaperch_external_cflags}"
+    "-DCMAKE_CXX_FLAGS=${mediaperch_external_cflags}"
     "-DCMAKE_LINKER_TYPE=LLD"
-    "-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld"
-    "-DCMAKE_MODULE_LINKER_FLAGS=-fuse-ld=lld"
-    "-DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld"
+    "-DCMAKE_EXE_LINKER_FLAGS=${mediaperch_external_ldflags}"
+    "-DCMAKE_MODULE_LINKER_FLAGS=${mediaperch_external_ldflags}"
+    "-DCMAKE_SHARED_LINKER_FLAGS=${mediaperch_external_ldflags}"
     "-DCMAKE_AR=${CMAKE_AR}"
     "-DCMAKE_RANLIB=${CMAKE_RANLIB}"
     "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL"

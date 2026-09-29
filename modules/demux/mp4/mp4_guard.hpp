@@ -15,12 +15,12 @@
 
 namespace mp::mp4 {
 
-/// An atom factory that declines to *parse* three boxes this tree never reads.
+/// An atom factory that declines to *parse* two boxes this tree never reads.
 ///
-/// **All three had the same defect, and `mp4_fuzzer` found two of them in the
-/// first ten minutes it ran.** A box states an entry count; the parser loops
-/// that many times; nothing checks the count against the bytes the box actually
-/// has. Measured, from files kept in `fuzz/corpus/mp4/`:
+/// **They had the same defect as a third, and `mp4_fuzzer` found two of the
+/// three in the first ten minutes it ran.** A box states an entry count; the
+/// parser loops that many times; nothing checks the count against the bytes the
+/// box actually has. Measured, from files kept in `fuzz/corpus/mp4/`:
 ///
 ///  * `sgpd` -- a 26-byte box declaring 67,108,865 entries of two bytes each,
 ///    one `AP4_DataBuffer` allocated per entry. **2 GB and no return**, out of a
@@ -34,11 +34,15 @@ namespace mp::mp4 {
 /// box means nothing without the descriptions it points into -- and it has the
 /// same shape.
 ///
+/// **`dref` is declined no longer: it is fixed in Bento4**
+/// (external/patches/bento4-the-entries-of-a-dref-are-read-once.patch), which is
+/// where the fix belongs and the one place it reaches every path. This factory
+/// never saw the `dref` of a movie box that `AP4_LinearReader` reads between
+/// fragments with a factory of its own, and the MP4 demuxer's fuzzer found one
+/// there that spun for 90 seconds under AddressSanitizer.
+///
 /// **Not parsing them is free.** Sample groups describe roll distances and
-/// rate-adaptation groups, for editors and packagers; `dref` says which file the
-/// media lives in, and this tree reads self-contained files. Nothing in Bento4
-/// reads a parsed `dref` either: the only other mention of the class is
-/// `Ap4TrakAtom.cpp` constructing one when *writing* a track.
+/// rate-adaptation groups, for editors and packagers.
 ///
 /// Leaving `atom` null and returning success is Bento4's own path for a box it
 /// does not recognise: the caller rewinds and keeps the bytes as an
@@ -47,23 +51,21 @@ namespace mp::mp4 {
 ///
 /// **This is the sharp instrument; `FileStream`'s operation budget in
 /// demux_mp4.cpp is the blunt one.** The budget bounds any parse loop that
-/// touches the file, which covers `sgpd` and the general class of this bug. It
-/// does *not* cover `dref`, whose spin never reads a byte -- `bytes_available <
-/// 8` returns before any I/O -- which is exactly why both defences are here.
+/// touches the file, which covers `sgpd` and the general class of this bug --
+/// though not a spin that never reads a byte, which is what `dref`'s was:
+/// `bytes_available < 8` returned before any I/O.
 ///
 /// **The durable fix is upstream, and it is small.** In `Ap4SgpdAtom.cpp`,
 /// subtract each entry from `bytes_available` as it is read and stop after the
 /// first entry when the version is 0, since a version-0 entry consumes the rest
-/// of the box by definition. In `Ap4DrefAtom.cpp`, break out of the outer loop
-/// when the inner one adds nothing.
+/// of the box by definition.
 class GuardedAtomFactory : public AP4_DefaultAtomFactory {
 public:
     AP4_Result CreateAtomFromStream(AP4_ByteStream& stream, AP4_UI32 type,
                                     AP4_UI32 size_32, AP4_UI64 size_64,
                                     AP4_Atom*& atom) override
     {
-        if (type == AP4_ATOM_TYPE_SGPD || type == AP4_ATOM_TYPE_SBGP ||
-            type == AP4_ATOM_TYPE_DREF) {
+        if (type == AP4_ATOM_TYPE_SGPD || type == AP4_ATOM_TYPE_SBGP) {
             atom = nullptr;
             return AP4_SUCCESS;
         }

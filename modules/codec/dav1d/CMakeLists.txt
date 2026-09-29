@@ -31,9 +31,10 @@
 # The module is pinned to the same runtime so the two agree.
 #
 # MEDIAPERCH_ARCH reaches dav1d's C as it reaches every external project
-# (cmake/CompilerOptions.cmake), through Meson's c_args; dav1d still chooses
-# its assembly with CPUID. See the comment in codec_dav1d.cpp for why that
-# choice is left to it, which is not the obvious answer.
+# (cmake/CompilerOptions.cmake), through Meson's c_args, and so do the
+# sanitizers of a sanitizer build (MEDIAPERCH_SANITIZER_FLAGS); dav1d still
+# chooses its assembly with CPUID. See the comment in codec_dav1d.cpp for why
+# that choice is left to it, which is not the obvious answer.
 
 set(dav1d_src "${CMAKE_SOURCE_DIR}/external/dav1d")
 
@@ -80,7 +81,8 @@ ExternalProject_Add(dav1d_external
         "-Dprefix=${dav1d_install}"
         "-Dcc=${CMAKE_C_COMPILER}"
         "-Dar=${CMAKE_AR}"
-        "-Dcflags=${MEDIAPERCH_ARCH_CFLAGS}"
+        "-Dcflags=${MEDIAPERCH_ARCH_CFLAGS} ${MEDIAPERCH_SANITIZER_FLAGS}"
+        "-Dldflags=${MEDIAPERCH_SANITIZER_FLAGS}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/meson_setup.cmake"
     BUILD_COMMAND "${MEDIAPERCH_MESON}" compile -C "${dav1d_prefix}/build"
     INSTALL_COMMAND "${MEDIAPERCH_MESON}" install -C "${dav1d_prefix}/build"

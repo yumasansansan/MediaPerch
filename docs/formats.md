@@ -1374,9 +1374,14 @@ The three lossless hashes are `b38bebc6…`, `f434a906…` and `5c449afc…`, wh
 the hashes this document already records for **ALAC** of the same audio. Three
 unrelated lossless codecs, three unrelated containers, one set of bytes.
 
-libwavpack is BSD-3-Clause, in OSS-Fuzz, and pinned at 5.9.0. It gets a fuzz
-target here anyway, for the reason libFLAC and libmpg123 do: the corpus needs
-somewhere to live and the machinery is the part that rots. `OPEN_WVC` is
+libwavpack is BSD-3-Clause, in OSS-Fuzz, and pinned at upstream's master after
+5.9.0 (5.9.0-56-gb0e6c05). It gets a fuzz target here anyway, for the reason
+libFLAC and libmpg123 do: the corpus needs somewhere to live and the machinery
+is the part that rots. And it found two faults once it ran under the sanitizers
+on Linux: the length of a hybrid profile of no bytes checked by adding to a null
+pointer, which upstream had fixed after 5.9.0 and is why the pin moved, and a
+mute limit that overflowed, which
+external/patches/libwavpack-the-mute-limit-in-64-bits.patch fixes. `OPEN_WVC` is
 deliberately not set -- a `.wvc` sits beside the `.wv` and turns a hybrid file
 lossless, and finding it would mean this module opening a path the host never
 gave it, which is the host's business.

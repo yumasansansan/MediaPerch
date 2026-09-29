@@ -1,0 +1,21 @@
+Bento4: the entries of a dref are read once
+
+AP4_DrefAtom's constructor read its children in two loops: an inner one that reads every atom the box holds, whatever its entry count says, until one cannot be read, inside an outer one that ran the inner one again for every entry the count claimed. Once the box was used up, each of those passes was a call of AP4_AtomFactory::CreateAtomFromStream that failed at once, as many times as the count said, which is up to 2^32 - 1; and a pass after a child that failed half read went on from wherever that child had left the stream. MediaPerch's MP4 demuxer fuzzer found an 894-byte file whose dref of 28 bytes counts 544,369,665 entries, which took 90 seconds under AddressSanitizer and more than libFuzzer's timeout under ThreadSanitizer. The count now says only whether there are entries to read, and they are read once, as the inner loop always read them. Against v1.6.0-641-119-gb8c50a0.
+
+diff --git a/Source/C++/Core/Ap4DrefAtom.cpp b/Source/C++/Core/Ap4DrefAtom.cpp
+index f0f7117..64e3a05 100644
+--- a/Source/C++/Core/Ap4DrefAtom.cpp
++++ b/Source/C++/Core/Ap4DrefAtom.cpp
+@@ -82,9 +82,10 @@ AP4_DrefAtom::AP4_DrefAtom(AP4_UI32         size,
+     AP4_Result result = stream.ReadUI32(entry_count);
+     if (AP4_FAILED(result)) return;
+ 
+-    // read children
++    // read children: every one the box holds, whatever the count says -- the
++    // count only says whether there are any
+     AP4_LargeSize bytes_available = size - (AP4_FULL_ATOM_HEADER_SIZE + 4);
+-    while (entry_count--) {
++    if (entry_count) {
+         AP4_Atom* atom; 
+         while (AP4_SUCCEEDED(atom_factory.CreateAtomFromStream(stream, 
+                                                                bytes_available,

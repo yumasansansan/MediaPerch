@@ -2,6 +2,14 @@
 #
 # The graph, the negotiation and the ring, with no device and no compositor.
 
+# Under the sanitizers, every test here runs with their environment, and the
+# canaries show that the checks which say nothing when they find nothing are
+# looking (cmake/CompilerOptions.cmake).
+if(MEDIAPERCH_SANITIZER_LIST)
+    cmake_language(DEFER CALL mediaperch_sanitizer_test_environment)
+    mediaperch_add_sanitizer_canaries()
+endif()
+
 include(FetchContent)
 
 FetchContent_Declare(Catch2
@@ -396,8 +404,18 @@ include(Catch)
 # built, since listing them runs the program: the AVX-512 build is built on
 # every runner and run only where the processor has AVX-512 (see the CI), and
 # listed at build time it stopped the build at the first instruction the
-# runner lacked.
-catch_discover_tests(mediaperch_tests DISCOVERY_MODE PRE_TEST)
+# runner lacked. Tests found that way are not the directory's yet when it is
+# configured, so they are given the sanitizers' environment here, each variable
+# as one value of the list catch_discover_tests hands on.
+set(mediaperch_discovered_properties "")
+if(MEDIAPERCH_SANITIZER_TEST_ENVIRONMENT)
+    string(REPLACE ";" "\\;" mediaperch_sanitizer_environment
+           "${MEDIAPERCH_SANITIZER_TEST_ENVIRONMENT}")
+    set(mediaperch_discovered_properties
+        PROPERTIES ENVIRONMENT "${mediaperch_sanitizer_environment}")
+endif()
+catch_discover_tests(mediaperch_tests DISCOVERY_MODE PRE_TEST
+                     ${mediaperch_discovered_properties})
 
 # **Either engine, alone.** Two programs that link one engine and not the
 # other, and use it: the link line is the proof, because a reference across

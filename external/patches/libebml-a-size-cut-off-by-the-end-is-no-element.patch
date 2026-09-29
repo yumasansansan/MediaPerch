@@ -1,0 +1,17 @@
+libebml: a size the stream ends in the middle of is no element
+
+EbmlElement::FindNextID reads an element's ID a byte at a time and returns nullptr when a read finds no more data, and then reads its coded size the same way -- without asking whether the read found a byte. A stream that ends inside a size left the rest of PossibleSize, a local array nothing had written, to ReadCodedSizeValue, which made the size of the element up out of whatever was on the stack: the same truncated file could be read as a different element on every run. MediaPerch's Matroska demuxer fuzzer, built for Linux with MemorySanitizer, found a 166-byte file that does it at the first element it looks for, at -O0 as at -O2. A read of a size byte that finds no more data is the end of the stream, as a read of an ID byte already was. Against release-1.4.3-535-g928e273.
+
+diff --git a/src/EbmlElement.cpp b/src/EbmlElement.cpp
+--- a/src/EbmlElement.cpp
++++ b/src/EbmlElement.cpp
+@@ -176,7 +176,8 @@ EbmlElement * EbmlElement::FindNextID(IOCallback & DataStream, const EbmlCallbac
+         // Size is larger than 8 bytes
+         return nullptr;
+ 
+-      DataStream.read(&PossibleSize.at(PossibleSizeLength++), 1);
++      if (!DataStream.read(&PossibleSize.at(PossibleSizeLength++), 1))
++        return nullptr;            // no more data, as for the ID above
+       _SizeLength = PossibleSizeLength;
+       SizeFound =
+           ReadCodedSizeValue(PossibleSize.data(), _SizeLength, SizeUnknown);

@@ -1,0 +1,30 @@
+libFLAC: a subframe whose residual was left unread is not decoded
+
+read_residual_partitioned_rice_ reads the residual of a subframe partition by partition, and when a partition holds a rice symbol that is not one, it reports lost sync, sets the state to FLAC__STREAM_DECODER_SEARCH_FOR_FRAME_SYNC and returns true, with the rest of the residual never written. read_subframe_fixed_ and read_subframe_lpc_ took the true for a residual and went on to restore the signal from it: every sample after that point is predicted from values nobody wrote, with signed products of them that may overflow, into a frame that read_frame_ then throws away because of the state. MediaPerch's FLAC codec fuzzer, built for Linux with MemorySanitizer and UndefinedBehaviorSanitizer, found a 1676-byte input on which the restore read the unwritten residual that FLAC__memory_alloc_aligned_int32_array had allocated, at -O0 as at -O2. Both return as soon as the state says the frame is lost, as read_frame_ does after each subframe. Against 1.5.0.
+
+diff --git a/src/libFLAC/stream_decoder.c b/src/libFLAC/stream_decoder.c
+index 914c9e5c..8c7bc177 100644
+--- a/src/libFLAC/stream_decoder.c
++++ b/src/libFLAC/stream_decoder.c
+@@ -3132,6 +3132,10 @@ FLAC__bool read_subframe_fixed_(FLAC__StreamDecoder *decoder, uint32_t channel,
+ 			FLAC__ASSERT(0);
+ 	}
+ 
++	/* an invalid rice symbol left the residual unread, and the frame is lost */
++	if(decoder->protected_->state == FLAC__STREAM_DECODER_SEARCH_FOR_FRAME_SYNC)
++		return true;
++
+ 	/* decode the subframe */
+ 	if(do_full_decode) {
+ 		if(bps < 33){
+@@ -3235,6 +3239,10 @@ FLAC__bool read_subframe_lpc_(FLAC__StreamDecoder *decoder, uint32_t channel, ui
+ 			FLAC__ASSERT(0);
+ 	}
+ 
++	/* an invalid rice symbol left the residual unread, and the frame is lost */
++	if(decoder->protected_->state == FLAC__STREAM_DECODER_SEARCH_FOR_FRAME_SYNC)
++		return true;
++
+ 	/* decode the subframe */
+ 	if(do_full_decode) {
+ 		if(bps <= 32) {

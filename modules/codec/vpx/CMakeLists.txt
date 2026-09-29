@@ -99,8 +99,9 @@ ExternalProject_Add(vpx_external
         # The instruction set every external project is given
         # (cmake/CompilerOptions.cmake), which the script adds to libvpx's
         # extra C flags, and the set it guarantees, whose assembly the script
-        # then takes without asking the CPU.
-        "${MEDIAPERCH_ARCH_CFLAGS}" "${MEDIAPERCH_ISA_LEVEL}"
+        # then takes without asking the CPU; then a sanitizer build's
+        # sanitizers, which it adds to the extra flags and to LDFLAGS.
+        "${MEDIAPERCH_ARCH_CFLAGS}" "${MEDIAPERCH_ISA_LEVEL}" "${MEDIAPERCH_SANITIZER_FLAGS}"
     INSTALL_COMMAND "${CMAKE_COMMAND}" -E true
     BUILD_BYPRODUCTS "${vpx_library}"
     # Everything is in the build step, so it is the one that has to run -- and

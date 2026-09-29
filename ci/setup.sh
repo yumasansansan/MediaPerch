@@ -90,8 +90,15 @@ setup_linux() {
 
     local codename
     codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
-    echo "deb [signed-by=$keyring] https://apt.llvm.org/$codename/ llvm-toolchain-$codename-$llvm_major main" |
-        sudo tee /etc/apt/sources.list.d/apt.llvm.org.list > /dev/null
+    # The sources as well as the binaries. What apt.llvm.org offers for a
+    # release is a snapshot of its branch, rebuilt often, so two builds of the
+    # same version number are not the same sources: the only way to have the
+    # sources of the very binaries installed here is to ask apt for them, which
+    # the memory sanitizer's C++ library is built from (ci/msan-libraries.sh).
+    {
+        echo "deb [signed-by=$keyring] https://apt.llvm.org/$codename/ llvm-toolchain-$codename-$llvm_major main"
+        echo "deb-src [signed-by=$keyring] https://apt.llvm.org/$codename/ llvm-toolchain-$codename-$llvm_major main"
+    } | sudo tee /etc/apt/sources.list.d/apt.llvm.org.list > /dev/null
 
     # **The C++ library's headers, of the GCC its runtime comes from.** Clang
     # compiles against the headers of the newest GCC it finds them for, and an
@@ -108,9 +115,12 @@ setup_linux() {
 
     sudo apt-get update -qq
     # clang-tools brings clang-scan-deps, which CMake runs over every C++23
-    # source for the modules it might import.
+    # source for the modules it might import. libclang-rt has the sanitizers'
+    # runtimes and libFuzzer, which the sanitizer and fuzzing jobs link and
+    # which the compiler only recommends.
     sudo apt-get install -y -qq --no-install-recommends \
         "clang-$llvm_major" "lld-$llvm_major" "llvm-$llvm_major" "clang-tools-$llvm_major" \
+        "libclang-rt-$llvm_major-dev" \
         "libstdc++-${runtime#gcc-}-dev" \
         "${linux_packages[@]}"
     llvm_from=apt

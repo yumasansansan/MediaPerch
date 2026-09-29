@@ -1,0 +1,23 @@
+Bento4: a decoder configuration too short for its fields holds zeros
+
+The constructor of AP4_DecoderConfigDescriptor that reads a stream returns at once when the descriptor's payload is shorter than the thirteen bytes its fields take, and left every field -- the object type indication, the stream type, the upstream flag, the buffer size and both bitrates -- holding whatever the heap held, for AP4_MpegSampleDescription to copy as the stream's type, codec and rates. MediaPerch's MP4 demuxer fuzzer, built for Linux with MemorySanitizer, found a 758-byte file whose esds holds such a descriptor. The fields start at zero now, as the other constructor starts them at its arguments: an object type indication and a stream type of zero are the values ISO/IEC 14496-1 forbids, which no reader takes for a codec. The reads after the check need nothing, since AP4_ByteStream stores zero where a read fails. Against v1.6.0-641-119-gb8c50a0.
+
+diff --git a/Source/C++/Core/Ap4DecoderConfigDescriptor.cpp b/Source/C++/Core/Ap4DecoderConfigDescriptor.cpp
+index 3d914dc..471d105 100644
+--- a/Source/C++/Core/Ap4DecoderConfigDescriptor.cpp
++++ b/Source/C++/Core/Ap4DecoderConfigDescriptor.cpp
+@@ -72,7 +72,13 @@ AP4_DecoderConfigDescriptor::AP4_DecoderConfigDescriptor(
+     AP4_ByteStream& stream, AP4_Size header_size, AP4_Size payload_size) :
+     AP4_Descriptor(AP4_DESCRIPTOR_TAG_DECODER_CONFIG, 
+                    header_size, 
+-                   payload_size)
++                   payload_size),
++    m_StreamType(0),
++    m_ObjectTypeIndication(0),
++    m_UpStream(false),
++    m_BufferSize(0),
++    m_MaxBitrate(0),
++    m_AverageBitrate(0)
+ {
+     // read descriptor fields
+     if (payload_size < 13) return;

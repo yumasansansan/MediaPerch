@@ -1,0 +1,34 @@
+Bento4: a handler box the stream ends inside is read as empty, not as what was on the heap
+
+AP4_HdlrAtom's constructor reads its five numbers and then its name without asking whether any read succeeded. The numbers are members nothing else initialises, so a box the stream ends before left them unwritten; and the name went into an array from new[], so a box whose stated size ran past the end of the stream left that array unwritten too -- and the constructor then tested its first byte for a QuickTime Pascal string and made the handler's name of whatever the heap held, up to the terminator it put at the end. MediaPerch's MP4 demuxer fuzzer, built for Linux with MemorySanitizer, found it within a minute. The numbers start at zero, and a name whose read fails is no name. Against v1.6.0-641-119-gb8c50a0.
+
+diff --git a/Source/C++/Core/Ap4HdlrAtom.cpp b/Source/C++/Core/Ap4HdlrAtom.cpp
+index b90ed05..137b4d6 100644
+--- a/Source/C++/Core/Ap4HdlrAtom.cpp
++++ b/Source/C++/Core/Ap4HdlrAtom.cpp
+@@ -74,8 +74,12 @@ AP4_HdlrAtom::AP4_HdlrAtom(AP4_UI32        size,
+                            AP4_UI32        flags,
+                            AP4_ByteStream& stream) :
+     AP4_Atom(AP4_ATOM_TYPE_HDLR, size, version, flags),
++    m_Predefined(0),
++    m_HandlerType(0),
+     m_QuickTimeMode(false)
+ {
++    // a field the stream ends before is left zero, not left unwritten
++    m_Reserved[0] = m_Reserved[1] = m_Reserved[2] = 0;
+     stream.ReadUI32(m_Predefined);
+     stream.ReadUI32(m_HandlerType);
+     stream.ReadUI32(m_Reserved[0]);
+@@ -87,7 +91,11 @@ AP4_HdlrAtom::AP4_HdlrAtom(AP4_UI32        size,
+     AP4_UI32 name_size = size-(AP4_FULL_ATOM_HEADER_SIZE+20);
+     char* name = new char[name_size+1];
+     if (name == NULL) return;
+-    stream.Read(name, name_size);
++    // and a name the stream ends in the middle of is no name
++    if (AP4_FAILED(stream.Read(name, name_size))) {
++        delete[] name;
++        return;
++    }
+     name[name_size] = '\0'; // force a null termination
+     // handle a special case: the Quicktime files have a pascal
+     // string here, but ISO MP4 files have a C string.

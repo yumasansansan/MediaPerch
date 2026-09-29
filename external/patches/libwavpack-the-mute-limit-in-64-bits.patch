@@ -1,0 +1,17 @@
+libwavpack: the mute limit is computed in 64 bits
+
+unpack_samples silences a block whose decoded samples stray beyond the magnitude its header states, and computes that limit as (1L << magnitude) + 2 in an int32_t, tripled with 128 added for hybrid lossy data. The magnitude field has five bits. At 31 the shift makes 2^31, which a 64-bit long holds and an int32_t does not, so the limit became -2147483646 and every lossless block stating 31 was silenced at its first sample; where long has 32 bits, as on Windows, the shift itself overflows. For hybrid data the multiplication overflows from 30 on, as it did when it was a doubling, before 6244d7e735c9fb6ccecf707f7f1b55a28e85753f. MediaPerch's WavPack fuzzer, built for Linux with UndefinedBehaviorSanitizer, found a 6936-byte input whose header states 31, on which the multiplication of -2147483646 overflowed. The limit is an int64_t now, shifted in 64 bits, which holds 3 * (2^31 + 2) + 128 with room to spare, and the comparisons with labs() of a 32-bit sample mean what they say. Against 5.9.0-56-gb0e6c05.
+
+diff --git a/src/unpack.c b/src/unpack.c
+index 852f0f1..f0b55d0 100644
+--- a/src/unpack.c
++++ b/src/unpack.c
+@@ -74,7 +74,7 @@ static void fixup_samples (WavpackStream *wps, int32_t *buffer, uint32_t sample_
+ int32_t unpack_samples (WavpackStream *wps, int32_t *buffer, uint32_t sample_count)
+ {
+     uint32_t flags = wps->wphdr.flags, crc = wps->crc, i;
+-    int32_t mute_limit = (1L << ((flags & MAG_MASK) >> MAG_LSB)) + 2;
++    int64_t mute_limit = ((int64_t) 1 << ((flags & MAG_MASK) >> MAG_LSB)) + 2;
+     int32_t correction [2], read_word, *bptr;
+     struct decorr_pass *dpp;
+     int tcount, m = 0;
