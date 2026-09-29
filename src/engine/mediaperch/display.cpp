@@ -181,6 +181,7 @@ bool DisplayLoop::turn(DisplayStep& out)
     parked_serial_.store(holding ? hold_serial_.load(std::memory_order_acquire) : 0,
                          std::memory_order_release);
     if (holding) {
+        turned_.release(); // for the holder waiting in `wait_turn_until`
         out.step = VideoGraph::Step::repeated;
         return true;
     }
@@ -215,7 +216,18 @@ std::uint64_t DisplayLoop::run()
     DisplayStep step;
     while (once(step)) {
     }
+    stopped_turning();
     return stats_.turns;
+}
+
+bool DisplayLoop::wait_turn_until(std::chrono::steady_clock::time_point deadline)
+{
+    return turned_.try_acquire_until(deadline);
+}
+
+void DisplayLoop::stopped_turning() noexcept
+{
+    turned_.release();
 }
 
 std::uint64_t DisplayLoop::hold() noexcept

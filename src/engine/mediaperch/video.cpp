@@ -373,7 +373,7 @@ void VideoGraph::rewound(double target_seconds) noexcept
     frame_ = MpVideoFrame{};
     drained_ = false;
     finished_ = false;
-    preroll_until_ = target_seconds;
+    preroll_until_.store(target_seconds, std::memory_order_release);
     // **Not `reconciled_`.** What the bitstream said its pixels were is a fact
     // about the stream, not about the position in it, and asking the presenter
     // to reconfigure at every seek would be a rebuild nobody needed.
@@ -409,18 +409,21 @@ VideoGraph::Step VideoGraph::pump(double audible_seconds)
             if (!reconciled_) {
                 reconcile();
             }
-            if (preroll_until_ >= 0.0) {
+            // Relaxed: only this thread and a held loop's mover write it, and
+            // the hold orders the mover's write before this read.
+            const double preroll_until = preroll_until_.load(std::memory_order_relaxed);
+            if (preroll_until >= 0.0) {
                 // **The container's pre-roll, and not the clock's business.**
                 // A seek landed on the sync point before its target, and the
                 // frames from there to the target are decoded because the one
                 // at the target needs them, and let go because nobody asked
                 // for them. Counted apart from dropping, which is lateness.
-                if (stream_seconds(frame_.pts, info_.timescale) < preroll_until_) {
+                if (stream_seconds(frame_.pts, info_.timescale) < preroll_until) {
                     ++stats_.preroll;
                     have_frame_ = false;
                     continue;
                 }
-                preroll_until_ = -1.0;
+                preroll_until_.store(-1.0, std::memory_order_relaxed);
             }
         }
 

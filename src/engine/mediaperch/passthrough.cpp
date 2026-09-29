@@ -152,6 +152,7 @@ MpResult PassthroughGraph::start()
         return r;
     }
 
+    live_.store(true, std::memory_order_release);
     render_thread_ = std::thread([this] { render_loop(); });
     decode_thread_ = std::thread([this] { decode_loop(); });
     return MP_OK;
@@ -161,6 +162,11 @@ void PassthroughGraph::stop() noexcept
 {
     running_.store(false, std::memory_order_release);
     wake_decoder();
+    // Whoever waits on either thread, or on a seek, looks again and finds the
+    // run over.
+    render_wake_.release();
+    render_turned_.release();
+    seek_done_.release();
 
     // The render thread first: nothing else may touch the device buffer while it
     // might still be inside acquire/commit.
@@ -170,6 +176,7 @@ void PassthroughGraph::stop() noexcept
     if (decode_thread_.joinable()) {
         decode_thread_.join();
     }
+    live_.store(false, std::memory_order_release);
     if (*sink_) {
         sink_->stop();
     }
@@ -216,6 +223,11 @@ void PassthroughGraph::render_loop() noexcept
 
     while (running_.load(std::memory_order_acquire)) {
         render_tick_.fetch_add(1, std::memory_order_release);
+        // A seek waiting for this thread to park counts its turns: one began.
+        // A release is an atomic add and a wake, and only while a seek waits.
+        if (seeking_.load(std::memory_order_acquire)) {
+            render_turned_.release();
+        }
 
         // Paused: the device is stopped rather than fed silence. It is ours
         // either way in exclusive mode, and a clock that is not running is what
@@ -226,7 +238,12 @@ void PassthroughGraph::render_loop() noexcept
                 device_running_ = false;
             }
             parked_.store(true, std::memory_order_release);
-            std::this_thread::sleep_for(std::chrono::milliseconds{2});
+            // A nap a seek, a resume or a stop cuts short, and every wake that
+            // came meanwhile is taken with it: one turn answers them all.
+            if (render_wake_.try_acquire_for(std::chrono::milliseconds{2})) {
+                while (render_wake_.try_acquire()) {
+                }
+            }
             continue;
         }
         if (!device_running_) {
@@ -353,6 +370,8 @@ void PassthroughGraph::pause() noexcept
 void PassthroughGraph::resume() noexcept
 {
     paused_.store(false, std::memory_order_release);
+    // The paused render thread takes it now rather than at the end of its nap.
+    render_wake_.release();
 }
 
 std::uint64_t PassthroughGraph::position_frames() const noexcept
@@ -403,21 +422,31 @@ bool PassthroughGraph::seek(std::uint64_t frame)
         return false;
     }
     if (!running_.load(std::memory_order_acquire)) {
-        // Nothing is playing, so there is nobody to hand the ring to.
+        // **Not started, or stopped and joined**: nothing else touches the
+        // ring, so the seek is done here. **Finished by itself, its threads not
+        // joined yet**, it is on its way out, and moving the source under a
+        // decode thread that may still be in its last read is two threads in
+        // one ring: there is nothing left to move.
+        if (live_.load(std::memory_order_acquire)) {
+            return false;
+        }
         perform_seek(frame);
         return true;
     }
     seek_request_.store(frame, std::memory_order_release);
     wake_decoder();
-    // Wait for the decode thread to have done it. A seek whose end a caller
-    // cannot observe is one a caller has to guess about.
+    // Wait for the decode thread to have done it, which it says by releasing
+    // `seek_done_`. A seek whose end a caller cannot observe is one a caller
+    // has to guess about.
+    const auto done = [this] {
+        return seek_request_.load(std::memory_order_acquire) == k_no_seek ||
+               !running_.load(std::memory_order_acquire);
+    };
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
-    while (seek_request_.load(std::memory_order_acquire) != k_no_seek &&
-           running_.load(std::memory_order_acquire)) {
-        if (std::chrono::steady_clock::now() > deadline) {
-            return false;
+    while (!done()) {
+        if (!seek_done_.try_acquire_until(deadline)) {
+            return done();
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds{1});
     }
     return true;
 }
@@ -437,10 +466,12 @@ void PassthroughGraph::perform_seek(std::uint64_t frame)
             render_tick_.load(std::memory_order_acquire) >= from + 2) {
             break;
         }
-        if (std::chrono::steady_clock::now() > deadline) {
+        // A paused render thread takes its next turn now rather than at the
+        // end of its nap; a playing one takes it at the device's next period.
+        render_wake_.release();
+        if (!render_turned_.try_acquire_until(deadline)) {
             break; // the render thread is gone; the seek is still the right thing
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds{1});
     }
 
     ring_.reset();
@@ -457,6 +488,7 @@ void PassthroughGraph::perform_seek(std::uint64_t frame)
     fill_to_floor();
     seek_request_.store(k_no_seek, std::memory_order_release);
     seeking_.store(false, std::memory_order_release);
+    seek_done_.release();
 }
 
 } // namespace mp

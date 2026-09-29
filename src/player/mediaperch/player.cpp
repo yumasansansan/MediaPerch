@@ -439,7 +439,8 @@ void Player::clear()
 
 void Player::pause()
 {
-    const std::lock_guard lock{mutex_};
+    std::unique_lock lock{mutex_};
+    wait_for_transport(lock);
     if (alone_ != nullptr && alone_->own_clock() != nullptr) {
         // A picture on its own clock: the clock stops, and the loop, which
         // follows it, holds the frame it is on.
@@ -459,7 +460,8 @@ void Player::pause()
 
 void Player::resume()
 {
-    const std::lock_guard lock{mutex_};
+    std::unique_lock lock{mutex_};
+    wait_for_transport(lock);
     if (alone_ != nullptr && alone_->own_clock() != nullptr) {
         alone_->own_clock()->resume();
         state_ = ipc::State::playing;
@@ -487,12 +489,31 @@ void Player::stop()
     wake_.notify_all();
 }
 
+void Player::wait_for_transport(std::unique_lock<std::mutex>& lock)
+{
+    // **A run says it plays before it has anything to move.** The engine
+    // thread says so as soon as the device has agreed, then opens the picture,
+    // builds the graph and starts it -- milliseconds, and more with every core
+    // busy -- and publishes the graph only then. A seek in between found
+    // neither a graph nor a picture and said no, and a pause, a resume or a
+    // "previous" did nothing without a word: with every core but one busy, one
+    // run in twenty of the transport test failed at its first seek. So a
+    // command waits, as long as a seek waits for the decoder to have done it,
+    // for the run to have something to move or to stop saying it plays.
+    seekable_.wait_for(lock, std::chrono::seconds{5}, [this] {
+        return graph_a_ != nullptr || graph_b_ != nullptr ||
+               (alone_ != nullptr && alone_->own_clock() != nullptr) ||
+               state_ != ipc::State::playing;
+    });
+}
+
 bool Player::seek(std::int64_t frames, bool relative)
 {
-    // Held for the whole call: the graph may not be destroyed underneath a
-    // seek, and the engine thread clears these pointers under the same lock
-    // before it destroys anything.
-    const std::lock_guard lock{mutex_};
+    // Held for the whole call but the wait: the graph may not be destroyed
+    // underneath a seek, and the engine thread clears these pointers under the
+    // same lock before it stops or destroys anything.
+    std::unique_lock lock{mutex_};
+    wait_for_transport(lock);
     if (alone_ != nullptr && alone_->own_clock() != nullptr) {
         // **The picture on its own clock.** The same clamp, then the file is
         // moved through its own door rather than through a graph: see
@@ -520,10 +541,20 @@ bool Player::seek(std::int64_t frames, bool relative)
 
 void Player::next()
 {
-    // Held for the whole call, as `seek` holds it: the graph may not be
-    // destroyed underneath this, and the engine thread clears these pointers
-    // under the same lock before it destroys anything.
-    const std::lock_guard lock{mutex_};
+    // Held for the whole call but the wait, as `seek` holds it: the graph may
+    // not be destroyed underneath this, and the engine thread clears these
+    // pointers under the same lock before it destroys anything.
+    std::unique_lock lock{mutex_};
+    // **Waited for as a seek waits, because below it is one.** A queue's run
+    // publishes its graph once the graph runs, and the ring is filled before
+    // that: a "next" in between found the queue and no graph, and skipped
+    // the decoder's track without throwing the ring away -- which is the
+    // button doing nothing for a ring's depth, the thing the seek below is
+    // there to prevent. A picture still opening is not waited for: it takes
+    // the step on its run's first turn.
+    if (!alone_opening_) {
+        wait_for_transport(lock);
+    }
     if (alone_ != nullptr || alone_opening_) {
         // **A picture on its own is one entry, so next is the entry after
         // it.** Its run ends and `play_request` walks on; there is no ring to
@@ -536,8 +567,9 @@ void Player::next()
         return;
     }
     if (graph_a_ == nullptr && graph_b_ == nullptr) {
-        // Nothing is running, so there is no ring to throw away and no
-        // listener to count from: the decoder's own track is the only one.
+        // No graph after the wait: the run is ending, or its graph never
+        // started. Nothing is running, so there is no ring to throw away and
+        // no listener to count from: the decoder's own track is the only one.
         queue_->skip();
         return;
     }
@@ -563,7 +595,7 @@ void Player::next()
 
 void Player::previous()
 {
-    const std::lock_guard lock{mutex_};
+    std::unique_lock lock{mutex_};
     if (alone_opening_) {
         // A picture still opening has not moved from its start, which is as
         // "only just got here" as it gets: the entry before it, taken on the
@@ -571,6 +603,9 @@ void Player::previous()
         step_wanted_.store(-1, std::memory_order_release);
         return;
     }
+    // As `next` waits, and for the same reason: a queue's run before its graph
+    // is published has nothing to seek, and a "previous" then did nothing.
+    wait_for_transport(lock);
     if (alone_ != nullptr && alone_->own_clock() != nullptr) {
         // The rule below, for a picture on its own: its start, unless you have
         // only just got here, in which case the entry before it.
@@ -1793,6 +1828,7 @@ void Player::play_request(const Request& request)
                 error_ = why;
             }
             state_ = ipc::State::stopped;
+            seekable_.notify_all();
             return;
         }
         if (kind == Playlist::Kind::silent) {
@@ -1816,6 +1852,7 @@ void Player::play_request(const Request& request)
             const std::lock_guard lock{mutex_};
             state_ = ipc::State::stopped;
             position_ = position;
+            seekable_.notify_all();
             return;
         }
 
@@ -1828,6 +1865,7 @@ void Player::play_request(const Request& request)
             const std::lock_guard lock{mutex_};
             error_ = why;
             state_ = ipc::State::stopped;
+            seekable_.notify_all();
             return;
         }
         played = true;
@@ -1912,6 +1950,7 @@ void Player::play_request(const Request& request)
                 const std::lock_guard lock{mutex_};
                 state_ = ipc::State::stopped;
                 position_ = position;
+                seekable_.notify_all();
             }
             return;
         }
@@ -1919,6 +1958,7 @@ void Player::play_request(const Request& request)
             queue.stopped() != QueueStop::silent) {
             const std::lock_guard lock{mutex_};
             state_ = ipc::State::stopped;
+            seekable_.notify_all();
             return;
         }
     }
@@ -2000,6 +2040,7 @@ Player::RunEnd Player::play_alone(Playlist& playlist, std::size_t index, std::ui
         alone_ = video.get();
         alone_media_ = media;
         alone_opening_ = false;
+        seekable_.notify_all();
     }
 
     RunEnd end = RunEnd::finished;
@@ -2030,6 +2071,7 @@ Player::RunEnd Player::play_alone(Playlist& playlist, std::size_t index, std::ui
         alone_ = nullptr;
         alone_media_ = nullptr;
         position_ = position;
+        seekable_.notify_all();
     }
     {
         // Said, because a picture that ends is either the file running out or
@@ -2238,15 +2280,10 @@ Player::RunEnd Player::play_run(Queue& queue, Playlist& playlist, std::uint64_t&
                                  config.buffering,
                                  chain.empty() ? nullptr : &chain};
             graph.set_position(queue.position());
-            {
-                const std::lock_guard lock{mutex_};
-                graph_b_ = &graph;
-            }
-            end = pump(graph, playlist, picture);
+            end = pump(graph, graph_b_, playlist, picture);
             position = graph.position_frames();
             {
                 const std::lock_guard lock{mutex_};
-                graph_b_ = nullptr;
                 position_ = position;
                 total_frames_ += graph.stats().frames_rendered;
                 total_underruns_ += graph.stats().underruns;
@@ -2255,15 +2292,10 @@ Player::RunEnd Player::play_run(Queue& queue, Playlist& playlist, std::uint64_t&
             PassthroughGraph graph{queue,      sink,   negotiated.accepted, period,
                                    negotiated.fidelity, nullptr, config.buffering};
             graph.set_position(queue.position());
-            {
-                const std::lock_guard lock{mutex_};
-                graph_a_ = &graph;
-            }
-            end = pump(graph, playlist, picture);
+            end = pump(graph, graph_a_, playlist, picture);
             position = graph.position_frames();
             {
                 const std::lock_guard lock{mutex_};
-                graph_a_ = nullptr;
                 position_ = position;
                 total_frames_ += graph.stats().frames_rendered;
                 total_underruns_ += graph.stats().underruns;
@@ -2277,6 +2309,7 @@ Player::RunEnd Player::play_run(Queue& queue, Playlist& playlist, std::uint64_t&
         // Both, because whichever was set points at a graph that has gone.
         graph_a_ = nullptr;
         graph_b_ = nullptr;
+        seekable_.notify_all();
         error_ = short_of_memory;
         end = RunEnd::failed;
     }
@@ -2428,7 +2461,8 @@ void Player::stop_video() noexcept
 }
 
 template <typename Graph>
-Player::RunEnd Player::pump(Graph& graph, Playlist& playlist, std::size_t picture)
+Player::RunEnd Player::pump(Graph& graph, Graph*& published, Playlist& playlist,
+                            std::size_t picture)
 {
     const MpResult started = graph.start();
     if (started != MP_OK) {
@@ -2439,6 +2473,16 @@ Player::RunEnd Player::pump(Graph& graph, Playlist& playlist, std::size_t pictur
         // A device can go between being negotiated with and being started, and
         // that is the same event as losing it later.
         return started == MP_ERR_DEVICE_LOST ? RunEnd::device_lost : RunEnd::failed;
+    }
+    // **Published once it runs, and taken back before it stops.** A graph
+    // built and not started has no threads of its own, and its seek moves the
+    // source itself, on the caller's thread -- while `start` was filling the
+    // ring from the same source on this one: ThreadSanitizer found it in the
+    // transport test once a seek waited for the graph instead of refusing it.
+    {
+        const std::lock_guard lock{mutex_};
+        published = &graph;
+        seekable_.notify_all();
     }
 
     RunEnd end = RunEnd::finished;
@@ -2503,6 +2547,11 @@ Player::RunEnd Player::pump(Graph& graph, Playlist& playlist, std::size_t pictur
             std::this_thread::sleep_for(k_poll);
         }
         stop_video();
+    }
+    {
+        const std::lock_guard lock{mutex_};
+        published = nullptr;
+        seekable_.notify_all();
     }
     graph.stop();
 

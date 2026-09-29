@@ -24,6 +24,7 @@
 
 #include <mediaperch/module.h>
 
+#include <atomic>
 #include <cstdint>
 #include <vector>
 
@@ -219,7 +220,10 @@ public:
     /// in `Stats::preroll` rather than as dropped, because its time never
     /// came. `prerolling()` says while that is still going on.
     void rewound(double target_seconds = -1.0) noexcept;
-    [[nodiscard]] bool prerolling() const noexcept { return preroll_until_ >= 0.0; }
+    [[nodiscard]] bool prerolling() const noexcept
+    {
+        return preroll_until_.load(std::memory_order_acquire) >= 0.0;
+    }
 
     /// One decision, against the audio being heard at `audible_seconds`.
     ///
@@ -293,7 +297,13 @@ private:
     bool finished_ = false;
     /// Where the last seek was aimed, while frames before it are still
     /// coming out; negative once one at or past it has.
-    double preroll_until_ = -1.0;
+    ///
+    /// **Atomic, because `prerolling` is asked outside the hold.** Everything
+    /// else `rewound` resets is read only in `pump`, which a held loop does not
+    /// enter; the loop's own thread asks `prerolling` after every turn, held
+    /// or not, while a seek on another thread writes this -- a data race
+    /// ThreadSanitizer reported in the player's tests.
+    std::atomic<double> preroll_until_{-1.0};
     MpResult error_ = MP_OK;
 
     std::vector<std::uint8_t> buffer_;

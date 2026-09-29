@@ -29,6 +29,7 @@
 #include <functional>
 #include <future>
 #include <mutex>
+#include <semaphore>
 #include <thread>
 #include <utility>
 
@@ -140,6 +141,17 @@ public:
     /// loop is parked for the latest hold there is.
     [[nodiscard]] bool parked() const noexcept;
     [[nodiscard]] bool parked(std::uint64_t serial) const noexcept;
+    /// **Sleeps until the loop has taken a turn under a hold, or has stopped
+    /// turning, or until `deadline`**: false when the deadline came first. What
+    /// a holder waits for `parked` with, rather than a nap of a millisecond and
+    /// another look -- which Windows makes a timer tick, 15.5 ms, a turn or
+    /// more for an answer that had come. The loop says so each turn it spends
+    /// holding; the wait may also end on an earlier turn's word, so a holder
+    /// asks `parked` again after it.
+    bool wait_turn_until(std::chrono::steady_clock::time_point deadline);
+    /// Tells whoever waits in `wait_turn_until` that the loop will turn no
+    /// more: said by whatever turned it, when it stops.
+    void stopped_turning() noexcept;
 
     // --- work that belongs to the loop's own thread ---------------------------
     //
@@ -228,6 +240,9 @@ private:
     std::atomic<std::uint64_t> holders_{0};
     std::atomic<std::uint64_t> hold_serial_{0};
     std::atomic<std::uint64_t> parked_serial_{0};
+    /// Released each turn taken under a hold and when the turning stops; see
+    /// `wait_turn_until`.
+    std::counting_semaphore<> turned_{0};
 
     std::mutex posts_mutex_;
     std::deque<std::pair<Job, std::promise<bool>>> posts_;
@@ -291,8 +306,10 @@ bool seek_together(AudioGraph& audio, VideoGraph& video, DisplayLoop& loop,
 {
     const std::uint64_t held = loop.hold();
     const auto give_up_at = std::chrono::steady_clock::now() + deadline;
-    while (!loop.parked(held) && std::chrono::steady_clock::now() < give_up_at) {
-        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    while (!loop.parked(held)) {
+        if (!loop.wait_turn_until(give_up_at)) {
+            break;
+        }
     }
 
     const bool moved = audio.seek(frame);

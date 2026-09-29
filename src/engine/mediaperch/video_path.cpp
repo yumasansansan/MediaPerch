@@ -460,6 +460,7 @@ bool VideoPath::start(IMediaClock* follow, IFrameClock& frames, std::string& why
             }
         }
         ended_.store(true, std::memory_order_release);
+        loop_->stopped_turning();
     }};
     return true;
 }
@@ -483,8 +484,10 @@ bool VideoPath::seek_alone(double seconds, const std::function<bool(double)>& mo
     // while the file moves is a turn deciding about a frame from a place
     // nobody is at any more.
     const auto give_up_at = std::chrono::steady_clock::now() + deadline;
-    while (!loop_->parked(held) && !ended() && std::chrono::steady_clock::now() < give_up_at) {
-        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    while (!loop_->parked(held) && !ended()) {
+        if (!loop_->wait_turn_until(give_up_at)) {
+            break;
+        }
     }
     const bool moved = move(seconds);
     // Even when it did not move: see `seek_together`. The clock moves only

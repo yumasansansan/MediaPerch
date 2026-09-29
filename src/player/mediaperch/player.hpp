@@ -346,8 +346,15 @@ private:
                       std::uint64_t& position);
     /// `picture` is the track `play_run` opened the picture for, which is the
     /// one the pump starts out showing.
+    /// `published` is the pointer other threads reach the graph by --
+    /// `graph_a_` or `graph_b_` -- which the pump sets once the graph runs and
+    /// clears before it stops it.
     template <typename Graph>
-    RunEnd pump(Graph& graph, Playlist& playlist, std::size_t picture);
+    RunEnd pump(Graph& graph, Graph*& published, Playlist& playlist, std::size_t picture);
+    /// **Until the run has something a transport command can reach** -- a
+    /// running graph, or a picture on its own clock -- or stops saying it
+    /// plays, for as long as a seek waits for the decoder: see its definition.
+    void wait_for_transport(std::unique_lock<std::mutex>& lock);
 
     /// Builds the chain from `config_.dsp`. False and a reason when a stage is
     /// not there or will not take a setting.
@@ -396,6 +403,11 @@ private:
 
     mutable std::mutex mutex_;
     std::condition_variable wake_;
+    /// **What a transport command waits on while its run has nothing yet to
+    /// move.** Told by the engine thread wherever a graph or a picture on its
+    /// own clock is published or cleared, and wherever a run stops without
+    /// one: see `wait_for_transport`.
+    std::condition_variable seekable_;
     std::thread thread_;
 
     /// Set under the mutex by the engine thread while a graph exists, cleared

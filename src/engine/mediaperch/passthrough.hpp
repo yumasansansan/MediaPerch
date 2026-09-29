@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cstdint>
 #include <limits>
+#include <semaphore>
 #include <thread>
 #include <vector>
 
@@ -259,6 +260,25 @@ private:
     std::atomic<bool> parked_{false};
     std::atomic<std::uint64_t> render_tick_{0};
     std::atomic<std::uint64_t> seek_request_{k_no_seek};
+    /// **What the seek's waits sleep on, instead of a nap and another look.**
+    /// Windows naps in whole timer ticks, 15.5 ms, so each nap of a millisecond
+    /// was a tick, and every seek waited a tick or two for news that had
+    /// already come. Each is released by whoever has the news and waited on
+    /// with the deadline the wait already had: `seek_done_` by the decode
+    /// thread when a seek is done, `render_turned_` by the render thread at
+    /// the start of each turn while a seek waits for it to park, and
+    /// `render_wake_` by whoever wants a paused render thread to take a turn
+    /// before its nap is over -- a seek, a resume, a stop. `stop()` releases
+    /// all three. A release nobody was waiting for leaves a token, which only
+    /// makes the next wait look again: every wait tests what it waits for
+    /// before it sleeps and after it wakes.
+    std::counting_semaphore<> seek_done_{0};
+    std::counting_semaphore<> render_turned_{0};
+    std::counting_semaphore<> render_wake_{0};
+    /// **Whether the threads exist**: set as `start` makes them, cleared once
+    /// `stop` has joined them. Not `running_`, which the render thread clears
+    /// itself at the end of the file, with both threads still on their way out.
+    std::atomic<bool> live_{false};
     /// **What the decode thread sleeps on when it has nothing to do.** Moved
     /// on, and the decode thread woken, by whatever may have given it
     /// something: the render thread taking a period out of the ring, a seek
