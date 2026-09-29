@@ -2114,14 +2114,13 @@ the declines.
 
 ## Fuzzing
 
-**Eight targets, one per parser, and every one runs in CI on every push** for
+**Nine targets, one per parser, and every one runs in CI on every push** for
 thirty seconds — which is a smoke test that the campaign still builds rather
 than a campaign, and somewhere for a regression corpus to live.
 
 | Target | What it fuzzes | How |
 |---|---|---|
 | `wav_fuzzer` | dr_wav | C++ under AddressSanitizer |
-| `flac_fuzzer` | libFLAC | " |
 | `mpa_fuzzer` | libmpg123, both halves | " |
 | `mp4_fuzzer` | Bento4 | " |
 | `wavpack_fuzzer` | libwavpack | " |
@@ -2131,7 +2130,13 @@ than a campaign, and somewhere for a regression corpus to live.
 | `adts_fuzzer` | the ADTS framer | " |
 | `dsd_fuzzer` | the DSF and DSDIFF readers | " |
 
-The Rust three have no sanitizer and do not need one: an index past a slice is a
+libFLAC has no row because it is fuzzed where it is used: `demux_flac_fuzzer`
+and `codec_flac_fuzzer` compile it into the modules that call it. The
+`flac_fuzzer` that stood here fuzzed dr_flac, which nothing has shipped since
+`decode_native` was split, and it was taken out when it found a fault there, in
+code no build of the player compiles.
+
+The Rust four have no sanitizer and do not need one: an index past a slice is a
 panic, which libFuzzer reports as a crash, so the bounds checks *are* the
 sanitizer. What they do need is coverage instrumentation, which stable `rustc`
 reaches by a route that is not the documented one and took five link errors to

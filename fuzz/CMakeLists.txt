@@ -95,7 +95,7 @@ set(mediaperch_fuzz_stl_checks
 function(mediaperch_add_fuzzer name source corpus)
     # Extra translation units after the corpus name: the AAC parser is ours,
     # so it is compiled into the fuzzer directly and gets instrumented with it.
-    # The dr_libs ones need no extra sources -- they are headers.
+    # The dr_wav one needs no extra sources -- dr_wav is a header.
     add_executable(${name} ${source} ${ARGN})
     target_include_directories(${name} PRIVATE
         "${CMAKE_SOURCE_DIR}/external/dr_libs"
@@ -201,7 +201,6 @@ function(mediaperch_instrument target)
 endfunction()
 
 mediaperch_add_fuzzer(wav_fuzzer wav_fuzzer.cpp wav)
-mediaperch_add_fuzzer(flac_fuzzer flac_fuzzer.cpp flac)
 # MPEG audio is libmpg123 now, on both sides, so the fuzzer links it rather
 # than compiling a parser of ours into itself. The library is built by
 # modules/codec/mpa, which this build does not add -- so it is built here, as

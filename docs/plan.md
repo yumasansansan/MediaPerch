@@ -3894,7 +3894,7 @@ anything — and which, on the machine that *does* have it installed, turned out
 offer no NV12 or P010 output when it was finally asked. A player whose HEVC support depends on
 somebody having installed something from a shop does not support HEVC.
 
-`codec_de265` is libde265 1.1.2, LGPL-3.0 for the library and MIT for the samples, which this
+`codec_de265` is libde265 1.1.3, LGPL-3.0 for the library and MIT for the samples, which this
 tree's GPL-3.0-or-later may link. It reads the `hvcC`'s own chroma format and bit depths and
 declines what libde265 declines — a depth outside eight to sixteen bits, or a luma depth and
 a chroma depth that differ — which is §7's rule that a decoder must not discover mid-file
